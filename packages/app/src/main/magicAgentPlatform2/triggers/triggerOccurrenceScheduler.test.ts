@@ -116,3 +116,112 @@ describe('TriggerOccurrenceScheduler', () => {
     expect(calls[0]?.[1]).not.toBe(calls[1]?.[1])
   })
 })
+
+describe('TriggerOccurrenceScheduler settlement failures', () => {
+  // Fake only the poll timer: a real setImmediate lets Node report unhandled rejections.
+  const withPollTimer = async (run: (unhandled: unknown[]) => Promise<void>) => {
+    const unhandled: unknown[] = []
+    const record = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', record)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await run(unhandled)
+    } finally {
+      vi.useRealTimers()
+      await new Promise((resolve) => setImmediate(resolve))
+      process.off('unhandledRejection', record)
+    }
+  }
+  const settle = () => new Promise((resolve) => setImmediate(resolve))
+
+  it('calls fail once when complete throws after a successful execute', async () => {
+    const store = stores()
+    const completion = new Error('complete failed')
+    store.complete.mockImplementation(() => {
+      throw completion
+    })
+    const scheduler = new TriggerOccurrenceScheduler({
+      occurrences: store as never,
+      triggers: triggers() as never,
+      execute: vi.fn(async () => undefined),
+      claimId: () => 'claim-1'
+    })
+    await expect(scheduler.runOnce()).resolves.toBe(true)
+    expect(store.fail).toHaveBeenCalledOnce()
+    expect(store.fail).toHaveBeenCalledWith('o', 'claim-1', expect.any(Number), completion, 5_000)
+  })
+
+  it('still rejects a direct runOnce when fail throws as well', async () => {
+    const store = stores()
+    store.complete.mockImplementation(() => {
+      throw new Error('complete failed')
+    })
+    store.fail.mockImplementation(() => {
+      throw new Error('fail failed')
+    })
+    const scheduler = new TriggerOccurrenceScheduler({
+      occurrences: store as never,
+      triggers: triggers() as never,
+      execute: vi.fn(async () => undefined)
+    })
+    await expect(scheduler.runOnce()).rejects.toThrow('fail failed')
+  })
+
+  it('keeps polling on the timer without an unhandled rejection when settlement throws', async () => {
+    await withPollTimer(async (unhandled) => {
+      const store = stores()
+      store.complete.mockImplementation(() => {
+        throw new Error('complete failed')
+      })
+      store.fail.mockImplementation(() => {
+        throw new Error('fail failed')
+      })
+      const scheduler = new TriggerOccurrenceScheduler({
+        occurrences: store as never,
+        triggers: triggers() as never,
+        execute: vi.fn(async () => undefined),
+        pollIntervalMs: 1_000
+      })
+      scheduler.start()
+      await vi.advanceTimersByTimeAsync(0)
+      await settle()
+      expect(store.claimNext).toHaveBeenCalledTimes(1)
+      expect(store.fail).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await settle()
+      expect(store.claimNext).toHaveBeenCalledTimes(2)
+      await scheduler.stop()
+      expect(unhandled).toEqual([])
+    })
+  })
+
+  it('polls at the interval, without stalling or busy looping, when every claim throws', async () => {
+    await withPollTimer(async (unhandled) => {
+      const store = stores()
+      store.claimNext.mockImplementation(() => {
+        throw new Error('sweep write failed')
+      })
+      const scheduler = new TriggerOccurrenceScheduler({
+        occurrences: store as never,
+        triggers: triggers() as never,
+        execute: vi.fn(async () => undefined),
+        pollIntervalMs: 1_000
+      })
+      scheduler.start()
+      await vi.advanceTimersByTimeAsync(0)
+      await settle()
+      expect(store.claimNext).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(999)
+      expect(store.claimNext).toHaveBeenCalledTimes(1)
+      for (let poll = 2; poll <= 4; poll += 1) {
+        await vi.advanceTimersByTimeAsync(poll === 2 ? 1 : 1_000)
+        await settle()
+        expect(store.claimNext).toHaveBeenCalledTimes(poll)
+      }
+      await scheduler.stop()
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(store.claimNext).toHaveBeenCalledTimes(4)
+      expect(unhandled).toEqual([])
+    })
+  })
+})

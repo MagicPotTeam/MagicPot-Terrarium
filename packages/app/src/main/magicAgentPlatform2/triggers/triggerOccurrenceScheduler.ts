@@ -68,7 +68,12 @@ export class TriggerOccurrenceScheduler {
   private schedule(delay: number): void {
     if (!this.running) return
     this.timer = setTimeout(() => {
-      void this.runOnce().finally(() => this.schedule(this.pollIntervalMs))
+      // A rejected poll leaves the occurrence durable: unmarked ones stay claimable (nothing was
+      // consumed), marked ones are settled as unknown by a later claimNext. Direct runOnce
+      // callers still see the error; the timer path keeps polling at the interval.
+      void this.runOnce()
+        .catch(() => undefined)
+        .then(() => this.schedule(this.pollIntervalMs))
     }, delay)
   }
 

@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.unmock('node:fs')
 vi.unmock('node:fs/promises')
-import { rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { PolicyRequest } from '../../../shared/magicAgentPlatform2/policy'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { MagicAgentPolicyAuthorizationService, PermitConsumedError } from '../policy'
@@ -12,7 +14,10 @@ import type {
   TriggerGraphDispatchInput
 } from './productionTriggerExecutor'
 import { ProductionTriggerRuntime } from './productionTriggerRuntime'
-import type { TriggerOccurrenceState } from './triggerOccurrenceStore'
+import {
+  TriggerOccurrenceFencingError,
+  type TriggerOccurrenceState
+} from './triggerOccurrenceStore'
 
 // Scheduler defaults that ProductionTriggerRuntime does not override.
 const LEASE_MS = 30_000
@@ -35,6 +40,12 @@ const openStore = (path = ':memory:') => {
   const store = new MagicAgentEventStore(path)
   stores.push(store)
   return store
+}
+
+const tempDatabase = () => {
+  const root = mkdtempSync(join(tmpdir(), 'trigger-permit-unknown-'))
+  roots.push(root)
+  return join(root, 'events.db')
 }
 
 // The allow rule of productionTriggerRuntime.test.ts: high risk still needs an explicit grant.
@@ -316,5 +327,136 @@ describe('trigger occurrence after its permit step', () => {
       (claimed?.resource.state as TriggerOccurrenceState).claim?.owner
     )
     expect(h.runtime.outcomes.list().map((item) => item.state.status)).toEqual(['succeeded'])
+  })
+})
+
+describe('trigger occurrence settlement of long runs and restarts', () => {
+  it('completes a dispatch that outlasts its lease exactly once', async () => {
+    const h = harness()
+    enqueue(h)
+    h.runAgent.mockImplementation(async (input) => {
+      h.clock.now += LEASE_MS + 1
+      return input
+    })
+    await expect(h.runtime.occurrenceScheduler.runOnce()).resolves.toBe(true)
+    expect(await h.runtime.occurrenceScheduler.runOnce()).toBe(false)
+    expect(await pollLater(h)).toEqual([false, false, false])
+    expect(h.runAgent).toHaveBeenCalledTimes(1)
+    expect(occurrence(h)).toMatchObject({ status: 'completed', attempt: 1, permit: { attempt: 1 } })
+    expect(h.runtime.outcomes.list().map((item) => item.state.status)).toEqual(['succeeded'])
+  })
+
+  it('ends unknown when a dispatch that outlasts its lease throws', async () => {
+    const h = harness()
+    enqueue(h)
+    h.runAgent.mockImplementation(async () => {
+      h.clock.now += LEASE_MS + 1
+      throw new Error('synthetic late dispatch failure')
+    })
+    await expect(h.runtime.occurrenceScheduler.runOnce()).resolves.toBe(true)
+    expect(await pollLater(h)).toEqual([false, false, false])
+    expect(h.runAgent).toHaveBeenCalledTimes(1)
+    expect(occurrence(h)).toMatchObject({ status: 'unknown', lastError: unknownError })
+  })
+
+  it('never dispatches again after a restart during the dispatch', async () => {
+    const path = tempDatabase()
+    const clock = { now: START }
+    const first = harness({ eventStore: openStore(path), clock })
+    enqueue(first)
+    const dispatched = Promise.withResolvers<void>()
+    first.runAgent.mockImplementation(() => {
+      dispatched.resolve()
+      return new Promise<never>(() => undefined)
+    })
+    void first.runtime.occurrenceScheduler.runOnce()
+    await dispatched.promise
+    // The process ends here: the store closes while the dispatch is still running.
+    first.eventStore.close()
+
+    clock.now = START + LEASE_MS + 1
+    const second = harness({ eventStore: openStore(path), clock })
+    const polls: boolean[] = []
+    for (let poll = 0; poll < 3; poll += 1)
+      polls.push(await second.runtime.occurrenceScheduler.runOnce())
+    expect(second.runAgent).not.toHaveBeenCalled()
+    expect(polls).toEqual([false, false, false])
+    expect(occurrence(second)).toMatchObject({
+      status: 'unknown',
+      attempt: 1,
+      permit: { attempt: 1 }
+    })
+    expect(second.runtime.outcomes.list().map((item) => item.state.status)).toEqual([
+      'permit-consumed'
+    ])
+    expect(second.runtime.outcomes.listUncertain().map((item) => item.state.status)).toEqual([
+      'outcome-unknown'
+    ])
+    const settled = second.runtime.occurrences.get('occ-1')
+    const history = second.eventStore.listResourceMutations('trigger-occurrence', 'occ-1', 100)
+    second.eventStore.close()
+
+    clock.now += LEASE_MS + RETRY_DELAY_MS
+    const third = harness({ eventStore: openStore(path), clock })
+    expect(await third.runtime.occurrenceScheduler.runOnce()).toBe(false)
+    expect(third.runAgent).not.toHaveBeenCalled()
+    expect(third.runtime.occurrences.get('occ-1')).toEqual(settled)
+    expect(third.eventStore.listResourceMutations('trigger-occurrence', 'occ-1', 100)).toEqual(
+      history
+    )
+    expect(third.runtime.outcomes.listUncertain()).toHaveLength(1)
+  })
+
+  it('never dispatches either of two occurrences left in flight by exited runtimes', async () => {
+    const eventStore = openStore()
+    const clock = { now: START }
+    const exited = [harness({ eventStore, clock }), harness({ eventStore, clock })]
+    enqueue(exited[0], agentTarget, 'occ-1')
+    enqueue(exited[0], agentTarget, 'occ-2')
+    for (const runtime of exited) {
+      const dispatched = Promise.withResolvers<void>()
+      runtime.runAgent.mockImplementation(() => {
+        dispatched.resolve()
+        return new Promise<never>(() => undefined)
+      })
+      void runtime.runtime.occurrenceScheduler.runOnce()
+      await dispatched.promise
+    }
+    clock.now += LEASE_MS + 1
+    const next = harness({ eventStore, clock })
+    const polls: boolean[] = []
+    for (let poll = 0; poll < 3; poll += 1)
+      polls.push(await next.runtime.occurrenceScheduler.runOnce())
+    expect(next.runAgent).not.toHaveBeenCalled()
+    expect(polls).toEqual([false, false, false])
+    for (const id of ['occ-1', 'occ-2'])
+      expect(occurrence(next, id)).toMatchObject({ status: 'unknown', attempt: 1 })
+  })
+
+  it('lets a second runtime settle, but never dispatch, an occurrence the first is dispatching', async () => {
+    const eventStore = openStore()
+    const clock = { now: START }
+    const a = harness({ eventStore, clock })
+    const b = harness({ eventStore, clock })
+    enqueue(a)
+    const dispatched = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<unknown>()
+    a.runAgent.mockImplementation(() => {
+      dispatched.resolve()
+      return release.promise
+    })
+    const running = a.runtime.occurrenceScheduler.runOnce()
+    await dispatched.promise
+    clock.now += LEASE_MS + 1
+    const claimedByB = await b.runtime.occurrenceScheduler.runOnce()
+    expect(b.runAgent).not.toHaveBeenCalled()
+    expect(claimedByB).toBe(false)
+    expect(occurrence(b)?.status).toBe('unknown')
+    release.resolve({ synthetic: true })
+    await expect(running).rejects.toBeInstanceOf(TriggerOccurrenceFencingError)
+    expect(occurrence(a)?.status).toBe('unknown')
+    expect(await pollLater(b)).toEqual([false, false, false])
+    expect(a.runAgent).toHaveBeenCalledTimes(1)
+    expect(b.runAgent).not.toHaveBeenCalled()
   })
 })
