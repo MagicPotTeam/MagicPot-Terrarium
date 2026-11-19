@@ -182,7 +182,11 @@ export class AgentThreadGoalStore {
       if (current.revision === 0 && Number(total.n) >= LIMITS.owners) throw new Error('Goal owner capacity reached; replay domains were not evicted.')
       if (snapshot.storageRevision >= Number.MAX_SAFE_INTEGER) throw new Error('Goal storage revision exhausted.')
       const storageRevision = snapshot.storageRevision + 1
-      const records = snapshot.records.map(auto => ['armed', 'claimed'].includes(auto.state) && !next.goals.some(goal => goal.id === auto.goalId && goal.generation === auto.generation && goal.status === 'active' && !goal.proposal) ? { ...auto, state: auto.state === 'armed' ? 'stopped' as const : 'unknown' as const } : auto)
+      // A delete rewrites only the records of the goal it removes; every other action keeps the
+      // conversation-wide rule. A delete leaves the other goals as they were read, so their armed
+      // records stay bound, and validateEnvelope below still refuses any envelope that is not.
+      const affected = (auto: GoalAutoRecord) => request.action !== 'delete' || auto.goalId === request.goalId
+      const records = snapshot.records.map(auto => affected(auto) && ['armed', 'claimed'].includes(auto.state) && !next.goals.some(goal => goal.id === auto.goalId && goal.generation === auto.generation && goal.status === 'active' && !goal.proposal) ? { ...auto, state: auto.state === 'armed' ? 'stopped' as const : 'unknown' as const } : auto)
       const payloadDocument = snapshot.format === 1 ? next : snapshot.format === 2 ? { version: 2 as const, storageRevision, collection: next, auto: records[0] } : { version: 3 as const, storageRevision, collection: next, records }
       if (snapshot.format !== 1) validateEnvelope(payloadDocument, storageRevision)
       plain = Buffer.from(JSON.stringify(payloadDocument), 'utf8')
