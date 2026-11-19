@@ -1,6 +1,15 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-const mocks = vi.hoisted(() => ({ fromId: vi.fn(), parent: vi.fn(), callTool: vi.fn(), listTools: vi.fn(), launch: vi.fn(), script: vi.fn(), assertActive: vi.fn() }))
+const mocks = vi.hoisted(() => ({ fromId: vi.fn(), parent: vi.fn(), callTool: vi.fn(), listTools: vi.fn(), launch: vi.fn(), script: vi.fn(), assertActive: vi.fn(), disposals: [] as unknown[] }))
+// Pass-through: records how each turn disposes its canvas tools (true, false or 'ended').
+vi.mock(import('./canvasAgentTools'), async original => {
+  const actual = await original()
+  const prepare = ((...input: Parameters<typeof actual.prepareCanvasAgentTools>) => {
+    const prepared = actual.prepareCanvasAgentTools(...input)
+    return prepared.dispose ? { ...prepared, dispose: (outcome?: boolean | 'ended') => { mocks.disposals.push(outcome); prepared.dispose!(outcome) } } : prepared
+  }) as typeof actual.prepareCanvasAgentTools
+  return { ...actual, prepareCanvasAgentTools: prepare }
+})
 vi.mock('electron', () => ({ net: {}, webContents: { fromId: mocks.fromId }, BrowserWindow: { fromWebContents: mocks.parent } }))
 vi.mock('./agentThreadHtmlRuntime', () => ({ getAgentThreadHtmlRuntime: async () => ({ launch: mocks.launch, assertReady: () => undefined }) }))
 vi.mock('./agentThreadHtmlProcess', () => ({ openHtmlProcess: mocks.launch }))
@@ -35,7 +44,7 @@ const teamMember = { scope: 'team-scope', thread: 'pane', lead: 'lead-chat', mem
 const ended = () => { throw new Error('Team has ended.') }
 let sender: EventEmitter
 beforeEach(() => {
-  vi.clearAllMocks(); mocks.assertActive.mockReset(); mocks.script.mockReset()
+  vi.clearAllMocks(); mocks.assertActive.mockReset(); mocks.script.mockReset(); mocks.disposals.length = 0
   sender = Object.assign(new EventEmitter(), { id: 93, isDestroyed: () => false, getURL: () => url })
   registerMagicAgentTrustedRouteBinding(93, route, { trustedUrl: url, trustedWebContents: sender as never })
   mocks.fromId.mockReturnValue(sender); mocks.parent.mockReturnValue({ isDestroyed: () => false, webContents: sender })
@@ -124,7 +133,7 @@ describe('a member turn cut by End keeps what it already started or finished', (
     expect(outcome).toBe('Team has ended.')
     expect(report(jobId!)).toMatchObject({ job: { status: 'cancelled' }, text: '' })
   })
-  it('still revokes the completed report when the user stops the turn', async () => {
+  it('disposes a turn the user stops as failed (not as an End cut), even when End is recorded too', async () => {
     const service = new LLMProxySvcImpl(), controller = new AbortController()
     model([
       async params => toolCall(params, 'critic', { task: 'Review the plan', run_in_background: true }, 'start-job'),
@@ -136,6 +145,8 @@ describe('a member turn cut by End keeps what it already started or finished', (
       }
     ])
     await expect(service.chat(request(), { ...invoke('chat'), signal: controller.signal })).rejects.toThrow()
+    // Stop's parent-abort listener revokes the job by itself; only the disposal shows how the turn was classified.
+    expect(mocks.disposals).toEqual([false])
     expect(report(jobs()[0].id)).toMatchObject({ job: { status: 'cancelled' }, text: '' })
   })
 
