@@ -16,8 +16,14 @@ export type TriggerOccurrenceSchedulerOptions = Readonly<{
   claimId?: () => string
 }>
 
+const POLL_FAILURE_LOG_INTERVAL_MS = 10 * 60_000
+// Only a class-like error name is logged; anything else (paths, record text) becomes 'Error'.
+const loggableErrorName = (error: unknown): string =>
+  error instanceof Error && /^[A-Za-z_$][\w$.-]{0,63}$/.test(error.name) ? error.name : 'Error'
+
 export class TriggerOccurrenceScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined
+  private pollFailure: Readonly<{ name: string; loggedAt: number }> | undefined
   private running = false
   private inFlight: Promise<boolean> | undefined
   private readonly pollIntervalMs: number
@@ -70,11 +76,33 @@ export class TriggerOccurrenceScheduler {
     this.timer = setTimeout(() => {
       // A rejected poll leaves the occurrence durable: unmarked ones stay claimable (nothing was
       // consumed), marked ones are settled as unknown by a later claimNext. Direct runOnce
-      // callers still see the error; the timer path keeps polling at the interval.
+      // callers still see the error; the timer path logs its name and keeps polling.
       void this.runOnce()
-        .catch(() => undefined)
+        .then(
+          () => this.notePollSucceeded(),
+          (error: unknown) => this.notePollFailed(error)
+        )
         .then(() => this.schedule(this.pollIntervalMs))
     }, delay)
+  }
+
+  // Content-free and rate-limited: the error name when a failure starts or changes, at most once
+  // per ten minutes while it repeats, and one line when polls succeed again.
+  private notePollFailed(error: unknown): void {
+    const name = loggableErrorName(error)
+    const at = this.now()
+    const current = this.pollFailure
+    if (current?.name === name && at - current.loggedAt < POLL_FAILURE_LOG_INTERVAL_MS) return
+    console.warn(
+      `[triggers] Occurrence poll ${current?.name === name ? 'still failing' : 'failed'}: ${name}`
+    )
+    this.pollFailure = { name, loggedAt: at }
+  }
+
+  private notePollSucceeded(): void {
+    if (this.pollFailure === undefined) return
+    this.pollFailure = undefined
+    console.warn('[triggers] Occurrence polls recovered.')
   }
 
   private async executeOne(): Promise<boolean> {

@@ -224,4 +224,65 @@ describe('TriggerOccurrenceScheduler settlement failures', () => {
       expect(unhandled).toEqual([])
     })
   })
+
+  it('logs only the error name of failing polls, rate-limited, and once on recovery', async () => {
+    await withPollTimer(async (unhandled) => {
+      const minute = 60_000
+      let clock = 0
+      let failure: Error | undefined
+      const failWith = (name: string) => {
+        failure = new Error('/home/user/private/events.db: synthetic record content')
+        failure.name = name
+      }
+      const store = stores()
+      store.claimNext.mockImplementation(() => {
+        if (failure) throw failure
+        return undefined as never
+      })
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const scheduler = new TriggerOccurrenceScheduler({
+        occurrences: store as never,
+        triggers: triggers() as never,
+        execute: vi.fn(async () => undefined),
+        pollIntervalMs: minute,
+        now: () => clock
+      })
+      // Polls at 0, 1, 2, ... minutes; each step sets what the next poll sees.
+      const steps: Array<() => void> = [
+        () => failWith('SqliteError'),
+        ...Array.from({ length: 10 }, () => () => undefined),
+        () => undefined,
+        () => failWith('TypeError'),
+        () => undefined,
+        () => failWith('ENOENT /home/user/private'),
+        () => {
+          failure = undefined
+        },
+        () => undefined,
+        () => failWith('Error')
+      ]
+      try {
+        scheduler.start()
+        for (const [index, step] of steps.entries()) {
+          step()
+          clock = index * minute
+          await vi.advanceTimersByTimeAsync(index === 0 ? 0 : minute)
+          await settle()
+        }
+        expect(store.claimNext).toHaveBeenCalledTimes(steps.length)
+        expect(warn.mock.calls).toEqual([
+          ['[triggers] Occurrence poll failed: SqliteError'],
+          ['[triggers] Occurrence poll still failing: SqliteError'],
+          ['[triggers] Occurrence poll failed: TypeError'],
+          ['[triggers] Occurrence poll failed: Error'],
+          ['[triggers] Occurrence polls recovered.'],
+          ['[triggers] Occurrence poll failed: Error']
+        ])
+        expect(unhandled).toEqual([])
+      } finally {
+        await scheduler.stop()
+        warn.mockRestore()
+      }
+    })
+  })
 })
