@@ -127,6 +127,18 @@ describe('a member turn cut by End keeps what it already started or finished', (
     expect(outcome).toBe('Team has ended.')
     expect(report(jobId!)).toMatchObject({ job: { status: 'completed' }, text: expect.stringContaining('Background report: the plan holds.') })
   })
+  it.each(['chat', 'chatStream'] as const)('keeps a completed background report when send_message meets End in its own check (%s)', async method => {
+    const dispatch = mocks.callTool.getMockImplementation()!
+    mocks.callTool.mockImplementation((r, name, args, options) => {
+      // End is recorded after the batch check admitted send_message, before the tool's own End check.
+      if (name === 'send_message') mocks.assertActive.mockImplementation(ended)
+      return dispatch(r, name, args, options)
+    })
+    const { outcome, jobId } = await runWithCompletedJob(method, async params => toolCall(params, 'send_message', { recipient: 'member-x', text: 'hi' }, 'message'))
+    expect(outcome).toBe('Team has ended.')
+    expect(mocks.disposals).toEqual(['ended'])
+    expect(report(jobId!)).toMatchObject({ job: { status: 'completed' }, text: expect.stringContaining('Background report: the plan holds.') })
+  })
   it('still revokes the completed report when the turn fails with a provider error carrying the same text', async () => {
     const { outcome, jobId } = await runWithCompletedJob('chat', async () => { throw new Error('Team has ended.') })
     expect(mocks.assertActive.mock.results.every(result => result.type === 'return')).toBe(true) // the store never refused

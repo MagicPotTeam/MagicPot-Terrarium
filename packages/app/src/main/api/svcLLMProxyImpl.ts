@@ -2,6 +2,7 @@ import { AgentTeamMessageQueue } from './agentTeamMessageQueue'
 import type { AgentTeamMessageClaim, AgentTeamMessageQueueScope } from '@shared/api/agentTeamMessage'
 import { assertTeamRequestActive, getTeamEndStore } from './teamEndStore'
 import { runWithApprovalContinuationCheck } from '../magicAgentPlatform2/approvalContinuationGate'
+import type { TeamMessageSource } from './agentTeamMessageTools'
 import type { LLMTeamIdentity } from '@shared/api/svcLLMProxy'
 import {
   registerManagedTextFirstRunService,
@@ -1272,15 +1273,18 @@ const listRequestTools = (
 const createMemberTeamChecks = (entered: LLMChatReq) => {
   if (!Object.hasOwn(entered, 'teamMember')) return undefined
   let cut = false
+  const recorded = (operation: () => void): void => {
+    try {
+      operation()
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Team has ended.') cut = true
+      throw error
+    }
+  }
   return {
-    check: (): void => {
-      try {
-        assertTeamRequestActive(entered)
-      } catch (error) {
-        if (error instanceof Error && error.message === 'Team has ended.') cut = true
-        throw error
-      }
-    },
+    check: (): void => recorded(() => assertTeamRequestActive(entered)),
+    /** send_message/send_channel: their own per-call check of the given source, recorded like the turn's checks. */
+    checkMessageSource: (source: TeamMessageSource): void => recorded(() => getTeamEndStore().assertActive(source)),
     background: (): void => assertTeamRequestActive(entered),
     cutByEnd: (): boolean => cut
   }
@@ -2519,7 +2523,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           createImageGenerator: () => this.createThreadImageGenerator(req),
           goalProgress,
           teamMessages: invocation && requestRoute ? {
-            assertNotEnded: source => getTeamEndStore().assertActive(source),
+            assertNotEnded: source => teamChecks ? teamChecks.checkMessageSource(source) : getTeamEndStore().assertActive(source),
             enqueue: async (intent, lease, signal) => this.teamMessageQueue.enqueue(intent, { invocation, route: requestRoute, lease, signal })
           } : undefined,
           local: !getConfig().use_remote_llm,
@@ -4277,7 +4281,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         createImageGenerator: () => this.createThreadImageGenerator(req),
         goalProgress: localGoalProgress,
         teamMessages: invocation && requestRoute ? {
-          assertNotEnded: source => getTeamEndStore().assertActive(source),
+          assertNotEnded: source => teamChecks ? teamChecks.checkMessageSource(source) : getTeamEndStore().assertActive(source),
           enqueue: async (intent, lease, signal) => this.teamMessageQueue.enqueue(intent, { invocation, route: requestRoute, lease, signal })
         } : undefined,
         local: true,
