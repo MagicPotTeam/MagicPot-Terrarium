@@ -2453,6 +2453,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     options?: ChatExecutionOptions & Partial<ServiceInvocationContext>
   ): Promise<LLMChatResp> => {
     assertTeamRequestActive(req)
+    // Helper loops re-check End from the request as it entered; requests without teamMember get none.
+    const entered = req
+    const assertTeamActive = Object.hasOwn(entered, 'teamMember') ? () => assertTeamRequestActive(entered) : undefined
     req = ensureCorrelationId(req)
     const abortContext = this.createConversationAbortContext(
       req.conversationId,
@@ -2504,6 +2507,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           createMemoryClient,
         commitMemoryFile: (provider, args, child) => getAssistantRuntime().callTool(parentRoute, 'memory.files.write', args, { allowedToolNames: ['memory.files.write'], toolProvider: provider, signal: child.signal, runId: child.runId, toolCallId: child.toolCallId }),
         createSubagentClient,
+          assertTeamActive,
           callSubagentReadTool: (name, args, child, assertDocument) => {
             if (!SUBAGENT_READ_TOOLS.includes(name as typeof SUBAGENT_READ_TOOLS[number]) || getConfig().use_remote_llm) throw new Error('Sub-agent tool is unavailable.')
             return canvas!.readAdmission!.run(name, child.signal, () => getAssistantRuntime().callTool(parentRoute, name, args, {
@@ -3496,6 +3500,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     invocation?: ServiceInvocationContext
   ): Promise<void> => {
     assertTeamRequestActive(req)
+    // Helper loops re-check End from the request as it entered; requests without teamMember get none.
+    const entered = req
+    const assertTeamActive = Object.hasOwn(entered, 'teamMember') ? () => assertTeamRequestActive(entered) : undefined
     req = ensureCorrelationId(req)
     // Normalize once at the trusted main boundary. Structured streaming is
     // gated until its complete response satisfies this detached contract.
@@ -4256,6 +4263,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         createMemoryClient,
         commitMemoryFile: (provider, args, child) => getAssistantRuntime().callTool(parentRoute, 'memory.files.write', args, { allowedToolNames: ['memory.files.write'], toolProvider: provider, signal: child.signal, runId: child.runId, toolCallId: child.toolCallId }),
         createSubagentClient,
+        assertTeamActive,
         callSubagentReadTool: (name, args, child, assertDocument) => {
           if (!SUBAGENT_READ_TOOLS.includes(name as typeof SUBAGENT_READ_TOOLS[number]) || getConfig().use_remote_llm) throw new Error('Sub-agent tool is unavailable.')
           return canvas.readAdmission!.run(name, child.signal, () => getAssistantRuntime().callTool(parentRoute, name, args, {

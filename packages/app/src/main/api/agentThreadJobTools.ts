@@ -28,6 +28,8 @@ export function createAgentThreadJobTools(options: {
   assertLive?(): void
   signal?: AbortSignal
   callReadTool: (name: string, args: Record<string, unknown>, context: Parameters<ChildOptions['callReadTool']>[2], assertLive: () => void) => ReturnType<ChildOptions['callReadTool']>
+  /** Team member requests only: a background child starts no new step or read after the team has ended. */
+  assertTeamActive?(): void
 }): AssistantRunToolProvider & {
   start: NonNullable<ChildOptions['startBackground']>
   release(success: boolean): void
@@ -56,7 +58,7 @@ export function createAgentThreadJobTools(options: {
           const child = createAgentThreadSubagents({
             route: scope.route, messages: options.request.messages, signal,
             assertInvocation: () => assertLive(), createClient: options.createClient,
-            listReadTools: options.listReadTools,
+            listReadTools: options.listReadTools, assertTeamActive: options.assertTeamActive,
             callReadTool: async (tool, input, childContext) => {
               assertLive()
               return options.callReadTool(tool, input, childContext, assertLive)

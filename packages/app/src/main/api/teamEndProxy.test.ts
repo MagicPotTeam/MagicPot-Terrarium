@@ -7,9 +7,15 @@ vi.mock('../config/config', () => ({ getConfig: vi.fn(), saveConfig: vi.fn(), on
 vi.mock(import('@shared/llm'), async original => ({ ...(await original()), cliFromProfile: vi.fn() }))
 vi.mock('../assistantRuntime/runtime', () => ({ getAssistantRuntime: () => ({ listTools: h.listTools, callTool: h.callTool }) }))
 vi.mock('../mcp/runtime', () => ({ syncMcpClientManager: vi.fn() }))
+// Pass-through spy: records the options the two call sites hand to the helper loops.
+vi.mock(import('./canvasAgentTools'), async original => {
+  const actual = await original()
+  return { ...actual, prepareCanvasAgentTools: vi.fn(actual.prepareCanvasAgentTools) as unknown as typeof actual.prepareCanvasAgentTools }
+})
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import { cliFromProfile } from '@shared/llm'
 import { getConfig } from '../config/config'
+import { prepareCanvasAgentTools } from './canvasAgentTools'
 import { LLMProxySvcImpl } from './svcLLMProxyImpl'
 
 describe('proxy member End entry gate, model never invoked', () => {
@@ -250,6 +256,24 @@ describe('model step after End (inert model)', () => {
     expect(h.callTool).toHaveBeenCalledTimes(2)
     expect(chat).toHaveBeenCalledTimes(3)
     expect(h.assertActive).not.toHaveBeenCalled()
+  })
+  it('hands helper loops an End check built from the entered member request, and none to other requests', async () => {
+    configure()
+    vi.mocked(prepareCanvasAgentTools).mockClear()
+    const chat = vi.fn().mockResolvedValue('answer')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const service = new LLMProxySvcImpl(), { teamMember: _member, ...ordinary } = request
+    await service.chat(request)
+    await service.chatStream(request, { onData: vi.fn() } as never)
+    await service.chat(ordinary)
+    await service.chatStream(ordinary, { onData: vi.fn() } as never)
+    const checks = vi.mocked(prepareCanvasAgentTools).mock.calls.map(([, , options]) => options.assertTeamActive)
+    expect(checks).toHaveLength(4)
+    expect(checks.slice(2)).toEqual([undefined, undefined])
+    h.assertActive.mockClear()
+    endTeam()
+    for (const check of checks.slice(0, 2)) expect(() => check!()).toThrow('Team has ended.')
+    expect(h.assertActive.mock.calls).toEqual([[tuple], [tuple]])
   })
   it('finishes an admitted stream after End and rejects new streams before another provider call', async () => {
     configure()

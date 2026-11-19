@@ -8,11 +8,11 @@ const schema = (name: string) => ({ name, description: 'Dedicated memory namespa
 let parent: AbortController
 beforeEach(() => { parent = new AbortController() })
 afterEach(() => { parent.abort(); vi.restoreAllMocks() })
-function fixture(cli: LLMCli, writable = true) {
+function fixture(cli: LLMCli, writable = true, assertTeamActive?: () => void) {
   const call = vi.fn(async () => ({ content: '{"path":"./memory/facts.md","content":"MEMORY_FILE_FACT_原始🌱","sha256":"abc","exists":true}' }))
   const close = vi.fn(), open = vi.fn(async () => ({ listTools: () => [schema('memory.files.tree'), schema('memory.files.read'), schema('memory.files.grep'), ...(writable ? [schema('memory.files.write')] : [])], callTool: call, close }))
   const createClient = vi.fn(async () => cli), assertInvocation = vi.fn()
-  const provider = createAgentThreadMemoryFiles({ route, signal: parent.signal, assertInvocation, createClient, openSession: open })
+  const provider = createAgentThreadMemoryFiles({ route, signal: parent.signal, assertInvocation, createClient, openSession: open, ...(assertTeamActive ? { assertTeamActive } : {}) })
   return { provider, open, call, close, createClient, assertInvocation }
 }
 describe('separately authorized stateless memory-file helper transport and narrow MAIN dispatcher', () => {
@@ -91,5 +91,26 @@ describe('separately authorized stateless memory-file helper transport and narro
     await vi.waitFor(() => expect(f.open).toHaveBeenCalledOnce()); parent.abort(new Error('Parent stopped'))
     await expect(pending).rejects.toThrow('Parent stopped'); finish({ content: 'late completion' })
     expect(f.call).not.toHaveBeenCalled(); expect(f.close).toHaveBeenCalledOnce(); f.provider.dispose()
+  })
+})
+describe('memory helper of a team member after End (store error thrown unchanged)', () => {
+  const ended = () => { throw new Error('Team has ended.') }
+  const write = (id: string) => ({ id, name: 'memory.files.write', wireName: 'mp_tool_2', arguments: '{"path":"./memory/facts.md"}' })
+  it('starts no write call when End is recorded during the step that asks for writes', async () => {
+    const assertTeamActive = vi.fn()
+    const chat = vi.fn<LLMCli['chat']>().mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); return { content: '', toolCalls: [write('w1'), write('w2')] } })
+    const f = fixture({ chat, supportsNativeTools: true, supportsIsolatedMainToolTurns: true }, true, assertTeamActive)
+    await expect(f.provider.callTool('memory_write', { task: 'Remember a preference.' }, context)).rejects.toThrow('Team has ended.')
+    expect(f.call).not.toHaveBeenCalled(); expect(chat).toHaveBeenCalledOnce(); expect(f.close).toHaveBeenCalledOnce(); f.provider.dispose()
+  })
+  it('completes a write already running when End is recorded and sends no next step', async () => {
+    const assertTeamActive = vi.fn()
+    const chat = vi.fn<LLMCli['chat']>().mockResolvedValueOnce({ content: '', toolCalls: [write('w1')] }).mockResolvedValueOnce({ content: 'Updated the memory file.' })
+    const f = fixture({ chat, supportsNativeTools: true, supportsIsolatedMainToolTurns: true }, true, assertTeamActive)
+    f.call.mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); return { content: '{"path":"./memory/facts.md","written":true}' } })
+    await expect(f.provider.callTool('memory_write', { task: 'Remember a preference.' }, context)).rejects.toThrow('Team has ended.')
+    expect(f.call).toHaveBeenCalledOnce()
+    await expect(f.call.mock.results[0].value).resolves.toEqual({ content: '{"path":"./memory/facts.md","written":true}' })
+    expect(chat).toHaveBeenCalledOnce(); expect(f.close).toHaveBeenCalledOnce(); f.provider.dispose()
   })
 })

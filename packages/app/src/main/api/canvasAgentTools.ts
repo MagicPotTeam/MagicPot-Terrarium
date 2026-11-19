@@ -103,6 +103,9 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
     commitMemoryFile?: (provider: AssistantRunToolProvider, args: Record<string, unknown>, context: Parameters<AssistantRunToolProvider['callTool']>[2]) => Promise<{ content: string; metadata?: Record<string, unknown> }>
     createSubagentClient?: SubagentClientFactory
     callSubagentReadTool?: (name: string, args: Record<string, unknown>, context: Parameters<Parameters<typeof createAgentThreadSubagents>[0]['callReadTool']>[2], assertDocument?: () => void) => Promise<{ content: string }>
+    /** Team member requests only: throws once the member's team has ended. Helpers call it only before a
+     * new model step or tool call starts, never after a result (so finished work is never relabelled). */
+    assertTeamActive?: () => void
   }
 ): {
   request: T
@@ -214,6 +217,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
   const scratchpadNames = new Set(scratchpadTools?.listTools().map(tool => tool.name) ?? [])
   const memoryFiles = !options.goalProgress && interactions && options.createMemoryClient && options.commitMemoryFile ? createAgentThreadMemoryFiles({
     route, signal: interactions.signal, assertInvocation, createClient: options.createMemoryClient,
+    assertTeamActive: options.assertTeamActive,
     openSession: async input => {
       assertActive(); input.signal.throwIfAborted()
       const [{ createMemoryFileSession }, { approveMemoryFileWrite }] = await Promise.all([import('./agentThreadMemoryFileHost'), import('./agentThreadMemoryFileApproval')])
@@ -249,6 +253,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
   if (!options.goalProgress && interactions && options.createSubagentClient && options.callSubagentReadTool) {
     jobs = createAgentThreadJobTools({
       request, invocation, assertInvocation, assertLive: assertActive, signal: interactions.signal, createClient: options.createSubagentClient,
+      assertTeamActive: options.assertTeamActive,
       listReadTools: () => options.listTools?.([...SUBAGENT_READ_TOOLS]) || [],
       callReadTool: options.callSubagentReadTool
     })
@@ -256,7 +261,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
   subagents = !options.goalProgress && interactions && options.createSubagentClient && options.callSubagentReadTool
     ? createAgentThreadSubagents({
         route, messages: request.messages, signal: interactions.signal, assertInvocation,
-        createClient: options.createSubagentClient,
+        createClient: options.createSubagentClient, assertTeamActive: options.assertTeamActive,
         startBackground: jobs?.start,
         listReadTools: () => options.listTools?.([...SUBAGENT_READ_TOOLS]) || [],
         callReadTool: options.callSubagentReadTool

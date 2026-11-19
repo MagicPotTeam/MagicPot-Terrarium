@@ -248,3 +248,44 @@ describe('bounded read-only thread sub-agents', () => {
     expect(JSON.parse((await provider.callTool('critic', { task: 'x' }, ctx())).content).status).toBe('incomplete')
   })
 })
+
+describe('sub-agent of a team member after End (store error thrown unchanged)', () => {
+  const ended = () => { throw new Error('Team has ended.') }
+  function member(chat = vi.fn<LLMCli['chat']>()) {
+    const assertTeamActive = vi.fn()
+    const callReadTool = vi.fn(async () => ({ content: 'verified file content' }))
+    const createClient = vi.fn(async (): Promise<LLMCli> => ({ chat, supportsNativeTools: true, supportsIsolatedReadOnlyTurns: true }))
+    const provider = createAgentThreadSubagents({ route, messages: [], signal: new AbortController().signal, assertInvocation: vi.fn(), createClient, listReadTools: () => [read], callReadTool, assertTeamActive })
+    return { provider, chat, callReadTool, assertTeamActive }
+  }
+  it('starts no read and no next step when End is recorded during a step that asks for a read', async () => {
+    const { provider, chat, callReadTool, assertTeamActive } = member()
+    chat.mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); return { content: '', toolCalls: [call('c1')] } })
+      .mockResolvedValueOnce({ content: 'Findings after the read.' })
+    await expect(provider.callTool('explore', { task: 'Find the entry point' }, ctx())).rejects.toThrow('Team has ended.')
+    expect(callReadTool).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalledOnce()
+  })
+  it('sends no native fallback step when End is recorded during the first step', async () => {
+    const { provider, chat, assertTeamActive } = member()
+    chat.mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); throw Object.assign(new Error('tools not supported'), { statusCode: 400 }) })
+      .mockResolvedValueOnce({ content: 'Fallback findings.' })
+    await expect(provider.callTool('explore', { task: 'Find the entry point' }, ctx())).rejects.toThrow('Team has ended.')
+    expect(chat).toHaveBeenCalledOnce()
+  })
+  it('returns a final report that arrived after End unchanged', async () => {
+    const { provider, chat, assertTeamActive } = member()
+    chat.mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); return { content: 'Final findings.' } })
+    const report = JSON.parse((await provider.callTool('critic', { task: 'Review the plan' }, ctx())).content)
+    expect(report).toMatchObject({ kind: 'critic', status: 'completed', content: 'Final findings.', modelSteps: 1, toolCalls: 0 })
+  })
+  it('keeps a read that finished after End and sends no next model step', async () => {
+    const { provider, chat, callReadTool, assertTeamActive } = member()
+    chat.mockResolvedValueOnce({ content: '', toolCalls: [call('c1')] }).mockResolvedValueOnce({ content: 'Findings after the read.' })
+    callReadTool.mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); return { content: 'read while the team ended' } })
+    await expect(provider.callTool('explore', { task: 'Find the entry point' }, ctx())).rejects.toThrow('Team has ended.')
+    expect(callReadTool).toHaveBeenCalledOnce()
+    await expect(callReadTool.mock.results[0].value).resolves.toEqual({ content: 'read while the team ended' })
+    expect(chat).toHaveBeenCalledOnce()
+  })
+})

@@ -21,11 +21,12 @@ beforeEach(() => {
 })
 afterEach(() => { agentThreadJobs.dispose(); clearMagicAgentTrustedRouteBindingsForTest(); vi.clearAllMocks() })
 
-const make = () => {
+const make = (assertTeamActive?: () => void) => {
   const sample = vi.fn().mockResolvedValue({ content: 'Report from child' })
   const callReadTool = vi.fn(async () => ({ content: 'Evidence' }))
   const prepared = prepareCanvasAgentTools({ ...scope, messages: [{ role: 'user' as const, content: 'Visible parent text' }] }, invocation(), {
     local: true, terminalEnabled: false, createSubagentClient: async () => ({ chat: sample, supportsIsolatedReadOnlyTurns: true }), listTools: () => [read],
+    ...(assertTeamActive ? { assertTeamActive } : {}),
     callSubagentReadTool: (name, args, context, assertLive) => prepared.readAdmission!.run(name, context.signal, () => callReadTool(), assertLive)
   })
   const call = (name: string, args: Record<string, unknown>, id = `${name}-call`) => prepared.admission!.run(name, undefined, () => prepared.toolProvider!.callTool(name, args, { route, runId: 'parent-run', toolCallId: id }))
@@ -90,5 +91,41 @@ describe('thread job tools and detached read admission', () => {
       await expect(call('jobs.wait', { job_id: b.job.id, timeout_seconds: 31 })).rejects.toThrow('arguments')
       await expect(call('stop_task', { job_id: 'other-session' })).rejects.toThrow('not available')
     } finally { prepared.dispose!() }
+  })
+})
+
+describe('background job of a team member after End', () => {
+  const readRequest = { content: '{"toolName":"files.read","args":{"path":"readme.md"}}' }
+  const ended = () => { throw new Error('Team has ended.') }
+  const job = (id: string) => agentThreadJobs.list(scope, invocation('listAgentJobs')).find((entry) => entry.id === id)
+  it('fails a member job before its next step after End while an ordinary job runs to completion', async () => {
+    const assertTeamActive = vi.fn()
+    const member = make(assertTeamActive), ordinary = make()
+    member.sample.mockResolvedValueOnce(readRequest)
+    ordinary.sample.mockResolvedValueOnce(readRequest)
+    // End is recorded while the member job's read runs; the read itself completes.
+    member.callReadTool.mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); return { content: 'Evidence' } })
+    const a = JSON.parse((await member.call('explore', { task: 'Member job', run_in_background: true })).content)
+    const b = JSON.parse((await ordinary.call('explore', { task: 'Ordinary job', run_in_background: true })).content)
+    member.prepared.dispose!(true); ordinary.prepared.dispose!(true)
+    await vi.waitFor(() => expect(job(a.job.id)?.status).toBe('failed'))
+    await vi.waitFor(() => expect(job(b.job.id)?.status).toBe('completed'))
+    expect(member.callReadTool).toHaveBeenCalledOnce()
+    expect(member.sample).toHaveBeenCalledOnce()
+    expect(assertTeamActive.mock.results.at(-1)).toMatchObject({ type: 'throw', value: new Error('Team has ended.') })
+    expect(ordinary.callReadTool).toHaveBeenCalledOnce()
+    expect(ordinary.sample).toHaveBeenCalledTimes(2)
+  })
+  it('keeps the report of a member job that finished before End', async () => {
+    const assertTeamActive = vi.fn()
+    const member = make(assertTeamActive)
+    const launched = JSON.parse((await member.call('critic', { task: 'Review', run_in_background: true })).content)
+    member.prepared.dispose!(true)
+    await vi.waitFor(() => expect(job(launched.job.id)?.status).toBe('completed'))
+    assertTeamActive.mockImplementation(ended)
+    const result = agentThreadJobs.read({ ...scope, jobId: launched.job.id }, invocation('readAgentJob'))
+    expect(result.job.status).toBe('completed')
+    expect(result.text).toContain('Report from child')
+    expect(member.sample).toHaveBeenCalledOnce()
   })
 })

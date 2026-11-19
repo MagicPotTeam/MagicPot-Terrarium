@@ -58,6 +58,8 @@ export function createAgentThreadSubagents(options: {
   listReadTools(): Tool[]
   startBackground?: (name: string, args: Record<string, unknown>, context: Context) => { content: string; metadata?: Record<string, unknown> }
   callReadTool(name: string, args: Record<string, unknown>, context: Context): Promise<{ content: string }>
+  /** Team member requests only: throws once the team has ended. Runs only before a new step or read starts. */
+  assertTeamActive?(): void
 }): AssistantRunToolProvider & { dispose(): void } {
   const key = getAgentSessionKey(normalizeAgentRoute(options.route))
   const parentSnapshot = snapshot(options.messages)
@@ -137,6 +139,8 @@ export function createAgentThreadSubagents(options: {
         }), metadata: { source: 'agent-thread-subagent', subagentRunId: runId } })
         while (steps < SUBAGENT_LIMITS.modelSteps) {
           check()
+          // No new helper model step (also the native fallback) after the member's team has ended.
+          options.assertTeamActive?.()
           steps++
           let streamedCharacters = 0
           const params: LLMChatParams = {
@@ -199,6 +203,7 @@ export function createAgentThreadSubagents(options: {
           const turn: LLMToolTurn = { content: result.content, calls: batch.map(({ call }) => call), results: [], ...(result.toolResponseItems ? { responseItems: result.toolResponseItems } : {}) }
           for (const item of requested) {
             check()
+            options.assertTeamActive?.()
             if (item.call) ids.add(item.call.id)
             calls++
             const result = await abortable(options.callReadTool(item.name, item.args, { ...context, runId, toolCallId: `${runId}:tool:${calls}`, signal }), signal)

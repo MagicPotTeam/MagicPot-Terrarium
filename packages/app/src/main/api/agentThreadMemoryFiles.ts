@@ -43,6 +43,8 @@ async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
 export function createAgentThreadMemoryFiles(options: {
   route: AgentRouteLike; signal: AbortSignal; assertInvocation(name: string): void
   createClient: MemoryHelperClientFactory; openSession: OpenMemoryFileSession
+  /** Team member requests only: throws once the team has ended. Runs only before a new step or memory call starts. */
+  assertTeamActive?(): void
 }): AssistantRunToolProvider & { dispose(): void } {
   const route = Object.freeze(normalizeAgentRoute(structuredClone(options.route))) as Readonly<AssistantRoute>, exactRoute = JSON.stringify(memoryFileRouteIdentity(route))
   const lifetime = new AbortController()
@@ -84,7 +86,8 @@ export function createAgentThreadMemoryFiles(options: {
         const messages: ChatMessage[] = [{ role: 'user', content: `Assigned task:\n${input.task}` }], turns: LLMToolTurn[] = []
         let native = cli.supportsNativeTools === true, fallback = false
         while (steps < MEMORY_HELPER_LIMITS.modelSteps) {
-          check(); steps++
+          // No new helper model step (also the native fallback) after the member's team has ended.
+          check(); options.assertTeamActive?.(); steps++
           let emitted = 0
           const params: LLMChatParams = {
             messages: structuredClone(messages), conversationId: childRunId, retryCapacity: false, disableProviderTools: true,
@@ -120,7 +123,7 @@ export function createAgentThreadMemoryFiles(options: {
           }
           const turn: LLMToolTurn = { content: result.content, calls: batch.map(item => item.call), results: [], ...(result.toolResponseItems ? { responseItems: result.toolResponseItems } : {}) }
           for (const item of requested) {
-            check(); calls++
+            check(); options.assertTeamActive?.(); calls++
             const result = await abortable(session.callTool(item.name, structuredClone(item.args), { route, runId: childRunId, toolCallId: `${childRunId}:tool:${calls}`, signal, modelStep: steps }), signal)
             check()
             // Never truncate a successful read and then treat its receipt as full observation.

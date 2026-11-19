@@ -7,6 +7,13 @@ import { watchSenderDocument } from '@shared/api/createServer/senderDocumentWatc
 
 const electron = vi.hoisted(() => ({ fromId: vi.fn(), parent: vi.fn() }))
 vi.mock('./agentThreadArchive', () => ({ agentThreadArchive: { search: async () => undefined } }))
+// A fake confined memory session: only the member End test below opens one.
+const memoryHost = vi.hoisted(() => ({ callTool: vi.fn(async () => ({ content: '{"path":"./memory/facts.md"}' })) }))
+vi.mock('./agentThreadMemoryFileHost', () => ({ createMemoryFileSession: () => ({
+  listTools: () => ['memory.files.tree', 'memory.files.read', 'memory.files.grep'].map(name => ({ name, description: 'Memory namespace only.', inputSchema: { type: 'object', additionalProperties: false, required: ['path'], properties: { path: { type: 'string' } } } })),
+  callTool: memoryHost.callTool, close: () => undefined
+}) }))
+vi.mock('./agentThreadMemoryFileApproval', () => ({ approveMemoryFileWrite: vi.fn() }))
 vi.mock('electron', () => ({ webContents: { fromId: electron.fromId }, BrowserWindow: { fromWebContents: electron.parent } }))
 const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'project', threadId: 'pane' } as const
 const scope = { route, conversationId: 'conversation' }
@@ -436,6 +443,41 @@ describe('local Agent thread interactions', () => {
     expect(pending()).toEqual([])
     expect(vi.getTimerCount()).toBe(0)
     expect(() => respond(item.id, { status: 'answered', actionId: 'approve' })).toThrow('not active')
+  })
+  it('hands the member End check to its sub-agent and memory helper, which start no read after End', async () => {
+    const { prepareCanvasAgentTools } = await import('./canvasAgentTools')
+    const source = { scope: 'team-scope', thread: route.threadId, lead: 'leader', member: scope.conversationId }
+    const req: LLMChatReq = { ...scope, messages: [], teamMember: source }
+    let ended = false
+    const assertTeamActive = vi.fn(() => { if (ended) throw new Error('Team has ended.') })
+    // Each helper's model step asks for one read; End is recorded while that step is in flight.
+    const subagentChat = vi.fn(async () => { ended = true; return { content: '{"toolName":"files.read","args":{"path":"notes.md"}}' } })
+    const memoryChat = vi.fn(async () => { ended = true; return { content: '{"toolName":"memory.files.read","args":{"path":"./memory/facts.md"}}' } })
+    const readTool = { name: 'files.read', description: 'Read text', inputSchema: { type: 'object', additionalProperties: false, required: ['path'], properties: { path: { type: 'string' } } } }
+    const callSubagentReadTool = vi.fn(async () => ({ content: 'notes' }))
+    const settings = {
+      local: true, terminalEnabled: false, listTools: () => [readTool], callSubagentReadTool,
+      createSubagentClient: async () => ({ chat: subagentChat, supportsIsolatedReadOnlyTurns: true }),
+      createMemoryClient: async () => ({ chat: memoryChat, supportsIsolatedMainToolTurns: true }),
+      commitMemoryFile: vi.fn(async () => ({ content: 'unused' }))
+    }
+    const member = prepareCanvasAgentTools(req, invocation(), { ...settings, assertTeamActive })
+    const ordinary = prepareCanvasAgentTools({ ...scope, messages: [] }, invocation(), settings)
+    const run = (prepared: typeof member, name: string) => prepared.admission!.run(name, undefined, () => prepared.toolProvider!.callTool(name, { task: 'Look it up' }, { route, runId: 'parent-run', toolCallId: `${name}-call` }))
+    try {
+      await expect(run(member, 'explore')).rejects.toThrow('Team has ended.')
+      expect(subagentChat).toHaveBeenCalledOnce(); expect(callSubagentReadTool).not.toHaveBeenCalled()
+      ended = false
+      await expect(run(member, 'memory_read')).rejects.toThrow('Team has ended.')
+      expect(memoryChat).toHaveBeenCalledOnce(); expect(memoryHost.callTool).not.toHaveBeenCalled()
+      // Without the callback (a request without teamMember) the same helpers run their reads.
+      subagentChat.mockResolvedValueOnce({ content: '{"toolName":"files.read","args":{"path":"notes.md"}}' }).mockResolvedValueOnce({ content: 'Found it.' })
+      memoryChat.mockResolvedValueOnce({ content: '{"toolName":"memory.files.read","args":{"path":"./memory/facts.md"}}' }).mockResolvedValueOnce({ content: 'Remembered.' })
+      expect(JSON.parse((await run(ordinary, 'explore')).content)).toMatchObject({ status: 'completed', toolCalls: 1 })
+      expect(JSON.parse((await run(ordinary, 'memory_read')).content)).toMatchObject({ status: 'completed', toolCalls: 1 })
+      expect(callSubagentReadTool).toHaveBeenCalledOnce(); expect(memoryHost.callTool).toHaveBeenCalledOnce()
+      expect(assertTeamActive).toHaveBeenCalledTimes(4) // each helper: its first step, then the refused read
+    } finally { member.dispose!(); ordinary.dispose!() }
   })
   it('exposes team message tools only to matching local member turns and requires their live admission', async () => {
     const { prepareCanvasAgentTools } = await import('./canvasAgentTools')
