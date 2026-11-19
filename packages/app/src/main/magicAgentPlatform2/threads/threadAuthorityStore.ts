@@ -16,7 +16,8 @@ import type {
  * gets a new id and generation + 1, so nothing bound to an old pair can come back. (2) Run grants:
  * what the user allowed one trigger delivery or goal generation to spend in one thread generation,
  * with hard limits on turns, tool calls and wall time (the turn, tool_call and walltime axes of
- * upstream core/budget.py), an expiry and revocation. A run grant is not the policy ApprovalGrant
+ * upstream core/budget.py), an expiry and revocation. Upstream counts after the fact; a run grant
+ * is charged BEFORE the work and refuses what would cross a hard limit. It is not the ApprovalGrant
  * of shared/magicAgentPlatform2/policy.ts and is never a grantProvider of the trigger lifecycle.
  *
  * What it is not: no IPC method, no scheduler, timer or startup hook, no approval producer and no
@@ -24,7 +25,9 @@ import type {
  * approval verifier is injected and has no default or implementation here. The target values come
  * from the renderer and are not authority: the caller must have authenticated them. Only
  * controlled API use and normal reopen are covered: a restored or rolled-back database and
- * arbitrary writers to the event store are not detected. Records hold ids, integers and enums only.
+ * arbitrary writers to the event store are not detected. Records hold ids, integers and enums
+ * only, plus the storageScope key of the target (at most 512 characters, no control characters);
+ * never prompt, goal or message text.
  *
  * It supersedes the TEST-ONLY sketch ThreadAdmissionDraft (triggers/threadAdmissionDraft.ts),
  * which keys an owner by a free string and takes its approval from an injected fake verifier.
@@ -122,6 +125,17 @@ export type ListGrantsResult =
 export type RevokeGrantResult =
   | Readonly<{ ok: true; changed: boolean; grant: RunGrantView }>
   | Readonly<{ ok: false; reason: 'unknown' }>
+export type ChargeGrantResult =
+  | Readonly<{ ok: true; replay: boolean; used: RunGrantAmounts; remaining: RunGrantAmounts }>
+  | Readonly<{
+      ok: false
+      reason:
+        'unknown' | 'binding' | 'revoked' | 'expired' | 'exhausted' | 'thread-revoked' | 'clock'
+      /** For 'exhausted': the axis whose hard limit refused. */
+      axis?: RunGrantAxis
+      /** For 'revoked': the stored revoke reason. */
+      revokeReason?: RunGrantRevokeReason | 'thread-revoked'
+    }>
 export type ThreadAuthorityStoreOptions = Readonly<{
   /** The only clock of the store (default Date.now). */
   now?: () => number
@@ -230,11 +244,19 @@ const isStorageScope = (value: unknown): value is string =>
   value.trim().length > 0 &&
   value.length <= 512 &&
   !Array.from(value).some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
-const isIdList = (value: unknown, max: number): value is readonly string[] =>
+const isIdList = (
+  value: unknown,
+  max: number,
+  item: (value: unknown) => value is string = isId
+): value is readonly string[] =>
   Array.isArray(value) &&
   value.length <= max &&
-  value.every(isId) &&
+  value.every((entry) => item(entry)) &&
   new Set(value).size === value.length
+/** A charge id is an id of at most 64 characters, which keeps a grant state under 2 KB. */
+const CHARGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
+const isChargeId = (value: unknown): value is string =>
+  typeof value === 'string' && CHARGE_ID_PATTERN.test(value)
 const unavailable = (): ThreadAuthorityUnavailableError => new ThreadAuthorityUnavailableError()
 /** Rethrows any failure of a stored-value check as unavailable. */
 function stored<T>(read: () => T): T {
@@ -390,6 +412,34 @@ function readGrantRequest(value: unknown, now: number): RunGrantRequest {
   return { threadId, generation, subject, limits, expiresAt, approval }
 }
 
+/**
+ * The amounts of one charge: only the keys turns, toolCalls and walltimeSeconds (a missing key is
+ * 0), each a non-negative safe integer, at least one above 0.
+ */
+function readAmounts(value: unknown): RunGrantAmounts {
+  if (!isRecord(value)) throw new TypeError('Invalid run grant charge.')
+  const keys = Object.keys(value)
+  if (keys.length === 0 || keys.some((key) => !(AXES as readonly string[]).includes(key)))
+    throw new TypeError('Invalid run grant charge.')
+  const turns = Object.hasOwn(value, 'turns') ? value.turns : 0
+  const toolCalls = Object.hasOwn(value, 'toolCalls') ? value.toolCalls : 0
+  const walltimeSeconds = Object.hasOwn(value, 'walltimeSeconds') ? value.walltimeSeconds : 0
+  if (!isInteger(turns, 0) || !isInteger(toolCalls, 0) || !isInteger(walltimeSeconds, 0))
+    throw new RangeError('Invalid run grant charge.')
+  if (turns === 0 && toolCalls === 0 && walltimeSeconds === 0)
+    throw new RangeError('A run grant charge must charge something.')
+  return { turns, toolCalls, walltimeSeconds }
+}
+
+function readPair(value: unknown): ThreadPair {
+  if (!isRecord(value) || !hasExactKeys(value, ['threadId', 'generation']))
+    throw new TypeError('Invalid thread pair.')
+  const threadId = value.threadId
+  const generation = value.generation
+  if (!isId(threadId) || !isInteger(generation, 1)) throw new TypeError('Invalid thread pair.')
+  return { threadId, generation }
+}
+
 function parseGrant(value: unknown, grantId: string): GrantRecord {
   if (!isRecord(value) || value.v !== 1 || !hasExactKeys(value, GRANT_KEYS)) throw unavailable()
   const issuedAt = value.issuedAt
@@ -417,7 +467,7 @@ function parseGrantState(value: unknown, grant: GrantRecord): GrantStateRecord {
     !isRecord(used) ||
     !hasExactKeys(used, AXES) ||
     !AXES.every((axis) => isInteger(used[axis], 0, grant.limits[axis])) ||
-    !isIdList(value.charges, RUN_GRANT_CHARGE_HISTORY) ||
+    !isIdList(value.charges, RUN_GRANT_CHARGE_HISTORY, isChargeId) ||
     (status !== 'active' && !isTime(value.endedAt)) ||
     (status === 'revoked' && !STORED_REVOKE_REASONS.includes(value.reason as string)) ||
     (status === 'exhausted' && !(AXES as readonly unknown[]).includes(value.reason))
@@ -711,6 +761,84 @@ export class ThreadAuthorityStore {
     const state: GrantStateRecord = { ...loaded.state, status: 'revoked', reason, endedAt: now }
     this.commit([{ kind: RUN_GRANT_STATE_KIND, id: grantId, row: loaded.stateRow, state }], now)
     return { ok: true, changed: true, grant: grantView(loaded.grant, state, live, now) }
+  }
+
+  /**
+   * Charges a grant BEFORE the work it pays for; a refusal means the work must not run. Checks in
+   * this order: no grant -> 'unknown'; a pair other than the grant's -> 'binding'; a stored
+   * terminal status -> that status; the thread not live in the grant's generation ->
+   * 'thread-revoked'; the clock before issuedAt -> 'clock' (none of these write); the clock at or
+   * after expiresAt -> 'expired' is written; a charge id among the last RUN_GRANT_CHARGE_HISTORY
+   * -> a replay with the current numbers, no write; any axis where used + amount would exceed its
+   * hard limit -> 'exhausted' is written with the first such axis (turns, toolCalls,
+   * walltimeSeconds) and nothing is added; otherwise every axis is charged at once. Reaching a
+   * hard limit exactly succeeds; the next charge on that axis exhausts the grant.
+   *
+   * A call that throws has an unknown outcome: the caller must count the amount as spent. A
+   * repeat with the same charge id is answered as a replay if the first call committed and the
+   * grant is still active. A charge id older than the last RUN_GRANT_CHARGE_HISTORY is charged
+   * again: this errs towards spending, never towards extra budget.
+   */
+  chargeGrant(
+    grantId: string,
+    binding: ThreadPair,
+    chargeId: string,
+    amounts: Partial<RunGrantAmounts>
+  ): ChargeGrantResult {
+    if (!isId(grantId) || !isChargeId(chargeId)) throw new TypeError('Invalid run grant charge.')
+    const pair = readPair(binding)
+    const amount = readAmounts(amounts)
+    const now = this.now()
+    const loaded = this.loadBoundGrant(grantId)
+    if (!loaded) return { ok: false, reason: 'unknown' }
+    const { grant, state, stateRow } = loaded
+    if (pair.threadId !== grant.threadId || pair.generation !== grant.generation)
+      return { ok: false, reason: 'binding' }
+    if (state.status === 'exhausted')
+      return { ok: false, reason: 'exhausted', axis: state.reason as RunGrantAxis }
+    if (state.status === 'revoked')
+      return {
+        ok: false,
+        reason: 'revoked',
+        revokeReason: state.reason as RunGrantRevokeReason | 'thread-revoked'
+      }
+    if (state.status !== 'active') return { ok: false, reason: state.status }
+    if (!threadIsLive(loaded.identity, grant)) return { ok: false, reason: 'thread-revoked' }
+    if (now < grant.issuedAt) return { ok: false, reason: 'clock' }
+    const write = (next: GrantStateRecord) =>
+      this.commit([{ kind: RUN_GRANT_STATE_KIND, id: grantId, row: stateRow, state: next }], now)
+    if (now >= grant.expiresAt) {
+      write({ ...state, status: 'expired', endedAt: now })
+      return { ok: false, reason: 'expired' }
+    }
+    const remaining = (used: RunGrantAmounts): RunGrantAmounts => ({
+      turns: grant.limits.turns - used.turns,
+      toolCalls: grant.limits.toolCalls - used.toolCalls,
+      walltimeSeconds: grant.limits.walltimeSeconds - used.walltimeSeconds
+    })
+    if (state.charges.includes(chargeId))
+      return {
+        ok: true,
+        replay: true,
+        used: copyAmounts(state.used),
+        remaining: remaining(state.used)
+      }
+    const axis = AXES.find((name) => amount[name] > grant.limits[name] - state.used[name])
+    if (axis !== undefined) {
+      write({ ...state, status: 'exhausted', reason: axis, endedAt: now })
+      return { ok: false, reason: 'exhausted', axis }
+    }
+    const used: RunGrantAmounts = {
+      turns: state.used.turns + amount.turns,
+      toolCalls: state.used.toolCalls + amount.toolCalls,
+      walltimeSeconds: state.used.walltimeSeconds + amount.walltimeSeconds
+    }
+    write({
+      ...state,
+      used,
+      charges: [...state.charges, chargeId].slice(-RUN_GRANT_CHARGE_HISTORY)
+    })
+    return { ok: true, replay: false, used: copyAmounts(used), remaining: remaining(used) }
   }
 
   private now(): number {
