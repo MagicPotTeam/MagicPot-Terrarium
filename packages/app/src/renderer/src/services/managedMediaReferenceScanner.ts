@@ -208,7 +208,13 @@ export async function scanManagedMediaReferenceIds(
 ): Promise<ManagedMediaReferenceScanResult> {
   const state: ScanState = { ids: new Map(), skipped: new Map() }
   const prefix = sources.draftBackupKeyPrefix ?? DEFAULT_DRAFT_BACKUP_KEY_PREFIX
+  // Draft backups are read before and after the other stores and both readings count: a
+  // reference that moves out of a draft (a send) while the chat store is read is not lost.
+  const draftsBefore: ScanState = { ids: new Map(), skipped: new Map() }
   try {
+    await inPhase('local-storage', () =>
+      scanDraftBackups(sources.localStorage, prefix, draftsBefore)
+    )
     await inPhase('chat-store', () =>
       sources.visitChatRecords((record) =>
         scanValueOf(record, state, {
@@ -223,6 +229,7 @@ export async function scanManagedMediaReferenceIds(
       )
     )
     await inPhase('local-storage', () => scanDraftBackups(sources.localStorage, prefix, state))
+    for (const [id, count] of draftsBefore.ids) if (!state.ids.has(id)) state.ids.set(id, count)
     const ids = [...state.ids.keys()].sort()
     const referenceCounts = Object.fromEntries(ids.map((id) => [id, state.ids.get(id) as number]))
     const skipped = [...state.skipped.values()]

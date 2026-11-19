@@ -256,6 +256,34 @@ describe('managed media reference scanner', () => {
     ).toEqual({ source: 'local-storage' })
   })
 
+  it('keeps a reference that leaves a draft backup while the chat store is read', async () => {
+    const leaving = 'a'.repeat(64)
+    const arriving = 'b'.repeat(64)
+    const storage = new Map([
+      ['magicpot-chat-draft:project-a.agent-1:s', JSON.stringify({ media: ref(leaving) })]
+    ])
+    const result = await scanManagedMediaReferenceIds({
+      ...sources(),
+      // A send clears the draft before its message reaches the store.
+      visitChatRecords: async () => {
+        storage.delete('magicpot-chat-draft:project-a.agent-1:s')
+        storage.set('magicpot-chat-draft:default:t', JSON.stringify({ media: ref(arriving) }))
+      },
+      localStorage: {
+        get length() {
+          return storage.size
+        },
+        key: (index) => [...storage.keys()][index] ?? null,
+        getItem: (key) => storage.get(key) ?? null
+      }
+    })
+    expect(result).toEqual({
+      ok: true,
+      ids: [leaving, arriving],
+      referenceCounts: { [leaving]: 1, [arriving]: 1 }
+    })
+  })
+
   it('ignores unrelated localStorage keys', async () => {
     const id = 'e'.repeat(64)
     const storage = new Map([
