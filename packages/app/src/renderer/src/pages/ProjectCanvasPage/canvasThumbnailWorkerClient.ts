@@ -17,7 +17,6 @@ import {
   type CanvasThumbnailRuntimeMetrics,
   type CanvasThumbnailWorkerGeneratedLevel
 } from './canvasThumbnailTypes'
-import { createCanvasImageObjectUrlHandle } from './canvasImageObjectUrlRegistry'
 import {
   canvasThumbnailManifestFromSet,
   canvasThumbnailSetFromManifest,
@@ -122,28 +121,69 @@ export function resetCanvasThumbnailRuntimeMetrics(): void {
   canvasThumbnailWorkerPool.resetCounters()
 }
 
-const thumbnailObjectUrlReleases = new Map<string, () => void>()
+/**
+ * Object URLs of thumbnail levels that live in this session only: pasted and other path-less
+ * images, and sets whose cache write failed. They stay outside the image layer's shared
+ * object-URL registry (128 slots): three to five URLs per pasted image filled it after about 25
+ * images, and every later image lost its thumbnails and kept a full-size decode plus a 512 px
+ * bitmap preview instead. Levels of files on disk never get a URL: they are read from the cache.
+ *
+ * The newest URLs are kept, within a count and a byte bound; the oldest are revoked. The image
+ * layer then fails to load that level once and keeps the item's own preview.
+ */
+export const CANVAS_THUMBNAIL_TRANSIENT_URL_MAX_COUNT = 768
+export const CANVAS_THUMBNAIL_TRANSIENT_URL_MAX_BYTES = 64 * 1024 * 1024
+/** URL -> bytes of its blob, oldest first. */
+const transientThumbnailObjectUrls = new Map<string, number>()
+let transientThumbnailObjectUrlBytes = 0
 
-function createObjectUrl(blob: Blob, ownerKey: string): string {
-  const handle = createCanvasImageObjectUrlHandle(ownerKey, blob)
-  if (!handle) return ''
-  thumbnailObjectUrlReleases.set(handle.url, handle.revoke)
-  return handle.url
-}
-
-function revokeObjectUrl(src: string): void {
-  const release = thumbnailObjectUrlReleases.get(src)
-  if (release) {
-    thumbnailObjectUrlReleases.delete(src)
-    release()
+function revokeTransientObjectUrl(src: string): void {
+  const bytes = transientThumbnailObjectUrls.get(src)
+  if (bytes === undefined) {
     return
   }
-  if (
-    src.startsWith('blob:') &&
-    typeof URL !== 'undefined' &&
-    typeof URL.revokeObjectURL === 'function'
-  ) {
+  transientThumbnailObjectUrls.delete(src)
+  transientThumbnailObjectUrlBytes -= bytes
+  if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
     URL.revokeObjectURL(src)
+  }
+}
+
+function createTransientObjectUrl(blob: Blob): string {
+  if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+    return ''
+  }
+  let url = ''
+  try {
+    url = URL.createObjectURL(blob)
+  } catch {
+    return ''
+  }
+  transientThumbnailObjectUrls.set(url, blob.size)
+  transientThumbnailObjectUrlBytes += blob.size
+  for (const oldest of transientThumbnailObjectUrls.keys()) {
+    if (
+      oldest === url ||
+      (transientThumbnailObjectUrls.size <= CANVAS_THUMBNAIL_TRANSIENT_URL_MAX_COUNT &&
+        transientThumbnailObjectUrlBytes <= CANVAS_THUMBNAIL_TRANSIENT_URL_MAX_BYTES)
+    ) {
+      break
+    }
+    revokeTransientObjectUrl(oldest)
+  }
+  return url
+}
+
+export function getCanvasThumbnailTransientObjectUrlMetrics(): { count: number; bytes: number } {
+  return {
+    count: transientThumbnailObjectUrls.size,
+    bytes: transientThumbnailObjectUrlBytes
+  }
+}
+
+export function revokeCanvasThumbnailTransientObjectUrlsForTest(): void {
+  for (const src of Array.from(transientThumbnailObjectUrls.keys())) {
+    revokeTransientObjectUrl(src)
   }
 }
 
@@ -214,15 +254,14 @@ function createWorker(): Worker | null {
   }
 }
 
+/** No URL yet: a level of a file on disk goes to the cache and is read from there. */
 function finalizeGeneratedThumbnailLevel(
-  level: CanvasThumbnailWorkerGeneratedLevel,
-  ownerKey: string
+  level: CanvasThumbnailWorkerGeneratedLevel
 ): CanvasGeneratedThumbnailLevel {
-  const src = createObjectUrl(level.blob, ownerKey)
   return {
     ...level,
     filename: getLevelFilename(level.maxSide, level.mimeType),
-    src,
+    src: '',
     sizeBytes: level.blob.size
   }
 }
@@ -236,14 +275,7 @@ async function generateLevelsWithWorker(
   request: CanvasThumbnailGenerationRequest
 ): Promise<CanvasGeneratedThumbnailLevel[] | null> {
   const workerLevels = await canvasThumbnailWorkerPool.generate(request)
-  return workerLevels
-    ? workerLevels.map((level) =>
-        finalizeGeneratedThumbnailLevel(
-          level,
-          `canvas-thumbnail:${request.identity.cacheKey}:${level.maxSide}:${level.blob.size}`
-        )
-      )
-    : null
+  return workerLevels ? workerLevels.map(finalizeGeneratedThumbnailLevel) : null
 }
 
 export function getCanvasThumbnailWorkerPoolMetrics(): CanvasThumbnailWorkerPoolMetrics {
@@ -281,12 +313,7 @@ async function generateLevelsInRenderer(
     onFirstLevel: request.onFirstLevel
   })
 
-  return levels.map((level) =>
-    finalizeGeneratedThumbnailLevel(
-      level,
-      `canvas-thumbnail:renderer:${request.identity.cacheKey}:${level.maxSide}:${level.blob.size}`
-    )
-  )
+  return levels.map(finalizeGeneratedThumbnailLevel)
 }
 
 export async function generateCanvasThumbnailLevels(
@@ -411,25 +438,30 @@ async function writeThumbnailSetToCache({
   levels: CanvasGeneratedThumbnailLevel[]
   requestedLevels: readonly CanvasThumbnailLevelSize[]
 }): Promise<CanvasImageThumbnailSet> {
-  const transientSet = createThumbnailSetFromGeneratedLevels({ identity, levels, requestedLevels })
+  // Levels that cannot go to the cache are shown from session-only object URLs.
+  const createTransientSet = () =>
+    createThumbnailSetFromGeneratedLevels({
+      identity,
+      levels: levels.map((level) => ({ ...level, src: createTransientObjectUrl(level.blob) })),
+      requestedLevels
+    })
   if (identity.kind !== 'local-file' || !bridge?.writeThumbnailSet) {
-    return transientSet
+    return createTransientSet()
   }
 
   try {
     const persistedResponse = await bridge.writeThumbnailSet({
       cacheKey: identity.cacheKey,
       ...(identity.cacheRootDir ? { cacheRootDir: identity.cacheRootDir } : {}),
-      manifest: canvasThumbnailManifestFromSet(transientSet),
+      manifest: canvasThumbnailManifestFromSet(
+        createThumbnailSetFromGeneratedLevels({ identity, levels, requestedLevels })
+      ),
       files: await buildWriteFiles(levels)
     })
     const persistedManifest = extractManifestFromWriteResponse(persistedResponse)
     if (persistedManifest && isManifestForIdentity(persistedManifest, identity)) {
       const persistedSet = canvasThumbnailSetFromManifest(persistedManifest, identity)
       if (persistedSet) {
-        for (const level of levels) {
-          revokeObjectUrl(level.src)
-        }
         return persistedSet
       }
     }
@@ -437,7 +469,7 @@ async function writeThumbnailSetToCache({
     console.warn('[Canvas] Failed to persist thumbnail set, using transient thumbnails.', error)
   }
 
-  return transientSet
+  return createTransientSet()
 }
 
 export async function readWarmCanvasThumbnailSet(
@@ -587,10 +619,7 @@ async function generateNativeThumbnailLevels({
       filename: getLevelFilename(maxSide, 'image/png'),
       sizeBytes: blob.size,
       blob,
-      src: createObjectUrl(
-        blob,
-        `canvas-thumbnail:${identity.cacheKey}:native:${maxSide}:${blob.size}`
-      )
+      src: ''
     })
   }
 

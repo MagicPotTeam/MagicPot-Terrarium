@@ -2,23 +2,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   buildCanvasImageSourceIdentity,
+  buildCanvasSessionSourceIdentity,
   canvasThumbnailManifestFromSet,
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
+import {
+  canvasImageObjectUrlRegistry,
+  createCanvasImageObjectUrlHandle,
+  getCanvasImageObjectUrlRegistryMetrics
+} from './canvasImageObjectUrlRegistry'
 import {
   generateCanvasThumbnailLevelsInScope,
   pickCanvasThumbnailFirstLevel,
   planCanvasThumbnailLevels
 } from './canvasThumbnailGeneration.worker'
 import {
+  CANVAS_THUMBNAIL_TRANSIENT_URL_MAX_COUNT,
   configureCanvasThumbnailWorkerPoolForTest,
   ensureCanvasThumbnailSet,
   generateCanvasThumbnailLevels,
   getCanvasThumbnailRuntimeMetrics,
+  getCanvasThumbnailTransientObjectUrlMetrics,
   getCanvasThumbnailWorkerPoolMetrics,
   readWarmCanvasThumbnailSet,
   resetCanvasThumbnailRuntimeMetrics,
-  resetCanvasThumbnailWorkerPoolForTest
+  resetCanvasThumbnailWorkerPoolForTest,
+  revokeCanvasThumbnailTransientObjectUrlsForTest
 } from './canvasThumbnailWorkerClient'
 import type {
   CanvasLocalFileSourceIdentity,
@@ -199,6 +208,7 @@ describe('canvasThumbnailWorkerClient', () => {
 
   afterEach(() => {
     resetCanvasThumbnailWorkerPoolForTest()
+    revokeCanvasThumbnailTransientObjectUrlsForTest()
     setGlobalCreateImageBitmap(originalCreateImageBitmap)
     setGlobalWorker(originalWorker)
     URL.createObjectURL = originalCreateObjectURL
@@ -331,6 +341,11 @@ describe('canvasThumbnailWorkerClient', () => {
     ])
     const written = writeThumbnailSet.mock.calls[0][0]
     expect(written.files.map((file) => file.filename)).toEqual(['128.webp', '256.webp', '512.webp'])
+    // A level that goes to the cache never becomes an object URL: it is read from the cache.
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+    expect(result.thumbnailSet?.levels.every((level) => level.src.startsWith('local-media:'))).toBe(
+      true
+    )
     expect(written.manifest.levels.map((level) => level.filename)).toEqual([
       '128.webp',
       '256.webp',
@@ -349,6 +364,110 @@ describe('canvasThumbnailWorkerClient', () => {
         workerPoolQueuedRequestCount: 0,
         workerPoolRejectedRequestCount: 0
       })
+    )
+  })
+
+  it('keeps the levels of a pathless image outside the shared object-URL registry', async () => {
+    const identity = buildCanvasSessionSourceIdentity({
+      sourceKey: 'canvas-session:test-pathless',
+      sizeBytes: 15,
+      mimeType: 'image/png',
+      fileName: 'pathless.png'
+    })
+    installRendererThumbnailMocks()
+    const writeThumbnailSet = vi.fn()
+    // The image layer's registry is full: pasted thumbnails must not depend on it.
+    canvasImageObjectUrlRegistry.revokeAll()
+    canvasImageObjectUrlRegistry.setMaxCount(1)
+    const filler = createCanvasImageObjectUrlHandle('test-filler', new Blob(['filler']))
+    expect(filler).not.toBeNull()
+    expect(createCanvasImageObjectUrlHandle('test-overflow', new Blob(['overflow']))).toBeNull()
+    const registryBefore = getCanvasImageObjectUrlRegistryMetrics()
+    let nextUrl = 0
+    vi.mocked(URL.createObjectURL).mockImplementation(() => `blob:pathless-level-${++nextUrl}`)
+
+    try {
+      const result = await ensureCanvasThumbnailSet({
+        source: new Blob(['pathless-source'], { type: 'image/png' }),
+        identity,
+        bridge: {
+          readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
+          writeThumbnailSet
+        }
+      })
+
+      expect(result.status).toBe('generated')
+      // Every level has a source, so the set is usable: three files, five entries.
+      expect(result.thumbnailSet?.levels.map((level) => level.src)).toEqual([
+        'blob:pathless-level-1',
+        'blob:pathless-level-2',
+        'blob:pathless-level-3',
+        'blob:pathless-level-3',
+        'blob:pathless-level-3'
+      ])
+      expect(getCanvasThumbnailTransientObjectUrlMetrics().count).toBe(3)
+      const registryAfter = getCanvasImageObjectUrlRegistryMetrics()
+      expect(registryAfter.activeCount).toBe(registryBefore.activeCount)
+      expect(registryAfter.createdCount).toBe(registryBefore.createdCount)
+      expect(registryAfter.rejectedCount).toBe(registryBefore.rejectedCount)
+      expect(writeThumbnailSet).not.toHaveBeenCalled()
+    } finally {
+      filler?.revoke()
+      canvasImageObjectUrlRegistry.setMaxCount(128)
+    }
+  })
+
+  it('shows the levels of a set whose cache write failed from session URLs', async () => {
+    installRendererThumbnailMocks()
+    let nextUrl = 0
+    vi.mocked(URL.createObjectURL).mockImplementation(() => `blob:unwritten-${++nextUrl}`)
+    const result = await ensureCanvasThumbnailSet({
+      source: new Blob(['source'], { type: 'image/png' }),
+      identity: createIdentity(),
+      bridge: {
+        readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
+        writeThumbnailSet: vi.fn(async () => {
+          throw new Error('disk full')
+        })
+      }
+    })
+
+    expect(result.status).toBe('generated')
+    expect(result.thumbnailSet?.levels.every((level) => level.src.startsWith('blob:'))).toBe(true)
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(3)
+    expect(getCanvasThumbnailTransientObjectUrlMetrics().count).toBe(3)
+  })
+
+  it('keeps only the newest session thumbnail URLs and revokes the oldest', async () => {
+    installRendererThumbnailMocks()
+    let nextUrl = 0
+    vi.mocked(URL.createObjectURL).mockImplementation(() => `blob:pasted-${++nextUrl}`)
+    const paste = (index: number) =>
+      ensureCanvasThumbnailSet({
+        source: new Blob([`pasted-${index}`], { type: 'image/png' }),
+        identity: buildCanvasSessionSourceIdentity({
+          sourceKey: `canvas-session:pasted-${index}`,
+          sizeBytes: 8,
+          mimeType: 'image/png'
+        }),
+        bridge: null
+      })
+
+    const pasteCount = Math.ceil(CANVAS_THUMBNAIL_TRANSIENT_URL_MAX_COUNT / 3) + 2
+    const first = await paste(0)
+    for (let index = 1; index < pasteCount; index += 1) {
+      await paste(index)
+    }
+
+    expect(getCanvasThumbnailTransientObjectUrlMetrics().count).toBe(
+      CANVAS_THUMBNAIL_TRANSIENT_URL_MAX_COUNT
+    )
+    // The first paste's URLs went first; the newest paste keeps all of its own.
+    const firstUrls = new Set(first.thumbnailSet?.levels.map((level) => level.src))
+    firstUrls.forEach((src) => expect(URL.revokeObjectURL).toHaveBeenCalledWith(src))
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith(`blob:pasted-${nextUrl}`)
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(
+      pasteCount * 3 - CANVAS_THUMBNAIL_TRANSIENT_URL_MAX_COUNT
     )
   })
 
