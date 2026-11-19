@@ -6,6 +6,7 @@ import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { cancelDebouncedSessionSave, ChatSessionSaveConflictError, ChatSessionSaveSupersededError, normalizedSessionsEqual, type ChatSession } from './chatStorage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
+import { ChatSessionLifecycleChangedError } from './chatSaveBaseline'
 import ChatPage from './ChatPage'
 
 // Synthetic storage only: the IndexedDB read and the guarded write are a fake with the same
@@ -406,6 +407,153 @@ describe('ChatPage treats a superseded save as benign and stops retrying a perma
     } finally { view.unmount() }
   })
 
+  it('records the object a refused save sent, so a reconciled object that replaced it still saves and survives a restart', async () => {
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // Another window ends the team while the read of the 'local edit' save is pending: the stored
+      // record gets the End transition, so that save is refused. The page's own lifecycle reconcile
+      // then rebases the baseline and replaces the live object, all in microtasks, so the refusal
+      // reaches onError before React renders (and the save effect registers) the reconciled object.
+      const ended: ChatSession = { ...structuredClone(session), teamEnded: true, teamGeneration: 1, teamLifecycleRevision: 1 }
+      let fired = false
+      let reconciledBeforeRefusal = false
+      h.afterReadPending = async (candidate) => {
+        if (fired || candidate.messages.at(-1)?.content !== 'local edit') return
+        fired = true
+        h.sessions = [structuredClone(ended)]
+        let reloaded = false
+        h.load.mockImplementationOnce(async () => { reloaded = true; return structuredClone(h.sessions) })
+        window.dispatchEvent(new CustomEvent('chat:team-lifecycle-ended', { detail: { scope, leadId: session.id } }))
+        for (let tick = 0; tick < 50; tick++) await Promise.resolve()
+        reconciledBeforeRefusal = reloaded
+      }
+      await append('local edit')
+      await waitFor(() => expect(fired).toBe(true), { timeout: 3000 })
+      await waitFor(() => expect(contents(stored())).toEqual(['original', 'local edit']), { timeout: 4000 })
+      await settle(1000)
+      expect(reconciledBeforeRefusal).toBe(true)
+      // Before: the reconciled object was recorded as refused although it was never sent, so it was
+      // never saved, the banner blamed another writer and the edit was gone after a restart.
+      expect(h.saves.map(call => [contents(call.session)?.at(-1), call.outcome, Boolean(call.session.teamEnded)]))
+        .toEqual([['local edit', 'conflict', false], ['local edit', 'written', true]])
+      expect(stored()).toEqual(expect.objectContaining({ teamEnded: true, teamGeneration: 1, teamLifecycleRevision: 1 }))
+      expect(banner()).toBeNull()
+      expect(shown()).toBe('original|local edit')
+      view.unmount()
+      // A restart on the same storage shows the edit.
+      const again = render(page())
+      try {
+        await waitFor(() => expect(shown()).toBe('original|local edit'))
+      } finally { again.unmount() }
+    } finally { view.unmount() }
+  })
+
+  it('an explicit save refused while a team End reconciles the session records the sent object, so the reconciled one still saves', async () => {
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // A transient storage failure leaves 'local edit' dirty under the banner.
+      h.forceError = candidate => candidate.messages.at(-1)?.content === 'local edit' ? new Error('fixture storage failure') : null
+      await append('local edit')
+      await waitFor(() => expect(banner()).not.toBeNull(), { timeout: 3000 })
+      // The user's Retry (persistCurrentSessionSnapshot) meets a team End by another window while its
+      // read is pending; the page reconciles in microtasks, so the refusal lands before React renders.
+      const ended: ChatSession = { ...structuredClone(session), teamEnded: true, teamGeneration: 1, teamLifecycleRevision: 1 }
+      let armed = true
+      h.afterReadPending = async (candidate) => {
+        if (!armed || candidate.messages.at(-1)?.content !== 'local edit') return
+        armed = false
+        h.forceError = null
+        h.sessions = [structuredClone(ended)]
+        window.dispatchEvent(new CustomEvent('chat:team-lifecycle-ended', { detail: { scope, leadId: session.id } }))
+        for (let tick = 0; tick < 50; tick++) await Promise.resolve()
+      }
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      // The Retry's refusal is the one reported (the debounced save never toasts).
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(1), { timeout: 3000 })
+      expect(armed).toBe(false)
+      // Before: the reconciled object was recorded as refused, so neither the save effect nor the
+      // backoff retries ever tried it and the edit was gone after a restart.
+      await waitFor(() => expect(contents(stored())).toEqual(['original', 'local edit']), { timeout: 4000 })
+      await settle(1500)
+      expect(h.saves.map(call => [contents(call.session)?.at(-1), call.outcome, Boolean(call.session.teamEnded)]).slice(-2))
+        .toEqual([['local edit', 'conflict', false], ['local edit', 'written', true]])
+      expect(stored()).toEqual(expect.objectContaining({ teamEnded: true, teamGeneration: 1, teamLifecycleRevision: 1 }))
+      expect(banner()).toBeNull()
+      view.unmount()
+      const again = render(page())
+      try {
+        await waitFor(() => expect(shown()).toBe('original|local edit'))
+      } finally { again.unmount() }
+    } finally { view.unmount() }
+  })
+
+  it('reports a stuck supersede met by a request once (one toast), and still toasts an explicit Retry', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      // Every object holding the request is superseded although it was never replaced.
+      h.forceSupersede = candidate => candidate.messages.some(m => m.content === 'fixture request')
+      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'fixture request' } })
+      fireEvent.click(screen.getByTestId('composer-send'))
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(1), { timeout: 3000 })
+      // The request fails (model requests fail closed here) and its later explicit saves of the stuck
+      // session, the debounced save and its backoff retries all meet the same stuck writer.
+      await advanceSeconds(40)
+      expect(banner()).not.toBeNull()
+      expect(h.saves.every(call => call.outcome === 'superseded')).toBe(true)
+      // Before: every explicit save of the stuck session toasted again.
+      expect(saveErrorsNotified()).toHaveLength(1)
+      // An explicit Retry is reported every time.
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(2))
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(3))
+      expect(contents(stored())).toEqual(['original'])
+      // Once the writer accepts it, Retry stores it, clears the banner and the report: a later stuck
+      // save is reported again.
+      h.forceSupersede = null
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(contents(stored())?.slice(0, 2)).toEqual(['original', 'fixture request']))
+      await waitFor(() => expect(banner()).toBeNull())
+      expect(saveErrorsNotified()).toHaveLength(3)
+      h.forceSupersede = candidate => candidate.messages.some(m => m.content === 'second request')
+      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'second request' } })
+      fireEvent.click(screen.getByTestId('composer-send'))
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(4), { timeout: 3000 })
+      await advanceSeconds(40)
+      expect(saveErrorsNotified()).toHaveLength(4)
+    } finally { view.unmount() }
+  })
+
+  it('does not toast a stuck session the debounced save already reported when a request meets it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const view = render(page())
+    try {
+      await waitFor(() => expect(shown()).toBe('original'))
+      h.forceSupersede = candidate => candidate.messages.some(m => m.content === 'stuck edit')
+      await append('stuck edit')
+      await advanceSeconds(5)
+      // The debounced save reports through the banner only.
+      expect(banner()).not.toBeNull()
+      expect(saveErrorsNotified()).toEqual([])
+      const before = h.saves.length
+      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'fixture request' } })
+      fireEvent.click(screen.getByTestId('composer-send'))
+      await advanceSeconds(40)
+      // The request's explicit saves met the stuck writer too, but the session was already reported.
+      expect(h.saves.length).toBeGreaterThan(before)
+      expect(h.saves.every(call => call.outcome === 'superseded')).toBe(true)
+      expect(banner()).not.toBeNull()
+      expect(saveErrorsNotified()).toEqual([])
+      fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(saveErrorsNotified()).toHaveLength(1))
+      expect(contents(stored())).toEqual(['original'])
+    } finally { view.unmount() }
+  })
+
   it('re-queues a superseded save with the newest effect options, not its own stale closure', async () => {
     const other: ChatSession = { id: otherSessionId, title: 'Other', profileId: 'base-model', messages: [{ role: 'user', content: 'other original' }], createdAt: 298 }
     h.sessions = [structuredClone(session), structuredClone(other)]
@@ -443,8 +591,8 @@ describe('ChatPage treats a superseded save as benign and stops retrying a perma
     const view = render(page())
     try {
       await waitFor(() => expect(shown()).toBe('original'))
-      // persistLatest's plain Error when the live team lifecycle no longer matches the baseline.
-      h.forceError = candidate => candidate.messages.at(-1)?.content === 'lifecycle edit' ? new Error('Session lifecycle changed before save') : null
+      // persistLatest's refusal when the live team lifecycle no longer matches the baseline.
+      h.forceError = candidate => candidate.messages.at(-1)?.content === 'lifecycle edit' ? new ChatSessionLifecycleChangedError() : null
       await append('lifecycle edit')
       await waitFor(() => expect(banner()).not.toBeNull(), { timeout: 3000 })
       expect(h.saves).toHaveLength(1)

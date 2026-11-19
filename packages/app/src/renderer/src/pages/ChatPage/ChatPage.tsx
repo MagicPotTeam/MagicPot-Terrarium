@@ -99,7 +99,7 @@ import {
   type ChatSession,
   type ChatSessionDraft
 } from './chatStorage'
-import { ChatSessionSaveBaseline } from './chatSaveBaseline'
+import { attemptedSessionOf, ChatSessionSaveBaseline } from './chatSaveBaseline'
 import { isBenignSaveSupersede, isPermanentSaveConflict, RefusedSaveSessions, SaveSupersedeStreaks } from './chatSaveErrors'
 import {
   buildAutoSavedChatImageKey,
@@ -1318,8 +1318,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const gatedMutationCountRef = useRef(0)
   const persistedSessionsRef = useRef<Map<string, ChatSession>>(new Map())
   const dirtySessionSnapshotsRef = useRef<Map<string, ChatSession>>(new Map())
-  // scope\u0000id -> the live object whose guarded save was refused by another writer. The automatic
-  // save does not retry that same object (it can only be refused again); a newer object is tried.
+  // scope\u0000id -> the object whose guarded save was refused (the one persistLatest sent, see
+  // attemptedSessionOf). The automatic save does not retry that same object (it can only be refused
+  // again); a newer object is tried.
   // Held weakly, so a refused session of another scope does not keep its messages and images alive.
   const saveConflictSessionsRef = useRef(new RefusedSaveSessions())
   // Consecutive supersedes per live session object: the same object superseded again and again was
@@ -1537,7 +1538,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           )
           if (!saved) return false
           saveConflictSessionsRef.current.delete(conflictKey)
-          saveSupersedeStreaksRef.current.clear(saved)
+          saveSupersedeStreaksRef.current.clear(saved, conflictKey)
           if (!isCurrentScope()) return true
           if (!clearDirtySessionSnapshotIfCurrent(requestScope, saved)) return false
           if (getDirtySessionIds(requestScope).length === 0) setSessionSaveError(null)
@@ -1548,8 +1549,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (!isCurrentScope()) return false
           const current = sessionsRef.current.find((candidate) => candidate.id === sessionId)
           if (current) setDirtySessionSnapshot(requestScope, current)
+          const superseded = isBenignSaveSupersede(e)
           // A supersede while the live object was never replaced is a failing save, reported below.
-          if (isBenignSaveSupersede(e) && !(current && saveSupersedeStreaksRef.current.note(current))) {
+          if (superseded && !(current && saveSupersedeStreaksRef.current.note(current))) {
             // Nothing was written and nothing conflicts: the session object was replaced while its
             // put was pending. Save the live object instead of reporting a failure. If it keeps
             // changing it stays dirty, and each change schedules the debounced save again.
@@ -1564,19 +1566,26 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const message = e instanceof Error ? e.message : String(e)
           const detail = `Failed to save chat session: ${message}`
           setSessionSaveError(detail)
+          // A conflict or a stuck supersede is said once per session (the banner stays); an explicit
+          // Retry reports again.
+          let reported = false
           if (isPermanentSaveConflict(e)) {
-            // Another writer owns the newer record. Say so once per conflicted session; an explicit
-            // Retry reports again.
-            // `current` is the live object now, which may be newer than the refused payload (it can
-            // be replaced while the put is pending). Recording it stops the automatic save from
-            // trying it although it was never sent; that is harmless while the frozen baseline is
-            // unchanged (it would be refused the same way), and a newer object or Retry still tries.
-            const reported = saveConflictSessionsRef.current.has(conflictKey)
-            if (current) saveConflictSessionsRef.current.record(conflictKey, current)
-            if (reported && label !== 'retry-unsaved') {
-              console.warn('[ChatPage] persistCurrentSessionSnapshot conflict (already reported):', e)
-              return false
-            }
+            // Another writer owns the newer record. Record the object persistLatest SENT, never
+            // `current`: the live object can be replaced between the refused read and this catch,
+            // also by the page's own reconcile writers (team End, lifecycle reconcile, attachment
+            // advance) that move the baseline at the same time. That newer object was never sent
+            // and may save against the new baseline, so the automatic save must still try it.
+            reported = saveConflictSessionsRef.current.has(conflictKey)
+            const sent = attemptedSessionOf(e)
+            saveConflictSessionsRef.current.record(conflictKey, sent?.id === sessionId ? sent : session)
+          } else if (superseded) {
+            // The same live object was superseded again and again: the debounced save's backoff
+            // keeps trying it under the banner.
+            reported = !saveSupersedeStreaksRef.current.markReported(conflictKey, sessionId)
+          }
+          if (reported && label !== 'retry-unsaved') {
+            console.warn('[ChatPage] persistCurrentSessionSnapshot failed (already reported):', e)
+            return false
           }
           notifyError(detail)
           console.warn('[ChatPage] persistCurrentSessionSnapshot failed:', e)
@@ -4867,10 +4876,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setDirtySessionSnapshot(storageScope, session)
     }
     const saveConflicts = saveConflictSessionsRef.current
-    if (saveConflicts.size > 0) {
-      const liveIds = new Set(sessions.map(session => session.id))
-      saveConflicts.prune((key, id) => key === getSessionStorageKey(storageScope, id) && !liveIds.has(id))
-    }
+    // Forget refusals and stuck-save reports of this scope's deleted sessions (the set of live ids
+    // is built only when there is something to check).
+    let liveIds: Set<string> | undefined
+    const deleted = (key: string, id: string): boolean => key === getSessionStorageKey(storageScope, id) &&
+      !(liveIds ??= new Set(sessions.map(session => session.id))).has(id)
+    saveConflicts.prune(deleted)
+    saveSupersedeStreaksRef.current.prune(deleted)
     // A session object another writer already refused stays dirty and reported; saving the same
     // object again can only be refused again. A newer object of that session is tried.
     const sessionsToSave = changedSessions.filter(
@@ -4890,8 +4902,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       onSuccess: (savedSessions) => {
         if (!isSaveScopeCurrent()) return
         for (const session of savedSessions) {
-          saveConflictSessionsRef.current.delete(getSessionStorageKey(storageScope, session.id))
-          saveSupersedeStreaksRef.current.clear(session)
+          const key = getSessionStorageKey(storageScope, session.id)
+          saveConflictSessionsRef.current.delete(key)
+          saveSupersedeStreaksRef.current.clear(session, key)
           clearDirtySessionSnapshotIfCurrent(storageScope, session)
         }
         if (getDirtySessionIds(storageScope).length === 0) {
@@ -4920,21 +4933,27 @@ const ChatPage: React.FC<ChatPageProps> = ({
           const requeueOptions = latest?.scope === storageScope ? latest.options : saveOptions
           if (requeue.length > 0) debouncedSaveSessions(requeue, 500, storageScope, requeueOptions)
           if (exhausted.length === 0) return
+          // Reported here (banner only); a later explicit save of the same session does not toast it
+          // again, only the explicit Retry does.
+          for (const session of exhausted) saveSupersedeStreaksRef.current.markReported(getSessionStorageKey(storageScope, session.id), session.id)
         }
         const detail = error instanceof Error ? error.message : String(error)
         setSessionSaveError(`Failed to save chat session: ${detail}`)
         if (isPermanentSaveConflict(error)) {
           // Another writer owns the newer record (or the session was deleted). Keep the dirty copy
           // and the one error line; retrying the same object on a timer would loop forever.
-          // Record the LIVE object, not the registered one: persistLatest resolved and sent the live
-          // object, so recording the older registered one would let the effect try the refused
-          // payload once more. If the live object was replaced after the refusal it was never tried;
-          // skipping it is harmless while the baseline is unchanged (it would be refused too), and
-          // any newer object or the explicit Retry still tries.
+          // Record the object persistLatest actually SENT (it resolves the live object on its turn,
+          // so not the registered one), and never whatever object is live now: the page's own
+          // reconcile writers (team End, lifecycle reconcile, attachment advance) move the baseline
+          // and replace the live object together, possibly between the refused read and this
+          // callback. That newer object was never sent and may save against the new baseline, so
+          // the effect must still try it. Without a sent object (debouncedSaveSessions refuses a
+          // tombstoned session itself) the registered object is the refused one.
+          const sent = attemptedSessionOf(error)
           for (const failed of failedSessions) {
             const live = sessionsRef.current.find(session => session.id === failed.id)
             if (live) setDirtySessionSnapshot(storageScope, live)
-            saveConflictSessionsRef.current.record(getSessionStorageKey(storageScope, failed.id), live ?? failed)
+            saveConflictSessionsRef.current.record(getSessionStorageKey(storageScope, failed.id), sent?.id === failed.id ? sent : failed)
           }
           return
         }

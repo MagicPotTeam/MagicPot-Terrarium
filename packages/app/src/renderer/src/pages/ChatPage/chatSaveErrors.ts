@@ -1,3 +1,4 @@
+import { ChatSessionLifecycleChangedError } from './chatSaveBaseline'
 import { ChatSessionSaveConflictError, ChatSessionSaveSupersededError } from './chatStorage'
 
 /**
@@ -10,9 +11,6 @@ export function isBenignSaveSupersede(error: unknown): boolean {
   return error instanceof ChatSessionSaveSupersededError
 }
 
-/** The message of persistLatest's plain Error (chatSaveBaseline.ts) for a team lifecycle mismatch. */
-const LIFECYCLE_CHANGED_BEFORE_SAVE = 'Session lifecycle changed before save'
-
 /**
  * A guarded save was refused because the stored record changed under another writer (or the
  * session was deleted), or because the live object's team membership / lifecycle fences no longer
@@ -22,8 +20,7 @@ const LIFECYCLE_CHANGED_BEFORE_SAVE = 'Session lifecycle changed before save'
  * Retry still tries.
  */
 export function isPermanentSaveConflict(error: unknown): boolean {
-  return error instanceof ChatSessionSaveConflictError ||
-    (error instanceof Error && error.message === LIFECYCLE_CHANGED_BEFORE_SAVE)
+  return error instanceof ChatSessionSaveConflictError || error instanceof ChatSessionLifecycleChangedError
 }
 
 /** Consecutive supersedes of one unchanged live object after which the save is reported as failed. */
@@ -38,6 +35,8 @@ export const SAVE_SUPERSEDE_STREAK_LIMIT = 3
  */
 export class SaveSupersedeStreaks {
   private counts = new WeakMap<object, number>()
+  // scope\u0000id -> session id of every session whose exhausted streak was already reported.
+  private reported = new Map<string, string>()
 
   /** Record one supersede seen while `live` was the live object; true once the streak is exhausted. */
   note(live: object): boolean {
@@ -46,9 +45,26 @@ export class SaveSupersedeStreaks {
     return count >= SAVE_SUPERSEDE_STREAK_LIMIT
   }
 
-  /** Forget the streak of an object that was saved. */
-  clear(live: object): void {
+  /**
+   * Mark the exhausted streak of the session under `key` as reported. True only the first time since
+   * that session last saved, so a stuck save is reported once, like a conflict; the caller still
+   * reports an explicit Retry.
+   */
+  markReported(key: string, sessionId: string): boolean {
+    if (this.reported.has(key)) return false
+    this.reported.set(key, sessionId)
+    return true
+  }
+
+  /** Forget the streak of an object that was saved, and that its session's stuck save was reported. */
+  clear(live: object, key: string): void {
     this.counts.delete(live)
+    this.reported.delete(key)
+  }
+
+  /** Drop every report for which `drop(key, sessionId)` is true. */
+  prune(drop: (key: string, sessionId: string) => boolean): void {
+    for (const [key, id] of this.reported) if (drop(key, id)) this.reported.delete(key)
   }
 }
 
@@ -59,14 +75,17 @@ export class SaveSupersedeStreaks {
  * stay alive just because it was refused once; once collected, nothing can present it again.
  */
 export class RefusedSaveSessions {
-  private entries = new Map<string, { id: string; ref: WeakRef<object> }>()
+  private entries = new Map<string, { id: string; ref: { deref(): object | undefined } }>()
+
+  /** `holdWeakly` is a seam for tests; it must not keep its target alive. */
+  constructor(private readonly holdWeakly: (session: object) => { deref(): object | undefined } = session => new WeakRef(session)) {}
 
   get size(): number {
     return this.entries.size
   }
 
   record(key: string, session: { id: string }): void {
-    this.entries.set(key, { id: session.id, ref: new WeakRef(session) })
+    this.entries.set(key, { id: session.id, ref: this.holdWeakly(session) })
   }
 
   /** Whether `session` is the very object that was refused under `key`. */

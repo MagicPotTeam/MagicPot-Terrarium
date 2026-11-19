@@ -25,6 +25,39 @@ import { ChatSessionSaveSupersededError, matchesTeamEndBaseline, normalizedSessi
 
 const baselineKey = (scope: string, sessionId: string): string => `${scope || 'default'}\u0000${sessionId}`
 
+/**
+ * persistLatest refused an ordinary save because the payload's team membership / lifecycle fences
+ * no longer match the frozen baseline (an ordinary save may never change those). Nothing was
+ * written; the same object can only be refused again.
+ */
+export class ChatSessionLifecycleChangedError extends Error {
+  readonly code = 'CHAT_SESSION_LIFECYCLE_CHANGED'
+  constructor() {
+    super('Session lifecycle changed before save')
+    this.name = 'ChatSessionLifecycleChangedError'
+  }
+}
+
+// A rejection of persistLatest -> the live session object whose payload it was writing (or refused
+// to write) when it failed. Keyed weakly by the error, so nothing outlives the rejection.
+const attemptedSessions = new WeakMap<object, ChatSession>()
+
+/**
+ * The live session object whose payload persistLatest last tried to write when it rejected with
+ * `error`: the source of the refused payload (after a supersede retry, the newer object it moved on
+ * to). Undefined for an error persistLatest did not raise after resolving a session. A caller that
+ * records a refusal must record this object, never whatever object is live when the rejection
+ * arrives: an object that replaced it in between was never sent and may save against a baseline
+ * that moved meanwhile (a team End or lifecycle reconcile, an attachment advance).
+ */
+export function attemptedSessionOf(error: unknown): ChatSession | undefined {
+  return typeof error === 'object' && error !== null ? attemptedSessions.get(error) : undefined
+}
+
+const noteAttempt = (error: unknown, session: ChatSession): void => {
+  if (typeof error === 'object' && error !== null) attemptedSessions.set(error, session)
+}
+
 export class ChatSessionSaveBaseline {
   private baselines = new Map<string, ChatSession | null>()
   private chains = new Map<string, Promise<unknown>>()
@@ -172,7 +205,11 @@ export class ChatSessionSaveBaseline {
       let current = session
       let payload = structuredClone(current)
       for (let attempt = 0; ; attempt++) {
-        if (expected && !sameTeamLifecycle(payload, expected)) throw new Error('Session lifecycle changed before save')
+        if (expected && !sameTeamLifecycle(payload, expected)) {
+          const refusal = new ChatSessionLifecycleChangedError()
+          noteAttempt(refusal, current)
+          throw refusal
+        }
         try {
           await saveSessionToDB(payload, scope, {
             expectedSession: expected,
@@ -182,6 +219,7 @@ export class ChatSessionSaveBaseline {
           break
         } catch (error) {
           this.acknowledgementObservations.set(key, (this.acknowledgementObservations.get(key) ?? 0) + 1)
+          noteAttempt(error, current)
           if (!(error instanceof ChatSessionSaveSupersededError) || !retrySuperseded || attempt >= 2 || !epochIsCurrent()) throw error
           const latest = resolveLatest()
           if (!latest || latest.id !== sessionId || latest === current) throw error

@@ -6,8 +6,8 @@ vi.mock('./chatStorage', async (importOriginal) => ({
   saveSessionToDB: fake.save
 }))
 
-import { ChatSessionSaveConflictError, type ChatSession } from './chatStorage'
-import { ChatSessionSaveBaseline } from './chatSaveBaseline'
+import { ChatSessionSaveConflictError, ChatSessionSaveSupersededError, type ChatSession } from './chatStorage'
+import { attemptedSessionOf, ChatSessionLifecycleChangedError, ChatSessionSaveBaseline } from './chatSaveBaseline'
 
 const session = (content: string): ChatSession => ({
   id: 'synthetic-session', title: 'synthetic', messages: [{ role: 'user', content }]
@@ -77,6 +77,9 @@ describe('persistLatest queued synthetic CAS', () => {
         expect('error' in secondOutcome && secondOutcome.error).toBe(errors[1])
         expect(errors[0]).toBeInstanceOf(ChatSessionSaveConflictError)
         expect(errors[1]).toBeInstanceOf(ChatSessionSaveConflictError)
+        // Each rejection names the object it sent, not the object live when it was refused.
+        expect(attemptedSessionOf(errors[0])).toBe(v1)
+        expect(attemptedSessionOf(errors[1])).toBe(v2)
         expect(events).toEqual(['start:1', 'conflict:1', 'start:2', 'conflict:2'])
         expect(store.get('scope')).toBe(externalBytes)
         expect(ack1).not.toHaveBeenCalled()
@@ -94,5 +97,49 @@ describe('persistLatest queued synthetic CAS', () => {
       await firstResult
       if (secondResult) await secondResult
     }
+  })
+
+  it('names the object it sent when refused, even after the live object was replaced and the baseline moved', async () => {
+    const writer = new ChatSessionSaveBaseline()
+    const v0 = session('v0'), v1 = session('v1')
+    let live = v1
+    const conflict = new ChatSessionSaveConflictError(v1.id, 'scope')
+    // While the read of v1 is pending a reconcile writer advances the baseline and replaces the live object.
+    fake.save.mockImplementationOnce(async () => {
+      const reconciled = { ...v1, teamEnded: true }
+      writer.advance('scope', v1.id, { ...v0, teamEnded: true })
+      live = reconciled
+      throw conflict
+    })
+    await expect(writer.persistLatest('scope', v1.id, () => live, () => v0)).rejects.toBe(conflict)
+    expect(live).not.toBe(v1)
+    expect(attemptedSessionOf(conflict)).toBe(v1)
+  })
+
+  it('names the newer object after a supersede retry moved on to it', async () => {
+    const writer = new ChatSessionSaveBaseline()
+    const v0 = session('v0'), v1 = session('v1'), v2 = session('v2')
+    let live = v1
+    const superseded = new ChatSessionSaveSupersededError()
+    const conflict = new ChatSessionSaveConflictError(v1.id, 'scope')
+    fake.save
+      .mockImplementationOnce(async () => { live = v2; throw superseded })
+      .mockImplementationOnce(async () => { throw conflict })
+    await expect(writer.persistLatest('scope', v1.id, () => live, () => v0, undefined, true)).rejects.toBe(conflict)
+    expect(fake.save).toHaveBeenCalledTimes(2)
+    expect(attemptedSessionOf(conflict)).toBe(v2)
+    expect(attemptedSessionOf(new ChatSessionSaveConflictError(v1.id, 'scope'))).toBeUndefined()
+    expect(attemptedSessionOf('not an object')).toBeUndefined()
+  })
+
+  it('refuses a lifecycle change with a typed error that names the refused object, before any storage access', async () => {
+    const writer = new ChatSessionSaveBaseline()
+    const baseline: ChatSession = { ...session('v0'), teamLeadId: 'lead', teamMemberName: 'a', teamGeneration: 1 }
+    const live: ChatSession = { ...baseline, teamGeneration: 2, messages: [{ role: 'user', content: 'edit' }] }
+    const refusal = await writer.persistLatest('scope', live.id, () => live, () => baseline).catch((error: unknown) => error)
+    expect(refusal).toBeInstanceOf(ChatSessionLifecycleChangedError)
+    expect((refusal as Error).message).toBe('Session lifecycle changed before save')
+    expect(attemptedSessionOf(refusal)).toBe(live)
+    expect(fake.save).not.toHaveBeenCalled()
   })
 })
