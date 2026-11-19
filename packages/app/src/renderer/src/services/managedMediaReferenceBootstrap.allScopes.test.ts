@@ -304,17 +304,26 @@ describe('managed media reference scan over every scope of the chat store', () =
     expect(snapshot).toEqual({ version: 1, complete: false, ids: [], referenceCounts: {} })
   })
 
-  it('sends an incomplete snapshot when a record of another scope holds a malformed reference', async () => {
+  it('skips a media value of another scope that names no managed media and names the rest', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     db.seedStore(STORE, 'storageKey', [
       stored('default', 'main', {
         messages: [{ role: 'user', content: 'a', attachments: [image(id(1))] }]
       }),
-      stored('project-a.agent-1', 'broken', {
+      stored('project-a.agent-1', 'tool-run', {
         messages: [
           {
-            role: 'user',
+            role: 'assistant',
             content: 'b',
-            attachments: [{ type: 'image', url: 'x', media: { kind: 'managed', sha256: 'bad' } }]
+            toolHistory: [
+              {
+                runId: 'r',
+                toolCallId: 't',
+                toolName: 'post',
+                args: { media: ['https://example.com/a.png'] },
+                status: 'completed'
+              }
+            ]
           }
         ]
       }),
@@ -325,9 +334,14 @@ describe('managed media reference scan over every scope of the chat store', () =
 
     const snapshot = await scanOnce()
 
-    expect(snapshot).toEqual({ version: 1, complete: false, ids: [], referenceCounts: {} })
-    // The pass stops at the malformed record.
-    expect(db.stats.handedOut).not.toContain('project-z.agent-1\u0000after')
+    expect(snapshot).toEqual({
+      version: 1,
+      complete: true,
+      ids: [id(1), id(2)],
+      referenceCounts: { [id(1)]: 1, [id(2)]: 1 }
+    })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"project-a.agent-1"'))
+    warn.mockRestore()
   })
 
   it('sends an incomplete snapshot when the chat store cannot be opened', async () => {

@@ -307,33 +307,22 @@ describe('managed media reference bootstrap', () => {
       mocks.updateReferenceSnapshot.mockResolvedValue(undefined)
     })
 
-    it('warns once per source per hour, naming the source and no media id', async () => {
+    it('warns once per source per hour, naming the source and no media id or path', async () => {
       vi.setSystemTime(new Date('2030-01-01T00:00:00Z'))
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       const sha = 'a'.repeat(64)
-      mocks.forEachStoredChatRecord.mockImplementation(async (visit: (record: unknown) => void) => {
-        visit({
-          storageScope: 'project-a.agent-1',
-          messages: [
-            {
-              attachments: [
-                {
-                  media: { kind: 'managed', sha256: 'bad', relativePath: `originals/aa/${sha}.png` }
-                }
-              ]
-            }
-          ]
-        })
-      })
+      mocks.forEachStoredChatRecord.mockRejectedValue(
+        new Error(`read failed at /home/u/.chat_media/originals/aa/${sha}.png`)
+      )
       const stop = start()
       await vi.advanceTimersByTimeAsync(2_000)
       expect(mocks.updateReferenceSnapshot).toHaveBeenLastCalledWith(
         expect.objectContaining({ complete: false })
       )
       expect(warn).toHaveBeenCalledTimes(1)
-      expect(String(warn.mock.calls[0][0])).toContain('"project-a.agent-1"')
-      expect(String(warn.mock.calls[0][0])).toContain('not a managed reference')
+      expect(String(warn.mock.calls[0][0])).toContain('the chat store could not be read')
       expect(String(warn.mock.calls[0][0])).not.toContain(sha)
+      expect(String(warn.mock.calls[0][0])).not.toContain('/home/u')
 
       // The same source fails every scan: no second warning within the hour.
       window.dispatchEvent(new Event('storage'))
@@ -354,9 +343,35 @@ describe('managed media reference bootstrap', () => {
       mocks.loadCanvasItems.mockResolvedValue({ items: [] })
       mocks.forEachStoredChatRecord.mockRejectedValue(new Error('read failed'))
       await vi.advanceTimersByTimeAsync(60 * 60_000)
-      expect(warn.mock.calls.map(([text]) => String(text))).toContainEqual(
+      expect(warn.mock.calls.map(([text]) => String(text))).toEqual([
+        expect.stringContaining('the chat store could not be read'),
+        expect.stringContaining('canvas board "board-1" could not be read'),
         expect.stringContaining('the chat store could not be read')
+      ])
+      stop()
+    })
+
+    it('reports skipped media values once per hour while the snapshot stays complete', async () => {
+      vi.setSystemTime(new Date('2030-03-01T00:00:00Z'))
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      mocks.forEachStoredChatRecord.mockImplementation(async (visit: (record: unknown) => void) => {
+        visit({
+          storageScope: 'project-a.agent-1',
+          messages: [{ toolHistory: [{ toolName: 'count', args: { media: 3 } }] }]
+        })
+      })
+      const stop = start()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ complete: true })
       )
+      window.dispatchEvent(new Event('storage'))
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(warn.mock.calls.map(([text]) => String(text))).toEqual([
+        expect.stringContaining(
+          '1 media value(s) in the chat records of scope "project-a.agent-1" name no managed media'
+        )
+      ])
       stop()
     })
 

@@ -15,8 +15,17 @@ export type ManagedMediaScanSource =
 /** A source and, where known, its scope name or board id. Never a media id or a file path. */
 export type ManagedMediaScanProblem = { source: ManagedMediaScanSource; context?: string }
 
+/** Media values that named no managed media, by source and scope or board. */
+export type ManagedMediaScanSkipped = ManagedMediaScanProblem & { count: number }
+
 export type ManagedMediaReferenceScanResult =
-  | { ok: true; ids: string[]; referenceCounts: Record<string, number> }
+  | {
+      ok: true
+      ids: string[]
+      referenceCounts: Record<string, number>
+      /** Present when media values that name no managed media were skipped. */
+      skipped?: ManagedMediaScanSkipped[]
+    }
   | {
       ok: false
       ids: []
@@ -64,39 +73,79 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function addMediaReference(value: unknown, ids: Map<string, number>): void {
-  const reference = normalizeMediaReference(value)
-  if (!reference || reference.kind !== 'managed' || !reference.sha256) {
-    throw new Error('Invalid managed media reference')
-  }
-  const id = reference.sha256.toLowerCase()
-  if (!SHA256_PATTERN.test(id)) throw new Error('Invalid managed media id')
-  ids.set(id, (ids.get(id) ?? 0) + 1)
+type ScanState = {
+  ids: Map<string, number>
+  skipped: Map<string, ManagedMediaScanSkipped>
 }
 
-function scanValue(value: unknown, ids: Map<string, number>): void {
+/** A 64-digit hex run not part of a longer one: the form of every managed media id. */
+const EMBEDDED_SHA256_PATTERN = /(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])/g
+
+/** Every managed media id a value could name: each 64-hex run in any of its strings. */
+function collectEmbeddedIds(value: unknown, found: Set<string>): void {
+  if (typeof value === 'string') {
+    for (const match of value.matchAll(EMBEDDED_SHA256_PATTERN)) found.add(match[0].toLowerCase())
+    return
+  }
   if (Array.isArray(value)) {
-    for (const entry of value) scanValue(entry, ids)
+    for (const entry of value) collectEmbeddedIds(entry, found)
+    return
+  }
+  if (isRecord(value)) for (const child of Object.values(value)) collectEmbeddedIds(child, found)
+}
+
+function addId(id: string, state: ScanState): void {
+  state.ids.set(id, (state.ids.get(id) ?? 0) + 1)
+}
+
+/**
+ * The ids a stored `media` value protects. A managed reference names its id. Any other value
+ * (malformed, another kind, a string) protects every id it could name: normalizeMediaReference
+ * reads an id from `sha256`, and a managed file's path and URL carry it too, so every 64-hex run
+ * in any of its strings counts. A value with none (a tool argument named media, a number) names
+ * no managed media: it is skipped and counted, it does not fail the snapshot.
+ */
+function addMediaReference(
+  value: unknown,
+  state: ScanState,
+  problem: ManagedMediaScanProblem
+): void {
+  const reference = normalizeMediaReference(value)
+  if (reference?.kind === 'managed' && reference.sha256 && SHA256_PATTERN.test(reference.sha256)) {
+    addId(reference.sha256, state)
+    return
+  }
+  const found = new Set<string>()
+  collectEmbeddedIds(value, found)
+  if (found.size > 0) {
+    for (const id of found) addId(id, state)
+    return
+  }
+  const key = `${problem.source}\u0000${problem.context ?? ''}`
+  const skipped = state.skipped.get(key)
+  if (skipped) skipped.count += 1
+  else state.skipped.set(key, { ...problem, count: 1 })
+}
+
+function scanValue(value: unknown, state: ScanState, problem: ManagedMediaScanProblem): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) scanValue(entry, state, problem)
     return
   }
   if (!isRecord(value)) return
 
   if ('media' in value && value.media !== undefined && value.media !== null) {
-    addMediaReference(value.media, ids)
+    addMediaReference(value.media, state, problem)
   }
   for (const [key, child] of Object.entries(value)) {
-    if (key !== 'media') scanValue(child, ids)
+    if (key !== 'media') scanValue(child, state, problem)
   }
 }
 
-/** Scans one value; a media value it cannot use fails the scan under `problem`. */
-function scanValueOf(
-  value: unknown,
-  ids: Map<string, number>,
-  problem: ManagedMediaScanProblem
-): void {
+/** Scans one value; a value it cannot walk fails the scan under `problem`. */
+function scanValueOf(value: unknown, state: ScanState, problem: ManagedMediaScanProblem): void {
   try {
-    scanValue(value, ids)
+    scanValue(value, state, problem)
   } catch (error) {
     throw new ManagedMediaScanSourceError(problem, { cause: error })
   }
@@ -116,7 +165,7 @@ const scopeOfDraftBackupKey = (key: string, prefix: string): string => {
 function scanDraftBackups(
   storage: ManagedMediaReferenceScannerSources['localStorage'],
   prefix: string,
-  ids: Map<string, number>
+  state: ScanState
 ): void {
   for (let index = 0; index < storage.length; index += 1) {
     const key = storage.key(index)
@@ -134,7 +183,7 @@ function scanDraftBackups(
         { cause: error }
       )
     }
-    scanValueOf(value, ids, { source: 'draft-media', context: scope })
+    scanValueOf(value, state, { source: 'draft-media', context: scope })
   }
 }
 
@@ -150,18 +199,19 @@ async function inPhase(source: ManagedMediaScanSource, run: () => unknown): Prom
 
 /**
  * The managed media ids referenced anywhere in the stores. The result authorises deletion of
- * everything else, so any read or parse error, and any malformed reference, fails the whole scan;
- * the result then names the source. Sources are read one after another and only ids are kept.
+ * everything else, so any read or parse error fails the whole scan, and the result then names the
+ * source. A media value that names no managed media is skipped and reported. Sources are read
+ * one after another and only ids are kept.
  */
 export async function scanManagedMediaReferenceIds(
   sources: ManagedMediaReferenceScannerSources
 ): Promise<ManagedMediaReferenceScanResult> {
-  const references = new Map<string, number>()
+  const state: ScanState = { ids: new Map(), skipped: new Map() }
   const prefix = sources.draftBackupKeyPrefix ?? DEFAULT_DRAFT_BACKUP_KEY_PREFIX
   try {
     await inPhase('chat-store', () =>
       sources.visitChatRecords((record) =>
-        scanValueOf(record, references, {
+        scanValueOf(record, state, {
           source: 'chat-media',
           context: scopeOfChatRecord(record)
         })
@@ -169,13 +219,14 @@ export async function scanManagedMediaReferenceIds(
     )
     await inPhase('canvas-board', () =>
       sources.visitCanvasItems((items, boardId) =>
-        scanValueOf(items, references, { source: 'canvas-media', context: boardId })
+        scanValueOf(items, state, { source: 'canvas-media', context: boardId })
       )
     )
-    await inPhase('local-storage', () => scanDraftBackups(sources.localStorage, prefix, references))
-    const ids = [...references.keys()].sort()
-    const referenceCounts = Object.fromEntries(ids.map((id) => [id, references.get(id) as number]))
-    return { ok: true, ids, referenceCounts }
+    await inPhase('local-storage', () => scanDraftBackups(sources.localStorage, prefix, state))
+    const ids = [...state.ids.keys()].sort()
+    const referenceCounts = Object.fromEntries(ids.map((id) => [id, state.ids.get(id) as number]))
+    const skipped = [...state.skipped.values()]
+    return { ok: true, ids, referenceCounts, ...(skipped.length > 0 ? { skipped } : {}) }
   } catch (error) {
     const failure =
       error instanceof ManagedMediaScanSourceError

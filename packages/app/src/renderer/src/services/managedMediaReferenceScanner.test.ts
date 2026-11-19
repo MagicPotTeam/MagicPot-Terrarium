@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { normalizeMediaReference } from '../../../shared/mediaReference'
 import {
   ManagedMediaScanSourceError,
   scanManagedMediaReferenceIds
@@ -125,21 +126,109 @@ describe('managed media reference scanner', () => {
     })
   })
 
-  it('fails closed for malformed or invalid media references', async () => {
+  it('skips a media value that names no managed media, and reports it, instead of failing', async () => {
+    const id = 'a'.repeat(64)
     const result = await scanManagedMediaReferenceIds({
       ...sources(),
-      visitChatRecords: async (visit) =>
+      visitChatRecords: async (visit) => {
         visit({
           storageScope: 'project-a.agent-1',
-          messages: [{ attachments: [{ media: { kind: 'managed', sha256: 'bad' } }] }]
+          messages: [
+            { attachments: [{ media: { kind: 'managed', sha256: 'bad' } }] },
+            {
+              role: 'assistant',
+              // A tool whose arguments include a parameter named media (stored verbatim).
+              toolHistory: [{ toolName: 'post', args: { media: ['https://example.com/a.png'] } }]
+            },
+            { toolHistory: [{ toolName: 'count', args: { media: 3 } }] }
+          ]
         })
+        visit({ storageScope: 'default', messages: [{ attachments: [{ media: ref(id) }] }] })
+      }
     })
     expect(result).toEqual({
-      ok: false,
-      ids: [],
-      referenceCounts: {},
-      failure: { source: 'chat-media', context: 'project-a.agent-1' }
+      ok: true,
+      ids: [id],
+      referenceCounts: { [id]: 1 },
+      skipped: [{ source: 'chat-media', context: 'project-a.agent-1', count: 3 }]
     })
+  })
+
+  it('keeps every id a malformed or foreign media value can name', async () => {
+    const id = (n: number) => n.toString(16).padStart(2, '0').repeat(32)
+    // No id in its path or name: each variant below names its file through its sha256 field alone.
+    const valid = {
+      ...ref(id(1)),
+      relativePath: 'originals/00/image.png',
+      originalFileName: 'image.png'
+    }
+    const values: unknown[] = [
+      // One broken field each: none of these normalizes, every one still names its file.
+      { ...valid, sha256: id(2), mimeType: 'not a type' },
+      { ...valid, sha256: id(3), sizeBytes: 0 },
+      { ...valid, sha256: id(4), originalFileName: 'a/b.png' },
+      { ...valid, sha256: id(5), version: 2 },
+      { ...valid, sha256: id(6), kind: 'project-asset' },
+      { ...valid, sha256: id(7).toUpperCase() + 'x' },
+      // No sha256 field: the id in the path of the original, in an URL, in a plain string.
+      { version: 1, kind: 'managed', relativePath: `originals/08/${id(8)}.png` },
+      { originalUrl: `local-media:///home/u/.chat_media/originals/09/${id(9)}.png` },
+      `local-media:///home/u/.chat_media/originals/0a/${id(10)}.png`,
+      [{ derivatives: [{ sha256: id(11) }] }]
+    ]
+    const result = await scanManagedMediaReferenceIds({
+      ...sources(),
+      visitCanvasItems: async (visit) =>
+        visit(
+          values.map((media) => ({ type: 'image', media })),
+          'board-1'
+        )
+    })
+    expect(result.ok).toBe(true)
+    // id(7) has a trailing x: its sha256 field is not a 64-digit run of its own, still found.
+    expect(result.ids).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((n) => id(n)))
+    expect(result.ok && result.skipped).toBeUndefined()
+  })
+
+  it('names at least the id the strict reading named, for every value it accepted', async () => {
+    // The reading before skips existed: a managed reference names its id, anything else fails.
+    const strictIds = (media: unknown): string[] | 'fails' => {
+      const reference = normalizeMediaReference(media)
+      return reference?.kind === 'managed' && reference.sha256 ? [reference.sha256] : 'fails'
+    }
+    const sha = 'Ab'.repeat(32)
+    const base = ref(sha)
+    const derivative = {
+      maxEdge: 512,
+      relativePath: `derivatives/ab/${sha}/512.webp`,
+      mimeType: 'image/webp',
+      sizeBytes: 9,
+      width: 4,
+      height: 4,
+      sha256: 'c'.repeat(64)
+    }
+    const values: unknown[] = [
+      base,
+      { ...base, relativePath: 'originals/00/image.png', originalFileName: 'image.png' },
+      { ...base, derivatives: [derivative], width: 4, height: 4, status: 'ready' },
+      { ...base, mediaId: 'm-1', originalUrl: 'https://example.com/a.png' },
+      { ...base, kind: 'project-asset' },
+      { ...base, sha256: undefined },
+      { media: base },
+      'text',
+      7,
+      true,
+      []
+    ]
+    for (const media of values) {
+      const strict = strictIds(media)
+      const result = await scanManagedMediaReferenceIds({
+        ...sources(),
+        visitChatRecords: async (visit) => visit({ media })
+      })
+      expect(result.ok).toBe(true)
+      if (strict !== 'fails') expect(result.ids).toEqual(expect.arrayContaining(strict))
+    }
   })
 
   it('names the source that failed the scan', async () => {
@@ -149,10 +238,12 @@ describe('managed media reference scanner', () => {
       const result = await scanManagedMediaReferenceIds({ ...sources(), ...overrides })
       return result.ok ? undefined : result.failure
     }
-    const bad = { media: { kind: 'managed', sha256: 'bad' } }
-    expect(await failureOf({ visitCanvasItems: async (visit) => visit([bad], 'board-7') })).toEqual(
-      { source: 'canvas-media', context: 'board-7' }
-    )
+    // A value the walk cannot finish (a cycle) fails the scan under its board.
+    const cyclic: Record<string, unknown> = { type: 'image' }
+    cyclic.self = cyclic
+    expect(
+      await failureOf({ visitCanvasItems: async (visit) => visit([cyclic], 'board-7') })
+    ).toEqual({ source: 'canvas-media', context: 'board-7' })
     expect(
       await failureOf({
         visitCanvasItems: async () => {
@@ -160,18 +251,6 @@ describe('managed media reference scanner', () => {
         }
       })
     ).toEqual({ source: 'canvas-file', context: 'board-8' })
-    const draftStorage = new Map([['magicpot-chat-draft:default:s', JSON.stringify(bad)]])
-    expect(
-      await failureOf({
-        localStorage: {
-          get length() {
-            return draftStorage.size
-          },
-          key: (index) => [...draftStorage.keys()][index] ?? null,
-          getItem: (key) => draftStorage.get(key) ?? null
-        }
-      })
-    ).toEqual({ source: 'draft-media', context: 'default' })
     expect(
       await failureOf({ localStorage: { length: 1, key: () => null, getItem: () => null } })
     ).toEqual({ source: 'local-storage' })

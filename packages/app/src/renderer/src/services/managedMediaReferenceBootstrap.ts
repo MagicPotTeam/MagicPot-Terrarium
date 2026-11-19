@@ -13,7 +13,9 @@ import {
   ManagedMediaScanSourceError,
   scanManagedMediaReferenceIds,
   type ManagedMediaReferenceScannerSources,
+  type ManagedMediaReferenceScanResult,
   type ManagedMediaScanProblem,
+  type ManagedMediaScanSkipped,
   type ManagedMediaScanSource
 } from './managedMediaReferenceScanner'
 
@@ -94,39 +96,60 @@ function describeScanFailure({ source, context }: ManagedMediaScanProblem): stri
     case 'chat-store':
       return 'the chat store could not be read'
     case 'chat-media':
-      return `a chat record of scope${quoted(context)} holds a media value that is not a managed reference`
+      return `a chat record of scope${quoted(context)} could not be scanned`
     case 'canvas-board':
       return `canvas board${quoted(context)} could not be read`
     case 'canvas-file':
       return `a stored file of canvas board${quoted(context)} could not be read or parsed`
     case 'canvas-media':
-      return `canvas board${quoted(context)} holds a media value that is not a managed reference`
+      return `the items of canvas board${quoted(context)} could not be scanned`
     case 'project-index':
       return 'the project index could not be read'
     case 'draft-backup':
       return `a draft backup of scope${quoted(context)} could not be read or parsed`
     case 'draft-media':
-      return `a draft backup of scope${quoted(context)} holds a media value that is not a managed reference`
+      return `a draft backup of scope${quoted(context)} could not be scanned`
     case 'local-storage':
       return 'localStorage could not be read'
   }
 }
 
-/** At most one warning per source per hour: a broken store fails every scan. */
-function warnIncompleteScan(failure: ManagedMediaScanProblem): void {
+function describeSkipped({ source, context, count }: ManagedMediaScanSkipped): string {
+  const where =
+    source === 'canvas-media'
+      ? `canvas board${quoted(context)}`
+      : source === 'draft-media'
+        ? `the draft backups of scope${quoted(context)}`
+        : `the chat records of scope${quoted(context)}`
+  return `${count} media value(s) in ${where} name no managed media and were skipped`
+}
+
+/** At most one warning per source per hour: a broken store fails, or repeats in, every scan. */
+function warnScanProblem(source: ManagedMediaScanSource, text: string): void {
   const now = Date.now()
-  const last = lastScanWarningAt.get(failure.source)
+  const last = lastScanWarningAt.get(source)
   if (last !== undefined && now >= last && now - last < SCAN_WARNING_INTERVAL_MS) return
-  lastScanWarningAt.set(failure.source, now)
-  console.warn(
-    `[ManagedMedia] Reference scan incomplete: ${describeScanFailure(failure)}. ` +
-      'Unused managed media is not cleaned up until a scan completes.'
-  )
+  lastScanWarningAt.set(source, now)
+  console.warn(text)
+}
+
+function warnScanProblems(result: ManagedMediaReferenceScanResult): void {
+  if (!result.ok) {
+    warnScanProblem(
+      result.failure.source,
+      `[ManagedMedia] Reference scan incomplete: ${describeScanFailure(result.failure)}. ` +
+        'Unused managed media is not cleaned up until a scan completes.'
+    )
+    return
+  }
+  for (const skipped of result.skipped ?? []) {
+    warnScanProblem(skipped.source, `[ManagedMedia] Reference scan: ${describeSkipped(skipped)}.`)
+  }
 }
 
 async function publishManagedMediaReferenceSnapshot(isCurrent: () => boolean): Promise<void> {
   const result = await scanManagedMediaReferenceIds(createScannerSources())
-  if (!result.ok) warnIncompleteScan(result.failure)
+  warnScanProblems(result)
   // A deferral that began while this scan ran withdrew the snapshot: do not put one back.
   if (!isCurrent()) return
   await api().svcManagedMedia.updateReferenceSnapshot({
