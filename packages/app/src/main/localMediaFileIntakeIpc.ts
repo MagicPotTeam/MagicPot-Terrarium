@@ -10,6 +10,7 @@ import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 import { toImportSourceLocalPath } from './api/svcManagedMediaImpl'
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
+  importSourceRootKey,
   isManagedMediaMimeTypeSupported,
   runImportSourceOperation
 } from './llmProxy/managedMediaStore'
@@ -73,7 +74,7 @@ export async function grantLocalMediaImportPath(
         if (!isImportablePath(resolved) || !(await stat(resolved)).isFile()) return ''
         return resolved
       },
-      { timeoutMs }
+      { key: importSourceRootKey(filePath), timeoutMs }
     )
     if (!canonical) return ''
     recordLocalMediaImportGrant(canonical, now())

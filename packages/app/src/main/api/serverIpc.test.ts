@@ -114,6 +114,37 @@ describe('serverIpc createServer', () => {
     expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenLastCalledWith('/elsewhere/a.png', ['/app-root'])
   })
 
+  it('puts the source-path authorization under the import-source deadline, keyed by its root', async () => {
+    managedMediaConstructor.mockClear()
+    createServer()
+    const deps = managedMediaConstructor.mock.calls[0]?.[0] as {
+      authorizeImportSourcePath: (sourcePath: string) => Promise<string | null>
+      importSourceGuard: { operationTimeoutMs: number }
+    }
+    const stalled: Array<() => void> = []
+    resolveAuthorizedLocalMediaPathMock.mockImplementation(((filePath: string) =>
+      filePath.startsWith('/mnt/dead/')
+        ? new Promise<null>((resolve) => stalled.push(() => resolve(null)))
+        : filePath) as never)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const outcomes = ['/mnt/dead/a.png', '/mnt/dead/b.png'].map((sourcePath) =>
+        deps.authorizeImportSourcePath(sourcePath).catch((error: unknown) => error)
+      )
+      await vi.advanceTimersByTimeAsync(deps.importSourceGuard.operationTimeoutMs)
+      for (const outcome of outcomes)
+        await expect(outcome).resolves.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+      // The dead mount holds its two calls; a file elsewhere is still authorized.
+      await expect(deps.authorizeImportSourcePath('/app-root/c.png')).resolves.toBe('/app-root/c.png')
+    } finally {
+      vi.useRealTimers()
+      stalled.forEach((release) => release())
+      resolveAuthorizedLocalMediaPathMock.mockImplementation((filePath: string, roots: readonly string[]) =>
+        roots.some((root) => filePath.startsWith(`${root}/`)) ? filePath : null
+      )
+    }
+  })
+
   it('creates the remaining service registry', () => {
     const api = createServer()
 

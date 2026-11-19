@@ -37,6 +37,7 @@ import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaClean
 import { getChatMediaDir } from '../llmProxy/chatMediaDir'
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
+  importSourceRootKey,
   runImportSourceOperation
 } from '../llmProxy/managedMediaStore'
 
@@ -90,7 +91,10 @@ export const createServer = (
       authorizeImportSourcePath: (sourcePath) =>
         runImportSourceOperation(
           () => authorizeLocalMediaImportSourcePathAsync(sourcePath, getLocalMediaAllowedRoots()),
-          { timeoutMs: DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs }
+          {
+            key: importSourceRootKey(sourcePath),
+            timeoutMs: DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs
+          }
         ),
       maxImportFileBytes: MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES,
       importSourceGuard: DEFAULT_IMPORT_SOURCE_GUARD,

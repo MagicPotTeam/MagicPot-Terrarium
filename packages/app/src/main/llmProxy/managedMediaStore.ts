@@ -119,25 +119,38 @@ export function isPathInsideRoot(root: string, candidate: string): boolean {
 }
 /**
  * Deadlines for reading a source the renderer named, which may sit on a stalled network
- * mount. A filesystem call that never returns holds one of libuv's few threadpool threads
- * whatever main does, so these calls also run through a small gate: at most
- * IMPORT_SOURCE_MAX_CONCURRENT_OPERATIONS of them at once (a slot is freed only when its
- * call really returns), and the caller gets a short error at the deadline instead of
- * waiting. Main's other file work keeps the remaining threads.
+ * mount. A filesystem call that never returns holds one of libuv's four threadpool threads
+ * whatever main does, so these calls also run through a gate keyed by the source's root (a
+ * drive or mount, see importSourceRootKey): at most IMPORT_SOURCE_MAX_CALLS_PER_ROOT calls
+ * on one root and IMPORT_SOURCE_MAX_CALLS in all, stalled ones included (a slot is freed only
+ * when its call really returns). A call's deadline starts when it gets its slot, so waiting
+ * behind other calls never counts. A root with a call past its deadline does not respond:
+ * its next calls are refused at once, and other roots keep working.
  */
 export type ImportSourceGuard = {
-  /** Deadline for each filesystem call on the source: lstat, realpath, open, stat, each read. */
+  /**
+   * Deadline for each filesystem call on the source (lstat, realpath, open, stat, each read),
+   * from when the call gets its slot: a copy that delivers no bytes for this long stops.
+   */
   operationTimeoutMs: number
-  /** The whole copy may take this long plus one second per copyMinBytesPerSecond bytes. */
+  /**
+   * Absolute cap of a copy that keeps delivering bytes, from when its open gets a slot: this
+   * plus one second per copyMinBytesPerSecond bytes of the file.
+   */
   copyBaseTimeoutMs: number
   copyMinBytesPerSecond: number
 }
-export const IMPORT_SOURCE_MAX_CONCURRENT_OPERATIONS = 2
+export const IMPORT_SOURCE_MAX_CALLS_PER_ROOT = 2
+export const IMPORT_SOURCE_MAX_CALLS = 3
 export const DEFAULT_IMPORT_SOURCE_GUARD: ImportSourceGuard = {
   operationTimeoutMs: 15_000,
   copyBaseTimeoutMs: 60_000,
-  copyMinBytesPerSecond: 1024 * 1024
+  // Generous: four copies that share a 256 KiB/s link still finish.
+  copyMinBytesPerSecond: 64 * 1024
 }
+
+/** Monotonic: a clock step or a suspend/resume never ends a copy as a timeout. */
+const monotonicNow = (): number => performance.now()
 
 function importSourceTimeoutError(): ManagedMediaImportError {
   return new ManagedMediaImportError(
@@ -146,73 +159,173 @@ function importSourceTimeoutError(): ManagedMediaImportError {
   )
 }
 
-type ImportSourceGate = {
-  acquire(run: () => void): () => void
-  release(): void
-  readonly active: number
+/** Mount parents whose next segments name one mount: /Volumes/<name>, /media/<user>/<name>. */
+const MOUNT_PARENT_DEPTH: Readonly<Record<string, number>> = {
+  Volumes: 2,
+  mnt: 2,
+  media: 3,
+  net: 2,
+  Network: 3,
+  nfs: 2,
+  smb: 2,
+  afp: 2,
+  cifs: 2
 }
 
-export function createImportSourceGate(limit: number): ImportSourceGate {
+/**
+ * The gate key of a source path, from its text alone (a call on the path itself may stall):
+ * the drive on Windows, the share of a UNC path, a mount under a usual mount parent, else the
+ * first directory. Two paths on one mount may get different keys and two mounts one key; the
+ * total limit still bounds the stalled calls either way.
+ */
+export function importSourceRootKey(filePath: string): string {
+  const value = String(filePath || '')
+  const drive = /^([a-zA-Z]):(?:[\\/]|$)/u.exec(value)
+  if (drive) return `${drive[1].toLowerCase()}:`
+  const segments = value.split(/[\\/]+/u).filter(Boolean)
+  if (/^[\\/]{2}/u.test(value)) return `//${segments.slice(0, 2).join('/').toLowerCase()}`
+  let depth = MOUNT_PARENT_DEPTH[segments[0] ?? ''] ?? 1
+  if (segments[0] === 'run' && segments[1] === 'media') depth = 4
+  if (segments[0] === 'run' && segments[1] === 'user' && segments[3] === 'gvfs') depth = 5
+  return `/${segments.slice(0, depth).join('/')}`
+}
+
+export type ImportSourceGate = {
+  /** Calls start() once a slot of `key` is free, or refuse() when the root does not respond. */
+  acquire(key: string, start: () => void, refuse: () => void): void
+  /** The call holding a slot of `key` passed its deadline; it keeps the slot until it returns. */
+  markOverdue(key: string): void
+  release(key: string, overdue: boolean): void
+  /** Calls holding a slot, stalled ones included. */
+  readonly active: number
+  /** Calls past their deadline that have not returned yet. */
+  readonly overdue: number
+}
+
+export function createImportSourceGate({
+  perRoot = IMPORT_SOURCE_MAX_CALLS_PER_ROOT,
+  total = IMPORT_SOURCE_MAX_CALLS,
+  onSaturated = () =>
+    console.warn(
+      '[ManagedMedia] Every import source slot is held by a call past its deadline; imports are refused until one returns'
+    )
+}: { perRoot?: number; total?: number; onSaturated?: () => void } = {}): ImportSourceGate {
+  const inFlight = new Map<string, number>()
+  const overdueByKey = new Map<string, number>()
   let active = 0
-  const waiting = new Set<() => void>()
-  return {
-    acquire(run) {
-      if (active < limit) {
+  let overdue = 0
+  let saturationLogged = false
+  const waiting: Array<{ key: string; start: () => void; refuse: () => void }> = []
+  const count = (map: Map<string, number>, key: string, delta: number): void => {
+    const next = (map.get(key) ?? 0) + delta
+    if (next > 0) map.set(key, next)
+    else map.delete(key)
+  }
+  // A root with a call past its deadline does not respond: a new call there would only take
+  // another thread. When every slot is held by such calls, nothing can run at all.
+  const refusesNow = (key: string): boolean => (overdueByKey.get(key) ?? 0) > 0 || overdue >= total
+  const pump = (): void => {
+    const run: Array<() => void> = []
+    for (let index = 0; index < waiting.length;) {
+      const waiter = waiting[index]
+      if (refusesNow(waiter.key)) {
+        waiting.splice(index, 1)
+        run.push(waiter.refuse)
+      } else if (active < total && (inFlight.get(waiter.key) ?? 0) < perRoot) {
+        waiting.splice(index, 1)
         active += 1
-        run()
-        return () => undefined
-      }
-      waiting.add(run)
-      return () => waiting.delete(run)
-    },
-    release() {
-      const next = waiting.values().next().value
-      if (next) {
-        waiting.delete(next)
-        next()
+        count(inFlight, waiter.key, 1)
+        run.push(waiter.start)
       } else {
-        active = Math.max(0, active - 1)
+        index += 1
       }
+    }
+    if (overdue >= total && !saturationLogged) {
+      saturationLogged = true
+      onSaturated()
+    } else if (overdue < total) {
+      saturationLogged = false
+    }
+    for (const next of run) next()
+  }
+  return {
+    acquire(key, start, refuse) {
+      waiting.push({ key, start, refuse })
+      pump()
+    },
+    markOverdue(key) {
+      overdue += 1
+      count(overdueByKey, key, 1)
+      pump()
+    },
+    release(key, wasOverdue) {
+      active = Math.max(0, active - 1)
+      count(inFlight, key, -1)
+      if (wasOverdue) {
+        overdue = Math.max(0, overdue - 1)
+        count(overdueByKey, key, -1)
+      }
+      pump()
     },
     get active() {
       return active
+    },
+    get overdue() {
+      return overdue
     }
   }
 }
 
-const defaultImportSourceGate = createImportSourceGate(IMPORT_SOURCE_MAX_CONCURRENT_OPERATIONS)
+const defaultImportSourceGate = createImportSourceGate()
 
 /**
  * Runs one filesystem call on an import source under the gate, rejecting with
- * MANAGED_MEDIA_IMPORT_TIMEOUT once timeoutMs has passed (waiting for a slot included).
- * The slot stays taken until the call really settles; a result that arrives after the
- * deadline goes to onLateResult (to close a late file handle).
+ * MANAGED_MEDIA_IMPORT_TIMEOUT once timeoutMs has passed since the call got its slot (the
+ * root is then taken as not responding), once the monotonic time notAfter() has come (a
+ * copy's cap), or at once when the source's root does not respond. The slot stays taken
+ * until the call really settles; a result that arrives after the deadline goes to
+ * onLateResult (to close a late file handle).
  */
 export function runImportSourceOperation<T>(
   operation: () => Promise<T>,
   {
+    key = '',
     timeoutMs,
+    notAfter,
     gate = defaultImportSourceGate,
     onLateResult
-  }: { timeoutMs: number; gate?: ImportSourceGate; onLateResult?: (value: T) => void }
+  }: {
+    key?: string
+    timeoutMs: number
+    notAfter?: () => number
+    gate?: ImportSourceGate
+    onLateResult?: (value: T) => void
+  }
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    let settled = false
-    let cancelWait = (): void => undefined
-    const timer = setTimeout(
-      () => {
-        if (settled) return
-        settled = true
-        cancelWait()
+    const start = (): void => {
+      const capLeft = notAfter ? notAfter() - monotonicNow() : Number.POSITIVE_INFINITY
+      const stallLimit = Math.max(0, timeoutMs)
+      if (capLeft <= 0) {
+        gate.release(key, false)
         reject(importSourceTimeoutError())
-      },
-      Math.max(0, timeoutMs)
-    )
-    cancelWait = gate.acquire(() => {
-      if (settled) {
-        gate.release()
         return
       }
+      let settled = false
+      let overdue = false
+      const timer = setTimeout(
+        () => {
+          if (settled) return
+          settled = true
+          // Only a call that ran out its own deadline marks its root as not responding.
+          if (stallLimit <= capLeft) {
+            overdue = true
+            gate.markOverdue(key)
+          }
+          reject(importSourceTimeoutError())
+        },
+        Math.min(stallLimit, capLeft)
+      )
       let pending: Promise<T>
       try {
         pending = Promise.resolve(operation())
@@ -238,8 +351,10 @@ export function runImportSourceOperation<T>(
             }
           }
         )
-        .finally(() => gate.release())
-    })
+        .catch(() => undefined)
+        .finally(() => gate.release(key, overdue))
+    }
+    gate.acquire(key, start, () => reject(importSourceTimeoutError()))
   })
 }
 
@@ -1163,25 +1278,26 @@ export async function importManagedMediaFile(
   const canonicalRoot = await prepareStoreRoot(input.chatMediaRoot, authorizedRoot, fileSystem)
   throwIfAborted(input.signal)
   const guard = input.sourceGuard
+  const resolvedSource = path.resolve(input.sourcePath)
+  const sourceKey = importSourceRootKey(resolvedSource)
+  // Monotonic time; set when the open gets its slot (see ImportSourceGuard).
   let copyDeadline = Number.POSITIVE_INFINITY
   let timedOut = false
-  // Every call on the source (which may be a stalled or hostile mount) has a deadline.
+  // Every call on the source (which may be a stalled or hostile mount) has a deadline, from
+  // when it gets its slot: no more than operationTimeoutMs, nor past the copy's cap.
   const onSource = <T>(operation: () => Promise<T>, onLateResult?: (value: T) => void) => {
     if (!guard) return operation()
-    const timeoutMs = Math.min(guard.operationTimeoutMs, copyDeadline - Date.now())
-    if (timeoutMs <= 0) {
-      timedOut = true
-      return Promise.reject(importSourceTimeoutError())
-    }
-    return runImportSourceOperation(operation, { timeoutMs, onLateResult }).catch(
-      (error: unknown) => {
-        if ((error as ManagedMediaImportError)?.code === 'MANAGED_MEDIA_IMPORT_TIMEOUT')
-          timedOut = true
-        throw error
-      }
-    )
+    return runImportSourceOperation(operation, {
+      key: sourceKey,
+      timeoutMs: guard.operationTimeoutMs,
+      notAfter: () => copyDeadline,
+      onLateResult
+    }).catch((error: unknown) => {
+      if ((error as ManagedMediaImportError)?.code === 'MANAGED_MEDIA_IMPORT_TIMEOUT')
+        timedOut = true
+      throw error
+    })
   }
-  const resolvedSource = path.resolve(input.sourcePath)
   const sourceLstat = await onSource(() => fileSystem.lstat(resolvedSource))
   if (sourceLstat.isSymbolicLink() || !sourceLstat.isFile())
     throw new Error('Managed media source must be a regular non-symlink file')
@@ -1197,13 +1313,16 @@ export async function importManagedMediaFile(
       'MANAGED_MEDIA_TOO_LARGE',
       `Managed media exceeds the ${maxBytes} byte limit`
     )
-  if (guard)
-    copyDeadline =
-      Date.now() +
-      guard.copyBaseTimeoutMs +
-      Math.ceil((sourceLstat.size / guard.copyMinBytesPerSecond) * 1000)
   const sourceHandle = await onSource(
-    () => fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK),
+    () => {
+      // The copy's cap starts now that its open has a slot, not when the import was asked.
+      if (guard)
+        copyDeadline =
+          monotonicNow() +
+          guard.copyBaseTimeoutMs +
+          Math.ceil((sourceLstat.size / guard.copyMinBytesPerSecond) * 1000)
+      return fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK)
+    },
     (lateHandle) => void lateHandle.close().catch(() => undefined)
   )
   let staged: { stagedPath: string; size: number; sha256: string } | undefined
