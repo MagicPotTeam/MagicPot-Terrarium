@@ -16,6 +16,7 @@ import {
 import { authorizeMagicAgentApprovalRenderer } from '../magicAgentRuntime/trustedRouteBinding'
 import { withCanvasFileTools } from './canvasFileTools'
 import { authorizeAgentThreadScope } from './agentThreadScope'
+import { watchSenderDocument } from '@shared/api/createServer/senderDocumentWatch'
 
 export type AgentThreadInteractionChannel = {
   request(prompt: AgentThreadInteractionPrompt, timeoutSeconds: number, signal?: AbortSignal): Promise<AgentThreadInteractionResult>
@@ -40,51 +41,25 @@ const scopeKey = (scope: AgentThreadInteractionScope) =>
   JSON.stringify([getAgentSessionKey(normalizeAgentRoute(scope.route)), scope.conversationId])
 
 type DocumentSender = Pick<Electron.WebContents, 'on' | 'removeListener'>
-type DocumentWatch = { ends: Set<() => void>; detach(): void }
 /**
- * One set of document listeners per WebContents for ALL its leases. Retained leases (background
- * processes and sub-agent jobs, HTML apps, scope bindings, running requests) used to add three
- * listeners each, so the main window's listener count grew with every retained entry; it is now
- * three, however many leases are alive. Every lease is still ended on the same events as before:
- * a main-frame navigation start, a renderer exit and the WebContents' destruction.
+ * Calls `end` when the sender's document ends; returns the function that stops watching. All
+ * leases of a WebContents (retained background processes and sub-agent jobs, HTML apps, scope
+ * bindings, running requests) share ONE set of document listeners with its IPC streams and path
+ * reads (senderDocumentWatch.ts): three, however many are alive. Every lease is still ended on
+ * the same events as before: a main-frame navigation start (observed before the first
+ * model-issued tool, including same-URL reloads and navigation away/back while the model is
+ * still thinking), a renderer exit and the WebContents' destruction.
  */
-const documentWatches = new WeakMap<DocumentSender, DocumentWatch>()
-
-/** Calls `end` when the sender's document ends; returns the function that stops watching. */
 function watchDocument(sender: DocumentSender, end: () => void): () => void {
-  let watch = documentWatches.get(sender)
-  if (!watch) {
-    const ends = new Set<() => void>()
-    // A copy: each end stops its own watch while the others are still being called.
-    const endAll = () => { for (const each of [...ends]) each() }
-    const onNavigation = (details: { isMainFrame?: boolean } | undefined, _url?: string, _inPlace?: boolean, legacyIsMainFrame?: boolean) => {
+  // The order in which ends run (among leases, and relative to stream aborts) is irrelevant: every dispose only aborts signals.
+  return watchSenderDocument(sender, {
+    navigation: (details, _url, _inPlace, legacyIsMainFrame) => {
       if ((details?.isMainFrame ?? legacyIsMainFrame) === false) return
-      endAll()
-    }
-    const created: DocumentWatch = {
-      ends,
-      detach: () => {
-        sender.removeListener('did-start-navigation', onNavigation)
-        sender.removeListener('render-process-gone', endAll)
-        sender.removeListener('destroyed', endAll)
-        if (documentWatches.get(sender) === created) documentWatches.delete(sender)
-      }
-    }
-    // Observe document replacement before the first model-issued tool, including
-    // same-URL reloads and navigation away/back while the model is still thinking.
-    sender.on('did-start-navigation', onNavigation)
-    sender.on('render-process-gone', endAll)
-    sender.on('destroyed', endAll)
-    documentWatches.set(sender, created)
-    watch = created
-  }
-  const own = watch
-  own.ends.add(end)
-  return () => {
-    if (!own.ends.delete(end)) return
-    // The last lease of this document is gone: no listener stays behind.
-    if (own.ends.size === 0) own.detach()
-  }
+      end()
+    },
+    gone: end,
+    destroyed: end
+  })
 }
 
 /** Memory-only rendezvous. Answers are data; this service never creates approval grants. */

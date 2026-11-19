@@ -19,6 +19,7 @@ import {
 import { IpcServiceError, type UnaryIpcResult } from '../apiUtils/unaryIpcResult'
 import { omittedAgentToolFailure, readAgentToolFailurePayload } from '../agentThreadToolFailure'
 import { ApiDefSheet, type UnaryServiceDef } from '../apiUtils/serviceDefSheet'
+import { watchSenderDocument } from './senderDocumentWatch'
 
 function portToStreamingResp<T>(
   port: MessagePortMain,
@@ -217,20 +218,22 @@ function registerServerStreaming<REQ, RESP>(
       if (!abortReceiver.isAborted()) abortSender.abort()
     }
     const abortOnNavigation = (
-      details: { isMainFrame?: boolean; isSameDocument?: boolean },
+      details: { isMainFrame?: boolean; isSameDocument?: boolean } | undefined,
       _url?: string,
       isInPlace?: boolean,
       isMainFrame?: boolean
     ): void => {
-      const mainFrame = details.isMainFrame ?? isMainFrame
-      const sameDocument = details.isSameDocument ?? isInPlace
+      const mainFrame = details?.isMainFrame ?? isMainFrame
+      const sameDocument = details?.isSameDocument ?? isInPlace
       if (mainFrame === true && sameDocument === false) abortStream()
     }
-    const sender = event.sender
-    // A renderer reload can orphan its port before MessagePortMain reports close.
-    sender?.on?.('did-start-navigation', abortOnNavigation)
-    sender?.on?.('render-process-gone', abortStream)
-    sender?.on?.('destroyed', abortStream)
+    // A renderer reload can orphan its port before MessagePortMain reports close. All streams of
+    // one sender share one set of listeners (senderDocumentWatch.ts): a stream adds none of its own.
+    const unwatchSender = watchSenderDocument(
+      event.sender,
+      { navigation: abortOnNavigation, gone: abortStream, destroyed: abortStream },
+      { optional: true }
+    )
     port.on('message', abortStream)
     port.on('close', abortStream)
     // MessagePortMain 需要 start 才能正常接收消息
@@ -248,9 +251,7 @@ function registerServerStreaming<REQ, RESP>(
         closeResponse()
         port.removeListener?.('message', abortStream)
         port.removeListener?.('close', abortStream)
-        sender?.removeListener?.('did-start-navigation', abortOnNavigation)
-        sender?.removeListener?.('render-process-gone', abortStream)
-        sender?.removeListener?.('destroyed', abortStream)
+        unwatchSender()
       }
     })
   })

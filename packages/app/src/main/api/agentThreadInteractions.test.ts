@@ -3,6 +3,7 @@ import type { LLMChatReq } from '@shared/api/svcLLMProxy'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentThreadInteractions, type AgentThreadInteractionChannel } from './agentThreadInteractions'
 import { registerMagicAgentTrustedRouteBinding, clearMagicAgentTrustedRouteBindingsForTest } from '../magicAgentRuntime/trustedRouteBinding'
+import { watchSenderDocument } from '@shared/api/createServer/senderDocumentWatch'
 
 const electron = vi.hoisted(() => ({ fromId: vi.fn(), parent: vi.fn() }))
 vi.mock('./agentThreadArchive', () => ({ agentThreadArchive: { search: async () => undefined } }))
@@ -944,6 +945,59 @@ describe('document listeners of Agent thread interaction leases', () => {
     sender.emit('did-start-navigation', { isMainFrame: true })
     expect(first.signal.aborted).toBe(true)
     expect(ended).toHaveBeenCalledTimes(1)
+  })
+
+  // IPC streams and pending path reads watch the same sender through the same dispatcher.
+  it.each(['leases first', 'streams first', 'interleaved'] as const)('shares its listeners with 120 running streams, whatever is disposed first (%s)', async (order) => {
+    const warnings: Error[] = []
+    const onWarning = (warning: Error) => warnings.push(warning)
+    process.on('warning', onWarning)
+    const retained = leases(120)
+    const aborted: number[] = []
+    // What registerIpcServer does for each open stream: abort on a main-frame document navigation.
+    const streams = Array.from({ length: 120 }, (_, index) => watchSenderDocument(sender, {
+      navigation: (details) => { if (details?.isMainFrame === true && details.isSameDocument === false) aborted.push(index) },
+      gone: () => aborted.push(index),
+      destroyed: () => aborted.push(index)
+    }))
+    // Node reports a listener warning on the next tick (timers are faked in this file).
+    try { await new Promise<void>((resolve) => process.nextTick(resolve)) } finally { process.off('warning', onWarning) }
+    expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toEqual([])
+    expect(counts()).toEqual([1, 1, 1])
+    // A sub-frame navigation ends neither.
+    const [kept, ...others] = retained
+    sender.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
+    expect(kept.signal.aborted).toBe(false)
+    expect(aborted).toEqual([])
+    const disposeLeases = () => { for (const lease of [channel, ...others]) lease.dispose() }
+    const stopStreams = () => { for (const stop of streams.slice(1).reverse()) stop() }
+    if (order === 'leases first') { disposeLeases(); stopStreams() }
+    else if (order === 'streams first') { stopStreams(); disposeLeases() }
+    else {
+      for (let index = others.length - 1; index >= 0; index -= 1) { others[index].dispose(); streams[index + 1]() }
+      channel.dispose()
+    }
+    expect(counts()).toEqual([1, 1, 1])
+    // One lease and one stream are left, and each keeps its own rule: a same-document main-frame
+    // navigation ends the lease, not the stream; the renderer's exit then ends the stream.
+    sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true })
+    expect(kept.signal.aborted).toBe(true)
+    expect(aborted).toEqual([])
+    expect(counts()).toEqual([1, 1, 1])
+    sender.emit('render-process-gone')
+    expect(aborted).toEqual([0])
+    streams[0]()
+    expect(counts()).toEqual([0, 0, 0])
+  })
+
+  it('takes no lease on a sender that cannot be listened to, as its own `on` call used to fail', () => {
+    const bare = { id: 71, isDestroyed: () => false, getURL: () => url, on: vi.fn() }
+    electron.fromId.mockReturnValue(bare)
+    electron.parent.mockReturnValue({ isDestroyed: () => false, webContents: bare })
+    registerMagicAgentTrustedRouteBinding(71, route, { trustedUrl: url, trustedWebContents: bare })
+    expect(manager.create({ ...scope, messages: [] }, invocation())).toBeUndefined()
+    expect(() => manager.createScoped({ route, conversationId: 'unwatched' }, invocation())).toThrow(TypeError)
+    expect(bare.on).not.toHaveBeenCalled()
   })
 
   it('a lease taken while the document ends is not ended by that same event', () => {

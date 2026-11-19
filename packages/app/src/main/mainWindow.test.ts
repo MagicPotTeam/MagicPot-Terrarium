@@ -6,9 +6,9 @@ import {
   createMainWindow,
   MAIN_WINDOW_BACKGROUND_COLOR,
   MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS,
-  MAIN_WINDOW_RUNNING_REQUEST_LISTENERS,
   MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS
 } from './mainWindow'
+import { watchSenderDocument } from '@shared/api/createServer/senderDocumentWatch'
 import { getAuthoritativeMainWindow, winController } from './winControls'
 import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
 import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
@@ -137,16 +137,13 @@ describe('createMainWindow teardown', () => {
     expect(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).toBeGreaterThan(10)
     expect(window.webContents.getMaxListeners()).toBe(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
     expect(limitsAtInstall).toEqual([MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS])
-    // Updated: the limit no longer counts one listener per retained Agent background process. All
-    // interaction leases of a WebContents share one dispatcher (agentThreadInteractions.test.ts pins
-    // that 200 leases hold one listener of each event), so what grows is only the running requests.
-    // What the running app can hold by design does not warn: at most 13 listeners of one event
-    // measured in the real app (within the fixed allowance) plus one per running request.
+    // Updated: the limit no longer has an allowance for running requests (it was a guessed 48).
+    // IPC streams, pending path reads and interaction leases of a WebContents share one dispatcher
+    // (senderDocumentWatch.test.ts and the test below pin one listener of each event for any number
+    // of them), so nothing grows with use and the limit is the fixed listeners alone.
     expect(MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS).toBeGreaterThanOrEqual(13)
-    expect(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).toBe(
-      MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS + MAIN_WINDOW_RUNNING_REQUEST_LISTENERS
-    )
-    const byDesign = MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS + MAIN_WINDOW_RUNNING_REQUEST_LISTENERS
+    expect(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).toBe(MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS)
+    const byDesign = MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS
     const warnings: Error[] = []
     const onWarning = (warning: Error) => warnings.push(warning)
     process.on('warning', onWarning)
@@ -169,6 +166,38 @@ describe('createMainWindow teardown', () => {
       process.off('warning', onWarning)
     }
     expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toHaveLength(1)
+  })
+
+  it('holds 150 running requests at once on one listener of each event, without a warning', async () => {
+    const window = createMainWindow() as unknown as FakeWindow
+    const events = ['did-start-navigation', 'render-process-gone', 'destroyed']
+    const before = events.map((event) => window.webContents.listenerCount(event))
+    const ended = vi.fn()
+    const warnings: Error[] = []
+    const onWarning = (warning: Error) => warnings.push(warning)
+    process.on('warning', onWarning)
+    let stops: Array<() => void> = []
+    try {
+      // What each open IPC stream, pending path read and interaction lease does.
+      stops = Array.from({ length: 150 }, () =>
+        watchSenderDocument(window.webContents, {
+          navigation: ended,
+          gone: ended,
+          destroyed: ended
+        })
+      )
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.off('warning', onWarning)
+    }
+    expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toEqual([])
+    expect(events.map((event) => window.webContents.listenerCount(event))).toEqual(
+      before.map((count) => count + 1)
+    )
+    window.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 5 })
+    expect(ended).toHaveBeenCalledTimes(150)
+    for (const stop of stops.reverse()) stop()
+    expect(events.map((event) => window.webContents.listenerCount(event))).toEqual(before)
   })
 
   it('paints the dark theme background, never white, while no page is shown', async () => {

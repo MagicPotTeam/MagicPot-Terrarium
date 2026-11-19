@@ -17,9 +17,10 @@ type SenderMock = {
   url: string
   isDestroyed(): boolean
   getURL(): string
-  on(event: string, cb: () => void): void
-  removeListener(event: string, cb: () => void): void
-  emit(event: string): void
+  on(event: string, cb: (...args: unknown[]) => void): void
+  removeListener(event: string, cb: (...args: unknown[]) => void): void
+  emit(event: string, ...args: unknown[]): void
+  listenerCount(event: string): number
 }
 const h = vi.hoisted(() => ({
   sender: null as SenderMock | null,
@@ -48,6 +49,7 @@ vi.mock('electron', () => ({
 }))
 
 import { createCanvasPathReadHandler } from './canvasPathReadApproval'
+import { watchSenderDocument } from '@shared/api/createServer/senderDocumentWatch'
 import { LocalFileReadGrants } from '../agentLocalFiles/readGrants'
 import {
   registerMagicAgentTrustedRouteBinding,
@@ -77,7 +79,7 @@ const invocation = (patch: Partial<ServiceInvocationContext> = {}): ServiceInvoc
   ...patch
 })
 function makeSender(): SenderMock {
-  const listeners = new Map<string, Set<() => void>>()
+  const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   const sender: SenderMock = {
     id: 11,
     destroyed: false,
@@ -91,9 +93,10 @@ function makeSender(): SenderMock {
     removeListener(event, cb) {
       listeners.get(event)?.delete(cb)
     },
-    emit(event) {
-      for (const cb of [...(listeners.get(event) ?? [])]) cb()
-    }
+    emit(event, ...args) {
+      for (const cb of [...(listeners.get(event) ?? [])]) cb(...args)
+    },
+    listenerCount: (event) => listeners.get(event)?.size ?? 0
   }
   return sender
 }
@@ -387,6 +390,89 @@ describe('cancellation, lifecycle and bounded concurrent work', () => {
       await expectCode(handler()(file), 'SCOPE_CHANGED')
     }
   )
+  // The read no longer adds listeners of its own: it shares the sender's one set with the IPC
+  // streams and interaction leases (senderDocumentWatch.ts). Every refusal must be the same.
+  const DOCUMENT_EVENTS = ['did-start-navigation', 'render-process-gone', 'destroyed']
+  const documentListeners = () => DOCUMENT_EVENTS.map((event) => h.sender!.listenerCount(event))
+  /** Runs `during` once, after the file was read and before the result is delivered. */
+  const duringRead = (during: () => void) => {
+    const realRead = LocalFileReadGrants.prototype.read
+    let done = false
+    vi.spyOn(LocalFileReadGrants.prototype, 'read').mockImplementation(async function (
+      this: LocalFileReadGrants,
+      ...args
+    ) {
+      const result = await realRead.apply(this, args)
+      if (!done) {
+        done = true
+        during()
+      }
+      return result
+    })
+  }
+  it.each(DOCUMENT_EVENTS)(
+    'refuses with SCOPE_CHANGED on %s while a stream watches the same sender, on one listener of each event',
+    async (event) => {
+      const file = await fixture('shared-watch.txt')
+      const stream = vi.fn()
+      const stopStream = watchSenderDocument(h.sender, {
+        navigation: stream,
+        gone: stream,
+        destroyed: stream
+      })
+      expect(documentListeners()).toEqual([1, 1, 1])
+      duringRead(() => {
+        // The pending read holds no listener of its own.
+        expect(documentListeners()).toEqual([1, 1, 1])
+        h.sender!.emit(event)
+      })
+      await expectCode(handler()(file), 'SCOPE_CHANGED')
+      expect(stream).toHaveBeenCalledOnce()
+      // The refused read stopped watching: the stream's listeners stay, and go with the stream.
+      expect(documentListeners()).toEqual([1, 1, 1])
+      stopStream()
+      expect(documentListeners()).toEqual([0, 0, 0])
+    }
+  )
+  it.each([
+    ['a sub-frame navigation', [{ isMainFrame: false, isSameDocument: false }]],
+    ['a same-document navigation', [{ isMainFrame: true, isSameDocument: true }]],
+    ['a legacy sub-frame navigation', [{}, 'https://frame.invalid', false, false]]
+  ])(
+    'still refuses with SCOPE_CHANGED on %s (any navigation start ends a read)',
+    async (_label, args) => {
+      const file = await fixture('any-navigation.txt')
+      duringRead(() => h.sender!.emit('did-start-navigation', ...args))
+      await expectCode(handler()(file), 'SCOPE_CHANGED')
+      expect(documentListeners()).toEqual([0, 0, 0])
+    }
+  )
+  it('refuses a read on a sender it cannot watch before reading, and holds nothing (no BUSY afterwards)', async () => {
+    const file = await fixture('unwatchable.txt')
+    const read = handler()
+    const removeListener = h.sender!.removeListener
+    const on = vi.spyOn(h.sender!, 'on')
+    const readFile = vi.spyOn(LocalFileReadGrants.prototype, 'read')
+    Object.assign(h.sender!, { removeListener: undefined })
+    // Its own `sender.on` used to fail the same way: an unwatched read never starts.
+    await expect(read(file)).rejects.toThrow(TypeError)
+    expect(on).not.toHaveBeenCalled()
+    expect(readFile).not.toHaveBeenCalled()
+    Object.assign(h.sender!, { removeListener })
+    await expect(read(file)).resolves.toHaveProperty('content')
+    expect(documentListeners()).toEqual([0, 0, 0])
+  })
+  it('refuses the pending read only: a read after the refusal works, and leaves no listener behind', async () => {
+    const file = await fixture('after-refusal.txt')
+    const read = handler()
+    duringRead(() => h.sender!.emit('render-process-gone'))
+    await expectCode(read(file), 'SCOPE_CHANGED')
+    expect(documentListeners()).toEqual([0, 0, 0])
+    // A document event between two reads refuses nothing.
+    h.sender!.emit('did-start-navigation')
+    await expect(read(file)).resolves.toHaveProperty('content')
+    expect(documentListeners()).toEqual([0, 0, 0])
+  })
   it('checks live navigation before starting an operation', async () => {
     const read = handler()
     h.sender!.url = TRUSTED_URL.replace('project-a', 'project-b')

@@ -10,6 +10,7 @@ import { LocalFileReadGrants } from '../agentLocalFiles/readGrants'
 import { createDocumentUtilityExtractor } from '../agentLocalFiles/documents/documentUtilityProcess'
 import { authorizeMagicAgentApprovalRenderer } from '../magicAgentRuntime/trustedRouteBinding'
 import { withCanvasFileTools } from './canvasFileTools'
+import { watchSenderDocument } from '@shared/api/createServer/senderDocumentWatch'
 import {
   validateFilesReadGlob,
   matchesFilesReadGlob,
@@ -176,11 +177,16 @@ export function createScopedCanvasPathReadHandler(thread: AgentThreadInteraction
         frameUrl: sender.getURL()
       })
     }
+    // Any navigation start (also a sub-frame or same-document one), a renderer exit and the
+    // destruction end the read, as before; the listeners are the sender's shared ones. A sender
+    // that cannot be watched refuses the read here, before it holds anything.
+    const unwatchSender = watchSenderDocument(sender, {
+      navigation: changed,
+      gone: changed,
+      destroyed: changed
+    })
     pendingSenders.add(senderId)
     signal?.addEventListener('abort', abort, { once: true })
-    sender.on('did-start-navigation', changed)
-    sender.on('render-process-gone', changed)
-    sender.on('destroyed', changed)
     const timer = setTimeout(() => {
       controller.abort(new AgentLocalFileError('TIMEOUT'))
       grants?.revokeSender(senderId)
@@ -316,9 +322,7 @@ export function createScopedCanvasPathReadHandler(thread: AgentThreadInteraction
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener('abort', abort)
-      sender.removeListener('did-start-navigation', changed)
-      sender.removeListener('render-process-gone', changed)
-      sender.removeListener('destroyed', changed)
+      unwatchSender()
       grants?.revokeSender(senderId)
       documents?.dispose()
       pendingSenders.delete(senderId)

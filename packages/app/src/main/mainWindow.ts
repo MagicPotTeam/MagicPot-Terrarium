@@ -48,26 +48,21 @@ export const MAIN_WINDOW_BACKGROUND_COLOR = '#1a1a1a'
  * Listeners of one event ('render-process-gone', 'destroyed', 'did-start-navigation') that the main
  * window's WebContents holds whatever the app does, rounded up: Electron's own forwarder, renderer
  * diagnostics, the two read admissions, the team-queue owner, the scope bindings (skill, goal,
- * first-run), the send-stage breadcrumbs, the unsaved-changes guard and ONE dispatcher for every
- * Agent thread interaction lease (api/agentThreadInteractions.ts: retained background processes,
- * sub-agent jobs, HTML apps, scope bindings and running requests all share it, so retained entries
- * no longer add listeners). Measured in the real app: at most 13 of one event, unchanged across
- * threads and reloads.
+ * first-run), the send-stage breadcrumbs, the unsaved-changes guard and ONE dispatcher
+ * (shared/api/createServer/senderDocumentWatch.ts) for everything that comes and goes with use:
+ * every open IPC stream, every pending canvas path read and every Agent thread interaction lease
+ * (retained background processes, sub-agent jobs, HTML apps, scope bindings, running requests).
+ * Measured in the real app: at most 8 of one event ('destroyed'), unchanged across threads, sends,
+ * reloads and 120 IPC streams open at once.
  */
 export const MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS = 16
 /**
- * Room for running requests: each open IPC stream (shared/api/createServer/registerIpcServer.ts)
- * and each pending canvas path read (api/canvasPathReadApproval.ts) holds one listener of each event
- * until it ends.
+ * Listener limit of the main window's WebContents. The count is constant by construction: nothing
+ * adds a listener per request, per stream or per retained entry any more, so there is no allowance
+ * for running requests to guess, and a leak (listeners added per reload or per request and never
+ * removed) warns as soon as it passes the fixed listeners.
  */
-export const MAIN_WINDOW_RUNNING_REQUEST_LISTENERS = 48
-/**
- * Listener limit of the main window's WebContents: the fixed listeners plus the running requests.
- * Nothing else grows with use, so a leak (listeners added per reload or per request and never
- * removed) still warns once it passes this.
- */
-export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS =
-  MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS + MAIN_WINDOW_RUNNING_REQUEST_LISTENERS
+export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS = MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS
 
 function sanitizeDragFileName(fileName: string): string {
   const trimmed = (fileName || '').trim()
@@ -193,7 +188,7 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     }
   })
 
-  // The fixed listeners plus one per running request (see MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).
+  // The fixed listeners; running requests add none (see MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).
   mainWindow.webContents.setMaxListeners(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
 
   const trustedRendererUrl = resolveMainWindowRendererUrl()

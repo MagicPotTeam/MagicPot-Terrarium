@@ -402,6 +402,84 @@ describe('registerIpcServer', () => {
     }
   )
 
+  // The window's listener limit had a guessed allowance of 48 for running requests; each stream
+  // added three listeners to its sender, so more streams than that printed a false leak warning.
+  it('runs 120 streams of one renderer on one listener of each event, without a listener warning', async () => {
+    const sender = new EventEmitter() // default limit: 10 listeners of one event
+    const events = ['did-start-navigation', 'render-process-gone', 'destroyed']
+    const warnings: Error[] = []
+    const onWarning = (warning: Error) => warnings.push(warning)
+    process.on('warning', onWarning)
+    let fixtures: Array<ReturnType<typeof createPendingStreamFixture>> = []
+    try {
+      fixtures = Array.from({ length: 120 }, () => createPendingStreamFixture(sender))
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.off('warning', onWarning)
+    }
+    expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toEqual([])
+    expect(events.map((event) => sender.listenerCount(event))).toEqual([1, 1, 1])
+
+    // Streams end in any order: every third first (from the back), then the rest from the front.
+    const early = fixtures.filter((_, index) => index % 3 === 0).reverse()
+    for (const fixture of early) fixture.finish()
+    await Promise.all(early.map((fixture) => fixture.running))
+    expect(events.map((event) => sender.listenerCount(event))).toEqual([1, 1, 1])
+    // A sub-frame navigation ends none; a renderer exit ends exactly the streams still open.
+    sender.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
+    expect(fixtures.some((fixture) => fixture.response().abortReceiver?.isAborted())).toBe(false)
+    sender.emit('render-process-gone', {})
+    for (const [index, fixture] of fixtures.entries()) {
+      expect(fixture.response().abortReceiver?.isAborted()).toBe(index % 3 !== 0)
+      expect(fixture.onAbort).toHaveBeenCalledTimes(index % 3 === 0 ? 0 : 1)
+    }
+    const rest = fixtures.filter((_, index) => index % 3 !== 0)
+    for (const fixture of rest) fixture.finish()
+    await Promise.all(rest.map((fixture) => fixture.running))
+    expect(sender.eventNames()).toEqual([])
+  })
+
+  // The shared listeners must end streams exactly as each stream's own listeners did: a document
+  // that is replaced or gone must not keep any stream of the old document open.
+  it.each([
+    {
+      label: 'main-frame document navigation',
+      event: 'did-start-navigation',
+      args: [{ isMainFrame: true, isSameDocument: false }]
+    },
+    {
+      label: 'legacy main-frame document navigation',
+      event: 'did-start-navigation',
+      args: [{}, 'app://renderer/index.html', false, true]
+    },
+    { label: 'renderer process exit', event: 'render-process-gone', args: [{}] },
+    { label: 'renderer destruction', event: 'destroyed', args: [] }
+  ])(
+    'aborts each of 101 open streams exactly once on $label, and the last one to end takes the listeners',
+    async ({ event, args }) => {
+      const sender = new EventEmitter()
+      const fixtures = Array.from({ length: 101 }, () => createPendingStreamFixture(sender))
+      sender.emit(event, ...args)
+      sender.emit(event, ...args)
+      for (const fixture of fixtures) {
+        expect(fixture.response().abortReceiver?.isAborted()).toBe(true)
+        expect(fixture.onAbort).toHaveBeenCalledOnce()
+      }
+      // The handlers end in any order after the abort; the listeners stay until the last one has ended.
+      const [last, ...others] = fixtures
+      for (const fixture of others.reverse()) fixture.fail(new Error('aborted'))
+      await Promise.all(others.map((fixture) => fixture.running))
+      expect(
+        ['did-start-navigation', 'render-process-gone', 'destroyed'].map((name) =>
+          sender.listenerCount(name)
+        )
+      ).toEqual([1, 1, 1])
+      last.finish()
+      await last.running
+      expect(sender.eventNames()).toEqual([])
+    }
+  )
+
   it('does not cancel a stream owned by another renderer', async () => {
     const first = createPendingStreamFixture()
     const second = createPendingStreamFixture()
