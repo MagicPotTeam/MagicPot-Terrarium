@@ -3,6 +3,7 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  PROJECT_CANVAS_IMAGE_STREAM_LAYOUT_BAND_SIZE,
   PROJECT_CANVAS_IMAGE_STREAM_PATCH_FRAME_LIMIT,
   getCanvasImageStreamPixelConcurrency,
   useCanvasAssetIntake,
@@ -15,6 +16,7 @@ import {
 import { isCanvasImagePlaceholderAsset } from './canvasImageAssetUtils'
 import { buildCanvasImageSourceIdentity, createCanvasThumbnailSet } from './canvasThumbnailCache'
 import { createCanvasHistorySnapshot, restoreCanvasHistorySnapshot } from './canvasHistory'
+import { getViewportBatchGridLayout } from './canvasViewportPlacementUtils'
 import type { CanvasImageAsset, CanvasImageItem, CanvasItem } from './types'
 
 type ThumbnailResolverArgs = { src: string; onFirstImage?: (image: CanvasImageAsset) => void }
@@ -128,20 +130,24 @@ function renderIntake(
   options: {
     viewport?: () => { x: number; y: number; width: number; height: number }
     onProgress?: (progress: CanvasImageBatchImportProgress | null) => void
+    fitImageToCanvasSize?: (width: number, height: number) => { width: number; height: number }
+    getBatchGridLayout?: Parameters<typeof useCanvasAssetIntake>[0]['getBatchGridLayout']
   } = {}
 ) {
   const nextZIndexRef = { current: 1 }
   return renderHook(() =>
     useCanvasAssetIntake({
       canvasId: 'canvas-1',
-      fitImageToCanvasSize: () => ({ width: 160, height: 120 }),
-      getBatchGridLayout: (sizes) =>
-        sizes.map((size, index) => ({
-          x: (index % COLUMNS) * CELL,
-          y: Math.floor(index / COLUMNS) * CELL,
-          width: size.width,
-          height: size.height
-        })),
+      fitImageToCanvasSize: options.fitImageToCanvasSize ?? (() => ({ width: 160, height: 120 })),
+      getBatchGridLayout:
+        options.getBatchGridLayout ??
+        ((sizes) =>
+          sizes.map((size, index) => ({
+            x: (index % COLUMNS) * CELL,
+            y: Math.floor(index / COLUMNS) * CELL,
+            width: size.width,
+            height: size.height
+          }))),
       getCenterPosition: () => ({ x: 0, y: 0 }),
       getViewportBounds: () => options.viewport?.() ?? { x: 0, y: 0, width: 1, height: 1 },
       nextZIndexRef,
@@ -519,6 +525,49 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
     expect(store.images().every((item) => Boolean(item.thumbnailSet))).toBe(true)
     // The import itself is still one history entry (the undone move left none).
     expect(store.history).toHaveLength(1)
+  })
+
+  it('keeps the frame size of a 48-image band and extends a larger import below the viewport', async () => {
+    const viewport = { x: 0, y: 0, width: 1600, height: 900 }
+    const fitted = { width: 1024, height: 768 }
+    const store = createCanvasStore()
+    const { result } = renderIntake(store, {
+      viewport: () => viewport,
+      fitImageToCanvasSize: () => fitted,
+      getBatchGridLayout: (sizes, layoutOptions) =>
+        getViewportBatchGridLayout(viewport, sizes, layoutOptions)
+    })
+    const band = getViewportBatchGridLayout(
+      viewport,
+      Array.from({ length: PROJECT_CANVAS_IMAGE_STREAM_LAYOUT_BAND_SIZE }, () => fitted),
+      { gap: 12, allowUpscale: false }
+    )[0]
+
+    await act(async () => {
+      await result.current.addImagesToCanvas(createSources(100))
+    })
+
+    const frames = store.images()
+    expect(frames).toHaveLength(100)
+    // Every frame as large as in a 48-image band (one grid for 100 fitted to the viewport made
+    // them about 120 x 90).
+    for (const frame of frames) {
+      expect(frame.width).toBeCloseTo(band.width, 0)
+      expect(frame.height).toBeCloseTo(band.height, 0)
+    }
+    // The import goes on below the viewport instead of shrinking into it, without overlaps.
+    expect(Math.max(...frames.map((frame) => frame.y + frame.height))).toBeGreaterThan(
+      viewport.height
+    )
+    for (let index = 0; index < frames.length; index += 1) {
+      for (let other = index + 1; other < frames.length; other += 1) {
+        const a = frames[index]
+        const b = frames[other]
+        const overlaps =
+          a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+        expect(overlaps).toBe(false)
+      }
+    }
   })
 
   it('leaves no pending tile on a copy of a frame made before its pixels arrived', async () => {

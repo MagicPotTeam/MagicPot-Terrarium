@@ -774,6 +774,56 @@ export function getCanvasImageStreamPixelConcurrency(): number {
   )
 }
 
+/** Images laid out together in one band of a streamed import. */
+export const PROJECT_CANVAS_IMAGE_STREAM_LAYOUT_BAND_SIZE = 48
+
+type CanvasImageStreamLayoutEntry = { x: number; y: number; width: number; height: number }
+
+/**
+ * The layout of a streamed import, all of it before the first commit: bands of 48 images in
+ * source order, each laid out like a batch of its own and stacked downwards with the batch gap
+ * between them. A frame keeps the size a 48-image batch gives it (one viewport-fitted grid for
+ * the whole import made every frame smaller the more images there were); a larger import
+ * extends in rows below the viewport. An import of up to 48 images is one band of its own size.
+ */
+export function layoutCanvasImageStreamBands(
+  sizes: Array<{ width: number; height: number }>,
+  layoutBatch: (
+    sizes: Array<{ width: number; height: number }>
+  ) => ReadonlyArray<CanvasImageStreamLayoutEntry>,
+  gap: number
+): Array<CanvasImageStreamLayoutEntry | undefined> {
+  const layout: Array<CanvasImageStreamLayoutEntry | undefined> = []
+  let nextBandTop: number | null = null
+  for (let start = 0; start < sizes.length; start += PROJECT_CANVAS_IMAGE_STREAM_LAYOUT_BAND_SIZE) {
+    const band = sizes.slice(start, start + PROJECT_CANVAS_IMAGE_STREAM_LAYOUT_BAND_SIZE)
+    // The last, partial band of a larger import is laid out as a full one (padded with its own
+    // sizes), so that its frames are not larger than the others.
+    const padded =
+      start > 0 && band.length < PROJECT_CANVAS_IMAGE_STREAM_LAYOUT_BAND_SIZE
+        ? Array.from(
+            { length: PROJECT_CANVAS_IMAGE_STREAM_LAYOUT_BAND_SIZE },
+            (_, index) => band[index % band.length]
+          )
+        : band
+    const bandLayout = layoutBatch(padded).slice(0, band.length)
+    const placed = bandLayout.filter(Boolean)
+    if (placed.length === 0) {
+      band.forEach(() => layout.push(undefined))
+      continue
+    }
+    const minY = Math.min(...placed.map((entry) => entry.y))
+    const maxY = Math.max(...placed.map((entry) => entry.y + entry.height))
+    const offsetY = nextBandTop == null ? 0 : nextBandTop - minY
+    nextBandTop = maxY + offsetY + gap
+    band.forEach((_, index) => {
+      const entry = bandLayout[index]
+      layout.push(entry ? { ...entry, y: entry.y + offsetY } : undefined)
+    })
+  }
+  return layout
+}
+
 function waitForCanvasImageStreamFrame(): Promise<void> {
   return new Promise((resolve) => {
     let settled = false
@@ -2139,9 +2189,10 @@ export function useCanvasAssetIntake({
           }
 
           // 2. One layout for the whole import. It is final: pixels arrive later, positions do not move.
-          const batchLayout = getBatchGridLayout(
+          const batchLayout = layoutCanvasImageStreamBands(
             planned.map((entry) => ({ width: entry.width, height: entry.height })),
-            { gap: batchGap, allowUpscale: false }
+            (sizes) => getBatchGridLayout(sizes, { gap: batchGap, allowUpscale: false }),
+            batchGap
           )
           // This import's own tile: an item that carries it but is not one of the frames waiting
           // below never gets pixels from this import (see applyPixelPatches).
