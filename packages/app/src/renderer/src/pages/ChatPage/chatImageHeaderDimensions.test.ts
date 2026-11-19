@@ -176,4 +176,54 @@ describe('chat image header dimensions', () => {
       vi.useRealTimers()
     }
   })
+
+  it('reads a lossy (VP8) WebP with unequal sides, and declines a broken start code', () => {
+    // RIFF/WEBP, 'VP8 ' chunk: size, 3-byte frame tag, start code 9d 01 2a, 14-bit width/height.
+    const vp8 = (width: number, height: number, startCode = [0x9d, 0x01, 0x2a]) =>
+      riff([
+        ...Array.from('VP8 ', (c) => c.charCodeAt(0)),
+        ...[20, 0, 0, 0],
+        ...[0, 0, 0],
+        ...startCode,
+        width & 0xff,
+        (width >> 8) & 0x3f,
+        height & 0xff,
+        (height >> 8) & 0x3f
+      ])
+    expect(parseChatImageHeaderDimensions(vp8(1920, 1080))).toEqual({
+      sourceWidth: 1920,
+      sourceHeight: 1080
+    })
+    // The two top bits of each field are the scale, not the size.
+    const scaled = vp8(300, 200)
+    scaled[27] |= 0xc0
+    scaled[29] |= 0x40
+    expect(parseChatImageHeaderDimensions(scaled)).toEqual({ sourceWidth: 300, sourceHeight: 200 })
+    expect(parseChatImageHeaderDimensions(vp8(1920, 1080, [0x9d, 0x01, 0x2b]))).toBeNull()
+    // A lossless (VP8L) header without its signature byte is declined too.
+    const vp8l = riff([
+      ...Array.from('VP8L', (c) => c.charCodeAt(0)),
+      10,
+      0,
+      0,
+      0,
+      0x2e,
+      0,
+      0,
+      0,
+      0
+    ])
+    expect(parseChatImageHeaderDimensions(vp8l)).toBeNull()
+  })
+
+  it('does not take a Huffman table (DHT) before the frame for a start of frame', () => {
+    // A DHT (c4) whose payload would read as 0x0102 x 0x0304 if it were taken for a frame.
+    const withDht = jpeg(640, 360, [[0xff, 0xc4, 0, 9, 0x10, 1, 2, 3, 4, 5, 6]])
+    expect(parseChatImageHeaderDimensions(withDht)).toEqual({ sourceWidth: 640, sourceHeight: 360 })
+  })
+
+  it('answers null when the header read fails, so the caller decodes', async () => {
+    const failing = { slice: () => ({ arrayBuffer: () => Promise.reject(new Error('EIO')) }) }
+    await expect(readChatImageHeaderDimensions(failing as unknown as Blob)).resolves.toBeNull()
+  })
 })

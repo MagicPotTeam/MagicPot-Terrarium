@@ -10676,9 +10676,21 @@ describe('ChatPage runtime workflow integration', () => {
         }
       }
     )
+    const revokeObjectURL = vi.fn()
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL')
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+    onTestFinished(() => {
+      if (originalRevoke) Object.defineProperty(URL, 'revokeObjectURL', originalRevoke)
+      else delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL
+    })
+    hoisted.fileToBlobUrlMock.mockReturnValue('blob:picked-preview')
     renderChatPage()
     await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
-    const picked = createLocalFile('picked.png', 'image/png', '/home/artist/Pictures/picked.png')
+    // Larger than the header window, so a read of the whole file would show in readSizes.
+    const picked = new File([new Uint8Array(CHAT_IMAGE_HEADER_READ_BYTES * 2)], 'picked.png', {
+      type: 'image/png'
+    })
+    localFilePaths.set(picked, '/home/artist/Pictures/picked.png')
     const arrayBuffer = vi.fn()
     Object.defineProperty(picked, 'arrayBuffer', { value: arrayBuffer })
     hoisted.selectFileMock.mockResolvedValueOnce(picked)
@@ -10702,7 +10714,59 @@ describe('ChatPage runtime workflow integration', () => {
     // Only the dimensions probe may touch the file: its header (a bounded slice; jsdom has
     // no Blob#arrayBuffer, so it goes through FileReader here) or a blob: preview URL.
     expect(dataUrlRead).not.toHaveBeenCalled()
-    for (const size of readSizes) expect(size).toBeLessThanOrEqual(CHAT_IMAGE_HEADER_READ_BYTES)
+    expect(readSizes.length).toBeGreaterThan(0)
+    for (const size of readSizes) {
+      expect(size).toBeLessThanOrEqual(CHAT_IMAGE_HEADER_READ_BYTES)
+      expect(size).toBeLessThan(picked.size)
+    }
+    // The header tells nothing here, so the size came from a decode of a preview URL that
+    // is released afterwards.
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:picked-preview')
+  })
+
+  it('reports a refused video pick as a file, not an image, through the composer notice', async () => {
+    const user = userEvent.setup()
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    // The notice comes from the app's i18next instance (react-i18next is mocked here).
+    const { default: i18next } = await import('i18next')
+    const { default: en } = await import('@shared/locales/en-US/renderer.json')
+    if (!i18next.isInitialized) {
+      await i18next.init({ lng: 'en-US', resources: { 'en-US': { translation: en } } })
+    }
+    const refusal = new Error('Unsupported managed media type')
+    hoisted.importManagedFileMock.mockRejectedValueOnce(refusal)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    hoisted.selectFileMock.mockResolvedValueOnce(
+      createLocalFile('clip.mp4', 'video/mp4', '/home/artist/Videos/clip.mp4')
+    )
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    const asFile = describeChatAttachmentImportFailure(refusal, 'clip.mp4', 'file')
+    expect(asFile).not.toBe(describeChatAttachmentImportFailure(refusal, 'clip.mp4', 'image'))
+    await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(asFile))
+    expect(alert).not.toHaveBeenCalled()
+  })
+
+  it('reports a chooser that fails to open through the composer notice, never a native alert', async () => {
+    const user = userEvent.setup()
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    hoisted.selectFileMock.mockRejectedValueOnce(new Error('dialog failed /home/artist'))
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalledOnce())
+    const [message] = hoisted.notifyErrorMock.mock.calls[0]
+    expect(String(message)).toMatch(
+      /attachment_add_failed|添加附件失败|Could not add the attachment/
+    )
+    expect(String(message)).not.toContain('/home/artist')
+    expect(alert).not.toHaveBeenCalled()
   })
 
   it('reads a picked image\'s size from its header and never decodes it', async () => {

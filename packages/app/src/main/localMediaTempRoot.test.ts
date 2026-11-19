@@ -96,6 +96,25 @@ describe('the private local-media temp root', () => {
     ).toBe(false)
   })
 
+  posixOnly('refuses a private (0600) regular file at the expected name', () => {
+    const file = path.join(sharedTemp(), 'magicpot-local-media')
+    fs.writeFileSync(file, 'not a directory', { mode: 0o600 })
+    expect(fs.lstatSync(file).mode & 0o077).toBe(0)
+    expect(ensurePrivateLocalMediaTempRoot(file)).toBe(false)
+  })
+
+  posixOnly(
+    'refuses its own directory when tightening the mode changes nothing (vfat, CIFS)',
+    () => {
+      const root = path.join(sharedTemp(), 'magicpot-local-media')
+      fs.mkdirSync(root)
+      fs.chmodSync(root, 0o755)
+      const chmodSync = vi.fn()
+      expect(ensurePrivateLocalMediaTempRoot(root, { chmodSync })).toBe(false)
+      expect(chmodSync).toHaveBeenCalledOnce()
+    }
+  )
+
   it('refuses a file at the expected name and an unreadable location', () => {
     const temp = sharedTemp()
     const file = path.join(temp, 'magicpot-local-media')

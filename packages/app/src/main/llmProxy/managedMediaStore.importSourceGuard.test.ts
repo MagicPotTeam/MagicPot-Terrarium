@@ -78,8 +78,12 @@ describe('import source deadlines (a stalled or slow source never blocks main)',
   const slowSource = (
     patch: Partial<{
       lstat: () => Promise<unknown>
+      realpath: () => Promise<unknown>
       open: (handle: Handle) => Promise<Handle>
       read: (real: Handle['read'], args: Parameters<Handle['read']>) => Promise<unknown>
+      /** Each fstat of the open source: the first (before the copy) is call 0. */
+      stat: (real: Handle['stat'], call: number) => Promise<unknown>
+      close: (real: Handle['close']) => Promise<void>
     }>
   ) => {
     const closed = vi.fn()
@@ -89,19 +93,29 @@ describe('import source deadlines (a stalled or slow source never blocks main)',
         String(args[0]) === source && patch.lstat
           ? patch.lstat()
           : fs.lstat(...args)) as typeof fs.lstat,
+      realpath: (async (...args: Parameters<typeof fs.realpath>) =>
+        String(args[0]) === source && patch.realpath
+          ? patch.realpath()
+          : fs.realpath(...args)) as typeof fs.realpath,
       open: (async (...args: Parameters<typeof fs.open>) => {
         const handle = await fs.open(...args)
         if (String(args[0]) !== source) return handle
+        let statCalls = 0
         const proxied = new Proxy(handle, {
           get(target, property) {
             if (property === 'read' && patch.read) {
               return (...readArgs: Parameters<Handle['read']>) =>
                 patch.read!(target.read.bind(target) as Handle['read'], readArgs)
             }
+            if (property === 'stat' && patch.stat) {
+              return () => patch.stat!(target.stat.bind(target) as Handle['stat'], statCalls++)
+            }
             if (property === 'close') {
               return async () => {
                 closed()
-                return target.close()
+                return patch.close
+                  ? patch.close(target.close.bind(target) as Handle['close'])
+                  : target.close()
               }
             }
             const value = Reflect.get(target, property) as unknown
@@ -139,6 +153,42 @@ describe('import source deadlines (a stalled or slow source never blocks main)',
     expect(Date.now() - startedAt).toBeLessThan(2_000)
     // The stalled handle is closed in the background, not awaited.
     expect(closed).toHaveBeenCalled()
+    await stagingIsEmpty()
+  })
+
+  it('rejects at the deadline even when closing the handle waits for the stalled read', async () => {
+    // FileHandle.close() waits for the handle's pending calls: awaiting it would hang.
+    let stalledRead: Promise<unknown> | undefined
+    const { fs: stalled, closed } = slowSource({
+      read: () => (stalledRead = never()),
+      close: async (real) => {
+        await stalledRead?.catch(() => undefined)
+        await real()
+      }
+    })
+    const startedAt = Date.now()
+    await expect(importWith(stalled, guard())).rejects.toMatchObject({
+      code: 'MANAGED_MEDIA_IMPORT_TIMEOUT'
+    })
+    expect(Date.now() - startedAt).toBeLessThan(2_000)
+    expect(closed).toHaveBeenCalled()
+    await stagingIsEmpty()
+  })
+
+  it.each([
+    ['the realpath', { realpath: () => never() }],
+    ['the fstat before the copy', { stat: () => never() }],
+    [
+      'the fstat after the copy',
+      { stat: (real: Handle['stat'], call: number) => (call === 0 ? real() : never()) }
+    ]
+  ] as const)('aborts when %s never returns', async (_name, patch) => {
+    const { fs: stalled } = slowSource(patch as Parameters<typeof slowSource>[0])
+    const startedAt = Date.now()
+    await expect(importWith(stalled, guard())).rejects.toMatchObject({
+      code: 'MANAGED_MEDIA_IMPORT_TIMEOUT'
+    })
+    expect(Date.now() - startedAt).toBeLessThan(2_000)
     await stagingIsEmpty()
   })
 
@@ -623,22 +673,22 @@ describe('a slow but working source is never cut, a stalled one is', () => {
   }, 30_000)
 
   it('starts the copy cap at the open: slow calls before it are not charged to the copy', async () => {
-    const file = virtualPng('late-open.png', 1 * MiB, 7, async () => undefined)
+    const file = virtualPng('late-open.png', 64 * 1024, 7, async () => undefined)
     const fileSystem = withVirtualFiles([file])
     const realpath = fileSystem.realpath
     // The realpath answers within its own deadline but takes longer than the whole copy cap.
     fileSystem.realpath = (async (...args: Parameters<typeof fs.realpath>) => {
       if (String(args[0]) === file.filePath)
-        await new Promise((resolve) => setTimeout(resolve, 150))
+        await new Promise((resolve) => setTimeout(resolve, 900))
       return realpath(...args)
     }) as typeof fs.realpath
     await expect(
       importVirtual(file, fileSystem, {
-        operationTimeoutMs: 1_000,
-        copyBaseTimeoutMs: 100,
+        operationTimeoutMs: 2_000,
+        copyBaseTimeoutMs: 600,
         copyMinBytesPerSecond: 1024 * MiB
       })
-    ).resolves.toMatchObject({ reference: { sizeBytes: 1 * MiB } })
+    ).resolves.toMatchObject({ reference: { sizeBytes: 64 * 1024 } })
   })
 
   it('measures the copy on a monotonic clock: a wall-clock jump does not end it', async () => {

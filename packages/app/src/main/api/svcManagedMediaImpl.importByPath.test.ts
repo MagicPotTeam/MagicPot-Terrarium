@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   LOCAL_MEDIA_IMPORT_GRANT_TTL_MS,
   authorizeLocalMediaImportSourcePathAsync,
+  authorizeScopedLocalMediaDirectory,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
   consumeLocalMediaImportGrant,
@@ -226,6 +227,45 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
     await expect(service.importFile(request(picked))).resolves.toMatchObject({
       reference: { kind: 'managed', sizeBytes: PNG.length }
     })
+  })
+
+  it('imports again and again with a persisted grant, of a file or of a folder (canvas boards)', async () => {
+    const boardVideo = path.join(outside, 'board-image.png')
+    const folder = path.join(outside, 'board-folder')
+    await fs.mkdir(folder)
+    const inFolder = path.join(folder, 'frame.png')
+    await fs.writeFile(boardVideo, PNG)
+    await fs.writeFile(inFolder, PNG)
+    const { service, importFile } = create()
+    await expectNoPathInError(
+      service.importFile(request(inFolder)),
+      'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+    )
+    expect(authorizeScopedLocalMediaPath(boardVideo)).toBe(true)
+    expect(authorizeScopedLocalMediaDirectory(folder)).toBe(true)
+    // A persisted grant is not one-use: canvas imports of the same file keep working.
+    for (const sourcePath of [boardVideo, boardVideo, inFolder, inFolder]) {
+      await expect(service.importFile(request(sourcePath))).resolves.toMatchObject({
+        reference: { kind: 'managed' }
+      })
+    }
+    expect(importFile).toHaveBeenCalledTimes(4)
+  })
+
+  it('forwards the source deadlines to the store', async () => {
+    const inside = path.join(allowed, 'guarded.png')
+    await fs.writeFile(inside, PNG)
+    const importSourceGuard = {
+      operationTimeoutMs: 1_234,
+      copyBaseTimeoutMs: 5_678,
+      copyMinBytesPerSecond: 910
+    }
+    const { service, importFile } = create({ importSourceGuard })
+    await service.importFile(request(inside))
+    expect(importFile).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceGuard: importSourceGuard }),
+      expect.anything()
+    )
   })
 
   it('imports a picked file once with its one-use import grant and refuses a second use', async () => {

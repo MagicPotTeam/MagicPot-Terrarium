@@ -116,6 +116,32 @@ describe('local media file intake IPC', () => {
     ])
   })
 
+  it.skipIf(process.platform === 'win32')(
+    'grants an existing file to the current main renderer only, once per request',
+    async () => {
+      // node:fs is the in-memory filesystem of the node test setup.
+      const { default: memoryFs } = await import('node:fs')
+      memoryFs.mkdirSync('/picked', { recursive: true })
+      memoryFs.writeFileSync('/picked/real.png', 'png')
+      let mainWindow: any = null
+      registerLocalMediaFileIntakeIpc(() => mainWindow)
+      const importHandler = handlerFor('local-media:authorize-import-path')
+      const trustedSender = { isDestroyed: () => false }
+      mainWindow = { isDestroyed: () => false, webContents: trustedSender }
+
+      // Another webContents (a child window, a webview) gets nothing for an existing file.
+      await expect(
+        importHandler({ sender: { isDestroyed: () => false } }, '/picked/real.png', 'image/png')
+      ).resolves.toBeNull()
+      expect(recordImportGrantMock).not.toHaveBeenCalled()
+      // The main renderer gets the grant for the same file.
+      await expect(
+        importHandler({ sender: trustedSender }, '/picked/real.png', 'image/png')
+      ).resolves.toEqual({ path: '/picked/real.png', sizeBytes: 3 })
+      expect(recordImportGrantMock).toHaveBeenCalledExactlyOnceWith('/picked/real.png', 0)
+    }
+  )
+
   it('records an import grant only for the current main renderer and never a persisted grant', async () => {
     let mainWindow: any = null
     registerLocalMediaFileIntakeIpc(() => mainWindow)
