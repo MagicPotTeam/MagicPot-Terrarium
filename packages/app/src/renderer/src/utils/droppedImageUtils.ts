@@ -970,40 +970,65 @@ export const getDroppedLocalImageContent = (dataTransfer: DragDataReader) => {
   })
 }
 
-/** Read only the explicitly dropped file bytes; do not infer another original or path grant. */
-export const getDroppedLocalImageFiles = async (
+/** One image of a URL-only drop, granted for one import by its path. */
+export type DroppedLocalImage = {
+  /** The dropped file URL (for messages; never stored). */
+  url: string
+  fileName: string
+  /** Canonical path main granted for one import. */
+  sourcePath: string
+  /** Size main measured when it granted the import. */
+  sizeBytes: number
+  mimeType: string
+}
+
+/**
+ * Ask main for a one-use import grant for each explicitly dropped file URL (the preload's
+ * private drop lease decides which URLs qualify): no persisted grant, and no bytes enter the
+ * renderer. The composer then imports each one by its path. A URL that is not granted or is
+ * larger than the composer's image limit is reported in failedUrls.
+ */
+export const getDroppedLocalImages = async (
   content: ReturnType<typeof getDroppedLocalImageContent>,
   options: { isCurrent?: () => boolean } = {}
-): Promise<{ files: File[]; failedUrls: string[] }> => {
+): Promise<{ images: DroppedLocalImage[]; failedUrls: string[] }> => {
   const isCurrent = options.isCurrent ?? (() => true)
-  const files: File[] = []
-  const failedUrls: string[] = []
-  if (!isCurrent()) return { files, failedUrls }
-  // Consume short-lived drop leases together; large reads then proceed sequentially.
-  const paths = await Promise.all(
-    content.fileUrls.map((url) => resolveAuthorizedDroppedLocalPath(url, isCurrent))
-  )
-  if (!isCurrent()) return { files, failedUrls }
+  if (!isCurrent()) return { images: [], failedUrls: [] }
   const maxBytes = getChatAttachmentMaxSizeMB('image') * 1024 * 1024
-  for (let index = 0; index < content.fileUrls.length; index++) {
-    if (!isCurrent()) return { files: [], failedUrls: [] }
-    const url = content.fileUrls[index]
-    try {
-      const authorizedPath = paths[index]
-      if (!authorizedPath) throw new Error('Local image path is not authorized')
-      const file = await readDroppedLocalImage(
-        authorizedPath,
-        inferFileNameFromUrl(url, 'dropped-image.png'),
-        maxBytes
-      )
-      if (!isCurrent()) return { files: [], failedUrls: [] }
-      files.push(file)
-    } catch {
-      if (!isCurrent()) return { files: [], failedUrls: [] }
+  // Every short drop lease is used at once, before any import starts.
+  const granted = await Promise.all(
+    content.fileUrls.map(async (url) => {
+      const fileName = inferFileNameFromUrl(url, 'dropped-image.png')
+      const mimeType = inferMimeTypeFromFileName(fileName)
+      try {
+        const grant = await window.electronFile?.authorizeDroppedLocalImageForImport?.(
+          url,
+          mimeType
+        )
+        return grant?.path ? { url, fileName, mimeType, grant } : null
+      } catch {
+        return null
+      }
+    })
+  )
+  if (!isCurrent()) return { images: [], failedUrls: [] }
+  const images: DroppedLocalImage[] = []
+  const failedUrls: string[] = []
+  content.fileUrls.forEach((url, index) => {
+    const entry = granted[index]
+    if (!entry || !(entry.grant.sizeBytes > 0) || entry.grant.sizeBytes > maxBytes) {
       failedUrls.push(url)
+      return
     }
-  }
-  return { files, failedUrls }
+    images.push({
+      url,
+      fileName: entry.fileName,
+      sourcePath: entry.grant.path,
+      sizeBytes: entry.grant.sizeBytes,
+      mimeType: entry.mimeType
+    })
+  })
+  return { images, failedUrls }
 }
 
 export const getDroppedAttachmentFile = async (

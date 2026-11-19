@@ -236,6 +236,47 @@ export const importChatAttachment = async ({
   }
 }
 
+/**
+ * Import an image main granted for one import by its path (a URL-only drop): main copies it,
+ * no bytes enter the renderer. `maxBytes` is checked again on the size main copied, since the
+ * file may have grown after the grant.
+ */
+export const importChatImageFromGrantedPath = async ({
+  service,
+  sourcePath,
+  mimeType,
+  fileName,
+  maxBytes,
+  storage = CHAT_ATTACHMENT_STORAGE
+}: {
+  service?: Pick<ManagedMediaSvc, 'importFile'>
+  sourcePath: string
+  mimeType: string
+  fileName: string
+  maxBytes: number
+  storage?: ManagedMediaStorage
+}): Promise<ChatAttachment> => {
+  if (!service) throw new Error('Managed media service is unavailable')
+  const imported = await service.importFile({
+    sourcePath,
+    mimeType,
+    originalFileName: toManagedOriginalFileName(fileName, 'image'),
+    storage
+  })
+  const sizeBytes = imported.reference.sizeBytes
+  if (!(typeof sizeBytes === 'number' && sizeBytes > 0 && sizeBytes <= maxBytes)) {
+    throw new Error('Dropped image exceeds the attachment size limit')
+  }
+  return {
+    type: 'image',
+    url: imported.localMediaUrl,
+    mimeType,
+    fileName,
+    media: imported.reference,
+    sizeBytes
+  }
+}
+
 export const importChatAttachmentUrl = async ({
   service,
   url,

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   read: vi.fn(),
   authorize: vi.fn(),
+  importGrant: vi.fn(),
   resolve: vi.fn(),
   nativeFile: vi.fn()
 }))
@@ -17,7 +18,7 @@ import {
   getDroppedImageFile,
   getDroppedImageUrl,
   getDroppedLocalImageContent,
-  getDroppedLocalImageFiles,
+  getDroppedLocalImages,
   INTERNAL_IMAGE_DRAG_PREFIX
 } from './droppedImageUtils'
 
@@ -27,13 +28,6 @@ const second =
   'file:///C:/Users/Owner/AppData/Roaming/Lark%20Shell/sdk_storage/cache/resources/images/second.png'
 const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9])
 const originalElectronFile = window.electronFile
-const readFileBytes = (file: File): Promise<ArrayBuffer> =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result as ArrayBuffer)
-    reader.onerror = () => reject(reader.error)
-    reader.readAsArrayBuffer(file)
-  })
 const transfer = (data: Record<string, string>, files: File[] = []): DataTransfer =>
   ({ getData: (key: string) => data[key] || '', files }) as unknown as DataTransfer
 const deferred = <T>() => {
@@ -50,6 +44,13 @@ beforeEach(() => {
   mocks.authorize.mockImplementation(async (url: string) =>
     url === first ? 'C:/cache/first.jpg' : url === second ? 'C:/cache/second.png' : ''
   )
+  mocks.importGrant.mockImplementation(async (url: string) =>
+    url === first
+      ? { path: 'C:\\cache\\first.jpg', sizeBytes: 1000 }
+      : url === second
+        ? { path: 'C:\\cache\\second.png', sizeBytes: 2000 }
+        : null
+  )
   mocks.read.mockImplementation(async ({ fullPath }: { fullPath: string }) => ({
     image: bytes,
     filename: fullPath.split('/').at(-1)!
@@ -58,6 +59,7 @@ beforeEach(() => {
     configurable: true,
     value: {
       authorizeDroppedLocalImage: mocks.authorize,
+      authorizeDroppedLocalImageForImport: mocks.importGrant,
       authorizeLocalMediaFile: mocks.nativeFile,
       resolveAuthorizedLocalMediaPath: mocks.resolve
     }
@@ -111,136 +113,97 @@ describe('external local image drop intake', () => {
     expect(content).toEqual({ fileUrls: [], text: '' })
   })
 
-  it('reads distinct originals only after exact drop authorization, with a main-side byte ceiling', async () => {
+  it('asks for one-use import grants of distinct originals and reads no bytes', async () => {
     const content = getDroppedLocalImageContent(
       transfer({
         'text/uri-list': `# from Feishu\r\n${first}\r\n${second}\r\n${first}`
       })
     )
-    const result = await getDroppedLocalImageFiles(content)
-    expect(mocks.authorize.mock.calls).toEqual([[first], [second]])
-    expect(mocks.read.mock.calls).toEqual([
-      [{ fullPath: 'C:/cache/first.jpg', maxBytes: 5 * 1024 * 1024 }],
-      [{ fullPath: 'C:/cache/second.png', maxBytes: 5 * 1024 * 1024 }]
+    const result = await getDroppedLocalImages(content)
+    expect(mocks.importGrant.mock.calls).toEqual([
+      [first, 'image/jpeg'],
+      [second, 'image/png']
     ])
-    expect(result.failedUrls).toEqual([])
-    expect(result.files.map((file) => [file.name, file.type, file.size])).toEqual([
-      ['first.jpg', 'image/jpeg', bytes.length],
-      ['second.png', 'image/png', bytes.length]
-    ])
-    expect(new Uint8Array(await readFileBytes(result.files[0]))).toEqual(bytes)
-    expect(result.files.every((file) => !Object.hasOwn(file, 'path'))).toBe(true)
+    expect(result).toEqual({
+      images: [
+        {
+          url: first,
+          fileName: 'first.jpg',
+          sourcePath: 'C:\\cache\\first.jpg',
+          sizeBytes: 1000,
+          mimeType: 'image/jpeg'
+        },
+        {
+          url: second,
+          fileName: 'second.png',
+          sourcePath: 'C:\\cache\\second.png',
+          sizeBytes: 2000,
+          mimeType: 'image/png'
+        }
+      ],
+      failedUrls: []
+    })
+    // No persisted grant, no lookup of an older grant, no bytes through the renderer.
+    expect(mocks.authorize).not.toHaveBeenCalled()
+    expect(mocks.resolve).not.toHaveBeenCalled()
+    expect(mocks.read).not.toHaveBeenCalled()
   })
 
-  it('consumes all short drop leases before the first potentially slow image read', async () => {
-    const pending = deferred<{ image: Uint8Array; filename: string }>()
-    mocks.read.mockReturnValueOnce(pending.promise)
-    const running = getDroppedLocalImageFiles({ fileUrls: [first, second], text: '' })
-    await vi.waitFor(() => expect(mocks.read).toHaveBeenCalledOnce())
-    expect(mocks.authorize).toHaveBeenCalledTimes(2)
-    pending.resolve({ image: bytes, filename: 'first.jpg' })
-    expect((await running).files).toHaveLength(2)
+  it('uses every short drop lease at once', async () => {
+    const pending = deferred<{ path: string; sizeBytes: number }>()
+    mocks.importGrant.mockReturnValueOnce(pending.promise)
+    const running = getDroppedLocalImages({ fileUrls: [first, second], text: '' })
+    await vi.waitFor(() => expect(mocks.importGrant).toHaveBeenCalledTimes(2))
+    pending.resolve({ path: 'C:\\cache\\first.jpg', sizeBytes: 1000 })
+    expect((await running).images).toHaveLength(2)
   })
 
-  it('keeps readable images when another exact source has expired', async () => {
-    mocks.read.mockRejectedValueOnce(new Error('ENOENT'))
-    const result = await getDroppedLocalImageFiles({ fileUrls: [first, second], text: 'caption' })
+  it('keeps granted images when another source is not granted', async () => {
+    mocks.importGrant.mockResolvedValueOnce(null)
+    const result = await getDroppedLocalImages({ fileUrls: [first, second], text: 'caption' })
     expect(result.failedUrls).toEqual([first])
-    expect(result.files.map((file) => file.name)).toEqual(['second.png'])
+    expect(result.images.map((image) => image.fileName)).toEqual(['second.png'])
   })
 
-  it('does not read or fetch an ungranted renderer path', async () => {
-    mocks.authorize.mockResolvedValue('')
-    const result = await getDroppedLocalImageFiles({ fileUrls: [first], text: '' })
-    expect(result).toEqual({ files: [], failedUrls: [first] })
-    expect(mocks.read).not.toHaveBeenCalled()
-  })
-
-  it('does not reacquire a rejected drop lease through its late path-grant side effect', async () => {
-    mocks.authorize.mockImplementation(async () => {
-      mocks.resolve.mockResolvedValue('C:/cache/first.jpg')
-      return ''
+  it('reports a source that is empty or above the image limit before any import', async () => {
+    mocks.importGrant.mockResolvedValueOnce({ path: 'C:\\cache\\first.jpg', sizeBytes: 0 })
+    mocks.importGrant.mockResolvedValueOnce({
+      path: 'C:\\cache\\second.png',
+      sizeBytes: 5 * 1024 * 1024 + 1
     })
-    expect(await getDroppedLocalImageFiles({ fileUrls: [first], text: '' })).toEqual({
-      files: [],
-      failedUrls: [first]
-    })
-    expect(mocks.resolve).toHaveBeenCalledOnce()
-    expect(mocks.read).not.toHaveBeenCalled()
-  })
-
-  it('retains compatibility with an already scoped local image without expanding the grant', async () => {
-    mocks.authorize.mockResolvedValue('')
-    mocks.resolve.mockResolvedValue('C:/cache/first.jpg')
-    expect((await getDroppedLocalImageFiles({ fileUrls: [first], text: '' })).files).toHaveLength(1)
-    expect(mocks.resolve).toHaveBeenCalledWith(
-      'C:/Users/Owner/AppData/Roaming/Lark Shell/sdk_storage/cache/resources/images/first.jpg'
-    )
-  })
-
-  it('rejects empty and oversized reads defensively even if a mock service ignores its ceiling', async () => {
-    mocks.read.mockResolvedValueOnce({ image: new Uint8Array(0), filename: 'first.jpg' })
-    mocks.read.mockResolvedValueOnce({
-      image: new Uint8Array(5 * 1024 * 1024 + 1),
-      filename: 'second.png'
-    })
-    expect(await getDroppedLocalImageFiles({ fileUrls: [first, second], text: '' })).toEqual({
-      files: [],
+    expect(await getDroppedLocalImages({ fileUrls: [first, second], text: '' })).toEqual({
+      images: [],
       failedUrls: [first, second]
+    })
+  })
+
+  it('treats a bridge failure as an ungranted source', async () => {
+    mocks.importGrant.mockRejectedValueOnce(new Error('bridge gone'))
+    expect(await getDroppedLocalImages({ fileUrls: [first], text: '' })).toEqual({
+      images: [],
+      failedUrls: [first]
     })
   })
 
   it('does no work for an already stale destination', async () => {
     expect(
-      await getDroppedLocalImageFiles({ fileUrls: [first], text: '' }, { isCurrent: () => false })
-    ).toEqual({ files: [], failedUrls: [] })
-    expect(mocks.authorize).not.toHaveBeenCalled()
-    expect(mocks.read).not.toHaveBeenCalled()
+      await getDroppedLocalImages({ fileUrls: [first], text: '' }, { isCurrent: () => false })
+    ).toEqual({ images: [], failedUrls: [] })
+    expect(mocks.importGrant).not.toHaveBeenCalled()
   })
 
-  it('does not request a new drop grant after the destination changes during scoped-path lookup', async () => {
+  it('discards late grants after the destination changes', async () => {
     let current = true
-    const lookup = deferred<string>()
-    mocks.resolve.mockReturnValue(lookup.promise)
-    const running = getDroppedLocalImageFiles(
+    const grant = deferred<{ path: string; sizeBytes: number }>()
+    mocks.importGrant.mockReturnValue(grant.promise)
+    const running = getDroppedLocalImages(
       { fileUrls: [first], text: '' },
       { isCurrent: () => current }
     )
+    await vi.waitFor(() => expect(mocks.importGrant).toHaveBeenCalledOnce())
     current = false
-    lookup.resolve('')
-    expect(await running).toEqual({ files: [], failedUrls: [] })
-    expect(mocks.authorize).not.toHaveBeenCalled()
-    expect(mocks.read).not.toHaveBeenCalled()
-  })
-
-  it('does not read a late granted path after the destination changes', async () => {
-    let current = true
-    const grant = deferred<string>()
-    mocks.authorize.mockReturnValue(grant.promise)
-    const running = getDroppedLocalImageFiles(
-      { fileUrls: [first], text: '' },
-      { isCurrent: () => current }
-    )
-    await vi.waitFor(() => expect(mocks.authorize).toHaveBeenCalledOnce())
-    current = false
-    grant.resolve('C:/cache/first.jpg')
-    expect(await running).toEqual({ files: [], failedUrls: [] })
-    expect(mocks.read).not.toHaveBeenCalled()
-  })
-
-  it('discards a late read without starting a second source after destination change', async () => {
-    let current = true
-    const pending = deferred<{ image: Uint8Array; filename: string }>()
-    mocks.read.mockReturnValueOnce(pending.promise)
-    const running = getDroppedLocalImageFiles(
-      { fileUrls: [first, second], text: '' },
-      { isCurrent: () => current }
-    )
-    await vi.waitFor(() => expect(mocks.read).toHaveBeenCalledOnce())
-    current = false
-    pending.resolve({ image: bytes, filename: 'first.jpg' })
-    expect(await running).toEqual({ files: [], failedUrls: [] })
-    expect(mocks.read).toHaveBeenCalledOnce()
+    grant.resolve({ path: 'C:\\cache\\first.jpg', sizeBytes: 1000 })
+    expect(await running).toEqual({ images: [], failedUrls: [] })
   })
 
   it('prefers an actual native File over accompanying URI text', async () => {

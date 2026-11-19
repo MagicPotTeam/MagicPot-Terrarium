@@ -94,7 +94,7 @@ describe('preload capability boundary', () => {
     const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
     const file = { name: 'picked.png' }
     getPathForFileMock.mockReturnValue('/picked/picked.png')
-    invokeMock.mockResolvedValue('/canonical/picked.png')
+    invokeMock.mockResolvedValue({ path: '/canonical/picked.png', sizeBytes: 3 })
 
     await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toBe(
       '/canonical/picked.png'
@@ -122,10 +122,14 @@ describe('preload capability boundary', () => {
       )
     ).resolves.toBe('')
     expect(invokeMock).not.toHaveBeenCalled()
-    // A non-string answer from main is never passed on as a path.
+    // A malformed answer from main is never passed on as a path.
     getPathForFileMock.mockReturnValue('/picked/picked.png')
-    invokeMock.mockResolvedValue({ path: '/etc/shadow' })
-    await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toBe('')
+    for (const answer of ['/etc/shadow', { path: '/etc/shadow' }, { path: 7, sizeBytes: 1 }]) {
+      invokeMock.mockResolvedValue(answer)
+      await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toBe(
+        ''
+      )
+    }
     expect(sendSyncMock).not.toHaveBeenCalled()
   })
 
@@ -133,6 +137,7 @@ describe('preload capability boundary', () => {
     const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
     expect(Object.keys(electronFile).sort()).toEqual([
       'authorizeDroppedLocalImage',
+      'authorizeDroppedLocalImageForImport',
       'authorizeLocalMediaFile',
       'authorizeLocalMediaFileForImport',
       'getPathForFile',
@@ -179,6 +184,38 @@ describe('preload capability boundary', () => {
     )
     expect(getPathForFileMock).not.toHaveBeenCalled()
     expect(sendSyncMock).not.toHaveBeenCalled()
+  })
+
+  it('asks main for a one-use import grant for the exact captured URL, once per drop', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const url =
+      process.platform === 'win32'
+        ? 'file:///C:/Synthetic%20Lark/import.png'
+        : 'file:///tmp/Synthetic%20Lark/import.png'
+    invokeMock.mockResolvedValue({ path: fileURLToPath(url), sizeBytes: 42 })
+    // Nothing without a trusted drop that carried this URL.
+    await expect(electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')).resolves.toBe(
+      null
+    )
+    windowListeners.get('drop')?.({
+      isTrusted: true,
+      dataTransfer: { getData: (type: string) => (type === 'text/uri-list' ? url : '') }
+    } as unknown as Event)
+    await expect(
+      electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')
+    ).resolves.toEqual({ path: fileURLToPath(url), sizeBytes: 42 })
+    // The URL is used up: no second grant of either kind from the same drop.
+    await expect(electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')).resolves.toBe(
+      null
+    )
+    await expect(electronFile.authorizeDroppedLocalImage(url)).resolves.toBe('')
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith(
+      'local-media:authorize-import-path',
+      fileURLToPath(url),
+      'image/png'
+    )
+    // Never the persisted grant channel.
+    expect(invokeMock).not.toHaveBeenCalledWith('local-media:authorize-picker-path', expect.anything())
   })
 
   it('invalidates an unconsumed trusted drop on navigation', async () => {

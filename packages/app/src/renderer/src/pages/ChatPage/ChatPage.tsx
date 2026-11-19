@@ -209,7 +209,8 @@ import {
 import { mergeChatAttachmentsWithSkillReferenceAttachments } from '@renderer/utils/customSkillReferenceAttachments'
 import {
   getDroppedLocalImageContent,
-  getDroppedLocalImageFiles,
+  getDroppedLocalImages,
+  type DroppedLocalImage,
   isImageOnlyInternalDragPayload,
   materializeInternalImageDragAttachment,
   parseInternalImageDragPayload
@@ -223,6 +224,7 @@ import {
   ChatImageTooLargeError,
   ChatPathlessAttachmentTooLargeError,
   describeChatAttachmentImportFailure,
+  importChatImageFromGrantedPath,
   importChatAttachment,
   importChatAttachmentUrl,
   importIncomingChatImageAttachment,
@@ -968,6 +970,8 @@ const describeImageBatchTooLarge = (t: TFunction, budget: ChatImageBatchBudget):
 type ComposerIncomingImages = {
   attachments?: readonly ChatAttachment[]
   files?: readonly File[]
+  /** Sizes of images imported by path without a File (URL-only drops). */
+  imageSizes?: readonly number[]
   /** Text and hidden context that arrive with the batch. */
   text?: string
   hiddenContext?: string
@@ -1090,6 +1094,21 @@ const buildImageChatAttachmentFromFile = async (
     relativePath: options?.relativePath,
     dimensions
   })
+}
+
+/** An image of a URL-only drop, imported by main from the path it granted for one import. */
+const buildImageChatAttachmentFromGrantedPath = async (
+  image: DroppedLocalImage
+): Promise<ChatAttachment> => {
+  const attachment = await importChatImageFromGrantedPath({
+    service: api().svcManagedMedia,
+    sourcePath: image.sourcePath,
+    mimeType: image.mimeType,
+    fileName: image.fileName,
+    maxBytes: getChatAttachmentMaxSizeMB('image') * 1024 * 1024
+  })
+  // The size from the managed copy, decoded by the image loader (not read into the page).
+  return { ...attachment, ...(await readImageDimensionsFromUrl(attachment.url)) }
 }
 
 const buildChatAttachmentFromDroppedFile = async (
@@ -3669,13 +3688,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
   resolveComposerImageBatchBudgetRef.current = ({
     attachments = [],
     files = [],
+    imageSizes = [],
     text,
     hiddenContext
   }: ComposerIncomingImages): ChatImageBatchBudget | null => {
     const imageFiles = files.filter((file) => getChatAttachmentTypeForFile(file) === 'image')
     const incomingBytes = [
       ...attachments.map(getKnownChatImageBytes),
-      ...imageFiles.map((file) => file.size)
+      ...imageFiles.map((file) => file.size),
+      ...imageSizes
     ]
     if (!incomingBytes.some((bytes) => bytes > 0)) return null
     const draftText = [inputValueRef.current, text].filter(Boolean).join('\n')
@@ -5617,18 +5638,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }))
         return
       }
-      let files = rawDroppedFiles
+      const files = rawDroppedFiles
+      // A URL-only drop: each image is granted for one import by its path and copied by
+      // main; no persisted grant, no bytes in the renderer.
+      let droppedLocalImages: DroppedLocalImage[] = []
       if (!files.length && externalImageContent.fileUrls.length) {
-        let resolved: Awaited<ReturnType<typeof getDroppedLocalImageFiles>>
+        let resolved: Awaited<ReturnType<typeof getDroppedLocalImages>>
         try {
-          resolved = await getDroppedLocalImageFiles(externalImageContent, {
+          resolved = await getDroppedLocalImages(externalImageContent, {
             isCurrent: isDropTargetCurrent
           })
         } catch {
-          resolved = { files: [], failedUrls: externalImageContent.fileUrls }
+          resolved = { images: [], failedUrls: externalImageContent.fileUrls }
         }
         if (!isDropTargetCurrent()) return
-        files = resolved.files
+        droppedLocalImages = resolved.images
         for (const url of resolved.failedUrls) {
           notifyError(
             t('chat.drop_local_image_failed', {
@@ -5650,6 +5674,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ? null
         : resolveComposerImageBatchBudgetRef.current({
             files: Array.from(files || []),
+            imageSizes: droppedLocalImages.map((image) => image.sizeBytes),
             text: droppedImageText
           })
       if (nativeImageBudget && !nativeImageBudget.fits) {
@@ -5666,6 +5691,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
             prev ? `${prev}\n\n${externalImageContent.text}` : externalImageContent.text
           )
         }
+      }
+      if (droppedLocalImages.length > 0) {
+        const imported: ChatAttachment[] = []
+        for (const image of droppedLocalImages) {
+          try {
+            const attachment = await buildImageChatAttachmentFromGrantedPath(image)
+            if (!isDropTargetCurrent()) return
+            if (editingAttachmentReceiver) editingAttachmentReceiver(attachment)
+            else imported.push(attachment)
+          } catch (error) {
+            if (!isDropTargetCurrent()) return
+            console.error('[ChatPage] Failed to import dropped local image:', error)
+            notifyError(describeChatAttachmentImportFailure(error, image.fileName, 'image'))
+          }
+        }
+        if (imported.length > 0) setPendingAttachments((prev) => [...prev, ...imported])
+        return
       }
       if (!files || files.length === 0) return
 

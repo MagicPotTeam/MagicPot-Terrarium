@@ -8,11 +8,18 @@ import type {
   WinBridge
 } from '@shared/utils/utilWindow'
 
+/** A one-use import grant from main: the canonical path and its size when granted. */
+export type LocalMediaImportGrant = { path: string; sizeBytes: number }
+
 export type ElectronFileBridge = {
   getPathForFile(file: File): string
   authorizeLocalMediaFile(file: File): Promise<string>
   authorizeLocalMediaFileForImport(file: File, mimeType: string): Promise<string>
   authorizeDroppedLocalImage(canonicalUrl: string): Promise<string>
+  authorizeDroppedLocalImageForImport(
+    canonicalUrl: string,
+    mimeType: string
+  ): Promise<LocalMediaImportGrant | null>
   resolveAuthorizedLocalMediaPath(filePath: string): Promise<string>
 }
 

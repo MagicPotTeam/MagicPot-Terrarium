@@ -67,7 +67,7 @@ vi.mock('@renderer/utils/fileUtils', async (original) => ({
 }))
 vi.mock('@renderer/utils/droppedImageUtils', async (original) => ({
   ...(await original<typeof import('@renderer/utils/droppedImageUtils')>()),
-  getDroppedLocalImageFiles: f.read,
+  getDroppedLocalImages: f.read,
   materializeInternalImageDragAttachment: (...args: unknown[]) => f.materialize(...args)
 }))
 vi.mock('./chatStorage', async (original) => ({
@@ -235,7 +235,7 @@ beforeEach(() => {
     localMediaUrl: 'local-media://imported',
     reference: { version: 1, kind: 'managed', relativePath: 'imported', status: 'ready' }
   })
-  f.read.mockResolvedValue({ files: [], failedUrls: [] })
+  f.read.mockResolvedValue({ images: [], failedUrls: [] })
   vi.stubGlobal(
     'Image',
     class {
@@ -819,6 +819,27 @@ describe('native drop image count boundary', () => {
       expect(f.importFile).not.toHaveBeenCalled()
       expect(attachmentCount()).toBe(0)
       expect(screen.getByTestId('input')).toHaveValue('session b')
+    })
+    it('refuses a URL-only drop of eight 4.9 MB images before importing any of them', async () => {
+      useProfile({})
+      await setupSessionB()
+      f.read.mockResolvedValue({
+        images: Array.from({ length: 8 }, (_, index) => ({
+          url: `file:///C:/drops/large-${index}.png`,
+          fileName: `large-${index}.png`,
+          sourcePath: `C:\\drops\\large-${index}.png`,
+          sizeBytes: size49,
+          mimeType: 'image/png'
+        })),
+        failedUrls: []
+      })
+      fireEvent.drop(screen.getByTestId('input'), {
+        dataTransfer: transfer([], 'file:///C:/drops/large-0.png')
+      })
+      await waitFor(() => expect(f.notify).toHaveBeenCalledWith('chat.image_batch_too_large'))
+      expect(f.importFile).not.toHaveBeenCalled()
+      expect(imports()).toBe(0)
+      expect(attachmentCount()).toBe(0)
     })
     it('attaches six 4.9 MB images, then refuses two more for the same message', async () => {
       useProfile({})

@@ -128,6 +128,43 @@ describe('private trusted external-image drop leases', () => {
     }
   )
 
+  it('grants each URL of a drop once, whichever grant is asked first', async () => {
+    const authorizeImportPath = vi.fn(async (filePath: string) => ({
+      path: filePath,
+      sizeBytes: 9
+    }))
+    const listeners = new Map<string, EventListener>()
+    const authorization = createExternalImageDropAuthorization({
+      target: {
+        addEventListener: (name: string, listener: EventListener) => listeners.set(name, listener),
+        removeEventListener: vi.fn()
+      } as unknown as Window,
+      authorizePath: vi.fn().mockResolvedValue(true),
+      authorizeImportPath,
+      now: () => 0
+    })
+    const dropOf = (data: Record<string, string>) =>
+      listeners.get('drop')?.({
+        isTrusted: true,
+        dataTransfer: { getData: (name: string) => data[name] || '' }
+      } as unknown as Event)
+    dropOf({ 'text/plain': `${first}\n${second}` })
+    const shared = authorization.authorizeDroppedLocalImageForImport(first, 'image/png')
+    // The same request while it runs shares it; the other kind of grant gets nothing.
+    expect(authorization.authorizeDroppedLocalImageForImport(first, 'image/png')).toBe(shared)
+    await expect(authorization.authorizeDroppedLocalImage(first)).resolves.toBe('')
+    await expect(shared).resolves.toEqual({ path: fileURLToPath(first), sizeBytes: 9 })
+    await expect(
+      authorization.authorizeDroppedLocalImageForImport(first, 'image/png')
+    ).resolves.toBeNull()
+    // A URL the drop did not carry, or no type: nothing.
+    await expect(
+      authorization.authorizeDroppedLocalImageForImport(`${prefix}other.png`, 'image/png')
+    ).resolves.toBeNull()
+    await expect(authorization.authorizeDroppedLocalImageForImport(second, 7)).resolves.toBeNull()
+    expect(authorizeImportPath).toHaveBeenCalledExactlyOnceWith(fileURLToPath(first), 'image/png')
+  })
+
   it('rejects an expired lease before any authorization starts', async () => {
     const subject = harness()
     subject.drop({ 'text/plain': first })

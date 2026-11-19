@@ -16,7 +16,7 @@ vi.mock('@renderer/hooks/useMessage', () => ({ useMessage: () => ({ notifyError:
 vi.mock('./hooks/useChatProfiles', () => ({ useChatProfiles: () => ({ availableProfiles: f.profiles, remoteProfiles: f.remoteProfiles }) }))
 vi.mock('@renderer/utils/windowUtils', () => ({ api: () => ({ svcFs: {}, svcLLMProxy: { signHy3DModel: vi.fn() }, svcManagedMedia: { importDataUrl: vi.fn(), importBytes: f.importBytes, importFile: vi.fn() } }) }))
 vi.mock('@renderer/utils/fileUtils', async original => ({ ...await original<typeof import('@renderer/utils/fileUtils')>(), fileToBlobUrl: f.blob }))
-vi.mock('@renderer/utils/droppedImageUtils', async original => ({ ...await original<typeof import('@renderer/utils/droppedImageUtils')>(), getDroppedLocalImageFiles: f.read }))
+vi.mock('@renderer/utils/droppedImageUtils', async original => ({ ...await original<typeof import('@renderer/utils/droppedImageUtils')>(), getDroppedLocalImages: f.read }))
 vi.mock('./chatStorage', async original => ({ ...await original<typeof import('./chatStorage')>(), loadAllSessions: async () => ['a', 'b'].map(id => ({ id, title: id, profileId: 'fixture-profile', storageScope: 'race', messages: [], draft: { inputValue: id === 'a' ? 'keep' : 'session b', pendingAttachments: [], pendingHiddenContext: '', updatedAt: Date.now() } })), saveSessionToDB: vi.fn(), debouncedSaveSessions: vi.fn(), cancelDebouncedSessionSave: vi.fn(), migrateFromLocalStorage: async () => null }))
 vi.mock('./components/SessionSidebar', () => ({ default: ({ onSelectSession }: { onSelectSession: (id: string) => void }) => <button onClick={() => onSelectSession('b')}>switch b</button> }))
 vi.mock('./components/SessionHistoryDialog', () => ({ default: () => null }))
@@ -44,7 +44,7 @@ async function setup() {
 }
 beforeEach(() => {
   vi.resetAllMocks(); f.config = structuredClone(DEFAULT_CONFIG); f.blob.mockReturnValue('blob:test')
-  f.read.mockResolvedValue({ files: [], failedUrls: [] })
+  f.read.mockResolvedValue({ images: [], failedUrls: [] })
   f.importBytes.mockImplementation(async ({ originalFileName }: { originalFileName: string }) => result(originalFileName))
   vi.stubGlobal('Image', class { naturalWidth = 1; naturalHeight = 1; onload: (() => void) | null = null; set src(_: string) { queueMicrotask(() => this.onload?.()) } })
 })

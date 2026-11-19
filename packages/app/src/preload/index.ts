@@ -10,7 +10,10 @@ import type {
 } from '@shared/utils/utilWindow'
 import type { Api } from '@shared/api'
 import { winBridge } from './winBridge'
-import { createExternalImageDropAuthorization } from './externalImageDropLease'
+import {
+  createExternalImageDropAuthorization,
+  type DroppedLocalImageImportGrant
+} from './externalImageDropLease'
 import {
   parseRendererRecoveredEvent,
   RENDERER_RECOVERED_CHANNEL,
@@ -27,7 +30,8 @@ const api: Api = newApiIpc()
 const path: BuiltInPath = pkgPath as unknown as BuiltInPath
 const droppedLocalImages = createExternalImageDropAuthorization({
   target: typeof window === 'undefined' ? undefined : window,
-  authorizePath: authorizeLocalMediaFilePath
+  authorizePath: authorizeLocalMediaFilePath,
+  authorizeImportPath: requestLocalMediaImportGrant
 })
 const electronFile = {
   getPathForFile(file: unknown): string {
@@ -55,18 +59,24 @@ const electronFile = {
     try {
       const filePath = (webUtils.getPathForFile as (target: unknown) => string)(file) || ''
       if (!filePath || typeof mimeType !== 'string') return ''
-      const canonical: unknown = await ipcRenderer.invoke(
-        'local-media:authorize-import-path',
-        filePath,
-        mimeType
-      )
-      return typeof canonical === 'string' ? canonical : ''
+      return (await requestLocalMediaImportGrant(filePath, mimeType))?.path ?? ''
     } catch {
       return ''
     }
   },
   authorizeDroppedLocalImage(canonicalUrl: string): Promise<string> {
     return droppedLocalImages.authorizeDroppedLocalImage(canonicalUrl)
+  },
+  /**
+   * One-use, in-memory import grant for a file URL of the current trusted drop (the private
+   * drop lease decides which URLs qualify): main's canonical path and size, or null. No
+   * persisted grant is recorded and no bytes reach the page.
+   */
+  authorizeDroppedLocalImageForImport(
+    canonicalUrl: string,
+    mimeType: string
+  ): Promise<DroppedLocalImageImportGrant | null> {
+    return droppedLocalImages.authorizeDroppedLocalImageForImport(canonicalUrl, mimeType)
   },
   async resolveAuthorizedLocalMediaPath(filePath: string): Promise<string> {
     try {
@@ -206,6 +216,31 @@ async function authorizeLocalMediaFilePath(filePath: string): Promise<boolean> {
     return (await ipcRenderer.invoke('local-media:authorize-picker-path', filePath)) === true
   } catch {
     return false
+  }
+}
+
+/** Main's one-use import grant for a path the preload itself obtained, or null. */
+async function requestLocalMediaImportGrant(
+  filePath: string,
+  mimeType: string
+): Promise<DroppedLocalImageImportGrant | null> {
+  if (!filePath) return null
+  try {
+    const granted: unknown = await ipcRenderer.invoke(
+      'local-media:authorize-import-path',
+      filePath,
+      mimeType
+    )
+    const candidate = granted as Partial<DroppedLocalImageImportGrant> | null
+    return candidate &&
+      typeof candidate.path === 'string' &&
+      candidate.path &&
+      Number.isSafeInteger(candidate.sizeBytes) &&
+      (candidate.sizeBytes as number) >= 0
+      ? { path: candidate.path, sizeBytes: candidate.sizeBytes as number }
+      : null
+  } catch {
+    return null
   }
 }
 

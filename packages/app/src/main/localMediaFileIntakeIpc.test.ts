@@ -118,13 +118,13 @@ describe('local media file intake IPC', () => {
     // A path that does not exist: the trust check comes before any filesystem access.
     const picked = process.platform === 'win32' ? 'C:\\nowhere\\a.png' : '/nowhere/a.png'
 
-    await expect(importHandler({ sender: trustedSender }, picked, 'image/png')).resolves.toBe('')
+    await expect(importHandler({ sender: trustedSender }, picked, 'image/png')).resolves.toBeNull()
     mainWindow = { isDestroyed: () => false, webContents: trustedSender }
     await expect(
       importHandler({ sender: { isDestroyed: () => false } }, picked, 'image/png')
-    ).resolves.toBe('')
+    ).resolves.toBeNull()
     // Trusted, but the file does not exist: nothing is recorded.
-    await expect(importHandler({ sender: trustedSender }, picked, 'image/png')).resolves.toBe('')
+    await expect(importHandler({ sender: trustedSender }, picked, 'image/png')).resolves.toBeNull()
     expect(recordImportGrantMock).not.toHaveBeenCalled()
     expect(authorizeMock).not.toHaveBeenCalled()
   })

@@ -75,7 +75,7 @@ vi.mock('@renderer/utils/fileUtils', async (original) => ({
 }))
 vi.mock('@renderer/utils/droppedImageUtils', async (original) => ({
   ...(await original<typeof import('@renderer/utils/droppedImageUtils')>()),
-  getDroppedLocalImageFiles: f.read,
+  getDroppedLocalImages: f.read,
   materializeInternalImageDragAttachment: (...args: unknown[]) => f.materialize(...args)
 }))
 vi.mock('./chatStorage', async (original) => ({
@@ -201,7 +201,7 @@ beforeEach(() => {
   f.importDataUrl.mockResolvedValue(imported)
   // A File without a path (jsdom has none) is imported as bytes.
   f.importBytes.mockResolvedValue(imported)
-  f.read.mockResolvedValue({ files: [], failedUrls: [] })
+  f.read.mockResolvedValue({ images: [], failedUrls: [] })
   vi.stubGlobal(
     'Image',
     class {

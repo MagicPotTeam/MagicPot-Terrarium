@@ -24,7 +24,10 @@ import {
   initializeLocalMediaAccess,
   resolveAuthorizedLocalMediaPath
 } from './localMediaAccess'
-import { grantLocalMediaImportPath } from './localMediaFileIntakeIpc'
+import { pathToFileURL } from 'node:url'
+import { normalizeExternalImageFileUrl } from '@shared/externalImageDrop'
+import { createExternalImageDropAuthorization } from '../preload/externalImageDropLease'
+import { grantLocalMediaImportFile, grantLocalMediaImportPath } from './localMediaFileIntakeIpc'
 
 const cleanupPaths: string[] = []
 
@@ -81,6 +84,47 @@ describe('short-lived local media import grants', () => {
     flushLocalMediaAccessGrants()
     const persisted = JSON.parse(fs.readFileSync(grantsPath, 'utf8')) as { files: string[] }
     // Import grants are never written to disk.
+    expect(persisted.files).toEqual([canvasVideo])
+    expect(countLocalMediaImportGrantsForTest()).toBe(0)
+  })
+
+  it('leaves a persisted canvas grant resolvable after 1000 URL-only chat drops', async () => {
+    const root = makeTempDir('magicpot-import-grants-')
+    const grantsPath = path.join(root, 'grants.json')
+    initializeLocalMediaAccess(grantsPath)
+    const canvasVideo = path.join(root, 'canvas-video.mp4')
+    fs.writeFileSync(canvasVideo, 'video')
+    expect(authorizeScopedLocalMediaPath(canvasVideo)).toBe(true)
+    // The preload's private drop lease, wired as in production.
+    const listeners = new Map<string, EventListener>()
+    const lease = createExternalImageDropAuthorization({
+      target: {
+        addEventListener: (name: string, listener: EventListener) => listeners.set(name, listener),
+        removeEventListener: () => undefined
+      } as unknown as Window,
+      authorizePath: async (filePath) => authorizeScopedLocalMediaPath(filePath),
+      authorizeImportPath: (filePath, mimeType) => grantLocalMediaImportFile(filePath, mimeType)
+    })
+
+    const drops = path.join(root, 'drops')
+    fs.mkdirSync(drops)
+    for (let index = 0; index < 1000; index += 1) {
+      const dropped = path.join(drops, `drop-${index}.png`)
+      fs.writeFileSync(dropped, 'png')
+      const url = normalizeExternalImageFileUrl(pathToFileURL(dropped).href)!
+      listeners.get('drop')?.({
+        isTrusted: true,
+        dataTransfer: { getData: (type: string) => (type === 'text/uri-list' ? url : '') }
+      } as unknown as Event)
+      const granted = await lease.authorizeDroppedLocalImageForImport(url, 'image/png')
+      expect(granted).toEqual({ path: dropped, sizeBytes: 3 })
+      // main's importFile spends it.
+      expect(await authorizeImport(granted!.path, [])).toBe(dropped)
+    }
+
+    expect(resolveAuthorizedLocalMediaPath(canvasVideo, [])).toBe(canvasVideo)
+    flushLocalMediaAccessGrants()
+    const persisted = JSON.parse(fs.readFileSync(grantsPath, 'utf8')) as { files: string[] }
     expect(persisted.files).toEqual([canvasVideo])
     expect(countLocalMediaImportGrantsForTest()).toBe(0)
   })

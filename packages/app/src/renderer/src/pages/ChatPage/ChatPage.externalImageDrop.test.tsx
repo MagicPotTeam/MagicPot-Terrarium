@@ -16,15 +16,16 @@ import {
   CHAT_ATTACHMENT_STORAGE,
   ChatPathlessAttachmentTooLargeError
 } from './chatManagedMediaAttachments'
+import type { DroppedLocalImage } from '@renderer/utils/droppedImageUtils'
 import ChatPage from './ChatPage'
 
-type DropReadResult = { files: File[]; failedUrls: string[] }
+type DropReadResult = { images: DroppedLocalImage[]; failedUrls: string[] }
 type DropReadOptions = { isCurrent?: () => boolean }
 
 const fixture = vi.hoisted(() => ({
   config: null as Config | null,
   sessions: [] as ChatSession[],
-  getDroppedLocalImageFiles: vi.fn(),
+  getDroppedLocalImages: vi.fn(),
   materializeIncoming: vi.fn(),
   importDataUrl: vi.fn(),
   importBytes: vi.fn(),
@@ -102,7 +103,7 @@ vi.mock('@renderer/utils/droppedImageUtils', async (importOriginal) => {
   const actualDroppedImageUtils = await importOriginal<typeof import('@renderer/utils/droppedImageUtils')>()
   return {
     ...actualDroppedImageUtils,
-    getDroppedLocalImageFiles: (...args: unknown[]) => fixture.getDroppedLocalImageFiles(...args),
+    getDroppedLocalImages: (...args: unknown[]) => fixture.getDroppedLocalImages(...args),
     materializeInternalImageDragAttachment: async (attachment: ChatAttachment) => {
       return fixture.materializeIncoming.getMockImplementation()
         ? fixture.materializeIncoming(attachment)
@@ -253,8 +254,18 @@ const managedResult = (name: string): ImportManagedMediaResp => ({
     kind: 'managed',
     relativePath: `user-output/chat-attachments/${name}`,
     originalFileName: name,
+    sizeBytes: 1024,
     status: 'ready'
   }
+})
+
+/** An image of a URL-only drop as main granted it: imported by path, never read here. */
+const droppedImage = (name = 'first image.png', url = firstUrl): DroppedLocalImage => ({
+  url,
+  fileName: name,
+  sourcePath: `C:\\Feishu\\Cache\\${name}`,
+  sizeBytes: 1024,
+  mimeType: name.endsWith('.jpg') ? 'image/jpeg' : 'image/png'
 })
 
 const existingAttachment: ChatAttachment = {
@@ -341,9 +352,12 @@ beforeEach(() => {
   fixture.config.use_remote_llm = false
   fixture.capturedSubmit = null
   fixture.sessions = []
-  fixture.getDroppedLocalImageFiles.mockResolvedValue({ files: [], failedUrls: [] })
+  fixture.getDroppedLocalImages.mockResolvedValue({ images: [], failedUrls: [] })
   fixture.importBytes.mockImplementation(
     async ({ originalFileName }: ImportManagedMediaBytesReq) => managedResult(originalFileName)
+  )
+  fixture.importFile.mockImplementation(
+    async ({ originalFileName }: { originalFileName: string }) => managedResult(originalFileName)
   )
   fixture.fileToBlobUrl.mockImplementation((file: File) => `blob:fixture-${file.name}`)
   fixture.fetch.mockRejectedValue(new Error('Unexpected network access in drop regression'))
@@ -634,10 +648,10 @@ describe('ChatPage external local image drop', () => {
   })
 
   it.each(['text/plain', 'text/uri-list', 'text/html'])(
-    'imports multiple %s images as durable attachments without replacing the draft',
+    'imports multiple %s images by their granted paths without replacing the draft',
     async (flavor) => {
-      const files = [imageFile(), imageFile('second.jpg')]
-      fixture.getDroppedLocalImageFiles.mockResolvedValue({ files, failedUrls: [] })
+      const images = [droppedImage(), droppedImage('second.jpg', secondUrl)]
+      fixture.getDroppedLocalImages.mockResolvedValue({ images, failedUrls: [] })
       await renderPage([existingAttachment])
 
       drop({
@@ -648,27 +662,29 @@ describe('ChatPage external local image drop', () => {
       })
 
       await waitFor(() => expect(pendingAttachments()).toHaveLength(3))
-      expect(fixture.getDroppedLocalImageFiles).toHaveBeenCalledTimes(1)
-      expect(fixture.getDroppedLocalImageFiles).toHaveBeenCalledWith(
+      expect(fixture.getDroppedLocalImages).toHaveBeenCalledTimes(1)
+      expect(fixture.getDroppedLocalImages).toHaveBeenCalledWith(
         expect.objectContaining({ fileUrls: [firstUrl, secondUrl] }),
         expect.objectContaining({ isCurrent: expect.any(Function) })
       )
-      expect(fixture.importBytes).toHaveBeenCalledTimes(2)
+      // main copies each file from its path: no bytes and no data URL from the renderer.
+      expect(fixture.importFile).toHaveBeenCalledTimes(2)
+      expect(fixture.importBytes).not.toHaveBeenCalled()
       expect(fixture.importDataUrl).not.toHaveBeenCalled()
-      expect(fixture.importFile).not.toHaveBeenCalled()
-      for (const [index, file] of files.entries()) {
-        expect(fixture.fileToBlobUrl).toHaveBeenNthCalledWith(index + 1, file)
-        expect(fixture.importBytes).toHaveBeenNthCalledWith(index + 1, {
-          bytes: expect.any(Uint8Array),
-          mimeType: expect.stringMatching(/^image\/(?:png|jpeg)$/),
-          originalFileName: file.name,
+      expect(fixture.fileToBlobUrl).not.toHaveBeenCalled()
+      for (const [index, image] of images.entries()) {
+        expect(fixture.importFile).toHaveBeenNthCalledWith(index + 1, {
+          sourcePath: image.sourcePath,
+          mimeType: image.mimeType,
+          originalFileName: image.fileName,
           storage: CHAT_ATTACHMENT_STORAGE
         })
         expect(pendingAttachments()[index + 1]).toMatchObject({
           type: 'image',
-          fileName: file.name,
-          url: managedResult(file.name).localMediaUrl,
-          media: managedResult(file.name).reference,
+          fileName: image.fileName,
+          url: managedResult(image.fileName).localMediaUrl,
+          media: managedResult(image.fileName).reference,
+          sizeBytes: 1024,
           sourceWidth: 640,
           sourceHeight: 480
         })
@@ -682,11 +698,29 @@ describe('ChatPage external local image drop', () => {
         ).toHaveLength(3)
       )
       expect(JSON.stringify(fixture.sessions)).not.toContain('file:///')
+      expect(JSON.stringify(fixture.sessions)).not.toContain('Feishu')
     }
   )
 
+  it('refuses a dropped image whose copy main made is larger than the image limit', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    fixture.getDroppedLocalImages.mockResolvedValue({ images: [droppedImage()], failedUrls: [] })
+    const grown = managedResult('first image.png')
+    fixture.importFile.mockResolvedValueOnce({
+      ...grown,
+      reference: { ...grown.reference, sizeBytes: 6 * 1024 * 1024 }
+    })
+    await renderPage([existingAttachment])
+
+    drop()
+
+    await waitFor(() => expect(fixture.notifyError).toHaveBeenCalledOnce())
+    expect(fixture.notifyError).toHaveBeenCalledWith(expect.stringContaining('first image.png'))
+    expect(pendingAttachments()).toEqual([existingAttachment])
+  })
+
   it('retains existing draft and dropped body text but never inserts the local file URL', async () => {
-    fixture.getDroppedLocalImageFiles.mockResolvedValue({ files: [imageFile()], failedUrls: [] })
+    fixture.getDroppedLocalImages.mockResolvedValue({ images: [droppedImage()], failedUrls: [] })
     await renderPage()
 
     drop({ 'text/plain': `Please compare the colors.\n${firstUrl}\nKeep the composition.` })
@@ -708,7 +742,7 @@ describe('ChatPage external local image drop', () => {
       drop({ 'text/plain': firstUrl, 'text/uri-list': firstUrl }, [file])
 
       await waitFor(() => expect(pendingAttachments()).toHaveLength(1))
-      expect(fixture.getDroppedLocalImageFiles).not.toHaveBeenCalled()
+      expect(fixture.getDroppedLocalImages).not.toHaveBeenCalled()
       expect(fixture.fileToBlobUrl).toHaveBeenCalledWith(file)
       expect(pendingAttachments()[0]).toMatchObject({ type: 'image', fileName: 'native.png' })
       expect(fixture.importBytes).toHaveBeenCalledTimes(1)
@@ -722,7 +756,7 @@ describe('ChatPage external local image drop', () => {
     drop({ 'text/plain': `Compare this native image.\n${firstUrl}` }, [imageFile('native.png')])
 
     await waitFor(() => expect(pendingAttachments()).toHaveLength(1))
-    expect(fixture.getDroppedLocalImageFiles).not.toHaveBeenCalled()
+    expect(fixture.getDroppedLocalImages).not.toHaveBeenCalled()
     expect(screen.getByTestId('composer-input')).toHaveValue(
       `${draft}\n\nCompare this native image.`
     )
@@ -730,8 +764,8 @@ describe('ChatPage external local image drop', () => {
   })
 
   it('reports an unreadable image while retaining successful images and draft text', async () => {
-    fixture.getDroppedLocalImageFiles.mockResolvedValue({
-      files: [imageFile()],
+    fixture.getDroppedLocalImages.mockResolvedValue({
+      images: [droppedImage()],
       failedUrls: [secondUrl]
     })
     await renderPage([existingAttachment])
@@ -745,7 +779,7 @@ describe('ChatPage external local image drop', () => {
   })
 
   it('notifies on a failed local-image read without attaching a URL or changing the draft', async () => {
-    fixture.getDroppedLocalImageFiles.mockRejectedValue(new Error('Expired drop permission'))
+    fixture.getDroppedLocalImages.mockRejectedValue(new Error('Expired drop permission'))
     await renderPage([existingAttachment])
 
     drop()
@@ -757,8 +791,8 @@ describe('ChatPage external local image drop', () => {
   })
 
   it('reports a managed import failure without leaving a temporary URL attachment', async () => {
-    fixture.getDroppedLocalImageFiles.mockResolvedValue({ files: [imageFile()], failedUrls: [] })
-    fixture.importBytes.mockRejectedValue(new Error('Managed media storage is unavailable'))
+    fixture.getDroppedLocalImages.mockResolvedValue({ images: [droppedImage()], failedUrls: [] })
+    fixture.importFile.mockRejectedValue(new Error('Managed media storage is unavailable'))
     await renderPage([existingAttachment])
 
     drop()
@@ -766,7 +800,7 @@ describe('ChatPage external local image drop', () => {
     await waitFor(() => expect(fixture.notifyError).toHaveBeenCalled())
     expect(pendingAttachments()).toEqual([existingAttachment])
     expect(screen.getByTestId('composer-input')).toHaveValue(draft)
-    expect(fixture.importFile).not.toHaveBeenCalled()
+    expect(fixture.importBytes).not.toHaveBeenCalled()
   })
 
   it('refuses a dropped path-less file above the in-memory cap with its own message', async () => {
@@ -793,7 +827,7 @@ describe('ChatPage external local image drop', () => {
   })
 
   it('routes dropped images and body text to the active edit, not the bottom composer', async () => {
-    fixture.getDroppedLocalImageFiles.mockResolvedValue({ files: [imageFile()], failedUrls: [] })
+    fixture.getDroppedLocalImages.mockResolvedValue({ images: [droppedImage()], failedUrls: [] })
     await renderPage([existingAttachment])
     fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
 
@@ -816,11 +850,11 @@ describe('ChatPage external local image drop', () => {
   })
 
   it('continues importing other edit images when one managed import fails', async () => {
-    fixture.getDroppedLocalImageFiles.mockResolvedValue({
-      files: [imageFile(), imageFile('second.jpg')],
+    fixture.getDroppedLocalImages.mockResolvedValue({
+      images: [droppedImage(), droppedImage('second.jpg', secondUrl)],
       failedUrls: []
     })
-    fixture.importBytes.mockRejectedValueOnce(new Error('First image import failed'))
+    fixture.importFile.mockRejectedValueOnce(new Error('First image import failed'))
     await renderPage([existingAttachment])
     fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
 
@@ -847,26 +881,26 @@ describe('ChatPage external local image drop', () => {
     async (phase, reopen) => {
       const readGate = deferred<DropReadResult>()
       const importGate = deferred<ImportManagedMediaResp>()
-      fixture.getDroppedLocalImageFiles.mockImplementation(() =>
+      fixture.getDroppedLocalImages.mockImplementation(() =>
         phase === 'read'
           ? readGate.promise
-          : Promise.resolve({ files: [imageFile()], failedUrls: [] })
+          : Promise.resolve({ images: [droppedImage()], failedUrls: [] })
       )
-      fixture.importBytes.mockReturnValue(importGate.promise)
+      fixture.importFile.mockReturnValue(importGate.promise)
       await renderPage()
       drop({ 'text/plain': phase === 'read' ? `Do not leak this body.\n${firstUrl}` : firstUrl })
       await waitFor(() =>
         expect(
-          phase === 'read' ? fixture.getDroppedLocalImageFiles : fixture.importBytes
+          phase === 'read' ? fixture.getDroppedLocalImages : fixture.importFile
         ).toHaveBeenCalledTimes(1)
       )
-      const readOptions = fixture.getDroppedLocalImageFiles.mock.calls[0][1] as DropReadOptions
+      const readOptions = fixture.getDroppedLocalImages.mock.calls[0][1] as DropReadOptions
 
       await selectSession('session-b')
       if (reopen) await selectSession('session-a')
       expect(readOptions.isCurrent?.()).toBe(false)
       await act(async () => {
-        readGate.resolve({ files: [imageFile()], failedUrls: [] })
+        readGate.resolve({ images: [droppedImage()], failedUrls: [] })
         importGate.resolve(managedResult('first image.png'))
       })
 
@@ -876,7 +910,7 @@ describe('ChatPage external local image drop', () => {
       )
       expect(fixture.receiveEditingAttachment).not.toHaveBeenCalled()
       expect(fixture.notifyError).not.toHaveBeenCalled()
-      if (phase === 'read') expect(fixture.importBytes).not.toHaveBeenCalled()
+      if (phase === 'read') expect(fixture.importFile).not.toHaveBeenCalled()
     }
   )
 
@@ -890,27 +924,27 @@ describe('ChatPage external local image drop', () => {
     async (phase, reopen) => {
       const readGate = deferred<DropReadResult>()
       const importGate = deferred<ImportManagedMediaResp>()
-      fixture.getDroppedLocalImageFiles.mockImplementation(() =>
+      fixture.getDroppedLocalImages.mockImplementation(() =>
         phase === 'read'
           ? readGate.promise
-          : Promise.resolve({ files: [imageFile()], failedUrls: [] })
+          : Promise.resolve({ images: [droppedImage()], failedUrls: [] })
       )
-      fixture.importBytes.mockReturnValue(importGate.promise)
+      fixture.importFile.mockReturnValue(importGate.promise)
       await renderPage()
       fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
       drop({ 'text/plain': `Do not leak this body.\n${firstUrl}` })
       await waitFor(() =>
         expect(
-          phase === 'read' ? fixture.getDroppedLocalImageFiles : fixture.importBytes
+          phase === 'read' ? fixture.getDroppedLocalImages : fixture.importFile
         ).toHaveBeenCalledTimes(1)
       )
-      const readOptions = fixture.getDroppedLocalImageFiles.mock.calls[0][1] as DropReadOptions
+      const readOptions = fixture.getDroppedLocalImages.mock.calls[0][1] as DropReadOptions
 
       if (reopen) fireEvent.click(screen.getByRole('button', { name: 'Cancel edit' }))
       fireEvent.click(screen.getByRole('button', { name: reopen ? 'Edit 0' : 'Edit 1' }))
       expect(readOptions.isCurrent?.()).toBe(false)
       await act(async () => {
-        readGate.resolve({ files: [imageFile()], failedUrls: [] })
+        readGate.resolve({ images: [droppedImage()], failedUrls: [] })
         importGate.resolve(managedResult('first image.png'))
       })
 
@@ -922,39 +956,39 @@ describe('ChatPage external local image drop', () => {
       expect(screen.getByTestId('edit-content').textContent).not.toContain('Do not leak')
       expect(screen.getByTestId('composer-input')).toHaveValue(draft)
       expect(fixture.notifyError).not.toHaveBeenCalled()
-      if (phase === 'read') expect(fixture.importBytes).not.toHaveBeenCalled()
+      if (phase === 'read') expect(fixture.importFile).not.toHaveBeenCalled()
     }
   )
 
   it('does not move a pending composer drop into an edit opened during the read', async () => {
     const gate = deferred<DropReadResult>()
-    fixture.getDroppedLocalImageFiles.mockReturnValue(gate.promise)
+    fixture.getDroppedLocalImages.mockReturnValue(gate.promise)
     await renderPage()
     drop()
-    await waitFor(() => expect(fixture.getDroppedLocalImageFiles).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(fixture.getDroppedLocalImages).toHaveBeenCalledTimes(1))
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit 0' }))
-    await act(async () => gate.resolve({ files: [imageFile()], failedUrls: [] }))
+    await act(async () => gate.resolve({ images: [droppedImage()], failedUrls: [] }))
 
     expect(pendingAttachments()).toEqual([])
     expect(fixture.receiveEditingAttachment).not.toHaveBeenCalled()
-    expect(fixture.importBytes).not.toHaveBeenCalled()
+    expect(fixture.importFile).not.toHaveBeenCalled()
     expect(screen.getByTestId('composer-input')).toHaveValue(draft)
   })
 
   it('ignores a pending read and its failure notification after unmount', async () => {
     const gate = deferred<DropReadResult>()
-    fixture.getDroppedLocalImageFiles.mockReturnValue(gate.promise)
+    fixture.getDroppedLocalImages.mockReturnValue(gate.promise)
     const view = await renderPage()
     drop()
-    await waitFor(() => expect(fixture.getDroppedLocalImageFiles).toHaveBeenCalledTimes(1))
-    const readOptions = fixture.getDroppedLocalImageFiles.mock.calls[0][1] as DropReadOptions
+    await waitFor(() => expect(fixture.getDroppedLocalImages).toHaveBeenCalledTimes(1))
+    const readOptions = fixture.getDroppedLocalImages.mock.calls[0][1] as DropReadOptions
 
     view.unmount()
     expect(readOptions.isCurrent?.()).toBe(false)
-    await act(async () => gate.resolve({ files: [imageFile()], failedUrls: [secondUrl] }))
+    await act(async () => gate.resolve({ images: [droppedImage()], failedUrls: [secondUrl] }))
 
-    expect(fixture.importBytes).not.toHaveBeenCalled()
+    expect(fixture.importFile).not.toHaveBeenCalled()
     expect(fixture.receiveEditingAttachment).not.toHaveBeenCalled()
     expect(fixture.notifyError).not.toHaveBeenCalled()
   })
