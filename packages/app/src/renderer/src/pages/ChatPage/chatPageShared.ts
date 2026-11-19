@@ -353,6 +353,13 @@ export const updateScopedActiveLoadingSessionId = (
   return [...nextIds]
 }
 
+/**
+ * Whether a chat request of any scope is running in this window (one this window sends or an
+ * external one it tracks). Every change is announced with CHAT_SESSION_LOADING_STATE_EVENT.
+ */
+export const hasRunningScopedChatRequests = (): boolean =>
+  activeLoadingSessionIdsByScope.size > 0 || externalLoadingSessionIdsByScope.size > 0
+
 export const readScopedExternalLoadingSessionIds = (scope: string): string[] => {
   clearLegacyExternalLoadingSessionIds(scope)
   return [...(externalLoadingSessionIdsByScope.get(scope) || new Set<string>())]

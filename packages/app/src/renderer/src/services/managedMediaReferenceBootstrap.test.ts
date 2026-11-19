@@ -22,6 +22,12 @@ vi.mock('../utils/windowUtils', () => ({
   })
 }))
 
+import {
+  clearScopedActiveLoadingSessionIds,
+  clearScopedExternalLoadingSessionIds,
+  updateScopedActiveLoadingSessionId,
+  updateScopedExternalLoadingSessionId
+} from '../pages/ChatPage/chatPageShared'
 import { startManagedMediaReferenceScanner } from './managedMediaReferenceBootstrap'
 
 const reference = (id: string) => ({
@@ -46,6 +52,8 @@ describe('managed media reference bootstrap', () => {
   afterEach(() => {
     vi.useRealTimers()
     localStorage.clear()
+    clearScopedActiveLoadingSessionIds()
+    clearScopedExternalLoadingSessionIds()
   })
 
   it('publishes managed references from chat sessions, draft backups, and canvas items', async () => {
@@ -88,7 +96,7 @@ describe('managed media reference bootstrap', () => {
     expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
 
     // The next scan reads again instead of reusing the previous scan's records.
-    window.dispatchEvent(new Event('focus'))
+    window.dispatchEvent(new Event('storage'))
     await vi.advanceTimersByTimeAsync(2_000)
     expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(2)
     expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(2)
@@ -126,5 +134,81 @@ describe('managed media reference bootstrap', () => {
     })
 
     stop()
+  })
+  describe('when it runs', () => {
+    beforeEach(() => {
+      mocks.forEachStoredChatRecord.mockResolvedValue(undefined)
+      mocks.loadCanvasItems.mockResolvedValue({ items: [] })
+      mocks.updateReferenceSnapshot.mockResolvedValue(undefined)
+    })
+
+    it('scans at start, every five minutes and on storage writes, not on window focus', async () => {
+      const stop = startManagedMediaReferenceScanner()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(1)
+
+      // The user coming back to the window to send is no reason to scan.
+      for (let index = 0; index < 20; index += 1) window.dispatchEvent(new Event('focus'))
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(1)
+
+      window.dispatchEvent(new Event('storage'))
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(2)
+
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(3)
+      stop()
+    })
+
+    it('does not scan while a chat request of any scope runs, and scans once they end', async () => {
+      updateScopedActiveLoadingSessionId('project-a.agent-1', 'thread-1', true)
+      const stop = startManagedMediaReferenceScanner()
+
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.forEachStoredChatRecord).not.toHaveBeenCalled()
+      // Neither the reconcile timer nor a storage write starts one meanwhile.
+      window.dispatchEvent(new Event('storage'))
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      expect(mocks.forEachStoredChatRecord).not.toHaveBeenCalled()
+
+      // An external run (the canvas driving an Agent) counts as well.
+      updateScopedExternalLoadingSessionId('project-b.agent-2', 'thread-2', true)
+      updateScopedActiveLoadingSessionId('project-a.agent-1', 'thread-1', false)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.forEachStoredChatRecord).not.toHaveBeenCalled()
+
+      updateScopedExternalLoadingSessionId('project-b.agent-2', 'thread-2', false)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(1)
+      stop()
+    })
+
+    it('does not start a due scan when a request started during its delay', async () => {
+      const stop = startManagedMediaReferenceScanner()
+      await vi.advanceTimersByTimeAsync(1_000)
+      updateScopedActiveLoadingSessionId('default', 'session-1', true)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(mocks.forEachStoredChatRecord).not.toHaveBeenCalled()
+
+      updateScopedActiveLoadingSessionId('default', 'session-1', false)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
+      stop()
+    })
+
+    it('stops waiting for requests that never end after fifteen minutes', async () => {
+      updateScopedActiveLoadingSessionId('project-a.agent-1', 'stuck', true)
+      const stop = startManagedMediaReferenceScanner()
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 2_000)
+      expect(mocks.forEachStoredChatRecord).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(1)
+      stop()
+    })
   })
 })

@@ -1,3 +1,7 @@
+import {
+  CHAT_SESSION_LOADING_STATE_EVENT,
+  hasRunningScopedChatRequests
+} from '../pages/ChatPage/chatPageShared'
 import { forEachStoredChatRecord } from '../pages/ChatPage/chatStorage'
 import { loadCanvasItemsMetadata } from '../pages/ProjectCanvasPage/canvasStorage'
 import { LEGACY_PROJECTS_STORAGE_KEY, PROJECTS_STORAGE_KEY } from '../pages/MainPage/projectStore'
@@ -9,6 +13,7 @@ import {
 
 const SNAPSHOT_DEBOUNCE_MS = 2_000
 const SNAPSHOT_RECONCILE_MS = 5 * 60_000
+const SNAPSHOT_MAX_DEFER_MS = 15 * 60_000
 
 type ProjectIndexEntry = {
   id?: unknown
@@ -70,22 +75,41 @@ async function publishManagedMediaReferenceSnapshot(): Promise<void> {
 export function startManagedMediaReferenceScanner(): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined
   let stopped = false
+  // When the scan due first found a chat request running; undefined while none is waiting.
+  let deferredSince: number | undefined
+  const scan = () => {
+    timer = undefined
+    if (stopped) return
+    // A scan never starts while a chat request runs: it waits for the requests to end, and is
+    // retried by the reconcile timer. The wait is bounded, because main keeps using the last
+    // complete snapshot for its daily cleanup until a newer one arrives.
+    if (hasRunningScopedChatRequests()) {
+      deferredSince ??= Date.now()
+      if (Date.now() - deferredSince < SNAPSHOT_MAX_DEFER_MS) return
+    }
+    deferredSince = undefined
+    void publishManagedMediaReferenceSnapshot().catch(() => undefined)
+  }
   const schedule = () => {
     if (stopped) return
     if (timer) clearTimeout(timer)
-    timer = setTimeout(() => {
-      void publishManagedMediaReferenceSnapshot().catch(() => undefined)
-    }, SNAPSHOT_DEBOUNCE_MS)
+    timer = setTimeout(scan, SNAPSHOT_DEBOUNCE_MS)
+  }
+  const onChatLoadingState = () => {
+    if (deferredSince !== undefined && !hasRunningScopedChatRequests()) schedule()
   }
   schedule()
   const reconcileTimer = setInterval(schedule, SNAPSHOT_RECONCILE_MS)
+  // Not on window focus: that is when the user comes back to send, and the scan has no reason
+  // to run then (start, the reconcile timer and other windows' storage writes cover it).
   window.addEventListener('storage', schedule)
-  window.addEventListener('focus', schedule)
+  window.addEventListener(CHAT_SESSION_LOADING_STATE_EVENT, onChatLoadingState)
   return () => {
     stopped = true
     if (timer) clearTimeout(timer)
+    timer = undefined
     clearInterval(reconcileTimer)
     window.removeEventListener('storage', schedule)
-    window.removeEventListener('focus', schedule)
+    window.removeEventListener(CHAT_SESSION_LOADING_STATE_EVENT, onChatLoadingState)
   }
 }
