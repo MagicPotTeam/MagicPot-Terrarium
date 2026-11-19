@@ -106,6 +106,8 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
     /** Team member requests only: throws once the member's team has ended. Helpers call it only before a
      * new model step or tool call starts, never after a result (so finished work is never relabelled). */
     assertTeamActive?: () => void
+    /** The same check for background sub-agent jobs (defaults to assertTeamActive). */
+    assertBackgroundTeamActive?: () => void
   }
 ): {
   request: T
@@ -254,7 +256,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
   if (!options.goalProgress && interactions && options.createSubagentClient && options.callSubagentReadTool) {
     jobs = createAgentThreadJobTools({
       request, invocation, assertInvocation, assertLive: assertActive, signal: interactions.signal, createClient: options.createSubagentClient,
-      assertTeamActive: options.assertTeamActive,
+      assertTeamActive: options.assertBackgroundTeamActive ?? options.assertTeamActive,
       listReadTools: () => options.listTools?.([...SUBAGENT_READ_TOOLS]) || [],
       callReadTool: options.callSubagentReadTool
     })

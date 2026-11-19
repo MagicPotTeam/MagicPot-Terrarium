@@ -7,6 +7,7 @@ import { AGENT_PROCESS_JOB_LIMITS as LIMITS, type AgentProcessJob, type AgentPro
 import { agentThreadInteractions, type AgentThreadInteractionChannel } from './agentThreadInteractions'
 import { authorizeAgentThreadScope } from './agentThreadScope'
 import type { ThreadProcessControl } from './agentThreadProcessHost'
+import { isApprovalContinuationRefusal } from '../magicAgentPlatform2/approvalContinuationGate'
 
 const ownerKey = (scope: AgentThreadInteractionScope, sender: number) => JSON.stringify([sender, getAgentSessionKey(scope.route), scope.conversationId])
 type Entry = {
@@ -72,9 +73,10 @@ export class AgentThreadProcesses {
           entry.control = control // Preserve handle even when cancellation/setup prevents successful start.
         })
         if (!entry.started) throw new Error('Process execution ended without an OS start event.')
-      } catch {
+      } catch (error) {
         entry.failed = true
-        notStarted(new Error('Background process did not start successfully; approval, configuration or execution failed.'))
+        // A start refused right after its approval (for example: the member's team ended) keeps its own reason.
+        notStarted(isApprovalContinuationRefusal(error) ? error : new Error('Background process did not start successfully; approval, configuration or execution failed.'))
       } finally {
         entry.settled = true; entry.finishedAt = Date.now(); signal.removeEventListener('abort', abort); finish()
         // Keep parent abort until normal release, but no process handle survives navigation.

@@ -15,7 +15,21 @@ export function runWithApprovalContinuationCheck<T>(
   return check ? continuationCheck.run(check, operation) : operation()
 }
 
+const refusals = new WeakSet<object>()
+
 /** Called right after an approval resolves. Throws the caller's error when its check refuses; a no-op otherwise. */
 export function assertApprovalContinuationAllowed(): void {
-  continuationCheck.getStore()?.()
+  const check = continuationCheck.getStore()
+  if (!check) return
+  try {
+    check()
+  } catch (error) {
+    if (typeof error === 'object' && error !== null) refusals.add(error)
+    throw error
+  }
+}
+
+/** True for the exact error a continuation check threw: wrappers pass it on unchanged instead of a generic failure. */
+export function isApprovalContinuationRefusal(error: unknown): error is Error {
+  return typeof error === 'object' && error !== null && refusals.has(error)
 }

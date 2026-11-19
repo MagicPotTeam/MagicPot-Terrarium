@@ -21,6 +21,7 @@ import type { CommandJobRecord } from '../magicAgentPlatform2/toolHost'
 import { closeAssistantTerminalPolicyRuntime, getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
 import { agentThreadHtmlApps } from './agentThreadHtmlApps'
 import { agentThreadJobs } from './agentThreadJobs'
+import { approveAgentNoteMutation } from './agentThreadNotes'
 import { closeAgentThreadNotesStore, getAgentThreadNotesStore } from './agentThreadNotesStore'
 import { agentThreadProcesses } from './agentThreadProcesses'
 import type { ThreadScriptInvocation } from './agentThreadScriptTools'
@@ -248,5 +249,89 @@ describe('a member tool that waits for approval when End is recorded', () => {
     expect((await getAgentThreadNotesStore()).get(scope)).toMatchObject({ revision: 1, notes: [{ key: 'plan', value: 'APPROVED_NOTE' }] })
     expect(parent).toHaveBeenCalledTimes(2)
     if (!member) expect(mocks.assertActive).not.toHaveBeenCalled()
+  })
+})
+
+describe('an approval refused by End inside a wrapped tool still counts as an End cut', () => {
+  const policy = () => getAssistantTerminalPolicyRuntime()
+  /** An inert in-memory process that runs until its signal aborts. */
+  const inertStart = (signals: AbortSignal[]) => async (call: ThreadScriptInvocation) => {
+    signals.push(call.signal)
+    let record: CommandJobRecord = { jobId: 'inert-' + signals.length, routeKey: JSON.stringify(route), sessionId: scope.conversationId, command: 'python', args: [], cwd: process.cwd(), createdAt: 1, state: 'running', outcome: 'unknown', stdoutBytes: 0, stderrBytes: 0, logsTruncated: false }
+    const control = { jobId: record.jobId, status: () => ({ ...record }), read: () => ({ data: '', nextCursor: 0, eof: false, truncated: false }), stop: async () => { record = { ...record, state: 'stopped', outcome: 'known' }; return record } }
+    call.onOwned?.(control); call.onStarted?.(control)
+    await new Promise(resolve => call.signal.addEventListener('abort', resolve, { once: true }))
+    await control.stop()
+    return {}
+  }
+  it.each([
+    ['python.background', { code: 'print(2)' }],
+    ['asset.import', { path: 'x.png' }],
+    ['comfyui.workflow.submit', { workflow: { '1': { class_type: 'SaveImage', inputs: {} } } }]
+  ] as const)('%s approved after End: not started, the turn ends with "Team has ended." and keeps its work', async (tool, args) => {
+    const signals: AbortSignal[] = []
+    let refusedStart = false
+    const earlierProcess = tool !== 'python.background' // one background process per conversation at a time
+    if (earlierProcess) mocks.script.mockImplementationOnce(inertStart(signals))
+    else mocks.script.mockImplementationOnce(async (call: ThreadScriptInvocation) => {
+      // Like the real script host: formal approval first, then the OS start.
+      await approveAgentNoteMutation({ route, conversationId: scope.conversationId, action: 'set', key: 'process', value: 'start', expectedRevision: 0, operationId: 'process-start' }, call.signal)
+      refusedStart = true
+      return inertStart(signals)(call)
+    })
+    model([
+      async params => toolCall(params, 'critic', { task: 'Review the plan', run_in_background: true }, 'start-job'),
+      async params => toolCall(params, 'show_app', { title: 'Plan', html: '<p>plan</p>' }, 'prepare-app'),
+      ...(earlierProcess ? [async (params: LLMChatParams) => toolCall(params, 'python.background', { code: 'print(1)' }, 'earlier-process')] : []),
+      async params => {
+        await vi.waitFor(() => expect(jobs()[0]?.status).toBe('completed'))
+        return toolCall(params, tool, args, 'needs-approval')
+      },
+      async () => 'not reached'
+    ])
+    const service = new LLMProxySvcImpl()
+    const turn = service.chat(request(), invoke('chat')).then(() => 'resolved', (error: Error) => error.message)
+    await vi.waitFor(() => expect(policy().listPendingTerminalApprovals()).toHaveLength(1), { timeout: 8000 })
+    mocks.assertActive.mockImplementation(ended) // End is recorded while the approval card is open
+    const item = policy().listPendingTerminalApprovals()[0]
+    policy().resolvePendingTerminalApproval({ approvalId: item.approvalId, expectedRevision: item.revision, approved: true })
+    expect(await turn).toBe('Team has ended.')
+    expect(refusedStart).toBe(false)
+    expect(report(jobs()[0].id)).toMatchObject({ job: { status: 'completed' }, text: expect.stringContaining('Background report: the plan holds.') })
+    expect((await service.listAgentHtmlApps(scope, invoke('listAgentHtmlApps'))).apps.map(app => app.status)).toEqual(['ready'])
+    if (earlierProcess) {
+      expect(signals).toHaveLength(1)
+      expect(signals[0].aborted).toBe(false)
+      expect(agentThreadProcesses.list(scope, invoke('listAgentProcesses'), 'listAgentProcesses').map(job => job.status)).toEqual(['running'])
+    } else expect(signals).toHaveLength(0)
+  })
+  it.each(['chat', 'chatStream'] as const)('does not count a background job\'s End refusal as a cut of a turn that fails for another reason (%s)', async method => {
+    const signals: AbortSignal[] = []
+    mocks.script.mockImplementationOnce(inertStart(signals))
+    // The background child gets one read tool, so its next read passes its own End check first.
+    const readTool = { name: 'files.read', description: 'Read text', inputSchema: { type: 'object', additionalProperties: false, required: ['path'], properties: { path: { type: 'string' } } } }
+    mocks.listTools.mockImplementation((names?: string[]) => names?.includes('files.read') ? [readTool] : [])
+    let releaseChild!: (value: unknown) => void
+    const childStep = new Promise(resolve => { releaseChild = resolve })
+    const parent = vi.fn<Step>()
+    parent.mockImplementationOnce(async params => toolCall(params, 'python.background', { code: 'print(1)' }, 'earlier-process'))
+      .mockImplementationOnce(async params => toolCall(params, 'explore', { task: 'Investigate', run_in_background: true }, 'start-job'))
+      .mockImplementationOnce(async () => {
+        // End is recorded; the background job meets it at its next read and fails; then this step fails on its own.
+        mocks.assertActive.mockImplementation(ended)
+        releaseChild({ content: '', toolCalls: [{ id: 'child-read', name: 'files.read', wireName: 'mp_tool_0', arguments: JSON.stringify({ path: 'readme.md' }) }] })
+        await vi.waitFor(() => expect(jobs()[0]?.status).toBe('failed'))
+        throw new Error('provider failed')
+      })
+    const chat = vi.fn(async (params: LLMChatParams) => String(params.conversationId).startsWith('subagent-') ? childStep : parent(params))
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true, supportsIsolatedReadOnlyTurns: true } as never)
+    const onData = vi.fn()
+    if (method === 'chat') await expect(new LLMProxySvcImpl().chat(request(), invoke('chat'))).rejects.toThrow('provider failed')
+    else {
+      await new LLMProxySvcImpl().chatStream(request(), { onData }, invoke('chatStream'))
+      expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', error: 'provider failed' }))
+    }
+    expect(signals).toHaveLength(1)
+    expect(signals[0].aborted).toBe(true) // disposed as a failed turn: its process is stopped, as before
   })
 })

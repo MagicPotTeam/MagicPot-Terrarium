@@ -8,6 +8,7 @@ import type {
   MagicAgentCreativeToolPermissionLevel,
   MagicAgentCreativeToolResult
 } from './types'
+import { isApprovalContinuationRefusal } from '../../magicAgentPlatform2/approvalContinuationGate'
 
 type ToolSpec = {
   name: string
@@ -137,6 +138,8 @@ export const prepareCreativeToolDispatch = async (
       )
       dispatchContext.signal?.throwIfAborted()
     } catch (error) {
+      // Approved, but its caller refused to continue (for example: the member's team ended): pass that reason on.
+      if (isApprovalContinuationRefusal(error)) throw error
       return {
         prepared: false,
         result: {

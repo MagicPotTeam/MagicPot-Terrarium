@@ -234,6 +234,8 @@ type ChatExecutionOptions = LLMChatOptions & {
     signal?: AbortSignal
   }) => Promise<{ content: string; metadata?: Record<string, unknown> }>
   onDelta?: (event: LLMDeltaEvent) => void
+  /** Member requests (chat/chatStream): the turn's own End check, which records that the turn was cut by End. */
+  teamEndCheck?: () => void
 }
 
 export type ManagedRealChatContext = Readonly<{ config: Config; assertCurrent: () => void; retainRawWork: ProviderRawWorkRetainer }>
@@ -1260,18 +1262,29 @@ const listRequestTools = (
   })
 }
 
-// The End errors that the in-turn checks of a member request threw. A turn that fails with one of them was cut by its
-// team's End (not by Stop or a provider error) and keeps what it already started or finished.
-const teamEndCuts = new WeakSet<object>()
-const assertMemberTeamActive = (req: { teamMember?: LLMChatReq['teamMember'] }): void => {
-  try {
-    assertTeamRequestActive(req)
-  } catch (error) {
-    if (error instanceof Error && error.message === 'Team has ended.') teamEndCuts.add(error)
-    throw error
+/**
+ * The End checks of one member turn (absent for other requests). `check` serves the turn's own checks (loop, batch,
+ * retry notice, foreground helpers, approval continuation) and records when the store refuses because the team ended:
+ * such a turn was cut by End and keeps what it already started or finished. A provider error with the same text, Stop,
+ * a timeout or the budget error never pass through it. `background` serves background jobs, whose refusal never fails
+ * the turn, so it records nothing.
+ */
+const createMemberTeamChecks = (entered: LLMChatReq) => {
+  if (!Object.hasOwn(entered, 'teamMember')) return undefined
+  let cut = false
+  return {
+    check: (): void => {
+      try {
+        assertTeamRequestActive(entered)
+      } catch (error) {
+        if (error instanceof Error && error.message === 'Team has ended.') cut = true
+        throw error
+      }
+    },
+    background: (): void => assertTeamRequestActive(entered),
+    cutByEnd: (): boolean => cut
   }
 }
-const isTeamEndCut = (error: unknown): boolean => typeof error === 'object' && error !== null && teamEndCuts.has(error)
 
 const tryHandleSkillRuntimeToolCommand = async (
   req: LLMChatReq,
@@ -2469,9 +2482,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     options?: ChatExecutionOptions & Partial<ServiceInvocationContext>
   ): Promise<LLMChatResp> => {
     assertTeamRequestActive(req)
-    // Helper loops re-check End from the request as it entered; requests without teamMember get none.
-    const entered = req
-    const assertTeamActive = Object.hasOwn(entered, 'teamMember') ? () => assertMemberTeamActive(entered) : undefined
+    // The turn's End checks, built from the request as it entered; requests without teamMember get none.
+    const teamChecks = createMemberTeamChecks(req)
     req = ensureCorrelationId(req)
     const abortContext = this.createConversationAbortContext(
       req.conversationId,
@@ -2483,7 +2495,6 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let canvas: ReturnType<typeof prepareCanvasAgentTools> | undefined
     let detachDocumentAbort: (() => void) | undefined
     let successful = false
-    let endedByTeam = false
     let goalProgress: AgentGoalProgressContext | undefined
     try {
       // Before goal progress, provider, worker or canvas tool set-up.
@@ -2524,7 +2535,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           createMemoryClient,
         commitMemoryFile: (provider, args, child) => getAssistantRuntime().callTool(parentRoute, 'memory.files.write', args, { allowedToolNames: ['memory.files.write'], toolProvider: provider, signal: child.signal, runId: child.runId, toolCallId: child.toolCallId }),
         createSubagentClient,
-          assertTeamActive,
+          assertTeamActive: teamChecks?.check,
+          assertBackgroundTeamActive: teamChecks?.background,
           callSubagentReadTool: (name, args, child, assertDocument) => {
             if (!SUBAGENT_READ_TOOLS.includes(name as typeof SUBAGENT_READ_TOOLS[number]) || getConfig().use_remote_llm) throw new Error('Sub-agent tool is unavailable.')
             return canvas!.readAdmission!.run(name, child.signal, () => getAssistantRuntime().callTool(parentRoute, name, args, {
@@ -2572,6 +2584,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         imageToolAttachments: canvas.imageAttachments,
         assertSkillContext: canvas.assertSkillContext,
         goalProgress,
+        teamEndCheck: teamChecks?.check,
         signal: goalProgress?.signal ?? abortContext.signal
       })
       goalProgress?.assertLive()
@@ -2584,7 +2597,6 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           : new Error(
               'LLM request failed: ' + (typeof e === 'object' ? JSON.stringify(e) : String(e))
             )
-      endedByTeam = isTeamEndCut(e)
       console.error('[LLMProxy] chat failed at the top level:', err.message)
       // Only this final IPC-facing exit projects the typed reported failure.
       // Direct MAIN callers and chatStream keep their original throw contract.
@@ -2593,7 +2605,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       throw err
     } finally {
       detachDocumentAbort?.()
-      canvas?.dispose?.(successful || (endedByTeam ? 'ended' : false))
+      canvas?.dispose?.(successful || (teamChecks?.cutByEnd() ? 'ended' : false))
       goalProgress?.dispose()
       abortContext.cleanup()
     }
@@ -3039,8 +3051,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           timeout: { deadlineMs: MODEL_INVOCATION_DEFAULT_DEADLINE_MS }
         }
       )
-    // A member's tool that waits for approval re-checks End once the approval resolves (none for other requests).
-    const approvalContinuation = Object.hasOwn(req, 'teamMember') ? () => assertMemberTeamActive(req) : undefined
+    // The turn's own End check (a no-op without teamMember). A member's tool that waits for approval re-checks End once
+    // the approval resolves; other requests carry no continuation check.
+    const teamEndCheck = options?.teamEndCheck ?? (() => assertTeamRequestActive(req))
+    const approvalContinuation = Object.hasOwn(req, 'teamMember') ? teamEndCheck : undefined
     const emitToolStatus = (toolStatus: LLMToolStatus): void => {
       if (options?.signal?.aborted) return
       options?.onDelta?.({
@@ -3058,7 +3072,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         throwIfAborted(options?.signal)
         // No new model step (also the native fallback and protocol correction) once the
         // member's team has ended; a step already sent is never recalled.
-        assertMemberTeamActive(req)
+        teamEndCheck()
         restricted?.assertCurrent()
         options?.assertSkillContext?.()
         if (modelStepCount >= MAX_AGENT_MODEL_STEPS) {
@@ -3099,7 +3113,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             onDelta: capped || restricted || failedEditExplanation ? undefined : (event) => {
               options?.goalProgress?.assertLive()
               // A capacity retry is a new provider request: refuse it after End.
-              if (event.type === 'retry') assertMemberTeamActive(req)
+              if (event.type === 'retry') teamEndCheck()
               if (
                 (event.type === 'text-delta' && event.delta) ||
                 event.type === 'attachment' ||
@@ -3244,7 +3258,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         for (const [requestedIndex, requestedTool] of requested.entries()) {
           throwIfAborted(options?.signal)
           // No new tool call after End: it leaves no receipt, finished calls keep theirs.
-          assertMemberTeamActive(req)
+          teamEndCheck()
           const toolCallId = `${runId}:tool:${batchStep + requestedIndex}`
           const toolOptions = {
             allowedToolNames,
@@ -3517,9 +3531,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     invocation?: ServiceInvocationContext
   ): Promise<void> => {
     assertTeamRequestActive(req)
-    // Helper loops re-check End from the request as it entered; requests without teamMember get none.
-    const entered = req
-    const assertTeamActive = Object.hasOwn(entered, 'teamMember') ? () => assertMemberTeamActive(entered) : undefined
+    // The turn's End checks, built from the request as it entered; requests without teamMember get none.
+    const teamChecks = createMemberTeamChecks(req)
     req = ensureCorrelationId(req)
     // Normalize once at the trusted main boundary. Structured streaming is
     // gated until its complete response satisfies this detached contract.
@@ -3540,7 +3553,6 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let detachDocumentAbort: (() => void) | undefined
     let localGoalProgress: AgentGoalProgressContext | undefined
     let localCanvasSuccess = false
-    let localCanvasEndedByTeam = false
     let streamedText = ''
     let lastSessionUrl = req.sessionUrl?.trim() || undefined
     const seenAttachmentKeys = new Set<string>()
@@ -4281,7 +4293,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         createMemoryClient,
         commitMemoryFile: (provider, args, child) => getAssistantRuntime().callTool(parentRoute, 'memory.files.write', args, { allowedToolNames: ['memory.files.write'], toolProvider: provider, signal: child.signal, runId: child.runId, toolCallId: child.toolCallId }),
         createSubagentClient,
-        assertTeamActive,
+        assertTeamActive: teamChecks?.check,
+        assertBackgroundTeamActive: teamChecks?.background,
         callSubagentReadTool: (name, args, child, assertDocument) => {
           if (!SUBAGENT_READ_TOOLS.includes(name as typeof SUBAGENT_READ_TOOLS[number]) || getConfig().use_remote_llm) throw new Error('Sub-agent tool is unavailable.')
           return canvas.readAdmission!.run(name, child.signal, () => getAssistantRuntime().callTool(parentRoute, name, args, {
@@ -4307,6 +4320,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         assertSkillContext: canvas.assertSkillContext,
         readExternalFile,
         goalProgress: localGoalProgress,
+        teamEndCheck: teamChecks?.check,
         signal: localGoalProgress?.signal ?? abortContext.signal,
         onDelta: emitEvent
       })
@@ -4406,14 +4420,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         emitCancelledTerminal()
         return
       }
-      localCanvasEndedByTeam = isTeamEndCut(error)
       const message = isTrustedProviderJsonBudgetError(error)
         ? 'Provider request exceeds the size limit. Remove some attachments or send fewer images per message.'
         : boundRemoteErrorDetail(error instanceof Error ? error.message : String(error))
       emitErrorTerminal(message, error)
     } finally {
       detachDocumentAbort?.()
-      localCanvas?.dispose?.(localCanvasSuccess || (localCanvasEndedByTeam ? 'ended' : false))
+      localCanvas?.dispose?.(localCanvasSuccess || (teamChecks?.cutByEnd() ? 'ended' : false))
       localGoalProgress?.dispose()
       cleanupRemoteStream?.()
       cleanupRemoteStream = undefined
