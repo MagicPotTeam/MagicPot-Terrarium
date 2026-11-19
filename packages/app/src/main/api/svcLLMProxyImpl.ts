@@ -1,6 +1,7 @@
 import { AgentTeamMessageQueue } from './agentTeamMessageQueue'
 import type { AgentTeamMessageClaim, AgentTeamMessageQueueScope } from '@shared/api/agentTeamMessage'
 import { assertTeamRequestActive, getTeamEndStore } from './teamEndStore'
+import { runWithApprovalContinuationCheck } from '../magicAgentPlatform2/approvalContinuationGate'
 import type { LLMTeamIdentity } from '@shared/api/svcLLMProxy'
 import {
   registerManagedTextFirstRunService,
@@ -1332,9 +1333,11 @@ const tryHandleSkillRuntimeToolCommand = async (
   )
   // The explicit tool is a new start: none after the member's team has ended.
   assertTeamRequestActive(req)
-  const toolResult = options?.canvasToolAdmission
-    ? await options.canvasToolAdmission.run(command.toolName, options.signal, execute)
-    : await execute()
+  // A member's tool that waits for approval re-checks End once the approval resolves.
+  const toolResult = await runWithApprovalContinuationCheck(Object.hasOwn(req, 'teamMember') ? () => assertTeamRequestActive(req) : undefined, () =>
+    options?.canvasToolAdmission
+      ? options.canvasToolAdmission.run(command.toolName, options.signal, execute)
+      : execute())
 
   const images = options?.imageToolAttachments?.()
   return {
@@ -3036,6 +3039,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           timeout: { deadlineMs: MODEL_INVOCATION_DEFAULT_DEADLINE_MS }
         }
       )
+    // A member's tool that waits for approval re-checks End once the approval resolves (none for other requests).
+    const approvalContinuation = Object.hasOwn(req, 'teamMember') ? () => assertMemberTeamActive(req) : undefined
     const emitToolStatus = (toolStatus: LLMToolStatus): void => {
       if (options?.signal?.aborted) return
       options?.onDelta?.({
@@ -3291,13 +3296,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
                     requestedTool.args,
                     toolOptions
                   )
-            const toolResult = options?.canvasToolAdmission
-              ? await options.canvasToolAdmission.run(
-                  requestedTool.toolName,
-                  options.signal,
-                  execute
-                )
-              : await execute()
+            const toolResult = await runWithApprovalContinuationCheck(approvalContinuation, () =>
+              options?.canvasToolAdmission
+                ? options.canvasToolAdmission.run(requestedTool.toolName, options.signal, execute)
+                : execute())
             record.status = 'completed'
             record.content = toolResult.content
             if (toolResult.metadata)

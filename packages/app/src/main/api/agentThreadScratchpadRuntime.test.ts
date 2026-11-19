@@ -11,6 +11,7 @@ import { closeAssistantTerminalPolicyRuntime, getAssistantTerminalPolicyRuntime 
 import { clearMagicAgentTrustedRouteBindingsForTest, registerMagicAgentTrustedRouteBinding } from '../magicAgentRuntime/trustedRouteBinding'
 import { prepareCanvasAgentTools } from './canvasAgentTools'
 import { closeAgentThreadNotesStore, getAgentThreadNotesStore } from './agentThreadNotesStore'
+import { runWithApprovalContinuationCheck } from '../magicAgentPlatform2/approvalContinuationGate'
 vi.mock('fs/promises', async () => { const { fs } = await import('memfs'); return { ...fs.promises, default: fs.promises } })
 vi.mock('fs', async () => { const { fs } = await import('memfs'); return { ...fs, default: fs } })
 const h = vi.hoisted(() => ({ fromId: vi.fn(), parent: vi.fn() }))
@@ -73,6 +74,29 @@ describe('real Canvas + runtime + durable adapter + scratchpad (memfs/Electron s
     expect(policy.listPendingTerminalApprovals()).toEqual([]); expect(mutate).toHaveBeenCalledOnce()
     expect((await reopened.getSession(route))?.eventLog.map(event => actionType(event.metadata?.agentAction))).toEqual(['tool.invoke'])
     await reopened.flush()
+  })
+  it('starts no approved write when its caller refuses to continue after the approval, and honours it otherwise', async () => {
+    const notes = await getAgentThreadNotesStore(), mutate = vi.spyOn(notes, 'mutate'), policy = getAssistantTerminalPolicyRuntime()
+    let teamEnded = false
+    const check = vi.fn(() => { if (teamEnded) throw new Error('Team has ended.') })
+    const callAs = (args: Record<string, unknown>, toolCallId: string) => runWithApprovalContinuationCheck(check, () => prepared.admission!.run('scratchpad', undefined, () => runtime.callTool(route, 'scratchpad', args, { runId: 'notes-owned-run', toolCallId, allowedToolNames: prepared.request.skillRuntime!.bindings![0].toolNames, toolProvider: prepared.toolProvider })))
+    const approveWhen = async (decide: () => void) => {
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+      decide()
+      const item = policy.listPendingTerminalApprovals()[0]
+      policy.resolvePendingTerminalApproval({ approvalId: item.approvalId, expectedRevision: item.revision, approved: true })
+    }
+    // The member's team ends while the user decides; the user then approves: the write does not start.
+    const refused = callAs({ action: 'set', key: 'after-end', value: 'MUST_NOT_BE_WRITTEN', expectedRevision: 0 }, 'after-end-call')
+    await approveWhen(() => { teamEnded = true })
+    await expect(refused).rejects.toThrow('Team has ended.')
+    expect(mutate).not.toHaveBeenCalled(); expect(notes.get(scope)).toEqual({ revision: 0, notes: [] })
+    // While the team is active the same approval is honoured exactly as before.
+    teamEnded = false
+    const honoured = callAs({ action: 'set', key: 'active', value: 'WRITTEN_AFTER_APPROVAL', expectedRevision: 0 }, 'active-call')
+    await approveWhen(() => undefined)
+    expect(JSON.parse((await honoured).content)).toMatchObject({ revision: 1, keys: ['active'] })
+    expect(mutate).toHaveBeenCalledOnce(); expect(check).toHaveBeenCalledTimes(2)
   })
   it('cannot borrow another provider owner or bypass original Canvas admission for reads or writes', async () => {
     const other = prepareCanvasAgentTools({ ...scope, messages: [] }, invocation, { local: true, terminalEnabled: false })

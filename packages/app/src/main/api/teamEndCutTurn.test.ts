@@ -18,8 +18,10 @@ import type { LLMChatParams } from '@shared/llm/types'
 import { getConfig } from '../config/config'
 import { clearMagicAgentTrustedRouteBindingsForTest, registerMagicAgentTrustedRouteBinding } from '../magicAgentRuntime/trustedRouteBinding'
 import type { CommandJobRecord } from '../magicAgentPlatform2/toolHost'
+import { closeAssistantTerminalPolicyRuntime, getAssistantTerminalPolicyRuntime } from '../magicAgentPlatform2/productionRuntime'
 import { agentThreadHtmlApps } from './agentThreadHtmlApps'
 import { agentThreadJobs } from './agentThreadJobs'
+import { closeAgentThreadNotesStore, getAgentThreadNotesStore } from './agentThreadNotesStore'
 import { agentThreadProcesses } from './agentThreadProcesses'
 import type { ThreadScriptInvocation } from './agentThreadScriptTools'
 import { LLMProxySvcImpl } from './svcLLMProxyImpl'
@@ -41,10 +43,14 @@ beforeEach(() => {
   config.project_trace_config.enable_agent_python_notebook = true
   config.llm_config.api_profiles = [{ id: 'member-profile', provider: 'openai', deployment: 'local', call_type: 'api', model_use: 'chat', api_mode: 'chat-completions', model_name: 'Member Model', base_url: 'https://example.invalid/v1', api_key: 'not-used' }]
   vi.mocked(getConfig).mockReturnValue(config); mocks.listTools.mockReturnValue([])
-  mocks.callTool.mockImplementation((r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId, toolCallId: options.toolCallId, signal: options.signal, workspaceRootDir: process.cwd() }))
+  // Like the real runtime, an explicit /tool call gets its own run identity when the caller has none.
+  mocks.callTool.mockImplementation((r, name, args, options) => options.toolProvider.callTool(name, args, { route: r, runId: options.runId ?? 'explicit-run', toolCallId: options.toolCallId ?? 'explicit-call', signal: options.signal, workspaceRootDir: process.cwd() }))
   mocks.launch.mockImplementation(async (_doc, options) => ({ closed: false, update: vi.fn(), close: vi.fn(async () => { options.onClosed(true); return { confirmed: true } }) }))
 })
-afterEach(async () => { agentThreadJobs.dispose(); await agentThreadProcesses.dispose(); await agentThreadHtmlApps.dispose(); clearMagicAgentTrustedRouteBindingsForTest(); vi.restoreAllMocks() })
+afterEach(async () => {
+  agentThreadJobs.dispose(); await agentThreadProcesses.dispose(); await agentThreadHtmlApps.dispose()
+  await closeAgentThreadNotesStore(); closeAssistantTerminalPolicyRuntime(); clearMagicAgentTrustedRouteBindingsForTest(); vi.restoreAllMocks()
+})
 
 type Step = (params: LLMChatParams) => Promise<unknown>
 /** The fake model: sub-agent children answer with a report, the parent follows the given steps. */
@@ -191,5 +197,56 @@ describe('a member turn cut by End keeps what it already started or finished', (
     const items = await service.listAgentHtmlApps(scope, invoke('listAgentHtmlApps'))
     expect(items.apps).toHaveLength(1)
     expect(items.apps[0].status).toBe(endCut ? 'ready' : 'closed')
+  })
+})
+
+describe('a member tool that waits for approval when End is recorded', () => {
+  const policy = () => getAssistantTerminalPolicyRuntime()
+  async function approveWhenPending(beforeApproval: () => void) {
+    await vi.waitFor(() => expect(policy().listPendingTerminalApprovals()).toHaveLength(1))
+    beforeApproval()
+    const item = policy().listPendingTerminalApprovals()[0]
+    policy().resolvePendingTerminalApproval({ approvalId: item.approvalId, expectedRevision: item.revision, approved: true })
+  }
+  const note = { action: 'set', key: 'plan', value: 'APPROVED_NOTE', expectedRevision: 0 }
+  it('does not start the tool the user approves after End, and keeps the turn\'s finished job report', async () => {
+    model([
+      async params => toolCall(params, 'critic', { task: 'Review the plan', run_in_background: true }, 'start-job'),
+      async params => {
+        await vi.waitFor(() => expect(jobs()[0]?.status).toBe('completed'))
+        return toolCall(params, 'scratchpad', note, 'write-note')
+      },
+      async () => 'not reached'
+    ])
+    const turn = new LLMProxySvcImpl().chat(request(), invoke('chat')).then(() => 'resolved', (error: Error) => error.message)
+    await approveWhenPending(() => mocks.assertActive.mockImplementation(ended))
+    expect(await turn).toBe('Team has ended.')
+    expect((await getAgentThreadNotesStore()).get(scope)).toEqual({ revision: 0, notes: [] })
+    expect(report(jobs()[0].id)).toMatchObject({ job: { status: 'completed' }, text: expect.stringContaining('Background report: the plan holds.') })
+  })
+  it('does not start an explicit /tool command the user approves after End', async () => {
+    const { chat } = model([])
+    const command = request({ messages: [{ role: 'user' as const, content: `/tool scratchpad ${JSON.stringify(note)}` }] })
+    const turn = new LLMProxySvcImpl().chat(command, invoke('chat')).then(() => 'resolved', (error: Error) => error.message)
+    await approveWhenPending(() => mocks.assertActive.mockImplementation(ended))
+    expect(await turn).toBe('Team has ended.')
+    expect((await getAgentThreadNotesStore()).get(scope)).toEqual({ revision: 0, notes: [] })
+    expect(chat).not.toHaveBeenCalled()
+  })
+  it.each([
+    ['an active team', true],
+    ['a request without teamMember (the End store is never read)', false]
+  ] as const)('honours the approval exactly as before for %s', async (_label, member) => {
+    const { parent } = model([
+      async params => toolCall(params, 'scratchpad', note, 'write-note'),
+      async () => 'Noted.'
+    ])
+    const { teamMember: _team, ...ordinary } = request()
+    const turn = new LLMProxySvcImpl().chat(member ? request() : ordinary, invoke('chat'))
+    await approveWhenPending(() => { if (!member) mocks.assertActive.mockImplementation(ended) })
+    expect((await turn).content).toBe('Noted.')
+    expect((await getAgentThreadNotesStore()).get(scope)).toMatchObject({ revision: 1, notes: [{ key: 'plan', value: 'APPROVED_NOTE' }] })
+    expect(parent).toHaveBeenCalledTimes(2)
+    if (!member) expect(mocks.assertActive).not.toHaveBeenCalled()
   })
 })

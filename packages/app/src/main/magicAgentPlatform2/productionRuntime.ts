@@ -19,6 +19,7 @@ import {
   type PolicyRequest,
   type PolicyRule
 } from '../../shared/magicAgentPlatform2'
+import { assertApprovalContinuationAllowed } from './approvalContinuationGate'
 import { MagicAgentEventStore } from './persistence'
 import { MagicAgentPolicyAuthorizationService } from './policy'
 import {
@@ -544,7 +545,12 @@ export const getAssistantTerminalPolicyRuntime = (): AssistantTerminalPolicyRunt
     eventStore: store,
     authorization,
     createTrustedApproval,
-    requestTerminalApproval: (request, signal) => approvals.request(request, undefined, signal),
+    requestTerminalApproval: async (request, signal) => {
+      const reference = await approvals.request(request, undefined, signal)
+      // The approved tool has not started yet: its caller may still refuse to continue (a team that ended meanwhile).
+      assertApprovalContinuationAllowed()
+      return reference
+    },
     requestTerminalApprovalWithSnapshot: (request, graphContext, signal) =>
       approvals.requestWithSnapshot(request, graphContext, signal),
     listPendingTerminalApprovals: () => approvals.list(),
