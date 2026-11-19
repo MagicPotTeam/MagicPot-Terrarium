@@ -11,6 +11,7 @@ import {
   initializeLocalMediaAccess,
   resolveAuthorizedLocalMediaPath
 } from './localMediaAccess'
+import { normalizeLocalFilePath } from './utils/localFileUrl'
 
 const cleanupPaths: string[] = []
 
@@ -248,6 +249,41 @@ describe('local media access policy', () => {
       withPlatform('win32', () => {
         expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}`, [root])).toBeNull()
       })
+    }
+  )
+
+  // The protocol handler's whole check on POSIX, from the URL Chromium hands over (the first
+  // path segment as the host) to the policy answer.
+  it.skipIf(process.platform === 'win32')(
+    'keeps encoded separators and traversal in a POSIX local-media URL inside the roots',
+    () => {
+      const root = makeTempDir('magicpot-media-root-')
+      const outside = makeTempDir('magicpot-media-outside-')
+      const mediaPath = path.join(root, 'canvas-thumbnails', '512 level.webp')
+      const secretPath = path.join(outside, 'secret.txt')
+      fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+      fs.writeFileSync(mediaPath, 'image')
+      fs.writeFileSync(secretPath, 'secret')
+      const canonicalMediaPath = path.resolve(fs.realpathSync.native(mediaPath))
+      const encodePath = (filePath: string) => filePath.split('/').map(encodeURIComponent).join('/')
+      const authorize = (url: string) =>
+        hasLocalMediaTraversal(url)
+          ? null
+          : resolveAuthorizedLocalMediaPath(normalizeLocalFilePath(url), [root])
+
+      for (const platform of ['linux', 'darwin'] as const) {
+        withPlatform(platform, () => {
+          expect(authorize(`local-media:/${encodePath(mediaPath)}`)).toBe(canonicalMediaPath)
+          // A whole outside path packed into the host with encoded separators.
+          expect(authorize(`local-media://${encodeURIComponent(secretPath.slice(1))}`)).toBeNull()
+          expect(authorize(`local-media:/${encodePath(secretPath)}`)).toBeNull()
+          // Traversal out of the root, plain, encoded and double-encoded.
+          const escape = `${path.basename(outside)}/secret.txt`
+          expect(authorize(`local-media:/${encodePath(root)}/../${escape}`)).toBeNull()
+          expect(authorize(`local-media:/${encodePath(root)}%2F..%2F${escape}`)).toBeNull()
+          expect(authorize(`local-media:/${encodePath(root)}/%252e%252e/${escape}`)).toBeNull()
+        })
+      }
     }
   )
 
