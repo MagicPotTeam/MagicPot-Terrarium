@@ -1108,7 +1108,7 @@ const buildImageChatAttachmentFromFile = async (
             revokeBlobUrl(previewUrl)
           }
         })()))
-  return importChatAttachment({
+  const attachment = await importChatAttachment({
     service: api().svcManagedMedia,
     file,
     type: 'image',
@@ -1116,6 +1116,10 @@ const buildImageChatAttachmentFromFile = async (
     relativePath: options?.relativePath,
     dimensions
   })
+  // A slow but working source: the size from the managed copy main made, as for URL drops.
+  return header === CHAT_IMAGE_HEADER_READ_TIMED_OUT
+    ? { ...attachment, ...(await readImageDimensionsFromUrl(attachment.url)) }
+    : attachment
 }
 
 /**

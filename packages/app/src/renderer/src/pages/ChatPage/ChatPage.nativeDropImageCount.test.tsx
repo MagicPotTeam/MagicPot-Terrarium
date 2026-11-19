@@ -1026,6 +1026,51 @@ describe('a picked file on a stalled mount', () => {
     Object.defineProperty(window, 'electronFile', { configurable: true, value: originalElectronFile })
   })
 
+  it('takes the size from the managed copy when the header read of a slow source gives up', async () => {
+    await setup()
+    const file = new File(['x'], 'slow.png', { type: 'image/png' })
+    Object.defineProperty(file, 'slice', {
+      value: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(() => undefined) })
+    })
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        getPathForFile: () => '/mnt/nas/slow.png',
+        authorizeLocalMediaFileForImport: async () => ({ path: '/mnt/nas/slow.png' })
+      }
+    })
+    f.importFile.mockResolvedValue({
+      localMediaUrl: 'local-media://imported/slow.png',
+      reference: { version: 1, kind: 'managed', relativePath: 'slow.png', status: 'ready' }
+    })
+    const sources: string[] = []
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 640
+        naturalHeight = 360
+        onload: (() => void) | null = null
+        set src(value: string) {
+          sources.push(value)
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer([file]) })
+    await waitFor(
+      () =>
+        expect(
+          (
+            JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
+          ).find((attachment) => attachment.fileName === 'slow.png')
+        ).toMatchObject({ sourceWidth: 640, sourceHeight: 360 }),
+      { timeout: 8000 }
+    )
+    // Decoded from main's copy, never from the slow file itself.
+    expect(sources).toEqual(['local-media://imported/slow.png'])
+    expect(f.blob).not.toHaveBeenCalled()
+  }, 15_000)
+
   it('shows the timeout notice and reads nothing itself when neither the header nor main answers', async () => {
     await setup()
     const file = new File(['x'], 'nas.png', { type: 'image/png' })
