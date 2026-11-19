@@ -1355,12 +1355,21 @@ export async function loadSessionPreviewSummaries(
  * managed-media reference scan, whose result authorises deletion, so it must see at least every
  * record a scoped loader can see). One read-only transaction and one cursor: only the record
  * being visited is held. Rejects on any read error, and with the visitor's own error after which
- * no further record is visited.
+ * no further record is visited. A failed walk leaves the shared connection and the scopes'
+ * summary indexes alone: a record only this walk reads must not disturb every open conversation.
  */
 export async function forEachStoredChatRecord(visit: (record: unknown) => void): Promise<void> {
+  let db: IDBDatabase
+  try {
+    db = await openDB()
+  } catch (error) {
+    // No working connection to keep: let the next caller open the database afresh.
+    const storageError = createStorageError(error, 'IndexedDB failed to open the chat store.')
+    await handleStorageFailure(storageError, 'forEachStoredChatRecord failed')
+    throw storageError
+  }
   let visitorFailure: { error: unknown } | undefined
   try {
-    const db = await openDB()
     await new Promise<void>((resolve, reject) => {
       let settled = false
       const fail = (error: unknown): void => {
@@ -1401,9 +1410,7 @@ export async function forEachStoredChatRecord(visit: (record: unknown) => void):
     })
   } catch (error) {
     if (visitorFailure) throw visitorFailure.error
-    const storageError = createStorageError(error, 'IndexedDB failed to read the chat store.')
-    await handleStorageFailure(storageError, 'forEachStoredChatRecord failed')
-    throw storageError
+    throw createStorageError(error, 'IndexedDB failed to read the chat store.')
   }
 }
 
