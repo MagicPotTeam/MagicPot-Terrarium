@@ -275,13 +275,17 @@ export function resolveAuthorizedLocalMediaPath(
 /**
  * Short-lived import grants. A file the user picks or drops into the chat composer is copied
  * into managed media at once, so it needs no durable grant: these grants live in memory only
- * (never persisted), expire after LOCAL_MEDIA_IMPORT_GRANT_TTL_MS, are removed by the import
- * that uses them, and never evict the persisted grants that canvas boards rely on.
+ * (never persisted), expire LOCAL_MEDIA_IMPORT_GRANT_TTL_MS after they were recorded on a
+ * monotonic clock, are spent by the one import that uses them, and never evict the persisted
+ * grants that canvas boards rely on.
  */
 export const LOCAL_MEDIA_IMPORT_GRANT_TTL_MS = 60_000
 const MAX_LOCAL_MEDIA_IMPORT_GRANTS = 256
 /** Canonical-path key -> expiry time of each grant for that path, oldest first. */
 const localMediaImportGrants = new Map<string, number[]>()
+
+/** Monotonic: setting the clock back never extends a grant. */
+export const localMediaImportGrantClock = (): number => performance.now()
 
 function pruneLocalMediaImportGrants(now: number): number {
   let total = 0
@@ -301,7 +305,10 @@ function pruneLocalMediaImportGrants(now: number): number {
  * Records one import grant for a canonical path (the caller has canonicalised it and checked
  * that main would import it). The oldest import grants go first when the bound is reached.
  */
-export function recordLocalMediaImportGrant(canonicalPath: string, now = Date.now()): void {
+export function recordLocalMediaImportGrant(
+  canonicalPath: string,
+  now = localMediaImportGrantClock()
+): void {
   const key = comparisonKey(canonicalPath)
   let total = pruneLocalMediaImportGrants(now)
   const expiries = localMediaImportGrants.get(key) ?? []
@@ -317,8 +324,21 @@ export function recordLocalMediaImportGrant(canonicalPath: string, now = Date.no
   }
 }
 
-/** Uses up one live import grant for this canonical path; false when there is none. */
-export function consumeLocalMediaImportGrant(canonicalPath: string, now = Date.now()): boolean {
+/** Whether a live import grant covers this canonical path; nothing is spent. */
+function hasLocalMediaImportGrant(canonicalPath: string, now: number): boolean {
+  return (localMediaImportGrants.get(comparisonKey(canonicalPath)) ?? []).some(
+    (expiresAt) => expiresAt > now
+  )
+}
+
+/**
+ * Spends one live import grant for this canonical path; false when there is none. It is
+ * synchronous, so two imports that both saw the grant cannot both spend it.
+ */
+export function consumeLocalMediaImportGrant(
+  canonicalPath: string,
+  now = localMediaImportGrantClock()
+): boolean {
   pruneLocalMediaImportGrants(now)
   const key = comparisonKey(canonicalPath)
   const expiries = localMediaImportGrants.get(key)
@@ -339,21 +359,30 @@ async function canonicalizeExistingPathAsync(
   }
 }
 
+export type LocalMediaImportSourceAuthorization = {
+  canonicalPath: string
+  /**
+   * Only a one-use import grant covers the path: the import must spend it
+   * (consumeLocalMediaImportGrant) once it has accepted the request.
+   */
+  viaImportGrant: boolean
+}
+
 /**
- * Source-path policy for a renderer importFile request: the canonical path when a live
- * import grant covers it (the grant is used up) or when it is persistently authorized
- * (scoped grant or application root), otherwise null. Every realpath (of the source and of
- * each root) is fs.promises.realpath, on the threadpool, so a path on a stalled mount never
- * blocks main's event loop.
+ * Source-path policy for a renderer importFile request: the canonical path when it is
+ * persistently authorized (scoped grant or application root) or covered by a live import
+ * grant, otherwise null. It spends nothing: the import grant is spent by importFile, after
+ * its own checks. Every realpath (of the source and of each root) is fs.promises.realpath,
+ * on the threadpool, so a path on a stalled mount never blocks main's event loop.
  */
 export async function authorizeLocalMediaImportSourcePathAsync(
   filePath: string,
   allowedRoots: readonly string[],
   {
-    now = Date.now(),
+    now = localMediaImportGrantClock,
     realpath = (value: string) => fs.promises.realpath(value)
-  }: { now?: number; realpath?: (value: string) => Promise<string> } = {}
-): Promise<string | null> {
+  }: { now?: () => number; realpath?: (value: string) => Promise<string> } = {}
+): Promise<LocalMediaImportSourceAuthorization | null> {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
   const isNetworkPath =
@@ -366,24 +395,27 @@ export async function authorizeLocalMediaImportSourcePathAsync(
   }
   const canonical = await canonicalizeExistingPathAsync(trimmed, realpath)
   if (!canonical) return null
-  if (consumeLocalMediaImportGrant(canonical, now)) return canonical
-  if (scopedLocalMediaPaths.has(comparisonKey(canonical))) return canonical
+  const persisted = { canonicalPath: canonical, viaImportGrant: false }
+  if (scopedLocalMediaPaths.has(comparisonKey(canonical))) return persisted
   if (
     Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
       isSameOrInside(directory, canonical)
     )
   ) {
-    return canonical
+    return persisted
   }
-  if (isNetworkPath) return null
-  for (const root of allowedRoots) {
-    const canonicalRoot = await canonicalizeExistingPathAsync(root, realpath)
-    if (canonicalRoot && isSameOrInside(canonicalRoot, canonical)) return canonical
+  if (!isNetworkPath) {
+    for (const root of allowedRoots) {
+      const canonicalRoot = await canonicalizeExistingPathAsync(root, realpath)
+      if (canonicalRoot && isSameOrInside(canonicalRoot, canonical)) return persisted
+    }
   }
-  return null
+  return hasLocalMediaImportGrant(canonical, now())
+    ? { canonicalPath: canonical, viaImportGrant: true }
+    : null
 }
 
-export function countLocalMediaImportGrantsForTest(now = Date.now()): number {
+export function countLocalMediaImportGrantsForTest(now = localMediaImportGrantClock()): number {
   return pruneLocalMediaImportGrants(now)
 }
 

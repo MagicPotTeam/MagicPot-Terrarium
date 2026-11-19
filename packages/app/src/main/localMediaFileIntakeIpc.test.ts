@@ -20,6 +20,7 @@ vi.mock('./config/userDataDirectory', () => ({
 vi.mock('./localMediaTempRoot', () => ({ ensurePrivateLocalMediaTempRoot: () => true }))
 vi.mock('./localMediaAccess', () => ({
   authorizeScopedLocalMediaPath: authorizeMock,
+  localMediaImportGrantClock: () => 0,
   recordLocalMediaImportGrant: recordImportGrantMock,
   resolveAuthorizedLocalMediaPath: resolveMock
 }))

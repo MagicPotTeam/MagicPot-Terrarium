@@ -18,6 +18,7 @@ import {
   authorizeLocalMediaImportSourcePathAsync,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
+  consumeLocalMediaImportGrant,
   countLocalMediaImportGrantsForTest,
   flushLocalMediaAccessGrants,
   initializeLocalMediaAccess,
@@ -31,6 +32,24 @@ afterEach(() => {
   clearScopedLocalMediaPathsForTest()
   cleanupPaths.splice(0).forEach((target) => fs.rmSync(target, { recursive: true, force: true }))
 })
+
+/** What main's importFile does with the policy: authorize, then spend an import grant. */
+async function authorizeImport(
+  filePath: string,
+  roots: readonly string[],
+  now?: number
+): Promise<string | null> {
+  const authorized = await authorizeLocalMediaImportSourcePathAsync(
+    filePath,
+    roots,
+    now === undefined ? {} : { now: () => now }
+  )
+  if (!authorized) return null
+  if (!authorized.viaImportGrant) return authorized.canonicalPath
+  return consumeLocalMediaImportGrant(authorized.canonicalPath, now)
+    ? authorized.canonicalPath
+    : null
+}
 
 function makeTempDir(prefix: string): string {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)))
@@ -55,7 +74,7 @@ describe('short-lived local media import grants', () => {
       const canonical = await grantLocalMediaImportPath(picked, 'image/png')
       expect(canonical).toBe(picked)
       // main's importFile uses the grant up.
-      expect(await authorizeLocalMediaImportSourcePathAsync(canonical, [])).toBe(picked)
+      expect(await authorizeImport(canonical, [])).toBe(picked)
     }
 
     expect(resolveAuthorizedLocalMediaPath(canvasVideo, [])).toBe(canvasVideo)
@@ -74,16 +93,16 @@ describe('short-lived local media import grants', () => {
     const clock = { now: () => now }
 
     expect(await grantLocalMediaImportPath(picked, 'image/png', clock)).toBe(picked)
-    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [], { now })).toBe(picked)
-    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [], { now })).toBeNull()
+    expect(await authorizeImport(picked, [], now)).toBe(picked)
+    expect(await authorizeImport(picked, [], now)).toBeNull()
 
     expect(await grantLocalMediaImportPath(picked, 'image/png', clock)).toBe(picked)
     now += LOCAL_MEDIA_IMPORT_GRANT_TTL_MS - 1
-    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [], { now })).toBe(picked)
+    expect(await authorizeImport(picked, [], now)).toBe(picked)
 
     expect(await grantLocalMediaImportPath(picked, 'image/png', clock)).toBe(picked)
     now += LOCAL_MEDIA_IMPORT_GRANT_TTL_MS
-    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [], { now })).toBeNull()
+    expect(await authorizeImport(picked, [], now)).toBeNull()
     expect(countLocalMediaImportGrantsForTest(now)).toBe(0)
   })
 
@@ -93,9 +112,9 @@ describe('short-lived local media import grants', () => {
     fs.writeFileSync(picked, 'png')
     await grantLocalMediaImportPath(picked, 'image/png')
     await grantLocalMediaImportPath(picked, 'image/png')
-    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [])).toBe(picked)
-    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [])).toBe(picked)
-    expect(await authorizeLocalMediaImportSourcePathAsync(picked, [])).toBeNull()
+    expect(await authorizeImport(picked, [])).toBe(picked)
+    expect(await authorizeImport(picked, [])).toBe(picked)
+    expect(await authorizeImport(picked, [])).toBeNull()
   })
 
   it('keeps at most 256 import grants in memory', async () => {
@@ -107,8 +126,8 @@ describe('short-lived local media import grants', () => {
     }
     expect(countLocalMediaImportGrantsForTest()).toBe(256)
     // The oldest went first.
-    expect(await authorizeLocalMediaImportSourcePathAsync(files[0], [])).toBeNull()
-    expect(await authorizeLocalMediaImportSourcePathAsync(files[299], [])).toBe(files[299])
+    expect(await authorizeImport(files[0], [])).toBeNull()
+    expect(await authorizeImport(files[299], [])).toBe(files[299])
   })
 
   it('records no grant for a type main refuses, a directory, a missing file or a refused path', async () => {
@@ -152,13 +171,38 @@ describe('short-lived local media import grants', () => {
     fs.writeFileSync(picked, 'png')
     fs.writeFileSync(other, 'png')
     await grantLocalMediaImportPath(picked, 'image/png')
-    expect(await authorizeLocalMediaImportSourcePathAsync(other, [])).toBeNull()
+    expect(await authorizeImport(other, [])).toBeNull()
     if (process.platform !== 'win32') {
       // A symlink to the granted file resolves to it: the canonical path is what importFile
-      // compares with the request, so the link itself is still refused there.
+      // compares with the request, so the link itself is still refused there (and spends
+      // nothing: the policy only reports the grant).
       const link = path.join(root, 'link.png')
       fs.symlinkSync(picked, link)
-      expect(await authorizeLocalMediaImportSourcePathAsync(link, [])).toBe(picked)
+      expect(await authorizeLocalMediaImportSourcePathAsync(link, [])).toEqual({
+        canonicalPath: picked,
+        viaImportGrant: true
+      })
+      expect(countLocalMediaImportGrantsForTest()).toBe(1)
+    }
+  })
+
+  it('expires on a monotonic clock: setting the wall clock back does not extend a grant', async () => {
+    const root = makeTempDir('magicpot-import-grants-')
+    const picked = path.join(root, 'clock.png')
+    fs.writeFileSync(picked, 'png')
+    vi.useFakeTimers({ toFake: ['performance'] })
+    // The wall clock stands still (as if set back): only the monotonic clock moves.
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(0)
+    try {
+      expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+      expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+      vi.advanceTimersByTime(LOCAL_MEDIA_IMPORT_GRANT_TTL_MS - 1)
+      expect(consumeLocalMediaImportGrant(picked)).toBe(true)
+      vi.advanceTimersByTime(2)
+      expect(consumeLocalMediaImportGrant(picked)).toBe(false)
+    } finally {
+      wallClock.mockRestore()
+      vi.useRealTimers()
     }
   })
 

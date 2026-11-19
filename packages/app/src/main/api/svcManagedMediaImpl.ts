@@ -51,6 +51,8 @@ import {
   resolveManagedMediaReference
 } from '../llmProxy/managedMediaStore'
 
+export type ImportSourceAuthorization = { canonicalPath: string; viaImportGrant: boolean }
+
 export type ManagedMediaSvcImplDependencies = {
   importFile?: typeof importManagedMediaFile
   importBytes?: typeof importManagedMedia
@@ -64,10 +66,15 @@ export type ManagedMediaSvcImplDependencies = {
   /**
    * Source-path policy for importFile requests that come from a renderer. Returns the
    * canonical path when the path is under an application root or was granted (a file the
-   * user picked), otherwise null. When set, importFile refuses every path it does not
-   * return unchanged. Main-owned callers that confine paths themselves leave it unset.
+   * user picked), otherwise null; viaImportGrant when only a one-use import grant covers it.
+   * It spends nothing. When set, importFile refuses every path it does not return unchanged.
+   * Main-owned callers that confine paths themselves leave it unset.
    */
-  authorizeImportSourcePath?: (sourcePath: string) => string | null | Promise<string | null>
+  authorizeImportSourcePath?: (
+    sourcePath: string
+  ) => ImportSourceAuthorization | null | Promise<ImportSourceAuthorization | null>
+  /** Spends one import grant for a canonical path, now; false when none is live. */
+  consumeImportGrant?: (canonicalPath: string) => boolean
   /** Byte cap for importFile, checked on the stat and again on the bytes actually copied. */
   maxImportFileBytes?: number
   /** Deadlines for the source's filesystem calls and copy (renderer-named sources). */
@@ -318,13 +325,24 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
         })
       }
       if (authorize) {
+        const forbidden = () =>
+          new ServiceError('Managed media source is not an allowed file', {
+            code: 'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+          })
         // The authorized form must be the requested path itself: no symlink, alias or
         // case variant of an allowed path is followed to somewhere else.
         const authorized = await authorize(sourcePath)
-        if (!authorized || !sameFilesystemPath(authorized, sourcePath)) {
-          throw new ServiceError('Managed media source is not an allowed file', {
-            code: 'MANAGED_MEDIA_IMPORT_FORBIDDEN'
-          })
+        if (!authorized || !sameFilesystemPath(authorized.canonicalPath, sourcePath)) {
+          throw forbidden()
+        }
+        // A one-use import grant is spent only now: after the checks above and only when the
+        // authorization answered within its deadline (a late answer never reaches here), its
+        // time to live judged at this moment. Synchronous, so two imports cannot share it.
+        if (
+          authorized.viaImportGrant &&
+          !this.dependencies.consumeImportGrant?.(authorized.canonicalPath)
+        ) {
+          throw forbidden()
         }
       }
       const { importRoot, authorizedRoot } = await resolveImportRoots(

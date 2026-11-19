@@ -5,13 +5,22 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  LOCAL_MEDIA_IMPORT_GRANT_TTL_MS,
   authorizeLocalMediaImportSourcePathAsync,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
+  consumeLocalMediaImportGrant,
+  countLocalMediaImportGrantsForTest,
+  recordLocalMediaImportGrant,
   resolveAuthorizedLocalMediaPath
 } from '../localMediaAccess'
 import { grantLocalMediaImportPath } from '../localMediaFileIntakeIpc'
-import { importManagedMediaFile } from '../llmProxy/managedMediaStore'
+import {
+  createImportSourceGate,
+  importManagedMediaFile,
+  importSourceRootKey,
+  runImportSourceOperation
+} from '../llmProxy/managedMediaStore'
 import { ManagedMediaSvcImpl, toImportSourceLocalPath } from './svcManagedMediaImpl'
 
 // Real filesystem: symlinks, FIFOs, /proc and devices are what these tests are about.
@@ -163,14 +172,16 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
     await fs.rm(root, { recursive: true, force: true })
   })
 
+  // The policy production uses for importFile (serverIpc), on the real filesystem.
   const create = (overrides: ConstructorParameters<typeof ManagedMediaSvcImpl>[0] = {}) => {
     const authorize = vi.fn((sourcePath: string) =>
-      resolveAuthorizedLocalMediaPath(sourcePath, [allowed])
+      authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed])
     )
     const importFile = vi.fn(importManagedMediaFile)
     const service = new ManagedMediaSvcImpl({
       getMediaDir: () => media,
       authorizeImportSourcePath: authorize,
+      consumeImportGrant: (canonicalPath) => consumeLocalMediaImportGrant(canonicalPath),
       importFile,
       maxImportFileBytes: 1024 * 1024,
       ensureDerivative: vi.fn(async () => {
@@ -220,20 +231,166 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
   it('imports a picked file once with its one-use import grant and refuses a second use', async () => {
     const picked = path.join(outside, 'chat-pick.png')
     await fs.writeFile(picked, PNG)
-    const { service, importFile } = create({
-      authorizeImportSourcePath: (sourcePath) =>
-        authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed])
-    })
+    const { service, importFile } = create()
     // The preload sends the webUtils path of the picked File; main returns the canonical path.
     const canonical = await grantLocalMediaImportPath(picked, 'image/png')
     expect(canonical).toBe(picked)
     await expect(service.importFile(request(canonical))).resolves.toMatchObject({
       reference: { kind: 'managed', sizeBytes: PNG.length }
     })
-    await expectNoPathInError(service.importFile(request(canonical)), 'MANAGED_MEDIA_IMPORT_FORBIDDEN')
+    await expectNoPathInError(
+      service.importFile(request(canonical)),
+      'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+    )
     expect(importFile).toHaveBeenCalledOnce()
     // Nothing was granted durably.
     expect(resolveAuthorizedLocalMediaPath(picked, [allowed])).toBeNull()
+  })
+
+  describe('an import grant is spent only by the import that uses it', () => {
+    /** The serverIpc composition, with the realpath of the authorization replaceable. */
+    const createWithDeadline = (
+      realpath: (value: string) => Promise<string>,
+      overrides: ConstructorParameters<typeof ManagedMediaSvcImpl>[0] = {}
+    ) => {
+      const gate = createImportSourceGate()
+      return create({
+        authorizeImportSourcePath: (sourcePath) =>
+          runImportSourceOperation(
+            () => authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed], { realpath }),
+            { key: importSourceRootKey(sourcePath), timeoutMs: 60, gate }
+          ),
+        ...overrides
+      })
+    }
+
+    it('keeps the grant when the authorization answers only after its deadline (D)', async () => {
+      const picked = path.join(outside, 'slow-share.png')
+      await fs.writeFile(picked, PNG)
+      expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+      let answer!: () => void
+      const answered = new Promise<void>((resolve) => (answer = resolve))
+      const slow = createWithDeadline(async (value) => {
+        await answered
+        return fs.realpath(value)
+      })
+      await expectNoPathInError(
+        slow.service.importFile(request(picked)),
+        'MANAGED_MEDIA_IMPORT_TIMEOUT'
+      )
+      expect(countLocalMediaImportGrantsForTest()).toBe(1)
+      // The abandoned authorization finishes later: it spends nothing.
+      answer()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(countLocalMediaImportGrantsForTest()).toBe(1)
+      expect(slow.importFile).not.toHaveBeenCalled()
+      // The retry imports with the same grant and spends it.
+      const { service, importFile } = create()
+      await expect(service.importFile(request(picked))).resolves.toMatchObject({
+        reference: { kind: 'managed' }
+      })
+      expect(importFile).toHaveBeenCalledOnce()
+      expect(countLocalMediaImportGrantsForTest()).toBe(0)
+    })
+
+    it.skipIf(process.platform === 'win32')(
+      'keeps the grant when a request names an alias of the granted file (E)',
+      async () => {
+        const picked = path.join(outside, 'granted.png')
+        const alias = path.join(outside, 'alias.png')
+        await fs.writeFile(picked, PNG)
+        await fs.symlink(picked, alias)
+        expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+        const { service, importFile } = create()
+        await expectNoPathInError(
+          service.importFile(request(alias)),
+          'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+        )
+        expect(countLocalMediaImportGrantsForTest()).toBe(1)
+        await expect(service.importFile(request(picked))).resolves.toMatchObject({
+          reference: { kind: 'managed' }
+        })
+        expect(importFile).toHaveBeenCalledOnce()
+        expect(countLocalMediaImportGrantsForTest()).toBe(0)
+      }
+    )
+
+    it('judges the time to live when the grant is spent, after a slow authorization (O)', async () => {
+      const picked = path.join(outside, 'aged.png')
+      await fs.writeFile(picked, PNG)
+      let now = 0
+      recordLocalMediaImportGrant(picked, now)
+      now = 59_000
+      const { service, importFile } = create({
+        authorizeImportSourcePath: async (sourcePath) => {
+          const authorized = await authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed], {
+            now: () => 59_000
+          })
+          // The realpath and the reply took until 73 s.
+          now = 73_000
+          return authorized
+        },
+        consumeImportGrant: (canonicalPath) => consumeLocalMediaImportGrant(canonicalPath, now)
+      })
+      expect(now + 14_000).toBeGreaterThan(LOCAL_MEDIA_IMPORT_GRANT_TTL_MS)
+      await expectNoPathInError(
+        service.importFile(request(picked)),
+        'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+      )
+      expect(importFile).not.toHaveBeenCalled()
+    })
+
+    it('lets only one of two concurrent imports spend one grant', async () => {
+      const picked = path.join(outside, 'once.png')
+      await fs.writeFile(picked, PNG)
+      expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+      // Both authorizations see the live grant before either import goes on to spend it.
+      let arrived = 0
+      let bothAuthorized!: () => void
+      const barrier = new Promise<void>((resolve) => (bothAuthorized = resolve))
+      const { service, importFile } = create({
+        authorizeImportSourcePath: async (sourcePath) => {
+          const authorized = await authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed])
+          expect(authorized).toEqual({ canonicalPath: picked, viaImportGrant: true })
+          if (++arrived === 2) bothAuthorized()
+          await barrier
+          return authorized
+        }
+      })
+      const outcomes = await Promise.allSettled([
+        service.importFile(request(picked)),
+        service.importFile(request(picked))
+      ])
+      expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(['fulfilled', 'rejected'])
+      expect(outcomes.find((outcome) => outcome.status === 'rejected')).toMatchObject({
+        reason: { code: 'MANAGED_MEDIA_IMPORT_FORBIDDEN' }
+      })
+      expect(importFile).toHaveBeenCalledOnce()
+      expect(countLocalMediaImportGrantsForTest()).toBe(0)
+    })
+
+    it('does not spend the grant of a file an application root already covers', async () => {
+      const inside = path.join(allowed, 'in-root.png')
+      await fs.writeFile(inside, PNG)
+      expect(await grantLocalMediaImportPath(inside, 'image/png')).toBe(inside)
+      const { service } = create()
+      await expect(service.importFile(request(inside))).resolves.toMatchObject({
+        reference: { kind: 'managed' }
+      })
+      expect(countLocalMediaImportGrantsForTest()).toBe(1)
+    })
+
+    it('refuses an import grant when no spender is wired (fails closed)', async () => {
+      const picked = path.join(outside, 'unwired.png')
+      await fs.writeFile(picked, PNG)
+      expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+      const { service, importFile } = create({ consumeImportGrant: undefined })
+      await expectNoPathInError(
+        service.importFile(request(picked)),
+        'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+      )
+      expect(importFile).not.toHaveBeenCalled()
+    })
   })
 
   it('refuses a path outside the allowed roots before the store opens it', async () => {
@@ -310,8 +467,8 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
       await fs.writeFile(secret, PNG)
       await fs.writeFile(swapped, PNG)
       const { service } = create({
-        authorizeImportSourcePath: (sourcePath) => {
-          const authorized = resolveAuthorizedLocalMediaPath(sourcePath, [allowed])
+        authorizeImportSourcePath: async (sourcePath) => {
+          const authorized = await authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed])
           // Swap the checked file for a symlink to an outside file before the copy.
           execFileSync('ln', ['-sf', secret, swapped])
           return authorized
@@ -336,7 +493,7 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
       // Even when a device or /proc path is inside an allowed root it is not a regular file.
       const procOpen = create({
         authorizeImportSourcePath: (sourcePath) =>
-          resolveAuthorizedLocalMediaPath(sourcePath, ['/'])
+          authorizeLocalMediaImportSourcePathAsync(sourcePath, ['/'])
       })
       for (const sourcePath of [`/proc/${process.pid}/environ`, '/dev/zero', '/dev/null']) {
         await expect(procOpen.service.importFile(request(sourcePath))).rejects.toMatchObject({

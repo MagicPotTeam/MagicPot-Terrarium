@@ -378,7 +378,7 @@ describe('import source deadlines (a stalled or slow source never blocks main)',
     const realpath = vi.fn((value: string) => fs.realpath(value))
     await expect(
       authorizeLocalMediaImportSourcePathAsync(source, [root], { realpath })
-    ).resolves.toBe(source)
+    ).resolves.toEqual({ canonicalPath: source, viaImportGrant: false })
     expect(realpath).toHaveBeenCalledWith(source)
     expect(realpathSync).not.toHaveBeenCalled()
     realpathSync.mockRestore()
@@ -692,7 +692,10 @@ describe('a slow but working source is never cut, a stalled one is', () => {
     await expect(
       grantLocalMediaImportPath(healthy, 'image/png', { timeoutMs: 1_000 })
     ).resolves.toBe(healthy)
-    await expect(authorizeLocalMediaImportSourcePathAsync(healthy, [])).resolves.toBe(healthy)
+    await expect(authorizeLocalMediaImportSourcePathAsync(healthy, [])).resolves.toEqual({
+      canonicalPath: healthy,
+      viaImportGrant: true
+    })
     await expect(
       importManagedMediaFile(
         {

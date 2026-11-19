@@ -3,6 +3,7 @@ import path from 'node:path'
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import {
   authorizeScopedLocalMediaPath,
+  localMediaImportGrantClock,
   recordLocalMediaImportGrant,
   resolveAuthorizedLocalMediaPath
 } from './localMediaAccess'
@@ -60,7 +61,7 @@ export async function grantLocalMediaImportPath(
   {
     realpath = (value) => fs.realpath(value),
     stat = (value) => fs.stat(value),
-    now = Date.now,
+    now = localMediaImportGrantClock,
     timeoutMs = DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs
   }: LocalMediaImportGrantDependencies = {}
 ): Promise<string> {
