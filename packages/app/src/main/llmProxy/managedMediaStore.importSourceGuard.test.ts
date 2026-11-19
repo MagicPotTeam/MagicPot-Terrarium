@@ -919,6 +919,34 @@ describe('a slow but working source is never cut, a stalled one is', () => {
     await stagingIsEmpty()
   }, 20_000)
 
+  it('starts the copy cap when the open gets its slot, not when the open is asked for', async () => {
+    const file = virtualPng('queued-open.png', 64 * 1024, 8, async () => undefined)
+    const fileSystem = withVirtualFiles([file])
+    const realpath = fileSystem.realpath
+    const blockers: Array<Promise<unknown>> = []
+    // Right before the open, two other calls take both slots of the source's root for 600 ms.
+    fileSystem.realpath = (async (...args: Parameters<typeof fs.realpath>) => {
+      if (String(args[0]) === file.filePath) {
+        for (let index = 0; index < 2; index += 1)
+          blockers.push(
+            runImportSourceOperation(() => new Promise((resolve) => setTimeout(resolve, 600)), {
+              key: importSourceRootKey(file.filePath),
+              timeoutMs: 2_000
+            })
+          )
+      }
+      return realpath(...args)
+    }) as typeof fs.realpath
+    await expect(
+      importVirtual(file, fileSystem, {
+        operationTimeoutMs: 2_000,
+        copyBaseTimeoutMs: 300,
+        copyMinBytesPerSecond: 1024 * MiB
+      })
+    ).resolves.toMatchObject({ reference: { sizeBytes: 64 * 1024 } })
+    await Promise.all(blockers)
+  })
+
   it('measures the copy on a monotonic clock: a wall-clock jump does not end it', async () => {
     const realNow = Date.now.bind(Date)
     let jumped = false

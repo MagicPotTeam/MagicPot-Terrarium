@@ -44,8 +44,11 @@ const { createServiceClass, handleMock, onMock, catalogDelegateFactory, platform
     storageDelegateFactory: vi.fn((_getMainWindow: () => Electron.BrowserWindow | null) => vi.fn(async () => ({ status: 'unavailable', reason: 'unavailable' }))),
     stateConstructor: vi.fn(),
     managedMediaConstructor: vi.fn(),
+    // The policy's own answer shape: the canonical path and whether only an import grant covers it.
     resolveAuthorizedLocalMediaPathMock: vi.fn((filePath: string, roots: readonly string[]) =>
-      roots.some((root) => filePath.startsWith(`${root}/`)) ? filePath : null
+      roots.some((root) => filePath.startsWith(`${root}/`))
+        ? { canonicalPath: filePath, viaImportGrant: false }
+        : null
     ),
     consumeImportGrantMock: vi.fn((_canonicalPath: string, _kind?: string) => ({
       finished: vi.fn()
@@ -120,13 +123,18 @@ describe('serverIpc createServer', () => {
     createServer()
     expect(managedMediaConstructor).toHaveBeenCalledOnce()
     const deps = managedMediaConstructor.mock.calls[0]?.[0] as {
-      authorizeImportSourcePath?: (sourcePath: string) => Promise<string | null>
+      authorizeImportSourcePath?: (
+        sourcePath: string
+      ) => Promise<{ canonicalPath: string; viaImportGrant: boolean } | null>
       maxImportFileBytes?: number
       importSourceGuard?: { operationTimeoutMs: number }
     }
     expect(deps.maxImportFileBytes).toBe(1024)
     expect(deps.importSourceGuard?.operationTimeoutMs).toBeGreaterThan(0)
-    await expect(deps.authorizeImportSourcePath?.('/app-root/a.png')).resolves.toBe('/app-root/a.png')
+    await expect(deps.authorizeImportSourcePath?.('/app-root/a.png')).resolves.toEqual({
+      canonicalPath: '/app-root/a.png',
+      viaImportGrant: false
+    })
     await expect(deps.authorizeImportSourcePath?.('/elsewhere/a.png')).resolves.toBeNull()
     expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenLastCalledWith('/elsewhere/a.png', ['/app-root'])
     // importFile spends a one-use import grant through main's own grant store.
@@ -148,7 +156,7 @@ describe('serverIpc createServer', () => {
     resolveAuthorizedLocalMediaPathMock.mockImplementation(((filePath: string) =>
       filePath.startsWith('/mnt/dead/')
         ? new Promise<null>((resolve) => stalled.push(() => resolve(null)))
-        : filePath) as never)
+        : { canonicalPath: filePath, viaImportGrant: false }) as never)
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       const outcomes = ['/mnt/dead/a.png', '/mnt/dead/b.png'].map((sourcePath) =>
@@ -158,12 +166,18 @@ describe('serverIpc createServer', () => {
       for (const outcome of outcomes)
         await expect(outcome).resolves.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
       // The dead mount holds its two calls; a file elsewhere is still authorized.
-      await expect(deps.authorizeImportSourcePath('/app-root/c.png')).resolves.toBe('/app-root/c.png')
+      await expect(deps.authorizeImportSourcePath('/app-root/c.png')).resolves.toEqual({
+        canonicalPath: '/app-root/c.png',
+        viaImportGrant: false
+      })
     } finally {
       vi.useRealTimers()
       stalled.forEach((release) => release())
-      resolveAuthorizedLocalMediaPathMock.mockImplementation((filePath: string, roots: readonly string[]) =>
-        roots.some((root) => filePath.startsWith(`${root}/`)) ? filePath : null
+      resolveAuthorizedLocalMediaPathMock.mockImplementation(
+        (filePath: string, roots: readonly string[]) =>
+          roots.some((root) => filePath.startsWith(`${root}/`))
+            ? { canonicalPath: filePath, viaImportGrant: false }
+            : null
       )
     }
   })
