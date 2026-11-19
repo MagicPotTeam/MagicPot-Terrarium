@@ -282,10 +282,16 @@ describe('sub-agent of a team member after End (store error thrown unchanged)', 
   it('keeps a read that finished after End and sends no next model step', async () => {
     const { provider, chat, callReadTool, assertTeamActive } = member()
     chat.mockResolvedValueOnce({ content: '', toolCalls: [call('c1')] }).mockResolvedValueOnce({ content: 'Findings after the read.' })
-    callReadTool.mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); return { content: 'read while the team ended' } })
+    let abortedWhenReturned: boolean | undefined
+    callReadTool.mockImplementationOnce(async (...input: unknown[]) => {
+      assertTeamActive.mockImplementation(ended)
+      abortedWhenReturned = (input[2] as { signal: AbortSignal }).signal.aborted
+      return { content: 'read while the team ended' }
+    })
     await expect(provider.callTool('explore', { task: 'Find the entry point' }, ctx())).rejects.toThrow('Team has ended.')
     expect(callReadTool).toHaveBeenCalledOnce()
-    await expect(callReadTool.mock.results[0].value).resolves.toEqual({ content: 'read while the team ended' })
+    // End fires no abort: the running read finished with a live signal.
+    expect(abortedWhenReturned).toBe(false)
     expect(chat).toHaveBeenCalledOnce()
   })
 })

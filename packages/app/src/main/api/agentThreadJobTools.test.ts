@@ -116,7 +116,7 @@ describe('background job of a team member after End', () => {
     expect(ordinary.callReadTool).toHaveBeenCalledOnce()
     expect(ordinary.sample).toHaveBeenCalledTimes(2)
   })
-  it('keeps the report of a member job that finished before End', async () => {
+  it('keeps the report of a member job that finished before End when the parent turn succeeded', async () => {
     const assertTeamActive = vi.fn()
     const member = make(assertTeamActive)
     const launched = JSON.parse((await member.call('critic', { task: 'Review', run_in_background: true })).content)
@@ -127,5 +127,32 @@ describe('background job of a team member after End', () => {
     expect(result.job.status).toBe('completed')
     expect(result.text).toContain('Report from child')
     expect(member.sample).toHaveBeenCalledOnce()
+  })
+  it.each([
+    { outcome: 'ended' as const, label: 'a parent cut by End keeps both' },
+    { outcome: false as const, label: 'any other failed parent revokes both, as before' }
+  ])('parent disposed with $outcome: $label (completed report, running job)', async ({ outcome }) => {
+    const assertTeamActive = vi.fn()
+    const member = make(assertTeamActive)
+    let resume!: (value: unknown) => void
+    member.sample.mockResolvedValueOnce({ content: 'Report from child' }).mockImplementationOnce(() => new Promise((resolve) => { resume = resolve }))
+    const done = JSON.parse((await member.call('critic', { task: 'Review', run_in_background: true }, 'done-job')).content)
+    await vi.waitFor(() => expect(job(done.job.id)?.status).toBe('completed'))
+    const running = JSON.parse((await member.call('explore', { task: 'Investigate', run_in_background: true }, 'running-job')).content)
+    await vi.waitFor(() => expect(member.sample).toHaveBeenCalledTimes(2))
+    assertTeamActive.mockImplementation(ended) // End is recorded while the parent turn still runs
+    member.prepared.dispose!(outcome)
+    if (outcome === 'ended') {
+      expect(agentThreadJobs.read({ ...scope, jobId: done.job.id }, invocation('readAgentJob'))).toMatchObject({ job: { status: 'completed' }, text: expect.stringContaining('Report from child') })
+      expect(job(running.job.id)?.status).toBe('running')
+      // The running job stops by itself before its next read, as a failed job.
+      resume({ content: '{"toolName":"files.read","args":{"path":"readme.md"}}' })
+      await vi.waitFor(() => expect(job(running.job.id)?.status).toBe('failed'))
+      expect(member.callReadTool).not.toHaveBeenCalled()
+    } else {
+      expect(agentThreadJobs.read({ ...scope, jobId: done.job.id }, invocation('readAgentJob'))).toMatchObject({ job: { status: 'cancelled' }, text: '' })
+      expect(job(running.job.id)?.status).toBe('cancelled')
+      resume({ content: 'late' })
+    }
   })
 })

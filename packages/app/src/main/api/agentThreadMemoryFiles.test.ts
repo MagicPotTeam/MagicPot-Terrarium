@@ -107,10 +107,16 @@ describe('memory helper of a team member after End (store error thrown unchanged
     const assertTeamActive = vi.fn()
     const chat = vi.fn<LLMCli['chat']>().mockResolvedValueOnce({ content: '', toolCalls: [write('w1')] }).mockResolvedValueOnce({ content: 'Updated the memory file.' })
     const f = fixture({ chat, supportsNativeTools: true, supportsIsolatedMainToolTurns: true }, true, assertTeamActive)
-    f.call.mockImplementationOnce(async () => { assertTeamActive.mockImplementation(ended); return { content: '{"path":"./memory/facts.md","written":true}' } })
+    let abortedWhenReturned: boolean | undefined
+    f.call.mockImplementationOnce(async (...input: unknown[]) => {
+      assertTeamActive.mockImplementation(ended)
+      abortedWhenReturned = (input[2] as { signal: AbortSignal }).signal.aborted
+      return { content: '{"path":"./memory/facts.md","written":true}' }
+    })
     await expect(f.provider.callTool('memory_write', { task: 'Remember a preference.' }, context)).rejects.toThrow('Team has ended.')
     expect(f.call).toHaveBeenCalledOnce()
-    await expect(f.call.mock.results[0].value).resolves.toEqual({ content: '{"path":"./memory/facts.md","written":true}' })
+    // End fires no abort: the running write completed with a live signal.
+    expect(abortedWhenReturned).toBe(false)
     expect(chat).toHaveBeenCalledOnce(); expect(f.close).toHaveBeenCalledOnce(); f.provider.dispose()
   })
 })
