@@ -976,12 +976,21 @@ export type DroppedLocalImage = {
   /** The dropped file URL (for messages; never stored). */
   url: string
   fileName: string
-  /** Canonical path main granted for one import. */
+  /** Canonical path main granted for one import (the dropped path when readBytes). */
   sourcePath: string
   /** Size main measured when it granted the import. */
   sizeBytes: number
   mimeType: string
+  /**
+   * On a network path main does not import by path (a mapped drive): main reads it once for
+   * the composer instead (readDroppedLocalImageBytes), within the image limit.
+   */
+  readBytes?: true
 }
+
+/** The bytes of a read-granted dropped image (a mapped network drive), at most `maxBytes`. */
+export const readDroppedLocalImageBytes = (image: DroppedLocalImage, maxBytes: number) =>
+  readDroppedLocalImage(image.sourcePath, image.fileName, maxBytes)
 
 /**
  * Ask main for a one-use import grant for each explicitly dropped file URL (the preload's
@@ -1032,7 +1041,8 @@ export const getDroppedLocalImages = async (
       fileName: entry.fileName,
       sourcePath: entry.grant.path,
       sizeBytes: entry.grant.sizeBytes,
-      mimeType: entry.mimeType
+      mimeType: entry.mimeType,
+      ...(entry.grant.bytesOnly ? { readBytes: true as const } : {})
     })
   })
   return { images, failedUrls }

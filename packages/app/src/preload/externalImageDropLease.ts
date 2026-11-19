@@ -4,8 +4,12 @@ import { normalizeExternalImageFileUrl, parseExternalImageDrop } from '@shared/e
 export const EXTERNAL_IMAGE_DROP_LEASE_MS = 15_000
 
 type DropEventSource = Pick<Window, 'addEventListener' | 'removeEventListener'>
-/** A one-use import grant from main: the canonical path and its size when granted. */
-export type DroppedLocalImageImportGrant = { path: string; sizeBytes: number }
+/**
+ * A one-use grant from main: the canonical path and its size when granted. bytesOnly: the
+ * file is on a network path main does not import by path (a mapped drive); `path` is then the
+ * dropped path, which main reads once for the page (readImageFromPath).
+ */
+export type DroppedLocalImageImportGrant = { path: string; sizeBytes: number; bytesOnly?: true }
 type DropLeaseUse = 'persisted' | 'import'
 type DropLeaseEntry = {
   consumed: boolean

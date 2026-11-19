@@ -8,8 +8,12 @@ import type {
   WinBridge
 } from '@shared/utils/utilWindow'
 
-/** A one-use import grant from main: the canonical path and its size when granted. */
-export type LocalMediaImportGrant = { path: string; sizeBytes: number }
+/**
+ * A one-use grant from main: the canonical path and its size when granted. bytesOnly: a file
+ * on a network path (mapped drive) that main reads once for the page instead (`path` is then
+ * the dropped path).
+ */
+export type LocalMediaImportGrant = { path: string; sizeBytes: number; bytesOnly?: true }
 /**
  * main's answer for a picked file: the canonical path, or why there is none: no answer in
  * time, a network path main imports only as bytes (mapped drive), or any other refusal.

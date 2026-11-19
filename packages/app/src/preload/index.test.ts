@@ -142,7 +142,7 @@ describe('preload capability boundary', () => {
     }
     // main's reasons pass through: no answer in time, or a network path (bytes only).
     for (const refused of ['timeout', 'network'] as const) {
-      invokeMock.mockResolvedValue({ refused })
+      invokeMock.mockResolvedValue({ refused, sizeBytes: 9 })
       await expect(
         electronFile.authorizeLocalMediaFileForImport(file, 'image/png')
       ).resolves.toEqual({ refused })
@@ -239,6 +239,29 @@ describe('preload capability boundary', () => {
     expect(invokeMock).not.toHaveBeenCalledWith(
       'local-media:authorize-picker-path',
       expect.anything()
+    )
+  })
+
+  it('turns a mapped-drive answer for a dropped URL into a one-time bytes read of the dropped path', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const url =
+      process.platform === 'win32' ? 'file:///Z:/pics/mapped.png' : 'file:///tmp/pics/mapped.png'
+    invokeMock.mockResolvedValue({ refused: 'network', sizeBytes: 4321 })
+    windowListeners.get('drop')?.({
+      isTrusted: true,
+      dataTransfer: { getData: (type: string) => (type === 'text/uri-list' ? url : '') }
+    } as unknown as Event)
+    await expect(
+      electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')
+    ).resolves.toEqual({ path: fileURLToPath(url), sizeBytes: 4321, bytesOnly: true })
+    // Without a size from main there is nothing to check the limits against: refused.
+    invokeMock.mockResolvedValue({ refused: 'network' })
+    windowListeners.get('drop')?.({
+      isTrusted: true,
+      dataTransfer: { getData: (type: string) => (type === 'text/uri-list' ? url : '') }
+    } as unknown as Event)
+    await expect(electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')).resolves.toBe(
+      null
     )
   })
 

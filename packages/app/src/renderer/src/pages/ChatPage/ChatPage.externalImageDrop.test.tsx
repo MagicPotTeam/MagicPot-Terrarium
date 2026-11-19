@@ -30,6 +30,7 @@ const fixture = vi.hoisted(() => ({
   importDataUrl: vi.fn(),
   importBytes: vi.fn(),
   importFile: vi.fn(),
+  readImageFromPath: vi.fn(),
   fileToBlobUrl: vi.fn(),
   capturedSubmit: null as null | (() => void),
   receiveEditingAttachment: vi.fn(),
@@ -86,7 +87,7 @@ vi.mock('./hooks/useChatProfiles', () => ({
 }))
 vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
-    svcFs: {},
+    svcFs: { readImageFromPath: fixture.readImageFromPath },
     svcLLMProxy: { signHy3DModel: vi.fn() },
     svcManagedMedia: {
       importDataUrl: fixture.importDataUrl,
@@ -701,6 +702,33 @@ describe('ChatPage external local image drop', () => {
       expect(JSON.stringify(fixture.sessions)).not.toContain('Feishu')
     }
   )
+
+  it('attaches a URL-only drop from a mapped network drive by reading it once as bytes', async () => {
+    fixture.getDroppedLocalImages.mockResolvedValue({
+      images: [
+        { ...droppedImage('mapped.png'), sourcePath: 'Z:\\pics\\mapped.png', readBytes: true }
+      ],
+      failedUrls: []
+    })
+    fixture.readImageFromPath.mockResolvedValue({
+      image: new Uint8Array([1, 2, 3]),
+      filename: 'mapped.png'
+    })
+    await renderPage([existingAttachment])
+
+    drop()
+
+    await waitFor(() => expect(pendingAttachments()).toHaveLength(2))
+    // Read once by main within the image limit, then imported as bytes: never by path.
+    expect(fixture.readImageFromPath).toHaveBeenCalledExactlyOnceWith({
+      fullPath: 'Z:\\pics\\mapped.png',
+      maxBytes: 5 * 1024 * 1024
+    })
+    expect(fixture.importFile).not.toHaveBeenCalled()
+    expect(fixture.importBytes).toHaveBeenCalledOnce()
+    expect(pendingAttachments()[1]).toMatchObject({ type: 'image', fileName: 'mapped.png' })
+    expect(fixture.notifyError).not.toHaveBeenCalled()
+  })
 
   it('refuses a dropped image whose copy main made is larger than the image limit', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)

@@ -33,7 +33,11 @@ const droppedLocalImages = createExternalImageDropAuthorization({
   authorizePath: authorizeLocalMediaFilePath,
   authorizeImportPath: async (filePath, mimeType) => {
     const answer = await requestLocalMediaImportGrant(filePath, mimeType)
-    return answer && 'path' in answer ? answer : null
+    if (answer && 'path' in answer) return answer
+    // A mapped network drive: main read-granted the file once; the page reads it as bytes.
+    if (answer?.refused === 'network' && answer.sizeBytes !== undefined)
+      return { path: filePath, sizeBytes: answer.sizeBytes, bytesOnly: true }
+    return null
   }
 })
 const electronFile = {
@@ -67,7 +71,7 @@ const electronFile = {
       if (!filePath || typeof mimeType !== 'string') return { refused: 'denied' }
       const answer = await requestLocalMediaImportGrant(filePath, mimeType)
       if (!answer) return { refused: 'denied' }
-      return 'path' in answer ? { path: answer.path } : answer
+      return 'path' in answer ? { path: answer.path } : { refused: answer.refused }
     } catch {
       return { refused: 'denied' }
     }
@@ -232,7 +236,8 @@ async function authorizeLocalMediaFilePath(filePath: string): Promise<boolean> {
  * answer in time, a network path main imports only as bytes, or any other refusal).
  */
 type LocalMediaFileImportAnswer = { path: string } | { refused: 'timeout' | 'network' | 'denied' }
-type LocalMediaImportGrantRefusal = { refused: 'timeout' | 'network' }
+type LocalMediaImportGrantRefusal =
+  { refused: 'timeout' } | { refused: 'network'; sizeBytes?: number }
 
 /** Main's one-use import grant for a path the preload itself obtained, or why not, or null. */
 async function requestLocalMediaImportGrant(
@@ -246,8 +251,14 @@ async function requestLocalMediaImportGrant(
       filePath,
       mimeType
     )
-    const refusal = (granted as Partial<LocalMediaImportGrantRefusal> | null)?.refused
-    if (refusal === 'timeout' || refusal === 'network') return { refused: refusal }
+    const refusal = (granted as { refused?: unknown } | null)?.refused
+    if (refusal === 'timeout') return { refused: 'timeout' }
+    if (refusal === 'network') {
+      const sizeBytes = (granted as { sizeBytes?: unknown }).sizeBytes
+      return Number.isSafeInteger(sizeBytes) && (sizeBytes as number) >= 0
+        ? { refused: 'network', sizeBytes: sizeBytes as number }
+        : { refused: 'network' }
+    }
     const candidate = granted as Partial<DroppedLocalImageImportGrant> | null
     return candidate &&
       typeof candidate.path === 'string' &&

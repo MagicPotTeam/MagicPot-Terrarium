@@ -42,11 +42,14 @@ export type LocalMediaImportGrantDependencies = {
 /** A one-use import grant: the canonical path main will import, and its size when granted. */
 export type LocalMediaImportGrant = { path: string; sizeBytes: number }
 /**
- * Why no grant was recorded, where the renderer acts on it: the file did not answer in time
- * (the composer says so and reads nothing itself), or its canonical form is a network path
- * main never imports by path (a mapped network drive: the composer may read it as bytes).
+ * Why no import grant was recorded, where the renderer acts on it: the file did not answer in
+ * time (the composer says so and reads nothing itself), or its canonical form is a network
+ * path main never imports by path (a mapped network drive). For the latter main records a
+ * one-use read grant instead and reports the size: the composer reads it as bytes, within its
+ * image limit (a pick from its File, a URL-only drop through readImageFromPath).
  */
-export type LocalMediaImportGrantRefusal = { refused: 'timeout' | 'network' }
+export type LocalMediaImportGrantRefusal =
+  { refused: 'timeout' } | { refused: 'network'; sizeBytes?: number }
 
 const isNetworkOrDevicePath = (value: string): boolean => /^[\\/]{2}/u.test(value)
 
@@ -84,7 +87,12 @@ export async function grantLocalMediaImportFile(
       async (): Promise<LocalMediaImportGrant | LocalMediaImportGrantRefusal | null> => {
         const canonical = await realpath(filePath)
         // Checked on the realpath result itself, in any path syntax: a mapped drive's UNC form.
-        if (isNetworkOrDevicePath(canonical)) return { refused: 'network' }
+        if (isNetworkOrDevicePath(canonical)) {
+          const stats = await stat(canonical)
+          if (!stats.isFile()) return null
+          recordLocalMediaImportGrant(path.resolve(canonical), now(), 'read')
+          return { refused: 'network', sizeBytes: stats.size }
+        }
         const resolved = path.resolve(canonical)
         if (!isImportablePath(resolved)) return null
         const stats = await stat(resolved)

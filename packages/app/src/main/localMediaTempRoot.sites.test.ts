@@ -28,7 +28,7 @@ vi.mock('./config/userDataDirectory', () => ({
 
 import { FsSvcImpl } from './api/svcFsImpl'
 import { CanvasThumbnailSvcImpl } from './api/svcCanvasThumbnailImpl'
-import { clearScopedLocalMediaPathsForTest } from './localMediaAccess'
+import { clearScopedLocalMediaPathsForTest, recordLocalMediaImportGrant } from './localMediaAccess'
 import { forgetLocalMediaTempRootVerification } from './localMediaTempRoot'
 
 const PNG = Buffer.from(
@@ -118,5 +118,15 @@ describe('the temp media folder at every renderer-facing reader', () => {
     await expect(planted.readImage()).rejects.toThrow('not authorized')
     await expect(planted.copyMirror()).rejects.toThrow('not authorized')
     await expect(planted.nativeRegion()).rejects.toThrow('not authorized')
+  })
+
+  it('reads a file dropped from a mapped network drive once, under its one-use read grant', async () => {
+    // Outside every root, like a file on a mapped drive (Z:\ resolving to a UNC path).
+    const dropped = path.join(victim, 'secret.png')
+    const reader = readers(dropped)
+    await expect(reader.readImage()).rejects.toThrow('not authorized')
+    recordLocalMediaImportGrant(fs.realpathSync(dropped), undefined, 'read')
+    await expect(reader.readImage()).resolves.toMatchObject({ filename: 'secret.png' })
+    await expect(reader.readImage()).rejects.toThrow('not authorized')
   })
 })

@@ -19,6 +19,8 @@ import {
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
   consumeLocalMediaImportGrant,
+  consumeLocalMediaReadGrant,
+  recordLocalMediaImportGrant,
   countLocalMediaImportGrantsForTest,
   flushLocalMediaAccessGrants,
   initializeLocalMediaAccess,
@@ -225,19 +227,56 @@ describe('short-lived local media import grants', () => {
       })
     ).resolves.toEqual({ refused: 'timeout' })
     answer(picked)
-    // A mapped network drive resolves to its UNC form, in either syntax: bytes only.
+    // A mapped network drive resolves to its UNC form, in either syntax: never imported by
+    // path; a one-use read grant and the size, so the composer can read it as bytes.
     for (const unc of ['\\\\server\\share\\mapped.png', '//server/share/mapped.png']) {
       const stat = vi.fn(async () => ({ isFile: () => true, size: 3 }))
       await expect(
         grantLocalMediaImportFile(picked, 'image/png', { realpath: async () => unc, stat })
-      ).resolves.toEqual({ refused: 'network' })
-      expect(stat).not.toHaveBeenCalled()
+      ).resolves.toEqual({ refused: 'network', sizeBytes: 3 })
+      expect(stat).toHaveBeenCalledWith(unc)
+      // ...and no import grant: importFile cannot copy it by path.
+      await expect(
+        authorizeLocalMediaImportSourcePathAsync(path.resolve(unc), [], {
+          realpath: async (value) => value
+        })
+      ).resolves.toBeNull()
     }
+    await expect(
+      grantLocalMediaImportFile(picked, 'image/png', {
+        realpath: async () => '//server/share/folder.png',
+        stat: async () => ({ isFile: () => false, size: 0 })
+      })
+    ).resolves.toBeNull()
+    expect(countLocalMediaImportGrantsForTest()).toBe(2)
+    clearScopedLocalMediaPathsForTest()
     // Anything else is a plain refusal.
     await expect(
       grantLocalMediaImportFile(path.join(root, 'missing.png'), 'image/png')
     ).resolves.toBeNull()
     expect(countLocalMediaImportGrantsForTest()).toBe(0)
+  })
+
+  it('lets readImageFromPath read a read-granted file once, and nothing else', async () => {
+    const root = makeTempDir('magicpot-import-grants-')
+    const mapped = path.join(root, 'mapped.png')
+    fs.writeFileSync(mapped, 'png')
+    expect(consumeLocalMediaReadGrant(mapped)).toBeNull()
+    // An import grant is not a read grant, and a read grant is not an import grant.
+    recordLocalMediaImportGrant(mapped)
+    expect(consumeLocalMediaReadGrant(mapped)).toBeNull()
+    clearScopedLocalMediaPathsForTest()
+    recordLocalMediaImportGrant(mapped, undefined, 'read')
+    expect(await authorizeImport(mapped, [])).toBeNull()
+    expect(consumeLocalMediaReadGrant(mapped)).toBe(mapped)
+    expect(consumeLocalMediaReadGrant(mapped)).toBeNull()
+    // A network path the page names is refused before any filesystem access (main would
+    // contact that host).
+    const realpathSync = vi.spyOn(fs.realpathSync, 'native')
+    expect(consumeLocalMediaReadGrant('//server/share/mapped.png')).toBeNull()
+    expect(consumeLocalMediaReadGrant('\\\\server\\share\\mapped.png')).toBeNull()
+    expect(realpathSync).not.toHaveBeenCalled()
+    realpathSync.mockRestore()
   })
 
   it('does not let an import grant authorize a different file', async () => {

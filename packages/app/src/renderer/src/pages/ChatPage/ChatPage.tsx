@@ -210,6 +210,7 @@ import { mergeChatAttachmentsWithSkillReferenceAttachments } from '@renderer/uti
 import {
   getDroppedLocalImageContent,
   getDroppedLocalImages,
+  readDroppedLocalImageBytes,
   type DroppedLocalImage,
   isImageOnlyInternalDragPayload,
   materializeInternalImageDragAttachment,
@@ -1117,16 +1118,23 @@ const buildImageChatAttachmentFromFile = async (
   })
 }
 
-/** An image of a URL-only drop, imported by main from the path it granted for one import. */
+/**
+ * An image of a URL-only drop, imported by main from the path it granted for one import; one
+ * on a mapped network drive is read once by main and imported as bytes, as a pick from there.
+ */
 const buildImageChatAttachmentFromGrantedPath = async (
   image: DroppedLocalImage
 ): Promise<ChatAttachment> => {
+  const maxBytes = getChatAttachmentMaxSizeMB('image') * 1024 * 1024
+  if (image.readBytes) {
+    return buildImageChatAttachmentFromFile(await readDroppedLocalImageBytes(image, maxBytes))
+  }
   const attachment = await importChatImageFromGrantedPath({
     service: api().svcManagedMedia,
     sourcePath: image.sourcePath,
     mimeType: image.mimeType,
     fileName: image.fileName,
-    maxBytes: getChatAttachmentMaxSizeMB('image') * 1024 * 1024
+    maxBytes
   })
   // The size from the managed copy, decoded by the image loader (not read into the page).
   return { ...attachment, ...(await readImageDimensionsFromUrl(attachment.url)) }

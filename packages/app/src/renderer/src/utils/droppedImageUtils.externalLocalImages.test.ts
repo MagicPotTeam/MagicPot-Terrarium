@@ -150,6 +150,23 @@ describe('external local image drop intake', () => {
     expect(mocks.read).not.toHaveBeenCalled()
   })
 
+  it('marks an image on a mapped network drive for a one-time bytes read', async () => {
+    mocks.importGrant.mockResolvedValueOnce({
+      path: 'Z:\\pics\\first.jpg',
+      sizeBytes: 1000,
+      bytesOnly: true
+    })
+    const result = await getDroppedLocalImages({ fileUrls: [first], text: '' })
+    expect(result.images).toEqual([
+      expect.objectContaining({
+        sourcePath: 'Z:\\pics\\first.jpg',
+        sizeBytes: 1000,
+        readBytes: true
+      })
+    ])
+    expect(mocks.read).not.toHaveBeenCalled()
+  })
+
   it('uses every short drop lease at once', async () => {
     const pending = deferred<{ path: string; sizeBytes: number }>()
     mocks.importGrant.mockReturnValueOnce(pending.promise)

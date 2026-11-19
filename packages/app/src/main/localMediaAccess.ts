@@ -289,16 +289,23 @@ export function resolveAuthorizedLocalMediaPath(
  */
 export const LOCAL_MEDIA_IMPORT_GRANT_TTL_MS = 60_000
 const MAX_LOCAL_MEDIA_IMPORT_GRANTS = 256
-/** Canonical-path key -> expiry time of each grant for that path, oldest first. */
-const localMediaImportGrants = new Map<string, number[]>()
+/**
+ * What a grant lets main do once: copy the file into managed media by its path ('import'),
+ * or read its bytes for the renderer ('read': only for a file whose canonical form is a
+ * network path, which main never imports by path, such as a file on a mapped drive).
+ */
+export type LocalMediaImportGrantKind = 'import' | 'read'
+type LocalMediaImportGrantEntry = { expiresAt: number; kind: LocalMediaImportGrantKind }
+/** Canonical-path key -> each grant for that path, oldest first. */
+const localMediaImportGrants = new Map<string, LocalMediaImportGrantEntry[]>()
 
 /** Monotonic: setting the clock back never extends a grant. */
 export const localMediaImportGrantClock = (): number => performance.now()
 
 function pruneLocalMediaImportGrants(now: number): number {
   let total = 0
-  for (const [key, expiries] of localMediaImportGrants) {
-    const live = expiries.filter((expiresAt) => expiresAt > now)
+  for (const [key, entries] of localMediaImportGrants) {
+    const live = entries.filter((entry) => entry.expiresAt > now)
     if (live.length) {
       localMediaImportGrants.set(key, live)
       total += live.length
@@ -310,50 +317,78 @@ function pruneLocalMediaImportGrants(now: number): number {
 }
 
 /**
- * Records one import grant for a canonical path (the caller has canonicalised it and checked
- * that main would import it). The oldest import grants go first when the bound is reached.
+ * Records one grant for a canonical path (the caller has canonicalised it and checked that
+ * main would import, or read, it). The oldest grants go first when the bound is reached.
  */
 export function recordLocalMediaImportGrant(
   canonicalPath: string,
-  now = localMediaImportGrantClock()
+  now = localMediaImportGrantClock(),
+  kind: LocalMediaImportGrantKind = 'import'
 ): void {
   const key = comparisonKey(canonicalPath)
   let total = pruneLocalMediaImportGrants(now)
-  const expiries = localMediaImportGrants.get(key) ?? []
+  const entries = localMediaImportGrants.get(key) ?? []
   localMediaImportGrants.delete(key)
-  localMediaImportGrants.set(key, [...expiries, now + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS])
+  localMediaImportGrants.set(key, [
+    ...entries,
+    { expiresAt: now + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS, kind }
+  ])
   total += 1
   while (total > MAX_LOCAL_MEDIA_IMPORT_GRANTS) {
-    const [oldestKey, oldestExpiries] = localMediaImportGrants.entries().next().value ?? []
-    if (!oldestKey || !oldestExpiries) break
-    oldestExpiries.shift()
-    if (!oldestExpiries.length) localMediaImportGrants.delete(oldestKey)
+    const [oldestKey, oldestEntries] = localMediaImportGrants.entries().next().value ?? []
+    if (!oldestKey || !oldestEntries) break
+    oldestEntries.shift()
+    if (!oldestEntries.length) localMediaImportGrants.delete(oldestKey)
     total -= 1
   }
 }
 
-/** Whether a live import grant covers this canonical path; nothing is spent. */
-function hasLocalMediaImportGrant(canonicalPath: string, now: number): boolean {
+/** Whether a live grant of this kind covers this canonical path; nothing is spent. */
+function hasLocalMediaImportGrant(
+  canonicalPath: string,
+  now: number,
+  kind: LocalMediaImportGrantKind = 'import'
+): boolean {
   return (localMediaImportGrants.get(comparisonKey(canonicalPath)) ?? []).some(
-    (expiresAt) => expiresAt > now
+    (entry) => entry.kind === kind && entry.expiresAt > now
   )
 }
 
 /**
- * Spends one live import grant for this canonical path; false when there is none. It is
- * synchronous, so two imports that both saw the grant cannot both spend it.
+ * Spends one live grant of this kind for this canonical path; false when there is none. It
+ * is synchronous, so two uses that both saw the grant cannot both spend it.
  */
 export function consumeLocalMediaImportGrant(
   canonicalPath: string,
-  now = localMediaImportGrantClock()
+  now = localMediaImportGrantClock(),
+  kind: LocalMediaImportGrantKind = 'import'
 ): boolean {
   pruneLocalMediaImportGrants(now)
   const key = comparisonKey(canonicalPath)
-  const expiries = localMediaImportGrants.get(key)
-  if (!expiries?.length) return false
-  expiries.shift()
-  if (!expiries.length) localMediaImportGrants.delete(key)
+  const entries = localMediaImportGrants.get(key)
+  const index = entries?.findIndex((entry) => entry.kind === kind) ?? -1
+  if (!entries || index < 0) return false
+  entries.splice(index, 1)
+  if (!entries.length) localMediaImportGrants.delete(key)
   return true
+}
+
+/**
+ * The canonical path of `filePath` when a one-use read grant covers it, spending that grant:
+ * readImageFromPath may then hand the renderer its bytes once (a file the user dropped from
+ * a mapped network drive, within the caller's byte limit). A UNC or device path named by the
+ * renderer is refused before any filesystem access.
+ */
+export function consumeLocalMediaReadGrant(
+  filePath: string,
+  now = localMediaImportGrantClock()
+): string | null {
+  const trimmed = String(filePath || '').trim()
+  if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
+  if (trimmed.startsWith('\\\\') || trimmed.startsWith('//')) return null
+  const canonical = canonicalizeExistingPath(trimmed)
+  if (!canonical) return null
+  return consumeLocalMediaImportGrant(canonical, now, 'read') ? canonical : null
 }
 
 async function canonicalizeExistingPathAsync(

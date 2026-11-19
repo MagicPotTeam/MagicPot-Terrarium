@@ -41,7 +41,11 @@ import { createReadStream, type Stats } from 'fs'
 import * as path from 'path'
 import { getCurrentUserDataDirectoryState } from '../config/userDataDirectory'
 import { app } from 'electron'
-import { resolveAuthorizedLocalMediaPath, type LocalMediaRoot } from '../localMediaAccess'
+import {
+  consumeLocalMediaReadGrant,
+  resolveAuthorizedLocalMediaPath,
+  type LocalMediaRoot
+} from '../localMediaAccess'
 import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -720,13 +724,15 @@ export class FsSvcImpl implements FsSvc {
 
   readImageFromPath = async (req: ReadImageFromPathReq): Promise<ReadImageFromPathResp> => {
     const storageState = getCurrentUserDataDirectoryState()
-    // The temp media folder only once verified as main's own private directory.
-    const fullPath = resolveAuthorizedLocalMediaPath(req.fullPath, [
-      app.getPath('userData'),
-      ...getVerifiedLocalMediaTempRoots(),
-      storageState.projectRoot,
-      storageState.autoSaveRoot
-    ])
+    // The temp media folder only once verified as main's own private directory. A file the
+    // user dropped from a mapped network drive is read once under its one-use read grant.
+    const fullPath =
+      resolveAuthorizedLocalMediaPath(req.fullPath, [
+        app.getPath('userData'),
+        ...getVerifiedLocalMediaTempRoots(),
+        storageState.projectRoot,
+        storageState.autoSaveRoot
+      ]) ?? consumeLocalMediaReadGrant(req.fullPath)
 
     if (!fullPath) {
       throw new Error('Local image path is not authorized')
