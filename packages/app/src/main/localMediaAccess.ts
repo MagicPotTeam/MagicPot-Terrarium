@@ -210,6 +210,28 @@ export function hasLocalMediaTraversal(url: string): boolean {
   return decoded.split(/[\\/]+/).some((segment) => segment === '..')
 }
 
+/**
+ * A Windows network (UNC) spelling: two leading separators of either kind (`\\server`,
+ * `//server`, `/\server`, `\/server`; device paths such as `\\?\` included). Checked on the
+ * raw string: on Windows any filesystem call on such a path contacts the host (SMB, with the
+ * user's NTLM credentials), and a host that does not answer blocks the caller.
+ */
+export function isWindowsNetworkLocalMediaPath(value: string): boolean {
+  return /^[\\/]{2}/.test(value)
+}
+
+/**
+ * A network path the user granted (an exact picked file or a picked directory), decided on the
+ * resolved spelling alone: no filesystem call. Only such a path is canonicalized afterwards.
+ */
+function isWindowsNetworkPathScoped(filePath: string): boolean {
+  const resolved = path.resolve(filePath)
+  if (scopedLocalMediaPaths.has(comparisonKey(resolved))) return true
+  return Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
+    isSameOrInside(directory, resolved)
+  )
+}
+
 /** Returns a canonical path only when it is under an application root or explicitly scoped. */
 export function resolveAuthorizedLocalMediaPath(
   filePath: string,
@@ -223,11 +245,12 @@ export function resolveAuthorizedLocalMediaPath(
   // Refusing it as a network path made every thumbnail and every managed file under an
   // application root unreadable on Linux and macOS. The canonical path still has to be inside
   // an allowed root (or scoped) below.
-  const isNetworkPath =
-    process.platform === 'win32' && (trimmed.startsWith('\\\\') || trimmed.startsWith('//'))
+  const isNetworkPath = process.platform === 'win32' && isWindowsNetworkLocalMediaPath(trimmed)
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) {
     return null
   }
+  // Before any filesystem call: an unsolicited network path never makes main contact its host.
+  if (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) return null
 
   const canonical = canonicalizeExistingPath(trimmed)
   if (!canonical) return null
@@ -333,7 +356,14 @@ export async function authorizeLocalMediaImportSourcePathAsync(
 ): Promise<string | null> {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
-  const isNetworkPath = trimmed.startsWith('\\\\') || trimmed.startsWith('//')
+  const isNetworkPath =
+    process.platform === 'win32'
+      ? isWindowsNetworkLocalMediaPath(trimmed)
+      : trimmed.startsWith('\\\\') || trimmed.startsWith('//')
+  // Before any filesystem call on Windows: see resolveAuthorizedLocalMediaPath.
+  if (process.platform === 'win32' && isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) {
+    return null
+  }
   const canonical = await canonicalizeExistingPathAsync(trimmed, realpath)
   if (!canonical) return null
   if (consumeLocalMediaImportGrant(canonical, now)) return canonical

@@ -3,12 +3,14 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  authorizeLocalMediaImportSourcePathAsync,
   authorizeScopedLocalMediaDirectory,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
   flushLocalMediaAccessGrants,
   hasLocalMediaTraversal,
   initializeLocalMediaAccess,
+  isWindowsNetworkLocalMediaPath,
   resolveAuthorizedLocalMediaPath
 } from './localMediaAccess'
 import { normalizeLocalFilePath } from './utils/localFileUrl'
@@ -196,6 +198,52 @@ describe('local media access policy', () => {
       ).toBeNull()
     })
     realpathSpy.mockRestore()
+  })
+
+  it('recognises every Windows network spelling, separators of either kind', () => {
+    for (const networkPath of [
+      '\\\\server\\share\\image.png',
+      '//server/share/image.png',
+      '/\\server\\share\\image.png',
+      '\\/server/share/image.png',
+      '\\\\?\\UNC\\server\\share\\image.png'
+    ]) {
+      expect(isWindowsNetworkLocalMediaPath(networkPath)).toBe(true)
+    }
+    for (const localPath of ['C:\\images\\image.png', 'C:/images/image.png', '/images/image.png']) {
+      expect(isWindowsNetworkLocalMediaPath(localPath)).toBe(false)
+    }
+  })
+
+  it('refuses an unscoped Windows network path before any filesystem call', async () => {
+    const root = makeTempDir('magicpot-media-root-')
+    const realpathSpy = vi.spyOn(fs.realpathSync, 'native')
+    const statSpy = vi.spyOn(fs, 'statSync')
+    const asyncRealpath = vi.fn(async (value: string) => value)
+
+    withPlatform('win32', () => {
+      // Both spellings are absolute for the path module these tests run with.
+      expect(resolveAuthorizedLocalMediaPath('//server/share/image.png', [root])).toBeNull()
+      expect(resolveAuthorizedLocalMediaPath('/\\server\\share\\image.png', [root])).toBeNull()
+    })
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+    try {
+      await expect(
+        authorizeLocalMediaImportSourcePathAsync('//server/share/image.png', [root], {
+          realpath: asyncRealpath
+        })
+      ).resolves.toBeNull()
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor)
+    }
+
+    // No SMB contact: the host is never resolved.
+    expect(realpathSpy).not.toHaveBeenCalled()
+    expect(statSpy).not.toHaveBeenCalled()
+    expect(asyncRealpath).not.toHaveBeenCalled()
+    realpathSpy.mockRestore()
+    statSpy.mockRestore()
   })
 
   it('allows an exact network path only after a trusted picker grant', () => {
