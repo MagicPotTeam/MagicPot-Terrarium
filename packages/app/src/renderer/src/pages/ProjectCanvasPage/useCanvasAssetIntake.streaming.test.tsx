@@ -3,8 +3,8 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY,
   PROJECT_CANVAS_IMAGE_STREAM_PATCH_FRAME_LIMIT,
+  getCanvasImageStreamPixelConcurrency,
   useCanvasAssetIntake,
   type CanvasImageBatchImportProgress
 } from './useCanvasAssetIntake'
@@ -17,7 +17,7 @@ import { buildCanvasImageSourceIdentity, createCanvasThumbnailSet } from './canv
 import { createCanvasHistorySnapshot, restoreCanvasHistorySnapshot } from './canvasHistory'
 import type { CanvasImageAsset, CanvasImageItem, CanvasItem } from './types'
 
-type ThumbnailResolverArgs = { src: string }
+type ThumbnailResolverArgs = { src: string; onFirstImage?: (image: CanvasImageAsset) => void }
 type ThumbnailResult = { image: CanvasImageAsset; thumbnailSet: unknown } | null
 
 const thumbnailResolver = vi.fn<(args: ThumbnailResolverArgs) => Promise<ThumbnailResult>>()
@@ -30,6 +30,16 @@ vi.mock('./canvasAssetIntakeHelpers', async (importOriginal) => {
     resolveCanvasImageThumbnailDisplayAsset: (args: ThumbnailResolverArgs) =>
       thumbnailResolver(args),
     loadImageFromSrc: (src: string) => loadImageFromSrcMock(src)
+  }
+})
+
+const prewarmMock = vi.fn<(count: number) => number>(() => 0)
+
+vi.mock('./canvasThumbnailWorkerClient', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./canvasThumbnailWorkerClient')>()
+  return {
+    ...actual,
+    prewarmCanvasThumbnailWorkers: (count: number) => prewarmMock(count)
   }
 })
 
@@ -171,6 +181,8 @@ beforeEach(() => {
   thumbnailResolver.mockImplementation(async ({ src }) => createThumbnailResult(src))
   loadImageFromSrcMock.mockReset()
   loadImageFromSrcMock.mockRejectedValue(new Error('Failed to load image'))
+  prewarmMock.mockReset()
+  prewarmMock.mockReturnValue(0)
 })
 
 afterEach(() => {
@@ -200,7 +212,7 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
 
     await waitFor(() => expect(store.items).toHaveLength(sources.length))
     await waitFor(() =>
-      expect(thumbnailResolver).toHaveBeenCalledTimes(PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY)
+      expect(thumbnailResolver).toHaveBeenCalledTimes(getCanvasImageStreamPixelConcurrency())
     )
     expect(done).toBe(false)
     expect(store.historyCommits).toBe(1)
@@ -213,7 +225,7 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
     )
     expect(new Set(frames.map((item) => `${item.x}:${item.y}`)).size).toBe(sources.length)
     // Only the concurrency window is being worked on while all 60 frames are already visible.
-    expect(thumbnailResolver).toHaveBeenCalledTimes(PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY)
+    expect(thumbnailResolver).toHaveBeenCalledTimes(getCanvasImageStreamPixelConcurrency())
     const committedRects = rectsOf(store.items)
 
     await act(async () => {
@@ -233,6 +245,35 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
     // One undo step removes the whole import.
     store.undo()
     expect(store.items).toHaveLength(0)
+  })
+
+  it('starts the thumbnail workers before the header pass of a streamed import only', async () => {
+    const order: string[] = []
+    prewarmMock.mockImplementation(() => {
+      order.push('prewarm')
+      return 2
+    })
+    thumbnailResolver.mockImplementation(async ({ src }) => {
+      order.push('thumbnail')
+      return createThumbnailResult(src)
+    })
+    const store = createCanvasStore()
+    const { result } = renderIntake(store)
+
+    await act(async () => {
+      await result.current.addImagesToCanvas(createSources(30))
+    })
+    expect(prewarmMock).toHaveBeenCalledTimes(1)
+    expect(prewarmMock).toHaveBeenCalledWith(30)
+    expect(order[0]).toBe('prewarm')
+    expect(order.filter((step) => step === 'thumbnail')).toHaveLength(30)
+
+    // A few images do not stream: no workers are started ahead for them.
+    prewarmMock.mockClear()
+    await act(async () => {
+      await result.current.addImagesToCanvas(createSources(3, 'few'))
+    })
+    expect(prewarmMock).not.toHaveBeenCalled()
   })
 
   it('hands over a bounded number of images per frame', async () => {
@@ -503,6 +544,64 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
     expect(store.items).toHaveLength(60)
     expect(store.historyCommits).toBe(2)
     expect(countRealPixels(store.items)).toBe(60)
-    expect(maxActive).toBeLessThanOrEqual(PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY)
+    expect(maxActive).toBeLessThanOrEqual(getCanvasImageStreamPixelConcurrency())
+  })
+
+  it('shows the display image of a large source before its thumbnail set and never swaps it afterwards', async () => {
+    const gates = new Map<string, ReturnType<typeof deferred<void>>>()
+    const earlyImages = new Map<string, CanvasImageAsset>()
+    const lateEarlyImage: Array<() => void> = []
+    thumbnailResolver.mockImplementation(async ({ src, onFirstImage }) => {
+      // The display level is handed over while the larger levels are still being encoded ...
+      const result = createThumbnailResult(src)
+      earlyImages.set(src, result.image)
+      onFirstImage?.(result.image)
+      const gate = deferred<void>()
+      gates.set(src, gate)
+      await gate.promise
+      lateEarlyImage.push(() => onFirstImage?.(document.createElement('img')))
+      // ... and the result carries the same image plus the thumbnail set.
+      return result
+    })
+    const store = createCanvasStore()
+    const sources = createSources(24)
+    const { result } = renderIntake(store)
+
+    let done = false
+    await act(async () => {
+      void result.current.addImagesToCanvas(sources).then(() => {
+        done = true
+      })
+    })
+
+    // The images being worked on already show their pixels; their sets are still to come.
+    await waitFor(() =>
+      expect(countRealPixels(store.items)).toBe(getCanvasImageStreamPixelConcurrency())
+    )
+    expect(
+      store.images().filter((item) => item.image && item.image === earlyImages.get(item.src))
+    ).toHaveLength(getCanvasImageStreamPixelConcurrency())
+    expect(store.images().some((item) => item.thumbnailSet)).toBe(false)
+    expect(store.historyCommits).toBe(1)
+
+    for (let round = 0; round < 40 && !done; round += 1) {
+      await act(async () => {
+        ;[...gates.entries()].forEach(([src, gate]) => {
+          gates.delete(src)
+          gate.resolve()
+        })
+      })
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    await waitFor(() => expect(done).toBe(true), { timeout: 5000 })
+    // An early image that arrives after the final patch must not replace anything.
+    lateEarlyImage.forEach((emit) => emit())
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    // Every frame kept the image it showed first (one upload per image) and got its set.
+    expect(countRealPixels(store.items)).toBe(sources.length)
+    expect(store.images().every((item) => item.image === earlyImages.get(item.src))).toBe(true)
+    expect(store.images().every((item) => Boolean(item.thumbnailSet))).toBe(true)
+    expect(store.historyCommits).toBe(1)
   })
 })

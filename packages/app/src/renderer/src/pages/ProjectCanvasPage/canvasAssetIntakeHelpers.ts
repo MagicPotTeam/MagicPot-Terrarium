@@ -5,7 +5,11 @@ import type { CanvasImageAsset, CanvasImageItem, CanvasProvenanceSource } from '
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from './canvasThumbnailCache'
 import { ensureCanvasThumbnailSet, readWarmCanvasThumbnailSet } from './canvasThumbnailWorkerClient'
-import type { CanvasImageSourceIdentity, CanvasImageThumbnailSet } from './canvasThumbnailTypes'
+import type {
+  CanvasImageSourceIdentity,
+  CanvasImageThumbnailSet,
+  CanvasThumbnailEnsureResult
+} from './canvasThumbnailTypes'
 import {
   canReadCanvasLocalImageSource,
   createCanvasLocalImageObjectUrl,
@@ -773,19 +777,112 @@ async function resolveCanvasImageThumbnailSourceBlob({
   return await response.blob()
 }
 
+/**
+ * An image element decoded from encoded bytes in memory. The object URL only lives for the
+ * load: the element keeps the bytes it was loaded from.
+ */
+async function loadCanvasImageFromBlob(
+  blob: Blob,
+  loadImageFromSrcFn: (src: string) => Promise<LoadedCanvasImage>
+): Promise<HTMLImageElement | null> {
+  if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+    return null
+  }
+
+  let objectUrl = ''
+  try {
+    objectUrl = URL.createObjectURL(blob)
+    const { img } = await loadImageFromSrcFn(objectUrl)
+    return img
+  } catch {
+    return null
+  } finally {
+    if (objectUrl && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(objectUrl)
+    }
+  }
+}
+
+/**
+ * A thumbnail set lists every level, but only the levels below the source size have a file of
+ * their own. An entry at or above it repeats the largest file (same file name). For the image
+ * the set belongs to, such an entry stands for the source itself: this returns the set with
+ * those entries pointing at the source, so that "the level above the largest thumbnail" is the
+ * original picture and not an enlarged thumbnail. A set with one file per level (every set
+ * written before, and every source above 2048 px) is returned as it is.
+ */
+export function bindCanvasThumbnailSetToSource(
+  thumbnailSet: CanvasImageThumbnailSet,
+  source: { src: string; sourceWidth?: number; sourceHeight?: number; sizeBytes?: number }
+): CanvasImageThumbnailSet {
+  if (!source.src) {
+    return thumbnailSet
+  }
+
+  const levels = [...thumbnailSet.levels].sort((left, right) => left.maxSide - right.maxSide)
+  const hasSourceSize =
+    typeof source.sourceWidth === 'number' &&
+    typeof source.sourceHeight === 'number' &&
+    source.sourceWidth > 0 &&
+    source.sourceHeight > 0
+  let changed = false
+  let fileLevel: CanvasImageThumbnailSet['levels'][number] | null = null
+  const bound = levels.map((level) => {
+    if (!fileLevel || !level.filename || level.filename !== fileLevel.filename) {
+      fileLevel = level
+      return level
+    }
+    if (level.src === source.src) {
+      return level
+    }
+
+    // Without a known source size the entry is sized like the level it stands for.
+    const fileMaxSide = Math.max(fileLevel.width, fileLevel.height, 1)
+    const scale = level.maxSide / fileMaxSide
+    changed = true
+    return {
+      ...level,
+      src: source.src,
+      width: hasSourceSize ? Math.round(source.sourceWidth!) : Math.round(fileLevel.width * scale),
+      height: hasSourceSize
+        ? Math.round(source.sourceHeight!)
+        : Math.round(fileLevel.height * scale),
+      ...(typeof source.sizeBytes === 'number' && source.sizeBytes > 0
+        ? { sizeBytes: source.sizeBytes }
+        : {})
+    }
+  })
+
+  return changed ? { ...thumbnailSet, levels: bound } : thumbnailSet
+}
+
 export async function resolveCanvasImageThumbnailDisplayAsset({
   src,
   sourceIdentity,
   thumbnailSet,
   sourceFile,
+  sourceWidth,
+  sourceHeight,
+  sizeBytes,
   maxPreviewSide = CANVAS_IMAGE_PROXY_MAX_SIDE,
+  onFirstImage,
   loadImageFromSrcFn = loadImageFromSrc
 }: {
   src: string
   sourceIdentity?: CanvasImageSourceIdentity
   thumbnailSet?: CanvasImageThumbnailSet
   sourceFile?: Blob
+  /** Pixel size of the source from the header pass, when known. */
+  sourceWidth?: number
+  sourceHeight?: number
+  sizeBytes?: number
   maxPreviewSide?: number
+  /**
+   * Called at most once, and only while the thumbnails are being generated: the image of the
+   * display level, ready before the larger levels are encoded and written. It is the same
+   * image the resolved result carries (the result adds the thumbnail set).
+   */
+  onFirstImage?: (image: CanvasImageAsset) => void
   loadImageFromSrcFn?: (src: string) => Promise<LoadedCanvasImage>
 }): Promise<{ image: CanvasImageAsset; thumbnailSet: CanvasImageThumbnailSet } | null> {
   if (!sourceIdentity) {
@@ -801,25 +898,85 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
     resolvedThumbnailSet = warm.thumbnailSet
   }
 
+  let generatedLevels: CanvasThumbnailEnsureResult['generatedLevels']
+  // Set from the pool's callback: a holder, so that the read below is not narrowed to null.
+  const early: { level: { maxSide: number; image: Promise<HTMLImageElement | null> } | null } = {
+    level: null
+  }
   if (!resolvedThumbnailSet) {
     try {
       const sourceBlob = await resolveCanvasImageThumbnailSourceBlob({ src, sourceFile })
       if (sourceBlob) {
-        resolvedThumbnailSet = (
-          await ensureCanvasThumbnailSet({
-            source: sourceBlob,
-            identity: sourceIdentity
-          })
-        ).thumbnailSet
+        const ensured = await ensureCanvasThumbnailSet({
+          source: sourceBlob,
+          identity: sourceIdentity,
+          // The cache was read just above.
+          skipWarmRead: true,
+          ...(typeof sourceWidth === 'number' && typeof sourceHeight === 'number'
+            ? { sourceWidth, sourceHeight }
+            : {}),
+          ...(onFirstImage
+            ? {
+                firstLevelMaxSide: maxPreviewSide,
+                onFirstLevel: (level) => {
+                  if (early.level) {
+                    return
+                  }
+                  const image = loadCanvasImageFromBlob(level.blob, loadImageFromSrcFn)
+                  early.level = { maxSide: level.maxSide, image }
+                  void image.then((loaded) => {
+                    if (loaded) {
+                      onFirstImage(loaded)
+                    }
+                  })
+                }
+              }
+            : {})
+        })
+        resolvedThumbnailSet = ensured.thumbnailSet
+        generatedLevels = ensured.generatedLevels
       }
     } catch (error) {
       console.warn('[Canvas] Failed to generate thumbnail set for image source:', src, error)
     }
   }
 
+  if (resolvedThumbnailSet) {
+    resolvedThumbnailSet = bindCanvasThumbnailSetToSource(resolvedThumbnailSet, {
+      src,
+      sourceWidth,
+      sourceHeight,
+      sizeBytes
+    })
+  }
+
   const thumbnailLevel = pickBestCanvasThumbnailLevel(resolvedThumbnailSet, maxPreviewSide)
   if (!resolvedThumbnailSet || !thumbnailLevel?.src) {
     return null
+  }
+
+  if (thumbnailLevel.src !== src) {
+    // The level that was handed over early is the display level: keep that one image, so the
+    // canvas uploads it once.
+    const earlyLevel = early.level
+    if (earlyLevel && earlyLevel.maxSide === thumbnailLevel.maxSide) {
+      const image = await earlyLevel.image
+      if (image) {
+        return { image, thumbnailSet: resolvedThumbnailSet }
+      }
+    }
+
+    // A level that was encoded a moment ago is shown from those bytes: no authorisation round
+    // trip and no read of the file that was just written.
+    const generatedLevel = generatedLevels?.find(
+      (level) => level.filename === thumbnailLevel.filename
+    )
+    if (generatedLevel) {
+      const image = await loadCanvasImageFromBlob(generatedLevel.blob, loadImageFromSrcFn)
+      if (image) {
+        return { image, thumbnailSet: resolvedThumbnailSet }
+      }
+    }
   }
 
   try {
@@ -920,6 +1077,9 @@ export async function hydrateCanvasImageItemForCanvas(
     src: item.src,
     sourceIdentity: item.sourceIdentity,
     thumbnailSet: item.thumbnailSet,
+    sourceWidth: item.sourceWidth,
+    sourceHeight: item.sourceHeight,
+    sizeBytes: item.sizeBytes,
     maxPreviewSide,
     loadImageFromSrcFn
   })

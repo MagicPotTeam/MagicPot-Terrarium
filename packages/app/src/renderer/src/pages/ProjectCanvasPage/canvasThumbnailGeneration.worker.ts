@@ -9,7 +9,8 @@ import {
 
 type CanvasLike = OffscreenCanvas | HTMLCanvasElement
 
-const MAX_IDLE_THUMBNAIL_CANVASES = 2
+// One job holds a canvas per level until that level is encoded.
+const MAX_IDLE_THUMBNAIL_CANVASES = CANVAS_THUMBNAIL_LEVELS.length
 // An idle canvas keeps its object (and context) for the next level, but not its pixels: the
 // next level resizes it anyway, which reallocates them.
 const MAX_RETAINED_IDLE_THUMBNAIL_CANVAS_PIXELS = 1
@@ -190,70 +191,176 @@ async function encodeThumbnailBlob(
   return { blob: pngBlob, mimeType: 'image/png' }
 }
 
+export type CanvasThumbnailLevelPlan = {
+  maxSide: CanvasThumbnailLevelSize
+  width: number
+  height: number
+}
+
+/**
+ * The levels that get a file: only those strictly below the source size. A level at or above it
+ * would be the source's own pixels encoded a second time (for a 1024 px source the "1024" and
+ * "2048" levels were two identical full-size files and two thirds of the job's time); the
+ * source itself stands for those. An image smaller than every level still gets one file (the
+ * smallest level, at the image's own size), so that a set is never empty.
+ */
+export function planCanvasThumbnailLevels({
+  sourceWidth,
+  sourceHeight,
+  levels = CANVAS_THUMBNAIL_LEVELS
+}: {
+  sourceWidth: number
+  sourceHeight: number
+  levels?: readonly CanvasThumbnailLevelSize[]
+}): CanvasThumbnailLevelPlan[] {
+  const ordered = [...new Set(levels)].sort((left, right) => left - right)
+  const sourceMaxSide = Math.max(sourceWidth, sourceHeight)
+  const belowSource = ordered.filter((maxSide) => maxSide < sourceMaxSide)
+  const planned = belowSource.length > 0 ? belowSource : ordered.slice(0, 1)
+  return planned.map((maxSide) => ({
+    maxSide,
+    ...getThumbnailDimensions({ sourceWidth, sourceHeight, maxSide })
+  }))
+}
+
+/**
+ * The level to hand over before the others are encoded: the smallest planned level that covers
+ * `firstLevelMaxSide`. None when no planned level covers the size (the source itself is then
+ * what gets displayed), and none when it is the largest planned level: the levels below it
+ * take a few milliseconds, the job would end right after it anyway.
+ */
+export function pickCanvasThumbnailFirstLevel(
+  plans: readonly CanvasThumbnailLevelPlan[],
+  firstLevelMaxSide: number | undefined
+): CanvasThumbnailLevelPlan | null {
+  if (
+    typeof firstLevelMaxSide !== 'number' ||
+    !Number.isFinite(firstLevelMaxSide) ||
+    firstLevelMaxSide <= 0
+  ) {
+    return null
+  }
+  const index = plans.findIndex((plan) => plan.maxSide >= firstLevelMaxSide)
+  return index >= 0 && index < plans.length - 1 ? plans[index] : null
+}
+
 export async function generateCanvasThumbnailLevelsInScope({
   source,
   levels = CANVAS_THUMBNAIL_LEVELS,
-  preferWebp = true
+  preferWebp = true,
+  firstLevelMaxSide,
+  onFirstLevel
 }: {
   source: Blob
   levels?: readonly CanvasThumbnailLevelSize[]
   preferWebp?: boolean
+  /** Max side of the level that is encoded and handed over first (see onFirstLevel). */
+  firstLevelMaxSide?: number
+  /**
+   * Called once, with the first encoded level, before the other levels are encoded. The same
+   * level is part of the result again.
+   */
+  onFirstLevel?: (level: CanvasThumbnailWorkerGeneratedLevel) => void
 }): Promise<CanvasThumbnailWorkerGeneratedLevel[]> {
   if (typeof createImageBitmap !== 'function') {
     throw new Error('createImageBitmap is unavailable.')
   }
 
-  const bitmap = await createImageBitmap(source)
+  // Ascending by size. A canvas leaves this list (and goes back to the pool) once encoded.
+  const drawn: Array<{ plan: CanvasThumbnailLevelPlan; canvas: CanvasLike | null }> = []
   try {
-    const sourceWidth = getImageBitmapWidth(bitmap)
-    const sourceHeight = getImageBitmapHeight(bitmap)
-    if (
-      !Number.isFinite(sourceWidth) ||
-      !Number.isFinite(sourceHeight) ||
-      sourceWidth <= 0 ||
-      sourceHeight <= 0
-    ) {
-      throw new Error('Decoded image has invalid dimensions.')
-    }
-
-    const generated: CanvasThumbnailWorkerGeneratedLevel[] = []
-    for (const maxSide of levels) {
-      const { width, height } = getThumbnailDimensions({
-        sourceWidth,
-        sourceHeight,
-        maxSide
-      })
-      const canvas = thumbnailCanvasPool.acquire(width, height)
-      if (!canvas) {
-        throw new Error('No canvas implementation is available.')
+    const bitmap = await createImageBitmap(source)
+    try {
+      const sourceWidth = getImageBitmapWidth(bitmap)
+      const sourceHeight = getImageBitmapHeight(bitmap)
+      if (
+        !Number.isFinite(sourceWidth) ||
+        !Number.isFinite(sourceHeight) ||
+        sourceWidth <= 0 ||
+        sourceHeight <= 0
+      ) {
+        throw new Error('Decoded image has invalid dimensions.')
       }
 
-      try {
+      // Draw first, encode afterwards. The largest level is drawn from the decoded source and
+      // every smaller one from the level above it: one large downscale per job instead of one
+      // per level (each of the five draws from a 4096 x 3072 source cost 70-130 ms).
+      const plans = planCanvasThumbnailLevels({ sourceWidth, sourceHeight, levels })
+      let previous: ImageBitmap | CanvasLike = bitmap
+      for (let index = plans.length - 1; index >= 0; index -= 1) {
+        const plan = plans[index]
+        const canvas = thumbnailCanvasPool.acquire(plan.width, plan.height)
+        if (!canvas) {
+          throw new Error('No canvas implementation is available.')
+        }
+        drawn.unshift({ plan, canvas })
+
         const context = get2dContext(canvas)
         if (!context) {
           throw new Error('Failed to create thumbnail canvas context.')
         }
+        context.clearRect(0, 0, plan.width, plan.height)
+        context.drawImage(previous, 0, 0, plan.width, plan.height)
+        previous = canvas
+      }
+    } finally {
+      // The decoded source (4 bytes per pixel) is not needed while the levels are encoded.
+      bitmap.close?.()
+    }
 
-        context.clearRect(0, 0, width, height)
-        context.drawImage(bitmap, 0, 0, width, height)
-
+    const encoded = new Map<CanvasThumbnailLevelSize, CanvasThumbnailWorkerGeneratedLevel>()
+    const encodeLevel = async (entry: (typeof drawn)[number]) => {
+      const { plan, canvas } = entry
+      if (!canvas) {
+        return encoded.get(plan.maxSide) ?? null
+      }
+      try {
         const { blob, mimeType } = await encodeThumbnailBlob(canvas, preferWebp)
-        generated.push({
-          maxSide,
-          width,
-          height,
+        const level: CanvasThumbnailWorkerGeneratedLevel = {
+          maxSide: plan.maxSide,
+          width: plan.width,
+          height: plan.height,
           mimeType,
           format: mimeType === 'image/webp' ? 'webp' : 'png',
           blob
-        })
+        }
+        encoded.set(plan.maxSide, level)
+        return level
       } finally {
+        entry.canvas = null
         thumbnailCanvasPool.release(canvas)
       }
     }
 
+    const firstPlan = onFirstLevel
+      ? pickCanvasThumbnailFirstLevel(
+          drawn.map(({ plan }) => plan),
+          firstLevelMaxSide
+        )
+      : null
+    const firstEntry = firstPlan ? drawn.find(({ plan }) => plan === firstPlan) : undefined
+    if (firstEntry) {
+      const firstLevel = await encodeLevel(firstEntry)
+      if (firstLevel) {
+        onFirstLevel?.(firstLevel)
+      }
+    }
+
+    const generated: CanvasThumbnailWorkerGeneratedLevel[] = []
+    for (const entry of drawn) {
+      const level = await encodeLevel(entry)
+      if (level) {
+        generated.push(level)
+      }
+    }
     return generated
   } finally {
-    bitmap.close?.()
+    for (const entry of drawn) {
+      if (entry.canvas) {
+        thumbnailCanvasPool.release(entry.canvas)
+        entry.canvas = null
+      }
+    }
   }
 }
 
@@ -284,7 +391,15 @@ if (isWorkerScope()) {
     void generateCanvasThumbnailLevelsInScope({
       source: message.source,
       levels: message.levels,
-      preferWebp: message.preferWebp
+      preferWebp: message.preferWebp,
+      firstLevelMaxSide: message.firstLevelMaxSide,
+      onFirstLevel: (level) => {
+        workerScope.postMessage({
+          type: 'first-level',
+          requestId: message.requestId,
+          level
+        })
+      }
     })
       .then((levels) => {
         workerScope.postMessage({

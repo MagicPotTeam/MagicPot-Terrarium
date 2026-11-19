@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   buildCanvasImageSourceIdentity,
-  buildCanvasSessionSourceIdentity,
   canvasThumbnailManifestFromSet,
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
-import { generateCanvasThumbnailLevelsInScope } from './canvasThumbnailGeneration.worker'
+import {
+  generateCanvasThumbnailLevelsInScope,
+  pickCanvasThumbnailFirstLevel,
+  planCanvasThumbnailLevels
+} from './canvasThumbnailGeneration.worker'
 import {
   configureCanvasThumbnailWorkerPoolForTest,
   ensureCanvasThumbnailSet,
@@ -275,12 +278,26 @@ describe('canvasThumbnailWorkerClient', () => {
     )
   })
 
-  it('generates persistent thumbnail levels as WebP in renderer fallback', async () => {
+  it('generates only the levels below the source size and persists them as WebP in renderer fallback', async () => {
     const identity = createIdentity()
+    // The mocked source decodes to 1024 x 512: 128, 256 and 512 are below it.
     const { drawImage, close } = installRendererThumbnailMocks()
+    const writeThumbnailSet = vi.fn(
+      async ({
+        manifest
+      }: Parameters<NonNullable<CanvasThumbnailIpcBridge['writeThumbnailSet']>>[0]) => ({
+        manifest: {
+          ...manifest,
+          levels: manifest.levels.map((level) => ({
+            ...level,
+            src: `local-media:///cache/${level.filename}`
+          }))
+        }
+      })
+    )
     const bridge: CanvasThumbnailIpcBridge = {
       readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
-      writeThumbnailSet: vi.fn(async ({ manifest }) => ({ manifest }))
+      writeThumbnailSet
     }
 
     const result = await ensureCanvasThumbnailSet({
@@ -290,13 +307,38 @@ describe('canvasThumbnailWorkerClient', () => {
     })
 
     expect(result.status).toBe('generated')
+    // The set still lists every level ...
     expect(result.thumbnailSet?.levels.map((level) => level.maxSide)).toEqual([
       128, 256, 512, 1024, 2048
     ])
     expect(result.thumbnailSet?.levels.every((level) => level.mimeType === 'image/webp')).toBe(true)
-    expect(drawImage).toHaveBeenCalledTimes(5)
+    // ... but a level at or above the source is no encode and no file of its own.
+    expect(drawImage).toHaveBeenCalledTimes(3)
+    expect(HTMLCanvasElement.prototype.toBlob).toHaveBeenCalledTimes(3)
+    expect(result.thumbnailSet?.levels.map((level) => level.filename)).toEqual([
+      '128.webp',
+      '256.webp',
+      '512.webp',
+      '512.webp',
+      '512.webp'
+    ])
+    expect(result.thumbnailSet?.levels.map((level) => [level.width, level.height])).toEqual([
+      [128, 64],
+      [256, 128],
+      [512, 256],
+      [512, 256],
+      [512, 256]
+    ])
+    const written = writeThumbnailSet.mock.calls[0][0]
+    expect(written.files.map((file) => file.filename)).toEqual(['128.webp', '256.webp', '512.webp'])
+    expect(written.manifest.levels.map((level) => level.filename)).toEqual([
+      '128.webp',
+      '256.webp',
+      '512.webp',
+      '512.webp',
+      '512.webp'
+    ])
     expect(close).toHaveBeenCalled()
-    expect(bridge.writeThumbnailSet).toHaveBeenCalled()
     expect(getCanvasThumbnailRuntimeMetrics()).toEqual(
       expect.objectContaining({
         thumbnailCount: 1,
@@ -310,38 +352,59 @@ describe('canvasThumbnailWorkerClient', () => {
     )
   })
 
-  it('generates all five levels for a pathless identity as a renderer-only transient set', async () => {
-    const identity = buildCanvasSessionSourceIdentity({
-      sourceKey: 'canvas-session:test-pathless',
-      sizeBytes: 15,
-      mimeType: 'image/png',
-      fileName: 'pathless.png'
-    })
-    const { drawImage, close } = installRendererThumbnailMocks()
-    const generateThumbnailSet = vi.fn()
-    const createNativeThumbnail = vi.fn()
-    const writeThumbnailSet = vi.fn()
+  it('does not read the cache again when the caller has just missed it', async () => {
+    const identity = createIdentity()
+    installRendererThumbnailMocks()
+    const readThumbnailManifest = vi.fn(async () => ({ manifest: null }))
 
     const result = await ensureCanvasThumbnailSet({
-      source: new Blob(['pathless-source'], { type: 'image/png' }),
+      source: new Blob(['source'], { type: 'image/png' }),
       identity,
-      bridge: {
-        readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
-        generateThumbnailSet,
-        createNativeThumbnail,
-        writeThumbnailSet
-      }
+      skipWarmRead: true,
+      bridge: { readThumbnailManifest }
     })
 
     expect(result.status).toBe('generated')
-    expect(result.thumbnailSet?.levels.map((level) => level.maxSide)).toEqual([
-      128, 256, 512, 1024, 2048
-    ])
-    expect(drawImage).toHaveBeenCalledTimes(5)
-    expect(close).toHaveBeenCalled()
-    expect(generateThumbnailSet).not.toHaveBeenCalled()
-    expect(createNativeThumbnail).not.toHaveBeenCalled()
-    expect(writeThumbnailSet).not.toHaveBeenCalled()
+    expect(readThumbnailManifest).not.toHaveBeenCalled()
+  })
+
+  it('asks a switched-off sidecar once and a failing one three times, then leaves it alone', async () => {
+    installRendererThumbnailMocks()
+    const run = async (bridge: CanvasThumbnailIpcBridge, index: number) =>
+      ensureCanvasThumbnailSet({
+        source: new Blob(['source'], { type: 'image/png' }),
+        identity: createIdentity({ canonicalPath: `C:/Images/sidecar-${index}.png` }),
+        bridge
+      })
+
+    const disabled = vi.fn(async () => ({
+      manifest: null,
+      status: 'fallback' as const,
+      sidecar: { used: false, fallback: true, reason: 'feature-disabled' }
+    }))
+    const disabledBridge: CanvasThumbnailIpcBridge = {
+      readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
+      generateThumbnailSet: disabled
+    }
+    for (let index = 0; index < 4; index += 1) {
+      expect((await run(disabledBridge, index)).status).toBe('generated')
+    }
+    expect(disabled).toHaveBeenCalledTimes(1)
+
+    const failing = vi.fn(async () => ({
+      manifest: null,
+      status: 'failed' as const,
+      error: 'Canvas thumbnail sidecar output failed manifest validation.',
+      sidecar: { used: true, fallback: false }
+    }))
+    const failingBridge: CanvasThumbnailIpcBridge = {
+      readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
+      generateThumbnailSet: failing
+    }
+    for (let index = 0; index < 6; index += 1) {
+      expect((await run(failingBridge, 10 + index)).status).toBe('generated')
+    }
+    expect(failing).toHaveBeenCalledTimes(3)
   })
 
   it('falls back to PNG when WebP encoding is unavailable', async () => {
@@ -524,8 +587,8 @@ describe('canvasThumbnailWorkerClient', () => {
   it('draws thumbnail levels on a CPU canvas and keeps no pixels in the idle canvas', async () => {
     setGlobalCreateImageBitmap(
       vi.fn(async () => ({
-        width: 2048,
-        height: 2048,
+        width: 4096,
+        height: 4096,
         close: vi.fn()
       }))
     )
@@ -570,20 +633,16 @@ describe('canvasThumbnailWorkerClient', () => {
     expect(pooled.width * pooled.height).toBe(1)
   })
 
-  it('reuses one canvas only after async encoding completes and returns it after errors', async () => {
+  it('draws every level before the first encode, each from the level above it, and frees the decoded source early', async () => {
     const pendingEncodes: Array<(blob: Blob | null) => void> = []
     const contextCanvases: HTMLCanvasElement[] = []
     const originalCreateElement = document.createElement.bind(document)
     vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) =>
       originalCreateElement(tagName as 'canvas')) as typeof document.createElement)
 
-    setGlobalCreateImageBitmap(
-      vi.fn(async () => ({
-        width: 1024,
-        height: 512,
-        close: vi.fn()
-      }))
-    )
+    const close = vi.fn()
+    const bitmap = { width: 4096, height: 2048, close }
+    setGlobalCreateImageBitmap(vi.fn(async () => bitmap))
     const getContext = vi
       .spyOn(HTMLCanvasElement.prototype, 'getContext')
       .mockImplementation(function (this: HTMLCanvasElement) {
@@ -597,34 +656,164 @@ describe('canvasThumbnailWorkerClient', () => {
         levels: [128]
       })
     ).rejects.toThrow('Failed to create thumbnail canvas context.')
+    expect(close).toHaveBeenCalledTimes(1)
+    // The canvas of the failed job went back to the pool without pixels.
+    expect(contextCanvases[0].width).toBe(1)
 
-    const drawImage = vi.fn()
-    getContext.mockReturnValue({
-      clearRect: vi.fn(),
-      drawImage,
-      imageSmoothingEnabled: false,
-      imageSmoothingQuality: 'low'
-    } as unknown as ReturnType<HTMLCanvasElement['getContext']>)
+    const draws: Array<{ source: unknown; width: number; height: number }> = []
+    getContext.mockImplementation(function (this: HTMLCanvasElement) {
+      contextCanvases.push(this)
+      return {
+        clearRect: vi.fn(),
+        drawImage: (source: unknown, _x: number, _y: number, width: number, height: number) => {
+          draws.push({ source, width, height })
+        },
+        imageSmoothingEnabled: false,
+        imageSmoothingQuality: 'low'
+      } as unknown as ReturnType<HTMLCanvasElement['getContext']>
+    })
     vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (callback) {
       pendingEncodes.push((blob) => callback(blob))
     })
 
     const generation = generateCanvasThumbnailLevelsInScope({
       source: new Blob(['source'], { type: 'image/png' }),
-      levels: [128, 256]
+      levels: [128, 256, 512]
     })
     await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
-    expect(drawImage).toHaveBeenCalledTimes(1)
+
+    // All three draws happened before anything was encoded: 512 from the decoded source,
+    // 256 from the 512 canvas, 128 from the 256 canvas.
+    expect(draws.map((draw) => [draw.width, draw.height])).toEqual([
+      [512, 256],
+      [256, 128],
+      [128, 64]
+    ])
+    expect(draws[0].source).toBe(bitmap)
+    expect(draws[1].source).toBeInstanceOf(HTMLCanvasElement)
+    expect((draws[1].source as HTMLCanvasElement).width).toBe(512)
+    expect((draws[2].source as HTMLCanvasElement).width).toBe(256)
+    // The 32 MB of decoded source are released before the encodes run.
+    expect(close).toHaveBeenCalledTimes(2)
 
     pendingEncodes.shift()?.(new Blob(['encoded-128'], { type: 'image/webp' }))
     await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
-    expect(drawImage).toHaveBeenCalledTimes(2)
-
     pendingEncodes.shift()?.(new Blob(['encoded-256'], { type: 'image/webp' }))
-    await expect(generation).resolves.toHaveLength(2)
-    expect(contextCanvases.length).toBeGreaterThan(0)
-    expect(contextCanvases.every((canvas) => canvas === contextCanvases[0])).toBe(true)
+    await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+    pendingEncodes.shift()?.(new Blob(['encoded-512'], { type: 'image/webp' }))
+
+    const levels = await generation
+    expect(levels.map((level) => [level.maxSide, level.width, level.height])).toEqual([
+      [128, 128, 64],
+      [256, 256, 128],
+      [512, 512, 256]
+    ])
+    // Canvases are only handed back (emptied) after their encode is done.
+    expect(new Set(draws.map((draw) => draw.source)).size).toBe(3)
+    expect(contextCanvases.slice(-3).every((canvas) => canvas.width === 1)).toBe(true)
   })
+
+  it('encodes the display level first and hands it over before the larger levels are encoded', async () => {
+    const pendingEncodes: Array<{ width: number; finish: (blob: Blob | null) => void }> = []
+    const sourceBitmap = { width: 4096, height: 3072, close: vi.fn() }
+    const createImageBitmapMock = vi.fn(async () => sourceBitmap)
+    setGlobalCreateImageBitmap(createImageBitmapMock)
+    HTMLCanvasElement.prototype.getContext = (() =>
+      ({
+        clearRect: vi.fn(),
+        drawImage: vi.fn(),
+        imageSmoothingEnabled: false,
+        imageSmoothingQuality: 'low'
+      }) as unknown as CanvasRenderingContext2D) as unknown as typeof HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.toBlob = vi.fn(function (
+      this: HTMLCanvasElement,
+      callback: BlobCallback
+    ) {
+      pendingEncodes.push({ width: this.width, finish: (blob) => callback(blob) })
+    }) as unknown as typeof HTMLCanvasElement.prototype.toBlob
+    const onFirstLevel = vi.fn()
+
+    const generation = generateCanvasThumbnailLevelsInScope({
+      source: new Blob(['source'], { type: 'image/png' }),
+      firstLevelMaxSide: 512,
+      onFirstLevel
+    })
+    await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+
+    // The first encode is the 512 level, not the smallest one.
+    expect(pendingEncodes[0].width).toBe(512)
+    expect(onFirstLevel).not.toHaveBeenCalled()
+    const firstBlob = new Blob(['level-512'], { type: 'image/webp' })
+    pendingEncodes.shift()?.finish(firstBlob)
+    await vi.waitFor(() => expect(onFirstLevel).toHaveBeenCalledTimes(1))
+    expect(onFirstLevel).toHaveBeenCalledWith(
+      expect.objectContaining({ maxSide: 512, width: 512, height: 384, blob: firstBlob })
+    )
+
+    // The other four follow, smallest first; the 512 level is not encoded twice.
+    const encodedWidths: number[] = []
+    for (let index = 0; index < 4; index += 1) {
+      await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+      const next = pendingEncodes.shift()
+      encodedWidths.push(next?.width ?? 0)
+      next?.finish(new Blob([`level-${index}`], { type: 'image/webp' }))
+    }
+    const levels = await generation
+    expect(encodedWidths).toEqual([128, 256, 1024, 2048])
+    expect(levels.map((level) => level.maxSide)).toEqual([128, 256, 512, 1024, 2048])
+    expect(levels[2].blob).toBe(firstBlob)
+    expect(onFirstLevel).toHaveBeenCalledTimes(1)
+    // No second decode or bitmap for the early level: it is the level's own encoded bytes.
+    expect(createImageBitmapMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('hands no level over early when the display level is the last one to encode or none covers it', () => {
+    const plan = (sourceWidth: number, sourceHeight: number) =>
+      planCanvasThumbnailLevels({ sourceWidth, sourceHeight })
+    const first = (sourceWidth: number, sourceHeight: number, maxSide: number | undefined) =>
+      pickCanvasThumbnailFirstLevel(plan(sourceWidth, sourceHeight), maxSide)?.maxSide ?? null
+
+    // Larger levels follow: worth an early message.
+    expect(first(4096, 3072, 512)).toBe(512)
+    expect(first(4096, 3072, 300)).toBe(512)
+    expect(first(2048, 1536, 256)).toBe(256)
+    // 1024 px source: 512 is its largest file, the job ends right after it.
+    expect(first(1024, 768, 512)).toBeNull()
+    // 300 px source shown at 512: the source itself is displayed, no level covers it.
+    expect(first(300, 200, 512)).toBeNull()
+    expect(first(100, 80, 128)).toBeNull()
+    expect(first(4096, 3072, undefined)).toBeNull()
+    expect(first(4096, 3072, 0)).toBeNull()
+  })
+
+  it('plans the levels of a source: only below its size, and never none', () => {
+    const sides = (sourceWidth: number, sourceHeight: number) =>
+      planCanvasThumbnailLevels({ sourceWidth, sourceHeight }).map((level) => [
+        level.maxSide,
+        level.width,
+        level.height
+      ])
+
+    expect(sides(4096, 3072)).toEqual([
+      [128, 128, 96],
+      [256, 256, 192],
+      [512, 512, 384],
+      [1024, 1024, 768],
+      [2048, 2048, 1536]
+    ])
+    // A 2048 px source is its own top level: no full-size re-encode.
+    expect(sides(2048, 2048).map(([maxSide]) => maxSide)).toEqual([128, 256, 512, 1024])
+    expect(sides(1024, 768).map(([maxSide]) => maxSide)).toEqual([128, 256, 512])
+    expect(sides(300, 200)).toEqual([
+      [128, 128, 85],
+      [256, 256, 171]
+    ])
+    // Smaller than every level: one level at its own size, so that the set has a file.
+    expect(sides(100, 80)).toEqual([[128, 100, 80]])
+    expect(sides(128, 64)).toEqual([[128, 128, 64]])
+    expect(sides(768, 1024).map(([maxSide]) => maxSide)).toEqual([128, 256, 512])
+  })
+
   it('marks stale warm cache when regenerating after source metadata changes', async () => {
     const identity = createIdentity()
     const staleIdentity = buildCanvasImageSourceIdentity({

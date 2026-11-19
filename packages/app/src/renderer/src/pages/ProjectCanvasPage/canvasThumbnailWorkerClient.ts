@@ -250,6 +250,15 @@ export function getCanvasThumbnailWorkerPoolMetrics(): CanvasThumbnailWorkerPool
   return canvasThumbnailWorkerPool.getMetrics()
 }
 
+/** Starts thumbnail workers before the jobs of an import arrive (see CanvasThumbnailWorkerPool.prewarm). */
+export function prewarmCanvasThumbnailWorkers(count: number): number {
+  try {
+    return canvasThumbnailWorkerPool.prewarm(count)
+  } catch {
+    return 0
+  }
+}
+
 export function resetCanvasThumbnailWorkerPoolForTest(): void {
   canvasThumbnailWorkerPool.reset()
   canvasThumbnailWorkerPool.configure(createDefaultCanvasThumbnailWorkerPoolOptions())
@@ -267,7 +276,9 @@ async function generateLevelsInRenderer(
   const levels = await generateCanvasThumbnailLevelsInScope({
     source: request.source,
     levels: normalizeLevelList(request.levels),
-    preferWebp: request.preferWebp ?? true
+    preferWebp: request.preferWebp ?? true,
+    firstLevelMaxSide: request.firstLevelMaxSide,
+    onFirstLevel: request.onFirstLevel
   })
 
   return levels.map((level) =>
@@ -289,25 +300,45 @@ export async function generateCanvasThumbnailLevels(
   return await generateLevelsInRenderer(request)
 }
 
+/**
+ * A set always lists every requested level. Only the levels below the source size are generated
+ * and have a file; a requested level at or above it repeats the entry of the largest generated
+ * file (same file name: no second encode, no second file). Whoever knows the source
+ * (bindCanvasThumbnailSetToSource in canvasAssetIntakeHelpers) points such an entry at the
+ * source itself, so "the level above the largest thumbnail" is the original picture.
+ */
 function createThumbnailSetFromGeneratedLevels({
   identity,
-  levels
+  levels,
+  requestedLevels
 }: {
   identity: CanvasImageSourceIdentity
   levels: CanvasGeneratedThumbnailLevel[]
+  requestedLevels: readonly CanvasThumbnailLevelSize[]
 }): CanvasImageThumbnailSet {
-  return createCanvasThumbnailSet({
-    identity,
-    levels: levels.map((level): CanvasImageThumbnailLevel => ({
-      maxSide: level.maxSide,
-      width: level.width,
-      height: level.height,
-      mimeType: level.mimeType,
-      filename: level.filename,
-      src: level.src,
-      sizeBytes: level.sizeBytes
-    }))
+  const generated = [...levels].sort((left, right) => left.maxSide - right.maxSide)
+  const largest = generated[generated.length - 1]
+  const toSetLevel = (
+    level: CanvasGeneratedThumbnailLevel,
+    maxSide: CanvasThumbnailLevelSize
+  ): CanvasImageThumbnailLevel => ({
+    maxSide,
+    width: level.width,
+    height: level.height,
+    mimeType: level.mimeType,
+    filename: level.filename,
+    src: level.src,
+    sizeBytes: level.sizeBytes
   })
+  const entries = generated.map((level) => toSetLevel(level, level.maxSide))
+  if (largest) {
+    for (const maxSide of requestedLevels) {
+      if (maxSide > largest.maxSide && !generated.some((level) => level.maxSide === maxSide)) {
+        entries.push(toSetLevel(largest, maxSide))
+      }
+    }
+  }
+  return createCanvasThumbnailSet({ identity, levels: entries })
 }
 
 async function buildWriteFiles(
@@ -372,13 +403,15 @@ function isManifestForIdentity(
 async function writeThumbnailSetToCache({
   bridge,
   identity,
-  levels
+  levels,
+  requestedLevels
 }: {
   bridge: CanvasThumbnailIpcBridge | null
   identity: CanvasImageSourceIdentity
   levels: CanvasGeneratedThumbnailLevel[]
+  requestedLevels: readonly CanvasThumbnailLevelSize[]
 }): Promise<CanvasImageThumbnailSet> {
-  const transientSet = createThumbnailSetFromGeneratedLevels({ identity, levels })
+  const transientSet = createThumbnailSetFromGeneratedLevels({ identity, levels, requestedLevels })
   if (identity.kind !== 'local-file' || !bridge?.writeThumbnailSet) {
     return transientSet
   }
@@ -443,6 +476,27 @@ export async function readWarmCanvasThumbnailSet(
   }
 }
 
+/**
+ * The native sidecar is asked once per image only while it can answer. Asking main cost one
+ * round trip per image (about 5 ms each on a 100-image import) just to hear "switched off".
+ */
+const CANVAS_THUMBNAIL_SIDECAR_MAX_CONSECUTIVE_FAILURES = 3
+const SIDECAR_ABSENT_REASONS: ReadonlySet<string> = new Set([
+  'feature-disabled',
+  'binary-not-found'
+])
+type CanvasThumbnailSidecarState = { absent: boolean; consecutiveFailures: number }
+const sidecarStateByBridge = new WeakMap<CanvasThumbnailIpcBridge, CanvasThumbnailSidecarState>()
+
+function getSidecarState(bridge: CanvasThumbnailIpcBridge): CanvasThumbnailSidecarState {
+  let state = sidecarStateByBridge.get(bridge)
+  if (!state) {
+    state = { absent: false, consecutiveFailures: 0 }
+    sidecarStateByBridge.set(bridge, state)
+  }
+  return state
+}
+
 async function generateSidecarThumbnailSet({
   identity,
   bridge,
@@ -458,6 +512,16 @@ async function generateSidecarThumbnailSet({
     return null
   }
 
+  // A sidecar that is switched off or not installed stays so for the session, and one that
+  // keeps failing is not paid for with a process start per image: the worker takes over.
+  const state = getSidecarState(bridge)
+  if (
+    state.absent ||
+    state.consecutiveFailures >= CANVAS_THUMBNAIL_SIDECAR_MAX_CONSECUTIVE_FAILURES
+  ) {
+    return null
+  }
+
   try {
     const response = await bridge.generateThumbnailSet({
       fullPath: identity.canonicalPath,
@@ -466,11 +530,23 @@ async function generateSidecarThumbnailSet({
       format: preferWebp ? 'image/webp' : 'image/png'
     })
     const manifest = extractManifestFromGenerateResponse(response)
-    if (!manifest || !isManifestForIdentity(manifest, identity)) {
-      return null
+    const thumbnailSet =
+      manifest && isManifestForIdentity(manifest, identity)
+        ? canvasThumbnailSetFromManifest(manifest, identity)
+        : null
+    if (thumbnailSet) {
+      state.consecutiveFailures = 0
+      return thumbnailSet
     }
-    return canvasThumbnailSetFromManifest(manifest, identity)
+    const reason = response?.sidecar?.reason
+    if (typeof reason === 'string' && SIDECAR_ABSENT_REASONS.has(reason)) {
+      state.absent = true
+    } else {
+      state.consecutiveFailures += 1
+    }
+    return null
   } catch (error) {
+    state.consecutiveFailures += 1
     console.warn('[Canvas] Native sidecar thumbnail generation failed, falling back.', error)
     return null
   }
@@ -526,15 +602,24 @@ export async function ensureCanvasThumbnailSet({
   identity,
   levels = CANVAS_THUMBNAIL_LEVELS,
   preferWebp = true,
+  sourceWidth,
+  sourceHeight,
+  firstLevelMaxSide,
+  onFirstLevel,
+  skipWarmRead = false,
   bridge = getCanvasThumbnailIpcBridge()
 }: CanvasThumbnailGenerationRequest & {
+  /** The caller has just read the cache and missed: do not ask main a second time. */
+  skipWarmRead?: boolean
   bridge?: CanvasThumbnailIpcBridge | null
 }): Promise<CanvasThumbnailEnsureResult> {
-  const warm = await readWarmCanvasThumbnailSet(identity, bridge)
-  if (warm.status === 'cache-hit' && warm.thumbnailSet) {
-    return {
-      status: 'cache-hit',
-      thumbnailSet: warm.thumbnailSet
+  if (!skipWarmRead) {
+    const warm = await readWarmCanvasThumbnailSet(identity, bridge)
+    if (warm.status === 'cache-hit' && warm.thumbnailSet) {
+      return {
+        status: 'cache-hit',
+        thumbnailSet: warm.thumbnailSet
+      }
     }
   }
 
@@ -557,7 +642,11 @@ export async function ensureCanvasThumbnailSet({
     source,
     identity,
     levels: requestedLevels,
-    preferWebp
+    preferWebp,
+    sourceWidth,
+    sourceHeight,
+    firstLevelMaxSide,
+    onFirstLevel
   }).catch(() => [] as CanvasGeneratedThumbnailLevel[])
   let status: CanvasThumbnailEnsureStatus = 'generated'
 
@@ -581,12 +670,14 @@ export async function ensureCanvasThumbnailSet({
   const thumbnailSet = await writeThumbnailSetToCache({
     bridge,
     identity,
-    levels: generatedLevels
+    levels: generatedLevels,
+    requestedLevels
   })
   recordCanvasThumbnailRuntimeStatus(status, true)
 
   return {
     status,
-    thumbnailSet
+    thumbnailSet,
+    generatedLevels
   }
 }

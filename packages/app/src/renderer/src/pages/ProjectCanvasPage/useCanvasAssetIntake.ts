@@ -74,6 +74,10 @@ import {
 } from './canvasAssetIntakeHelpers'
 import { getCanvasImageAssetSize } from './canvasImageAssetUtils'
 import {
+  getCanvasThumbnailWorkerPoolMetrics,
+  prewarmCanvasThumbnailWorkers
+} from './canvasThumbnailWorkerClient'
+import {
   buildBboxToCellIdsMap,
   buildCanvasPreviewSheetsFromOcrResult,
   buildOcrResultHtml,
@@ -428,7 +432,10 @@ type CanvasImageStreamPixelPatch = {
   image?: CanvasImageAsset
   thumbnailSet?: CanvasImageItem['thumbnailSet']
   failed?: boolean
-  /** A first, coarse image: the final patch of the same item still follows. */
+  /**
+   * The display image of an item whose larger thumbnail levels are still being written: the
+   * final patch of the same item still follows (same image, plus the thumbnail set).
+   */
   preview?: boolean
 }
 
@@ -755,6 +762,18 @@ function resolveDeferredCanvasImageStreamSourceSize(
   )
 }
 
+/**
+ * Images whose pixels are being resolved at the same time. Two more than the thumbnail workers,
+ * so that the next sources are already read when a worker becomes free; the workers themselves
+ * are limited by the pool (count and bytes in flight).
+ */
+export function getCanvasImageStreamPixelConcurrency(): number {
+  return Math.max(
+    PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY,
+    getCanvasThumbnailWorkerPoolMetrics().maxWorkers + 2
+  )
+}
+
 function waitForCanvasImageStreamFrame(): Promise<void> {
   return new Promise((resolve) => {
     let settled = false
@@ -905,15 +924,19 @@ async function buildDeferredCanvasImagePreview({
 
 async function resolveCanvasImageIntakeThumbnail({
   source,
-  maxPreviewSide
+  maxPreviewSide,
+  onFirstImage
 }: {
   source: NormalizedCanvasImageSource
   maxPreviewSide: number
+  onFirstImage?: (image: CanvasImageAsset) => void
 }): Promise<{
   displayImage?: CanvasImageAsset
   thumbnailSet?: CanvasImageItem['thumbnailSet']
 }> {
   let thumbnail: Awaited<ReturnType<typeof resolveCanvasImageThumbnailDisplayAsset>> = null
+  const sourceWidth = getPositiveCanvasImageSourceHint(source.sourceWidthHint)
+  const sourceHeight = getPositiveCanvasImageSourceHint(source.sourceHeightHint)
   try {
     thumbnail = await withCanvasImageIntakeTimeout(
       resolveCanvasImageThumbnailDisplayAsset({
@@ -921,7 +944,10 @@ async function resolveCanvasImageIntakeThumbnail({
         sourceIdentity: source.sourceIdentity,
         thumbnailSet: source.thumbnailSet,
         sourceFile: source.sourceFile,
-        maxPreviewSide
+        ...(sourceWidth != null && sourceHeight != null ? { sourceWidth, sourceHeight } : {}),
+        ...(typeof source.sizeBytes === 'number' ? { sizeBytes: source.sizeBytes } : {}),
+        maxPreviewSide,
+        ...(onFirstImage ? { onFirstImage } : {})
       }),
       PROJECT_CANVAS_IMAGE_THUMBNAIL_RESOLVE_TIMEOUT_MS,
       'Timed out resolving canvas image thumbnail for intake.'
@@ -961,12 +987,14 @@ async function buildThumbnailFirstCanvasImageStreamEntry({
   source,
   sourceIndex,
   maxPreviewSide,
-  fitImageToCanvasSize
+  fitImageToCanvasSize,
+  onFirstImage
 }: {
   source: NormalizedCanvasImageSource
   sourceIndex: number
   maxPreviewSide: number
   fitImageToCanvasSize: (width: number, height: number) => { width: number; height: number }
+  onFirstImage?: (image: CanvasImageAsset) => void
 }): Promise<CanvasImageStreamEntry | null> {
   if (!canUseCanvasImageThumbnailFirstImport(source)) {
     return null
@@ -974,7 +1002,8 @@ async function buildThumbnailFirstCanvasImageStreamEntry({
 
   const thumbnailPreview = await resolveCanvasImageIntakeThumbnail({
     source,
-    maxPreviewSide
+    maxPreviewSide,
+    ...(onFirstImage ? { onFirstImage } : {})
   })
   if (!thumbnailPreview.displayImage) {
     return null
@@ -1065,11 +1094,14 @@ async function buildDeferredCanvasImageStreamEntry({
 async function resolveCanvasImageStreamEntryPixels({
   entry,
   maxPreviewSide,
-  fitImageToCanvasSize
+  fitImageToCanvasSize,
+  onFirstImage
 }: {
   entry: CanvasImageStreamPlanEntry
   maxPreviewSide: number
   fitImageToCanvasSize: (width: number, height: number) => { width: number; height: number }
+  /** The display image, ready before the larger thumbnail levels are written. */
+  onFirstImage?: (image: CanvasImageAsset) => void
 }): Promise<Omit<CanvasImageStreamPixelPatch, 'src'>> {
   const { source, sourceIndex } = entry
   try {
@@ -1096,7 +1128,8 @@ async function resolveCanvasImageStreamEntryPixels({
         source,
         sourceIndex,
         maxPreviewSide,
-        fitImageToCanvasSize
+        fitImageToCanvasSize,
+        ...(onFirstImage ? { onFirstImage } : {})
       })
       if (thumbnailFirst?.displayImage) {
         return {
@@ -1301,7 +1334,7 @@ export function useCanvasAssetIntake({
         else slots.active -= 1
       }
     }
-    if (slots.active < PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY) {
+    if (slots.active < getCanvasImageStreamPixelConcurrency()) {
       slots.active += 1
       return Promise.resolve(grant())
     }
@@ -1934,6 +1967,10 @@ export function useCanvasAssetIntake({
   const addImagesToCanvas = useCallback(
     async (sources: CanvasImageInput[], options?: { clientX?: number; clientY?: number }) => {
       const pasteAnchor = getCanvasPointFromClient(options?.clientX, options?.clientY)
+      if (sources.length >= PROJECT_CANVAS_IMAGE_STREAM_PROGRESS_BATCH_SIZE) {
+        // A streamed import: the thumbnail workers load their code while the header pass runs.
+        prewarmCanvasThumbnailWorkers(sources.length)
+      }
       const canvasOwnedBatchObjectUrls = new Set<string>()
       const committedUrls = new Set<string>()
       const signal = intakeAbortControllerRef.current.signal
@@ -2290,7 +2327,7 @@ export function useCanvasAssetIntake({
             item: CanvasImageItem,
             pixels: Omit<CanvasImageStreamPixelPatch, 'src'>
           ) => {
-            // The coarse first image of an item never overrides its final pixels.
+            // An early image that arrives late never overrides the final patch of its item.
             if (pixels.preview && resolvedPatchById.has(item.id)) return
             const patch = { ...pixels, src: item.src }
             if (!patch.preview) resolvedPatchById.set(item.id, patch)
@@ -2354,7 +2391,8 @@ export function useCanvasAssetIntake({
                 const patch = await resolveCanvasImageStreamEntryPixels({
                   entry,
                   maxPreviewSide,
-                  fitImageToCanvasSize
+                  fitImageToCanvasSize,
+                  onFirstImage: (image) => queuePixelPatch(entry.item, { image, preview: true })
                 })
                 assertActive()
                 if (patch.failed) failedCount += 1
@@ -2370,7 +2408,7 @@ export function useCanvasAssetIntake({
 
           await Promise.all(
             Array.from(
-              { length: Math.min(pixelQueue.length, PROJECT_CANVAS_IMAGE_BATCH_LOAD_CONCURRENCY) },
+              { length: Math.min(pixelQueue.length, getCanvasImageStreamPixelConcurrency()) },
               () => streamPixels()
             )
           )
