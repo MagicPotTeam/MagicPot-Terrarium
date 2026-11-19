@@ -1,10 +1,11 @@
-import React, { useId, useState } from 'react'
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Alert, Box, Button, TextField, Typography } from '@mui/material'
 import {
   AGENT_GOAL_LIMITS,
   type AgentGoalProposal,
   type AgentGoalSpec,
+  type AgentGoalStatus,
   type AgentGoalView
 } from '@shared/api/agentThreadGoal'
 
@@ -20,6 +21,17 @@ export type AgentThreadGoalDecisionIntent = {
   generation: number
   proposal: AgentGoalProposal
 }
+/** A delete applies to exactly the goal, revision and generation its confirmation was opened at. */
+export type AgentThreadGoalDeleteIntent = { goalId: string; revision: number; generation: number }
+/** The statuses MAIN deletes; an active, waiting or blocked goal is paused first. */
+const deletable: readonly AgentGoalStatus[] = [
+  'draft',
+  'paused',
+  'cancelled',
+  'completed',
+  'failed'
+]
+const enabledControl = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled)'
 export type AgentThreadGoalRecordsPanelProps = {
   view: AgentGoalView | null
   pending: boolean
@@ -28,6 +40,8 @@ export type AgentThreadGoalRecordsPanelProps = {
   onControl: (intent: AgentThreadGoalControlIntent) => void
   onReport?: (intent: AgentThreadGoalReportIntent) => void
   onDecision?: (intent: AgentThreadGoalDecisionIntent) => void
+  /** Without it the view offers no delete. */
+  onDelete?: (intent: AgentThreadGoalDeleteIntent) => void
   createResetVersion?: number
   reportAck?: AgentThreadGoalReportAck
   /**
@@ -46,6 +60,7 @@ export default function AgentThreadGoalRecordsPanel({
   onControl,
   onReport,
   onDecision,
+  onDelete,
   createResetVersion = 0,
   reportAck,
   embedded = false
@@ -69,6 +84,79 @@ export default function AgentThreadGoalRecordsPanel({
         : current
     )
   }, [reportAck])
+  // At most one goal waits for its delete confirmation. It is keyed by the goal id and the revision,
+  // generation and status it was opened at, never by label or position, and it ends when any of
+  // them changes or a request is pending.
+  const [confirming, setConfirming] = useState<{
+    goalId: string
+    revision: number
+    generation: number
+    status: AgentGoalStatus
+  } | null>(null)
+  const confirmed =
+    confirming &&
+    onDelete &&
+    view &&
+    !pending &&
+    view.revision === confirming.revision &&
+    view.goals.some(
+      (goal) =>
+        goal.id === confirming.goalId &&
+        goal.generation === confirming.generation &&
+        goal.status === confirming.status
+    )
+      ? confirming
+      : null
+  useEffect(() => {
+    if (confirming && !confirmed) setConfirming(null)
+  }, [confirming, confirmed])
+  const sectionRef = useRef<HTMLElement>(null)
+  const rows = useRef(new Map<string, HTMLElement>())
+  const deleteButtons = useRef(new Map<string, HTMLButtonElement>())
+  const cancelButton = useRef<HTMLButtonElement>(null)
+  const returnFocus = useRef<string | null>(null)
+  useEffect(() => {
+    if (confirmed) cancelButton.current?.focus()
+  }, [confirmed])
+  useEffect(() => {
+    const goalId = returnFocus.current
+    if (!goalId || confirming) return
+    returnFocus.current = null
+    deleteButtons.current.get(goalId)?.focus()
+  }, [confirming])
+  const cancelDelete = (goalId: string) => {
+    returnFocus.current = goalId
+    setConfirming(null)
+  }
+  // A confirmed delete disables the buttons and may remove the row: the focus stays in this view
+  // while it is pending, then moves to a control next to where the goal was.
+  const [deleting, setDeleting] = useState<{ goalId: string; index: number } | null>(null)
+  useLayoutEffect(() => {
+    const section = sectionRef.current
+    if (!deleting || !section) return
+    const active = document.activeElement
+    const lost =
+      !active ||
+      active === document.body ||
+      active === section ||
+      !active.isConnected ||
+      (section.contains(active) && active.matches(':disabled'))
+    if (pending) {
+      if (lost && active !== section) section.focus()
+      return
+    }
+    setDeleting(null)
+    if (!lost) return
+    const goals = view?.goals ?? []
+    const kept = goals.findIndex((goal) => goal.id === deleting.goalId)
+    const own = kept >= 0 ? deleteButtons.current.get(deleting.goalId) : undefined
+    const near = kept >= 0 ? goals[kept] : goals[Math.min(deleting.index, goals.length - 1)]
+    const target =
+      (own && !own.disabled ? own : null) ??
+      (near ? rows.current.get(near.id)?.querySelector<HTMLElement>(enabledControl) : null) ??
+      section.querySelector<HTMLElement>(enabledControl)
+    target?.focus()
+  }, [deleting, pending, view])
   const goalLabels = new Map<string, string>()
   const goals = view?.goals ?? []
   for (const goal of goals) {
@@ -94,6 +182,8 @@ export default function AgentThreadGoalRecordsPanel({
   return (
     <Box
       component="section"
+      ref={sectionRef}
+      tabIndex={deleting ? -1 : undefined}
       aria-labelledby={embedded ? undefined : headingId}
       aria-label={embedded ? translate('chat.agent_goal.panel_title', 'Thread goals') : undefined}
       sx={
@@ -124,9 +214,14 @@ export default function AgentThreadGoalRecordsPanel({
         const decisionAvailable = Boolean(
           onDecision && proposal && ['active', 'waiting', 'blocked', 'paused'].includes(goal.status)
         )
+        const confirmingThis = confirmed?.goalId === goal.id ? confirmed : null
         return (
           <Box
             key={goal.id}
+            ref={(node: HTMLElement | null) => {
+              if (node) rows.current.set(goalId, node)
+              else rows.current.delete(goalId)
+            }}
             role="group"
             aria-label={label}
             sx={{ borderTop: '1px solid', borderColor: 'divider', mt: 1, pt: 1 }}
@@ -206,25 +301,88 @@ export default function AgentThreadGoalRecordsPanel({
                 ) : null}
               </Box>
             ) : null}
-            <Box>
-              {goal.status === 'draft' || goal.status === 'paused' ? (
-                <Button
-                  size="small"
-                  disabled={pending}
-                  onClick={() => onControl({ goalId: goal.id, status: 'active' })}
-                >
-                  {translate('chat.agent_goal.activate_for', `Activate ${label}`, { label })}
-                </Button>
-              ) : null}
-              {['active', 'waiting', 'blocked'].includes(goal.status) ? (
-                <Button
-                  size="small"
-                  disabled={pending}
-                  onClick={() => onControl({ goalId: goal.id, status: 'paused' })}
-                >
-                  {translate('chat.agent_goal.pause_for', `Pause ${label}`, { label })}
-                </Button>
-              ) : null}
+            <Box
+              onKeyDown={
+                confirmingThis
+                  ? (event) => {
+                      if (event.key !== 'Escape' || event.nativeEvent.isComposing) return
+                      // Only the confirmation closes: the full-page view stays open.
+                      event.preventDefault()
+                      event.stopPropagation()
+                      cancelDelete(goalId)
+                    }
+                  : undefined
+              }
+            >
+              {confirmingThis ? (
+                <>
+                  <Button
+                    size="small"
+                    disabled={pending}
+                    onClick={() => {
+                      const intent = {
+                        goalId: confirmingThis.goalId,
+                        revision: confirmingThis.revision,
+                        generation: confirmingThis.generation
+                      }
+                      setConfirming(null)
+                      setDeleting({
+                        goalId: intent.goalId,
+                        index: view.goals.findIndex((item) => item.id === intent.goalId)
+                      })
+                      onDelete?.(intent)
+                    }}
+                  >
+                    {translate('chat.agent_goal.confirm_delete_for', `Confirm delete ${label}`, {
+                      label
+                    })}
+                  </Button>
+                  <Button
+                    ref={cancelButton}
+                    size="small"
+                    disabled={pending}
+                    onClick={() => cancelDelete(goalId)}
+                  >
+                    {translate('chat.cancel', 'Cancel')}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  {goal.status === 'draft' || goal.status === 'paused' ? (
+                    <Button
+                      size="small"
+                      disabled={pending}
+                      onClick={() => onControl({ goalId: goal.id, status: 'active' })}
+                    >
+                      {translate('chat.agent_goal.activate_for', `Activate ${label}`, { label })}
+                    </Button>
+                  ) : null}
+                  {['active', 'waiting', 'blocked'].includes(goal.status) ? (
+                    <Button
+                      size="small"
+                      disabled={pending}
+                      onClick={() => onControl({ goalId: goal.id, status: 'paused' })}
+                    >
+                      {translate('chat.agent_goal.pause_for', `Pause ${label}`, { label })}
+                    </Button>
+                  ) : null}
+                  {onDelete && deletable.includes(goal.status) ? (
+                    <Button
+                      ref={(node: HTMLButtonElement | null) => {
+                        if (node) deleteButtons.current.set(goalId, node)
+                        else deleteButtons.current.delete(goalId)
+                      }}
+                      size="small"
+                      disabled={pending}
+                      onClick={() =>
+                        setConfirming({ goalId, revision, generation, status: goal.status })
+                      }
+                    >
+                      {translate('chat.agent_goal.delete_for', `Delete ${label}`, { label })}
+                    </Button>
+                  ) : null}
+                </>
+              )}
             </Box>
             {onReport && ['active', 'waiting', 'blocked'].includes(goal.status) ? (
               <Box
@@ -363,7 +521,7 @@ function CreateGoalForm({
       />
       {view && view.goals.length >= AGENT_GOAL_LIMITS.goals ? (
         <Typography variant="caption">
-          {translate('chat.agent_goal.goal_limit_reached', `Goal limit reached (${AGENT_GOAL_LIMITS.goals}). This interface cannot delete goals yet.`, { count: AGENT_GOAL_LIMITS.goals })}
+          {translate('chat.agent_goal.goal_limit_reached', `Goal limit reached (${AGENT_GOAL_LIMITS.goals}).`, { count: AGENT_GOAL_LIMITS.goals })}
         </Typography>
       ) : null}
       <Button type="submit" disabled={!canCreate}>

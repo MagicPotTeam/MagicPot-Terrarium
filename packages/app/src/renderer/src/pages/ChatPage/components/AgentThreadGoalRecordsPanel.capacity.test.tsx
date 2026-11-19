@@ -21,7 +21,8 @@ describe('goal capacity explanation', () => {
 
     page.rerender(<AgentThreadGoalRecordsPanel view={view(AGENT_GOAL_LIMITS.goals)} pending={false} error={null} onCreate={onCreate} onControl={onControl} />)
     expect(screen.getByRole('button', { name: 'Create draft' })).toBeDisabled()
-    expect(screen.getByText(`Goal limit reached (${AGENT_GOAL_LIMITS.goals}). This interface cannot delete goals yet.`)).toBeVisible()
+    expect(screen.getByText(`Goal limit reached (${AGENT_GOAL_LIMITS.goals}).`)).toBeVisible()
+    expect(screen.queryByText(/cannot delete/)).not.toBeInTheDocument()
     expect(screen.getByLabelText('Goal title')).toHaveValue('Unsubmitted title')
     expect(screen.getByLabelText('Objective')).toHaveValue('Unsubmitted objective')
     fireEvent.submit(screen.getByLabelText('Goal title').closest('form')!)
