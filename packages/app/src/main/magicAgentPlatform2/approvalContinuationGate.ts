@@ -7,12 +7,15 @@ import { AsyncLocalStorage } from 'node:async_hooks'
  */
 const continuationCheck = new AsyncLocalStorage<() => void>()
 
-/** Runs one tool start with `check` (none: the operation runs exactly as before). */
+/**
+ * Runs one tool start with `check`. Without a check, a check inherited from an enclosing tool run is cleared, so work
+ * started inside a member's tool run never carries that member's check into an unrelated request's approval.
+ */
 export function runWithApprovalContinuationCheck<T>(
   check: (() => void) | undefined,
   operation: () => Promise<T>
 ): Promise<T> {
-  return check ? continuationCheck.run(check, operation) : operation()
+  return check ? continuationCheck.run(check, operation) : continuationCheck.exit(operation)
 }
 
 const refusals = new WeakSet<object>()
