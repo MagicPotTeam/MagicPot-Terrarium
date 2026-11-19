@@ -1,4 +1,4 @@
-import { loadAllSessions, readSessionDraftBackup } from '../pages/ChatPage/chatStorage'
+import { forEachStoredChatRecord } from '../pages/ChatPage/chatStorage'
 import { loadCanvasItemsMetadata } from '../pages/ProjectCanvasPage/canvasStorage'
 import { LEGACY_PROJECTS_STORAGE_KEY, PROJECTS_STORAGE_KEY } from '../pages/MainPage/projectStore'
 import { api } from '../utils/windowUtils'
@@ -39,24 +39,20 @@ function readProjectIds(): string[] {
 }
 
 function createScannerSources(): ManagedMediaReferenceScannerSources {
-  // The scan needs the same conversations twice (their media and their draft backups):
-  // read them from the chat store once per scan.
-  let sessions: ReturnType<typeof loadAllSessions> | undefined
-  const readSessions = (): ReturnType<typeof loadAllSessions> => (sessions ??= loadAllSessions())
   return {
-    readChatSessions: async () => readSessions(),
-    readChatDrafts: async () => {
-      const loaded = await readSessions()
-      return loaded.map((session) => readSessionDraftBackup(session.id)).filter(Boolean)
-    },
-    readCanvasItems: async () => {
+    // Every record of the chat store, of every scope (the Agent column's panes, team members and
+    // anything else stored there), one at a time and as stored: the draft each record keeps (its
+    // composer attachments and queued sends) is part of the record.
+    visitChatRecords: (visit) => forEachStoredChatRecord(visit),
+    visitCanvasItems: async (visit) => {
       // Only the items' media references are scanned: read the records, not the images
       // (a full load would wrap every image of every board in a new object URL each scan).
       const documents = await Promise.all(
         readProjectIds().map((projectId) => loadCanvasItemsMetadata(projectId))
       )
-      return documents.flatMap((document) => document.items)
+      for (const document of documents) visit(document.items)
     },
+    // Draft backups of every scope are read from localStorage by the scanner itself.
     localStorage
   }
 }

@@ -1348,6 +1348,65 @@ export async function loadSessionPreviewSummaries(
   }
 }
 
+/**
+ * Hand every record of the chat store to `visit`, one at a time and exactly as stored: every
+ * scope, keys no scope range reaches and records whose key and storageScope disagree included,
+ * with no normalisation, repair or write. It is for scans of everything the store holds (the
+ * managed-media reference scan, whose result authorises deletion, so it must see at least every
+ * record a scoped loader can see). One read-only transaction and one cursor: only the record
+ * being visited is held. Rejects on any read error, and with the visitor's own error after which
+ * no further record is visited.
+ */
+export async function forEachStoredChatRecord(visit: (record: unknown) => void): Promise<void> {
+  let visitorFailure: { error: unknown } | undefined
+  try {
+    const db = await openDB()
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const fail = (error: unknown): void => {
+        if (settled) return
+        settled = true
+        reject(error)
+      }
+      const tx = db.transaction(STORE_NAME, 'readonly')
+      tx.onabort = () =>
+        fail(createStorageError(tx.error, 'IndexedDB aborted the chat store read.'))
+      tx.onerror = () =>
+        fail(createStorageError(tx.error, 'IndexedDB failed to read the chat store.'))
+      const request = tx.objectStore(STORE_NAME).openCursor()
+      request.onerror = () =>
+        fail(createStorageError(request.error, 'IndexedDB failed to read the chat store.'))
+      request.onsuccess = () => {
+        if (settled) return
+        const cursor = request.result
+        if (!cursor) {
+          settled = true
+          resolve()
+          return
+        }
+        try {
+          visit(cursor.value)
+        } catch (error) {
+          visitorFailure = { error }
+          fail(error)
+          try {
+            tx.abort()
+          } catch {
+            // The transaction may already be finishing; the scan has failed either way.
+          }
+          return
+        }
+        cursor.continue()
+      }
+    })
+  } catch (error) {
+    if (visitorFailure) throw visitorFailure.error
+    const storageError = createStorageError(error, 'IndexedDB failed to read the chat store.')
+    await handleStorageFailure(storageError, 'forEachStoredChatRecord failed')
+    throw storageError
+  }
+}
+
 /** Load a single session by ID without scanning the whole store. */
 async function loadSessionRawFromDB(
   sessionId: string,

@@ -1,15 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  loadAllSessions: vi.fn(),
-  readSessionDraftBackup: vi.fn(),
+  forEachStoredChatRecord: vi.fn(),
   loadCanvasItems: vi.fn(),
   updateReferenceSnapshot: vi.fn()
 }))
 
 vi.mock('../pages/ChatPage/chatStorage', () => ({
-  loadAllSessions: mocks.loadAllSessions,
-  readSessionDraftBackup: mocks.readSessionDraftBackup
+  forEachStoredChatRecord: mocks.forEachStoredChatRecord
 }))
 
 vi.mock('../pages/ProjectCanvasPage/canvasStorage', () => ({
@@ -40,8 +38,7 @@ describe('managed media reference bootstrap', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     localStorage.clear()
-    mocks.loadAllSessions.mockReset()
-    mocks.readSessionDraftBackup.mockReset()
+    mocks.forEachStoredChatRecord.mockReset()
     mocks.loadCanvasItems.mockReset()
     mocks.updateReferenceSnapshot.mockReset()
   })
@@ -53,17 +50,21 @@ describe('managed media reference bootstrap', () => {
 
   it('publishes managed references from chat sessions, draft backups, and canvas items', async () => {
     localStorage.setItem('ai_engine_projects', JSON.stringify([{ id: 'canvas-a' }]))
-    mocks.loadAllSessions.mockResolvedValue([
-      {
+    mocks.forEachStoredChatRecord.mockImplementation(async (visit: (record: unknown) => void) => {
+      visit({
         id: 'chat-a',
         messages: [
           { role: 'assistant', content: '', attachments: [{ media: reference('a'.repeat(64)) }] }
         ]
-      }
-    ])
-    mocks.readSessionDraftBackup.mockReturnValue({
-      attachments: [{ media: reference('b'.repeat(64)) }]
+      })
     })
+    localStorage.setItem(
+      'magicpot-chat-draft:default:chat-a',
+      JSON.stringify({
+        updatedAt: 1,
+        draft: { pendingAttachments: [{ media: reference('b'.repeat(64)) }] }
+      })
+    )
     mocks.loadCanvasItems.mockResolvedValue({
       items: [{ id: 'canvas-item', type: 'image', media: reference('c'.repeat(64)) }]
     })
@@ -83,14 +84,13 @@ describe('managed media reference bootstrap', () => {
         ['c'.repeat(64)]: 1
       }
     })
-    // Sessions and their draft backups come from one read of the chat store per scan.
-    expect(mocks.loadAllSessions).toHaveBeenCalledTimes(1)
-    expect(mocks.readSessionDraftBackup).toHaveBeenCalledWith('chat-a')
+    // One pass over the chat store per scan.
+    expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
 
-    // The next scan reads again instead of reusing the previous scan's conversations.
+    // The next scan reads again instead of reusing the previous scan's records.
     window.dispatchEvent(new Event('focus'))
     await vi.advanceTimersByTimeAsync(2_000)
-    expect(mocks.loadAllSessions).toHaveBeenCalledTimes(2)
+    expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(2)
     expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(2)
 
     stop()
@@ -110,8 +110,7 @@ describe('managed media reference bootstrap', () => {
         }
       ])
     )
-    mocks.loadAllSessions.mockResolvedValue([])
-    mocks.readSessionDraftBackup.mockReturnValue(undefined)
+    mocks.forEachStoredChatRecord.mockResolvedValue(undefined)
     mocks.loadCanvasItems.mockResolvedValue({ items: [] })
     mocks.updateReferenceSnapshot.mockResolvedValue(undefined)
 

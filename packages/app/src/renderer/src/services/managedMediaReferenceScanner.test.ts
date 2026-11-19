@@ -14,9 +14,8 @@ const ref = (sha256: string) => ({
 function sources(overrides: Partial<Parameters<typeof scanManagedMediaReferenceIds>[0]> = {}) {
   const storage = new Map<string, string>()
   return {
-    readChatSessions: async () => [],
-    readChatDrafts: async () => [],
-    readCanvasItems: async () => [],
+    visitChatRecords: async () => undefined,
+    visitCanvasItems: async () => undefined,
     localStorage: {
       get length() {
         return storage.size
@@ -29,7 +28,7 @@ function sources(overrides: Partial<Parameters<typeof scanManagedMediaReferenceI
 }
 
 describe('managed media reference scanner', () => {
-  it('scans chat messages, drafts, draft-backup localStorage, and canvas image media', async () => {
+  it('scans chat records with their drafts, draft-backup localStorage, and canvas image media', async () => {
     const a = 'a'.repeat(64)
     const b = 'b'.repeat(64)
     const c = 'c'.repeat(64)
@@ -38,9 +37,11 @@ describe('managed media reference scanner', () => {
       ['magicpot-chat-draft:one', JSON.stringify({ attachment: { media: ref(c) } })]
     ])
     const result = await scanManagedMediaReferenceIds({
-      readChatSessions: async () => [{ messages: [{ attachments: [{ media: ref(a) }] }] }],
-      readChatDrafts: async () => [{ attachments: [{ media: ref(b) }] }],
-      readCanvasItems: async () => [{ type: 'image', media: ref(d) }],
+      visitChatRecords: async (visit) => {
+        visit({ messages: [{ attachments: [{ media: ref(a) }] }] })
+        visit({ draft: { pendingAttachments: [{ media: ref(b) }] } })
+      },
+      visitCanvasItems: async (visit) => visit([{ type: 'image', media: ref(d) }]),
       localStorage: {
         get length() {
           return storage.size
@@ -58,13 +59,48 @@ describe('managed media reference scanner', () => {
 
   it('tracks compacted-only references so retention is not mistaken for unreferenced media', async () => {
     const id = 'a'.repeat(64)
-    expect(await scanManagedMediaReferenceIds({ ...sources(), readChatSessions: async () => [{ messages: [], compactedMessages: [{ role: 'user', attachments: [{ media: ref(id) }] }] }] })).toEqual({ ok: true, ids: [id], referenceCounts: { [id]: 1 } })
+    expect(
+      await scanManagedMediaReferenceIds({
+        ...sources(),
+        visitChatRecords: async (visit) =>
+          visit({
+            messages: [],
+            compactedMessages: [{ role: 'user', attachments: [{ media: ref(id) }] }]
+          })
+      })
+    ).toEqual({ ok: true, ids: [id], referenceCounts: { [id]: 1 } })
+  })
+
+  it('drops what it already found when the chat read fails part way', async () => {
+    const result = await scanManagedMediaReferenceIds({
+      ...sources(),
+      visitChatRecords: async (visit) => {
+        visit({ messages: [{ attachments: [{ media: ref('a'.repeat(64)) }] }] })
+        throw new Error('cursor failed')
+      }
+    })
+    expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
+  })
+
+  it('fails closed on a draft backup it cannot parse', async () => {
+    const storage = new Map([['magicpot-chat-draft:project-a.agent-1:s', '{not json']])
+    const result = await scanManagedMediaReferenceIds({
+      ...sources(),
+      localStorage: {
+        get length() {
+          return storage.size
+        },
+        key: (index) => [...storage.keys()][index] ?? null,
+        getItem: (key) => storage.get(key) ?? null
+      }
+    })
+    expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
   })
 
   it('returns an empty fail-closed result when any store read fails', async () => {
     const result = await scanManagedMediaReferenceIds({
       ...sources(),
-      readCanvasItems: async () => {
+      visitCanvasItems: async () => {
         throw new Error('read failed')
       }
     })
@@ -74,9 +110,8 @@ describe('managed media reference scanner', () => {
   it('fails closed for malformed or invalid media references', async () => {
     const result = await scanManagedMediaReferenceIds({
       ...sources(),
-      readChatSessions: async () => [
-        { messages: [{ attachments: [{ media: { kind: 'managed', sha256: 'bad' } }] }] }
-      ]
+      visitChatRecords: async (visit) =>
+        visit({ messages: [{ attachments: [{ media: { kind: 'managed', sha256: 'bad' } }] }] })
     })
     expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
   })
@@ -104,7 +139,8 @@ describe('managed media reference scanner', () => {
     const id = 'f'.repeat(64)
     const result = await scanManagedMediaReferenceIds({
       ...sources(),
-      readChatSessions: async () => [{ attachments: [{ media: ref(id) }, { media: ref(id) }] }]
+      visitChatRecords: async (visit) =>
+        visit({ attachments: [{ media: ref(id) }, { media: ref(id) }] })
     })
     expect(result).toEqual({ ok: true, ids: [id], referenceCounts: { [id]: 2 } })
   })
