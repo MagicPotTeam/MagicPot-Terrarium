@@ -582,16 +582,79 @@ function hasCroppedSourceLeak(original: CanvasItem[], prepared: CanvasItem[]): b
   })
 }
 
+/** The PNG a crop was registered with when it was proven (canvasProvenCropRegistry). */
+export type CanvasProvenCropPngSource = {
+  blob: Blob
+  fileName: string
+  width: number
+  height: number
+}
+
+export type CanvasAgentCropDeliveryOptions = {
+  /**
+   * The registered PNG of exactly this item's id, source, record and crop. It
+   * is asked for only after the source read showed that the source still holds
+   * the recorded bytes; a hit is then sent as it is: no draw of the decoded
+   * picture and no new encode.
+   */
+  lookupProvenCropPng?: (item: CanvasImageItem) => CanvasProvenCropPngSource | null
+}
+
+function readBlobAsDataUrl(blob: Blob): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (typeof FileReader !== 'function') {
+      resolve(null)
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : null)
+    reader.onerror = () => resolve(null)
+    reader.readAsDataURL(blob)
+  })
+}
+
+/** The registered PNG of a proven crop as an attachment source, or null when it does not fit. */
+async function materializeRegisteredCropPng(
+  item: CroppedCanvasImageItem,
+  png: CanvasProvenCropPngSource
+): Promise<MaterializedCanvasImageAttachmentSource | null> {
+  if (
+    !(png.blob instanceof Blob) ||
+    png.blob.type !== 'image/png' ||
+    png.blob.size <= 0 ||
+    !Number.isSafeInteger(png.width) ||
+    !Number.isSafeInteger(png.height) ||
+    png.width <= 0 ||
+    png.height <= 0
+  ) {
+    return null
+  }
+  assertCanvasAttachmentCropOutputSize({ width: png.width, height: png.height })
+  const src = await readBlobAsDataUrl(png.blob)
+  if (!src || !/^data:image\/png;base64,.+/i.test(src)) return null
+  return {
+    src,
+    fileName: png.fileName || getCanvasImageCropPngFileName(item),
+    sizeBytes: png.blob.size,
+    sourceWidth: png.width,
+    sourceHeight: png.height
+  }
+}
+
 /**
  * Prepares a selection for the Agent without mutating it. A cropped image is
- * sent only as the pixels of its crop, drawn from bytes whose size, SHA-256 and
- * decoded size equal its record; one unproven crop refuses the whole selection.
+ * sent only as the pixels of its crop, and only while its source holds bytes
+ * whose size, SHA-256 and decoded size equal its record: the PNG registered
+ * when the same crop was proven, or else the crop drawn from those bytes. One
+ * unproven crop refuses the whole selection, also when a PNG of it is
+ * registered (the source changed since).
  * Order: budget on what is known, record check, then one read per cropped item.
  */
 export async function prepareCanvasAgentCropDelivery(
   items: CanvasItem[],
   isCurrent: () => boolean,
-  readEvidence: CanvasAgentCropEvidenceReader = readCanvasAgentCropEvidence
+  readEvidence: CanvasAgentCropEvidenceReader = readCanvasAgentCropEvidence,
+  { lookupProvenCropPng }: CanvasAgentCropDeliveryOptions = {}
 ): Promise<CanvasAgentCropPreparation> {
   if (!isCurrent()) return { status: 'cancelled' }
   try {
@@ -616,13 +679,37 @@ export async function prepareCanvasAgentCropDelivery(
     }
     if (!isCurrent()) return { status: 'cancelled' }
     if (!evidence) return { status: 'unverified' }
-    let source: MaterializedCanvasImageAttachmentSource | null
-    try {
-      source = resolveCanvasImageAttachmentCrop(item, evidence)
-    } catch (error) {
-      if (error instanceof CanvasAgentCropBudgetError) return { status: 'over-budget' }
-      console.warn('[SendToAgent] failed to export a cropped canvas image')
-      source = null
+    let source: MaterializedCanvasImageAttachmentSource | null = null
+    // The source still holds the recorded bytes, so the PNG registered when
+    // this crop was proven is current: it is sent without drawing the decoded
+    // picture and without a new encode. A source that changed since is refused
+    // below, registered PNG or not.
+    if (lookupProvenCropPng && hasVerifiableCrop(item) && matchesCropSource(item, evidence)) {
+      let registered: CanvasProvenCropPngSource | null
+      try {
+        registered = lookupProvenCropPng(item) ?? null
+      } catch {
+        registered = null
+      }
+      if (registered) {
+        try {
+          source = await materializeRegisteredCropPng(item, registered)
+        } catch (error) {
+          if (error instanceof CanvasAgentCropBudgetError) return { status: 'over-budget' }
+          source = null
+        }
+        if (!isCurrent()) return { status: 'cancelled' }
+        // An unusable entry: the crop is drawn from the verified bytes below.
+      }
+    }
+    if (!source) {
+      try {
+        source = resolveCanvasImageAttachmentCrop(item, evidence)
+      } catch (error) {
+        if (error instanceof CanvasAgentCropBudgetError) return { status: 'over-budget' }
+        console.warn('[SendToAgent] failed to export a cropped canvas image')
+        source = null
+      }
     }
     if (!source) return { status: 'unverified' }
     sources.set(item, source)

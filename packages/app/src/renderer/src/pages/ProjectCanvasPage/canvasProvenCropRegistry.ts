@@ -58,6 +58,18 @@ export type CanvasProvenCropRegistry = {
   ) => CanvasProvenCrop | null
   /** The entry made for exactly this item id, source, record and crop, or null. */
   lookup: (item: CanvasImageItem) => CanvasProvenCrop | null
+  /**
+   * The registered PNG itself for exactly this item id, source, record and
+   * crop, for a sink that copies the bytes (the Agent send) instead of
+   * borrowing the object URL. Null when there is none.
+   */
+  lookupPng: (item: CanvasImageItem) => CanvasProvenCropPng | null
+  /**
+   * Drops the entries of items that are gone or now show another proven crop
+   * (or no crop). An item whose crop has no record yet keeps its entry: the
+   * record may still be landing. Returns the number of entries dropped.
+   */
+  prune: (liveItems: readonly CanvasItem[]) => number
   /** Whether lookup would find an entry; does not change the recency order. */
   has: (item: CanvasImageItem) => boolean
   /** Whether a PNG of this many bytes fits without evicting another entry. */
@@ -81,21 +93,68 @@ export type CanvasProvenCropRegistry = {
   readonly totalBytes: number
 }
 
-type RegistryEntry = CanvasProvenCrop & { key: string; itemId: string; blob: Blob }
+export type CanvasProvenCropPng = {
+  blob: Blob
+  fileName: string
+  width: number
+  height: number
+}
+
+type RegistryEntry = CanvasProvenCrop & {
+  key: string
+  itemId: string
+  blob: Blob
+  /** PNG bytes plus the key's UTF-16 bytes: what the entry keeps alive. */
+  retainedBytes: number
+}
 
 const defaultObjectUrlApi: CanvasProvenCropObjectUrlApi = {
   create: (blob) => URL.createObjectURL(blob),
   revoke: (url) => URL.revokeObjectURL(url)
 }
 
-/** The identity of a proven crop: item id, source, record and the crop itself. */
+/** Sources up to this length are part of a key verbatim; longer ones by fingerprint. */
+const SOURCE_KEY_MAX_LENGTH = 2048
+const KEY_BYTES_ALLOWANCE = 8 * 1024
+const SOURCE_FINGERPRINT_WINDOWS = 256
+const SOURCE_FINGERPRINT_WINDOW_LENGTH = 16
+
+/**
+ * A short stand-in for a long source (a data: URL can be tens of MiB): its
+ * length and an FNV-1a hash of its head, its tail and evenly spaced windows.
+ * The key never holds a copy of such a source, and a lookup never walks it
+ * whole. The record's byte size and SHA-256 in the same key bind the bytes.
+ */
+function getCanvasProvenCropSourceKey(src: string): string {
+  if (typeof src !== 'string') return ''
+  if (src.length <= SOURCE_KEY_MAX_LENGTH) return src
+  let hash = 0x811c9dc5
+  const mix = (start: number) => {
+    const end = Math.min(src.length, start + SOURCE_FINGERPRINT_WINDOW_LENGTH)
+    for (let index = start; index < end; index += 1) {
+      hash ^= src.charCodeAt(index)
+      hash = Math.imul(hash, 0x01000193) >>> 0
+    }
+  }
+  const step = Math.floor(
+    (src.length - SOURCE_FINGERPRINT_WINDOW_LENGTH) / (SOURCE_FINGERPRINT_WINDOWS - 1)
+  )
+  for (let window = 0; window < SOURCE_FINGERPRINT_WINDOWS - 1; window += 1) mix(window * step)
+  mix(src.length - SOURCE_FINGERPRINT_WINDOW_LENGTH)
+  return `#${src.length}:${hash.toString(16)}:${src.slice(0, 64)}`
+}
+
+/**
+ * The identity of a proven crop: item id, source (verbatim when short, else a
+ * fingerprint), record and the crop itself. At most a few KiB long.
+ */
 export function getCanvasProvenCropKey(item: CanvasImageItem): string | null {
   if (item?.type !== 'image' || !item.crop || !hasVerifiableCrop(item)) return null
   const record = item.cropSource!
   const { x, y, width, height } = item.crop
   return JSON.stringify([
     item.id,
-    item.src,
+    getCanvasProvenCropSourceKey(item.src),
     record.sha256,
     record.sizeBytes,
     record.width,
@@ -149,7 +208,7 @@ export function createCanvasProvenCropRegistry(
     const entry = entries.get(itemId)
     if (!entry) return
     entries.delete(itemId)
-    totalBytes -= entry.blob.size
+    totalBytes -= entry.retainedBytes
     revoke(entry)
   }
 
@@ -202,10 +261,11 @@ export function createCanvasProvenCropRegistry(
         mimeType: 'image/png',
         sizeBytes: png.size,
         width: expected.width,
-        height: expected.height
+        height: expected.height,
+        retainedBytes: png.size + key.length * 2
       }
       entries.set(item.id, entry)
-      totalBytes += png.size
+      totalBytes += entry.retainedBytes
       for (const oldest of entries.values()) {
         if (entries.size <= maxEntries && totalBytes <= maxBytes) break
         if (oldest === entry) break
@@ -229,6 +289,41 @@ export function createCanvasProvenCropRegistry(
       entries.set(item.id, entry)
       return toPublic(entry)
     },
+    lookupPng(item) {
+      const key = getCanvasProvenCropKey(item)
+      if (!key) return null
+      const entry = entries.get(item.id)
+      if (!entry || entry.key !== key) return null
+      entries.delete(item.id)
+      entries.set(item.id, entry)
+      return {
+        blob: entry.blob,
+        fileName: entry.fileName,
+        width: entry.width,
+        height: entry.height
+      }
+    },
+    prune(liveItems) {
+      if (entries.size === 0) return 0
+      const liveById = new Map<string, CanvasItem>()
+      for (const item of liveItems) {
+        if (entries.has(item.id)) liveById.set(item.id, item)
+      }
+      let dropped = 0
+      for (const entry of Array.from(entries.values())) {
+        const live = liveById.get(entry.itemId)
+        let keep = false
+        if (live?.type === 'image' && live.crop) {
+          const liveKey = getCanvasProvenCropKey(live)
+          keep = liveKey === null || liveKey === entry.key
+        }
+        if (!keep) {
+          remove(entry.itemId)
+          dropped += 1
+        }
+      }
+      return dropped
+    },
     has(item) {
       const key = getCanvasProvenCropKey(item)
       return Boolean(key && entries.get(item.id)?.key === key)
@@ -239,7 +334,8 @@ export function createCanvasProvenCropRegistry(
         bytes > 0 &&
         bytes <= maxEntryBytes &&
         entries.size + 1 <= maxEntries &&
-        totalBytes + bytes <= maxBytes
+        // The entry's key is counted too: at most a few KiB.
+        totalBytes + bytes + KEY_BYTES_ALLOWANCE <= maxBytes
       )
     },
     beginPending(itemId) {
@@ -300,7 +396,9 @@ export function registerCanvasAgentSendProvenCrops(
       prepared.id !== original.id ||
       prepared.crop ||
       prepared.src === original.src ||
-      !getCanvasProvenCropKey(original)
+      !getCanvasProvenCropKey(original) ||
+      // Sent from its registered PNG: nothing new to keep, no base64 decode.
+      registry.has(original)
     ) {
       return
     }

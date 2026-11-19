@@ -837,6 +837,119 @@ describe('useCanvasBridgeActions', () => {
       expect(kept).toHaveLength(1)
     })
 
+    it('sends a crop whose PNG is registered as that PNG once the source bytes verify: one read, no draw, no encode, no second entry (F2 part 5)', async () => {
+      const original = 'local-media:///C:/MagicPot/registered.jpg'
+      installCropImageFixture(original)
+      const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext')
+      const kept: Blob[] = []
+      const registry = createCanvasProvenCropRegistry(
+        {},
+        {
+          create: (blob) => {
+            kept.push(blob)
+            return `blob:registered-crop-${kept.length}`
+          },
+          revoke: vi.fn()
+        }
+      )
+      const cropped = createImageItem('registered', 'registered.jpg', {
+        sourceWidth: 100,
+        sourceHeight: 80,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: LOCAL_SOURCE_RECORD
+      })
+      const png = new Blob(['registered-crop'], { type: 'image/png' })
+      expect(registry.register(cropped, png, { width: 30, height: 40 })).not.toBeNull()
+      const state = setup([cropped, textItem], { provenCropRegistry: registry })
+      await act(async () => {
+        // The source read and its hash settle on real async work; the registered
+        // PNG is then read as a data: URL by a FileReader (timer driven here).
+        let settled = false
+        const sending = state.result.current
+          .handleSendCanvasItemsToAgent([cropped, textItem])
+          .finally(() => {
+            settled = true
+          })
+        await vi.waitFor(
+          () => {
+            if (!settled) throw new Error('the send is still running')
+          },
+          { timeout: 4000, interval: 5 }
+        )
+        await sending
+        vi.runAllTimers()
+      })
+
+      expect(state.notifyError).not.toHaveBeenCalled()
+      // The source is read once and its bytes are checked against the record;
+      // the decoded picture is never drawn and nothing is encoded again.
+      expect(lastCropFixture!.fetch).toHaveBeenCalledOnce()
+      expect(lastCropFixture!.decodeInputs).toHaveLength(1)
+      expect(lastCropFixture!.decodeInputs[0]).toMatch(/^blob:/)
+      expect(toDataURL).not.toHaveBeenCalled()
+      expect(getContext).not.toHaveBeenCalled()
+      const attachments = state.events.mock.calls.flatMap(([event]) => {
+        if (event.type !== 'send-to-agent') return []
+        const detail = (event as CustomEvent<{ attachment?: { url?: string; fileName?: string } }>)
+          .detail
+        return detail?.attachment ? [detail.attachment] : []
+      })
+      expect(attachments[0]).toEqual(
+        expect.objectContaining({
+          url: `data:image/png;base64,${btoa('registered-crop')}`,
+          fileName: 'registered.png'
+        })
+      )
+      const [overviewItems] = state.renderSnapshot.mock.calls[0]
+      expect(overviewItems[0]).toEqual(
+        expect.objectContaining({ src: `data:image/png;base64,${btoa('registered-crop')}` })
+      )
+      expect(overviewItems[0]).not.toHaveProperty('crop')
+      expect(JSON.stringify(state.sendEvents().map((event) => event.detail))).not.toContain(original)
+      expect(kept).toEqual([png])
+      expect(registry.entryCount).toBe(1)
+    })
+
+    it('refuses a crop whose source changed since its PNG was registered, and sends nothing of it', async () => {
+      const original = 'local-media:///C:/MagicPot/replaced.jpg'
+      installCropImageFixture(original)
+      const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext')
+      const registry = createCanvasProvenCropRegistry(
+        {},
+        { create: () => 'blob:registered-before-replace', revoke: vi.fn() }
+      )
+      // The record describes the bytes the crop was proven on; the file now holds other bytes.
+      const cropped = createImageItem('replaced', 'replaced.jpg', {
+        sourceWidth: 100,
+        sourceHeight: 80,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: {
+          ...LOCAL_SOURCE_RECORD,
+          sha256: LOCAL_SOURCE_RECORD.sha256.replace(/^./, (c) => (c === '0' ? '1' : '0'))
+        }
+      })
+      const png = new Blob(['registered-crop'], { type: 'image/png' })
+      expect(registry.register(cropped, png, { width: 30, height: 40 })).not.toBeNull()
+      const state = setup([cropped, textItem], { provenCropRegistry: registry })
+      await act(async () => {
+        await state.result.current.handleSendCanvasItemsToAgent([cropped, textItem])
+        vi.runAllTimers()
+      })
+
+      expect(state.notifyError).toHaveBeenCalledExactlyOnceWith(
+        'canvas.agent_send_cropped_image_failed'
+      )
+      expect(lastCropFixture!.fetch).toHaveBeenCalledOnce()
+      expect(toDataURL).not.toHaveBeenCalled()
+      expect(getContext).not.toHaveBeenCalled()
+      expect(state.sendEvents()).toHaveLength(0)
+      expect(state.renderSnapshot).not.toHaveBeenCalled()
+      // The entry stays for a drag of the proven pixels; the send does not use it.
+      expect(registry.entryCount).toBe(1)
+    })
+
     it('allocates no canvas and decodes nothing when the canvas unmounts while the source is read', async () => {
       const original = 'local-media:///C:/MagicPot/pending.jpg'
       installCropImageFixture(original)

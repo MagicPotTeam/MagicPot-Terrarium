@@ -54,6 +54,9 @@ function createRegistry(limits: Parameters<typeof createCanvasProvenCropRegistry
 
 const CROP_SIZE = { width: 60, height: 30 }
 
+// An entry keeps its PNG and its key: both count against the byte budget.
+const keyBytes = (item: CanvasImageItem) => getCanvasProvenCropKey(item)!.length * 2
+
 describe('canvas proven crop registry', () => {
   it('registers the drawn PNG of a recorded crop and finds it for the same item', () => {
     const { registry, create } = createRegistry()
@@ -71,7 +74,7 @@ describe('canvas proven crop registry', () => {
     expect(create).toHaveBeenCalledExactlyOnceWith(blob)
     expect(registry.lookup({ ...item })).toEqual(entry)
     expect(registry.entryCount).toBe(1)
-    expect(registry.totalBytes).toBe(16)
+    expect(registry.totalBytes).toBe(16 + keyBytes(item))
   })
 
   it('tells subscribers which item got an entry, and nothing after they unsubscribe', () => {
@@ -148,13 +151,15 @@ describe('canvas proven crop registry', () => {
     const second = registry.register(recropped, png(20), { width: 100, height: 50 })
     expect(revoke).toHaveBeenCalledExactlyOnceWith(first?.url)
     expect(registry.entryCount).toBe(1)
-    expect(registry.totalBytes).toBe(20)
+    expect(registry.totalBytes).toBe(20 + keyBytes(recropped))
     expect(registry.lookup(croppedItem())).toBeNull()
     expect(registry.lookup(recropped)).toEqual(second)
   })
 
   it('evicts the least recently used entries beyond the entry and byte bounds', () => {
-    const { registry, revoke } = createRegistry({ maxEntries: 2, maxBytes: 40 })
+    // Every key here has the same length (one-letter ids).
+    const key = keyBytes(croppedItem({ id: 'a' }))
+    const { registry, revoke } = createRegistry({ maxEntries: 2, maxBytes: 40 + 2 * key })
     const a = registry.register(croppedItem({ id: 'a' }), png(10), CROP_SIZE)
     const b = registry.register(croppedItem({ id: 'b' }), png(10), CROP_SIZE)
     expect(registry.lookup(croppedItem({ id: 'a' }))).toEqual(a)
@@ -165,7 +170,7 @@ describe('canvas proven crop registry', () => {
 
     registry.register(croppedItem({ id: 'd' }), png(35), CROP_SIZE)
     expect(registry.entryCount).toBe(1)
-    expect(registry.totalBytes).toBe(35)
+    expect(registry.totalBytes).toBe(35 + key)
     expect(registry.lookup(croppedItem({ id: 'd' }))).not.toBeNull()
     expect(revoke).toHaveBeenCalledTimes(3)
   })
@@ -180,6 +185,73 @@ describe('canvas proven crop registry', () => {
     expect(registry.totalBytes).toBe(0)
     expect(registry.lookup(croppedItem({ id: 'a' }))).toBeNull()
     expect(registry.register(croppedItem({ id: 'a' }), png(), CROP_SIZE)).not.toBeNull()
+  })
+
+  it('never keeps a copy of a long data: source in its key, and still tells sources apart (F2 part 5)', () => {
+    const payload = 'A'.repeat(4 * 1024 * 1024)
+    const longSrc = `data:image/png;base64,${payload}`
+    const item = croppedItem({ src: longSrc })
+    const key = getCanvasProvenCropKey(item)!
+    expect(key.length).toBeLessThan(512)
+    expect(key).not.toContain(payload.slice(0, 1024))
+    // Another length, another head, tail or middle window: another key.
+    for (const other of [
+      `${longSrc}B`,
+      `data:image/png;base64,B${payload.slice(1)}`,
+      `${longSrc.slice(0, -1)}B`,
+      // Other bytes differ throughout: here a 64 KiB block in the middle.
+      `${longSrc.slice(0, 2 * 1024 * 1024)}${'B'.repeat(65536)}${longSrc.slice(2 * 1024 * 1024 + 65536)}`
+    ]) {
+      expect(other.length).toBeGreaterThan(2048)
+      expect(getCanvasProvenCropKey(croppedItem({ src: other }))).not.toBe(key)
+    }
+    // A short source is part of the key as it is.
+    expect(getCanvasProvenCropKey(croppedItem())).toContain('local-media:///C:/MagicPot/source.png')
+    const { registry } = createRegistry()
+    registry.register(item, png(), CROP_SIZE)
+    expect(registry.totalBytes).toBe(16 + key.length * 2)
+    expect(registry.lookup({ ...item, src: `${longSrc}` })).not.toBeNull()
+    expect(registry.lookup({ ...item, src: `${longSrc.slice(0, -1)}B` })).toBeNull()
+  })
+
+  it('drops the entries of deleted, uncropped or re-cropped items, and keeps one whose record is landing', () => {
+    const { registry, revoke } = createRegistry()
+    const kept = croppedItem({ id: 'kept' })
+    const deleted = croppedItem({ id: 'deleted' })
+    const uncropped = croppedItem({ id: 'uncropped' })
+    const recropped = croppedItem({ id: 'recropped' })
+    const landing = croppedItem({ id: 'landing' })
+    for (const item of [kept, deleted, uncropped, recropped, landing]) {
+      registry.register(item, png(), CROP_SIZE)
+    }
+    const dropped = registry.prune([
+      kept,
+      { ...uncropped, crop: undefined, cropSource: undefined },
+      { ...recropped, crop: { x: 0, y: 0, width: 100, height: 50 } },
+      // Same crop, its record not committed yet.
+      { ...landing, cropSource: undefined }
+    ])
+    expect(dropped).toBe(3)
+    expect(revoke).toHaveBeenCalledTimes(3)
+    expect(registry.entryCount).toBe(2)
+    expect(registry.has(kept)).toBe(true)
+    expect(registry.has(landing)).toBe(true)
+    expect(registry.totalBytes).toBe(2 * 16 + keyBytes(kept) + keyBytes(landing))
+  })
+
+  it('hands out the registered PNG itself for the same crop only', () => {
+    const { registry } = createRegistry()
+    const item = croppedItem()
+    const blob = png()
+    registry.register(item, blob, CROP_SIZE)
+    expect(registry.lookupPng({ ...item })).toEqual({
+      blob,
+      fileName: 'source.png',
+      width: 60,
+      height: 30
+    })
+    expect(registry.lookupPng({ ...item, crop: { x: 0, y: 0, width: 10, height: 10 } })).toBeNull()
+    expect(registry.lookupPng({ ...item, cropSource: undefined })).toBeNull()
   })
 
   it('draws at the crop size normalized against the record', () => {
@@ -257,6 +329,16 @@ describe('crops proven by an Agent send', () => {
     const { registry, create } = createRegistry()
     const item = croppedItem()
     expect(registerCanvasAgentSendProvenCrops(registry, [item], [prepare(item)])).toBe(0)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('keeps nothing when the prepared PNG is the original data: source itself (F2 part 6)', () => {
+    // The original is a PNG data URL and the "prepared" item still carries it:
+    // registering it would hand the whole original to a drag.
+    const { registry, create } = createRegistry()
+    const item = croppedItem({ src: DRAWN })
+    expect(getCanvasProvenCropKey(item)).not.toBeNull()
+    expect(registerCanvasAgentSendProvenCrops(registry, [item], [sent(item)])).toBe(0)
     expect(create).not.toHaveBeenCalled()
   })
 

@@ -8,8 +8,9 @@
 // same bounded read, hash and decode as a crop confirm, and only from bytes
 // whose byte size, SHA-256 and pixel size equal the item's record.
 //
-// Selected crops come first (a drag starts from the selection) and may evict
-// older entries. Other crops are drawn only while the registry has room, so the
+// Entries of deleted, uncropped or re-cropped items are dropped as soon as the
+// items change. Selected crops come first (a drag starts from the selection) and
+// may evict older entries. Other crops are drawn only while the registry has room, so the
 // fill never churns the registry. A crop that fails to prove is not read again
 // for the same key.
 import { useEffect, useRef } from 'react'
@@ -101,6 +102,12 @@ export function useCanvasProvenCropRegistryFill({
       mountedRef.current = false
     }
   }, [])
+
+  // Memory: an entry whose item was deleted, uncropped or re-cropped is dropped
+  // at once (an undo brings it back through the fill below).
+  useEffect(() => {
+    if (registry && registry.entryCount > 0) registry.prune(items)
+  }, [items, registry])
 
   useEffect(() => {
     // Nothing to do on boards without a proven crop: no idle callback at all.

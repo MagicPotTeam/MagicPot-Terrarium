@@ -225,6 +225,22 @@ describe('useCanvasProvenCropRegistryFill', () => {
     expect(registry.entryCount).toBe(0)
   })
 
+  it('drops the entry of a deleted item at once and draws it again when undo brings it back (F2 part 5)', async () => {
+    const item = provenItem('deleted-later')
+    const other = provenItem('stays')
+    const { registry, revoke, readEvidence, rerender } = setup([item, other])
+    await waitFor(() => expect(registry.entryCount).toBe(2))
+
+    rerender({ items: [other], selectedIds: new Set() })
+    expect(registry.has(item)).toBe(false)
+    expect(registry.entryCount).toBe(1)
+    expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:filled-1')
+
+    rerender({ items: [item, other], selectedIds: new Set() })
+    await waitFor(() => expect(registry.has(item)).toBe(true))
+    expect(readEvidence).toHaveBeenCalledTimes(3)
+  })
+
   it('does not draw a crop above the pixel cap', async () => {
     const huge = provenItem('huge-crop', {
       sourceWidth: 8000,

@@ -406,6 +406,24 @@ describe('crop source records', () => {
   })
 })
 
+describe('record bounds and identity crops (F2 part 6: guards no test reached)', () => {
+  it('refuses a crop that ends below the recorded height, as one that ends right of its width', () => {
+    const recorded = { cropSource: record(), sourceWidth: 200, sourceHeight: 120 }
+    expect(hasVerifiableCrop(imageItem({ ...recorded, crop: { x: 0, y: 60, width: 50, height: 60 } }))).toBe(true)
+    expect(hasVerifiableCrop(imageItem({ ...recorded, crop: { x: 0, y: 61, width: 50, height: 60 } }))).toBe(false)
+    expect(hasVerifiableCrop(imageItem({ ...recorded, crop: { x: 0, y: 0, width: 50, height: 121 } }))).toBe(false)
+    expect(hasVerifiableCrop(imageItem({ ...recorded, crop: { x: 151, y: 0, width: 50, height: 10 } }))).toBe(false)
+  })
+
+  it('never treats a full-image crop as an identity crop when only the source height differs', () => {
+    const full = { x: 0, y: 0, width: 200, height: 120 }
+    const base = { cropSource: record(), crop: full, sourceWidth: 200 }
+    expect(isConfirmedIdentityCrop(imageItem({ ...base, sourceHeight: 120 }))).toBe(true)
+    expect(isConfirmedIdentityCrop(imageItem({ ...base, sourceHeight: 240 }))).toBe(false)
+    expect(isConfirmedIdentityCrop(imageItem({ ...base, sourceHeight: undefined }))).toBe(false)
+  })
+})
+
 describe('resolveCanvasCropInSourceSpace (F2 part 4)', () => {
   function sizedImage(width: number, height: number) {
     const image = document.createElement('img')

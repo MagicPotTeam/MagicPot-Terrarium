@@ -830,6 +830,73 @@ describe('useCanvasLegacyCropUpgrade (owner decision 2)', () => {
     })
   })
 
+  describe('fences of the pass (F2 part 6: guards no test reached)', () => {
+    function renderFenceBoard(readEvidence: CanvasLegacyCropEvidenceReader) {
+      return renderHook(() => {
+        const runtime = useProjectCanvasPageRuntimeState()
+        const upgrade = useCanvasLegacyCropUpgrade({
+          canvasId: 'board-a',
+          items: runtime.items,
+          setItemsWithoutHistory: runtime.setItems,
+          attestItems: runtime.attestItems,
+          readEvidence,
+          waitForIdle: async () => undefined
+        })
+        return { runtime, upgrade }
+      })
+    }
+
+    async function startPass() {
+      const read = deferred<CanvasLegacyCropEvidence | null>()
+      const readEvidence = vi.fn(
+        (_src: string, _isCurrent: () => boolean) => read.promise
+      )
+      const view = renderFenceBoard(readEvidence)
+      const stored = createLegacyCrop()
+      act(() => view.result.current.runtime.setItems([stored]))
+      act(() =>
+        view.result.current.upgrade.handleCanvasItemsLoaded({
+          canvasId: 'board-a',
+          storedItems: [stored]
+        })
+      )
+      await waitFor(() => expect(readEvidence).toHaveBeenCalledTimes(1))
+      return { ...view, read, readEvidence, stored }
+    }
+
+    it('writes no record when the source changes during the read, although crop and size stay', async () => {
+      const { result, read, readEvidence, stored } = await startPass()
+      act(() =>
+        result.current.runtime.setItems([{ ...stored, src: 'blob:replaced-same-size-source' }])
+      )
+      expect((readEvidence.mock.calls[0][1] as () => boolean)()).toBe(false)
+      await act(async () => read.resolve(MATCHING_EVIDENCE))
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(findImage(result.current.runtime.items).cropSource).toBeUndefined()
+    })
+
+    it('never replaces a confirm record that lands during the read with a reopen record', async () => {
+      const { result, read, stored } = await startPass()
+      const confirmRecord = {
+        version: 1 as const,
+        origin: 'confirm' as const,
+        ...MATCHING_EVIDENCE
+      }
+      act(() =>
+        result.current.runtime.attestItems((item) =>
+          item.id === stored.id ? ({ ...item, cropSource: confirmRecord } as CanvasItem) : item
+        )
+      )
+      await act(async () => read.resolve(MATCHING_EVIDENCE))
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(findImage(result.current.runtime.items).cropSource).toEqual(confirmRecord)
+    })
+  })
+
   it('judges candidates on the stored items', () => {
     const { candidates, refusals, toMark } = collectCanvasLegacyCropCandidates([
       createLegacyCrop(),

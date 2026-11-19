@@ -155,7 +155,13 @@ export function useCanvasBridgeActions({
         // whole selection. The user's items are never changed.
         // An uncropped selection takes no extra turn before materialization.
         const cropPreparation: CanvasAgentCropPreparation = hasCanvasAgentCrop(expandedTargetItems)
-          ? await prepareCanvasAgentCropDelivery(expandedTargetItems, isCurrentDelivery)
+          ? await prepareCanvasAgentCropDelivery(expandedTargetItems, isCurrentDelivery, undefined, {
+              // A crop whose source still holds the recorded bytes is sent as its
+              // registered PNG: no draw of the decoded picture, no new encode.
+              lookupProvenCropPng: provenCropRegistry
+                ? (item) => provenCropRegistry.lookupPng(item)
+                : undefined
+            })
           : {
               status: 'ready',
               attachmentItems: expandedTargetItems,
