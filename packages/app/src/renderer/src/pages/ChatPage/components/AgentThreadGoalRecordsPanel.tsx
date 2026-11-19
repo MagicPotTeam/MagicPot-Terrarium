@@ -32,6 +32,12 @@ const deletable: readonly AgentGoalStatus[] = [
   'failed'
 ]
 const enabledControl = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled)'
+/**
+ * Confirm is drawn where Delete was, so a fast second click on Delete lands on it. A pointer click on
+ * Confirm counts only after this delay from the click that opened the confirmation; it covers a double
+ * click whose second press moved out of the platform's double-click area (detail 1, not 2).
+ */
+const confirmArmMs = 400
 export type AgentThreadGoalRecordsPanelProps = {
   view: AgentGoalView | null
   pending: boolean
@@ -92,6 +98,8 @@ export default function AgentThreadGoalRecordsPanel({
     revision: number
     generation: number
     status: AgentGoalStatus
+    /** Time stamp of the event that opened it. */
+    openedAt: number
   } | null>(null)
   const confirmed =
     confirming &&
@@ -319,7 +327,15 @@ export default function AgentThreadGoalRecordsPanel({
                   <Button
                     size="small"
                     disabled={pending}
-                    onClick={() => {
+                    onClick={(event) => {
+                      // The second click of a double click (detail 2) or a pointer click right after
+                      // the opening one does not confirm. Enter and Space give detail 0.
+                      if (
+                        event.detail > 1 ||
+                        (event.detail > 0 &&
+                          event.timeStamp - confirmingThis.openedAt < confirmArmMs)
+                      )
+                        return
                       const intent = {
                         goalId: confirmingThis.goalId,
                         revision: confirmingThis.revision,
@@ -374,8 +390,14 @@ export default function AgentThreadGoalRecordsPanel({
                       }}
                       size="small"
                       disabled={pending}
-                      onClick={() =>
-                        setConfirming({ goalId, revision, generation, status: goal.status })
+                      onClick={(event) =>
+                        setConfirming({
+                          goalId,
+                          revision,
+                          generation,
+                          status: goal.status,
+                          openedAt: event.timeStamp
+                        })
                       }
                     >
                       {translate('chat.agent_goal.delete_for', `Delete ${label}`, { label })}

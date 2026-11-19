@@ -190,7 +190,9 @@ describe('a goal delete rewrites only the chosen goal', () => {
     expect(t.store.read(scope)).toEqual(collection)
   })
 
-  it('lets only one of two stores on the same file delete at a revision', () => {
+  // BEGIN IMMEDIATE serialises the two stores, so the loser fails the revision check of the reducer; the
+  // conditional write on the storage revision cannot be the deciding refusal without stubbing the read.
+  it('refuses a delete from a second store that holds a stale revision and keeps the first delete', () => {
     const t = setup(), other = open(t), a = create(t.store, 'A'), b = create(t.store, 'B')
     const stale = other.read(scope)
     t.store.mutateUser(scope, { action: 'delete', goalId: a, expectedGeneration: 1, expectedRevision: stale.revision, operationId: 'first' }, now++)

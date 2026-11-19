@@ -136,6 +136,57 @@ describe('goal delete entry in the goal view (Panel)', () => {
   })
 })
 
+describe('a double click on Delete never confirms', () => {
+  afterEach(() => { vi.useRealTimers() })
+  // Click 1 redraws the row before click 2, and Confirm is drawn where Delete was: the second click of a
+  // double click lands on Confirm (always for an ended goal, on the left part of Delete for a draft).
+  it.each(['completed', 'cancelled', 'failed', 'draft', 'paused'] as const)('opens the confirmation of a %s goal and deletes nothing', status => {
+    const onDelete = vi.fn()
+    render(panel(view(4, [goal('Beta', status, 'beta-id', 3)]), { onDelete }))
+    const del = button('Beta', 'Delete Beta'), box = del.parentElement!
+    fireEvent.click(del, { detail: 1 })
+    const confirm = button('Beta', 'Confirm delete Beta')
+    expect(box.firstElementChild).toBe(confirm)
+    fireEvent.click(confirm, { detail: 2 }); fireEvent.dblClick(confirm, { detail: 2 }); fireEvent.click(confirm, { detail: 3 })
+    expect(onDelete).not.toHaveBeenCalled()
+    expect(button('Beta', 'Confirm delete Beta')).toBeEnabled()
+    expect(button('Beta', 'Cancel')).toBeEnabled()
+  })
+
+  it('ignores a pointer click on Confirm within 400 ms of the opening click, then accepts a single click', () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(1_000_000)
+    const onDelete = vi.fn()
+    render(panel(view(4, [goal('Beta', 'completed', 'beta-id', 3)]), { onDelete }))
+    fireEvent.click(button('Beta', 'Delete Beta'), { detail: 1 })
+    // A fast second press that left the double-click area arrives as a new single click.
+    vi.setSystemTime(1_000_150); fireEvent.click(button('Beta', 'Confirm delete Beta'), { detail: 1 })
+    vi.setSystemTime(1_000_399); fireEvent.click(button('Beta', 'Confirm delete Beta'), { detail: 1 })
+    expect(onDelete).not.toHaveBeenCalled()
+    vi.setSystemTime(1_000_400); fireEvent.click(button('Beta', 'Confirm delete Beta'), { detail: 1 })
+    expect(onDelete).toHaveBeenCalledExactlyOnceWith({ goalId: 'beta-id', revision: 4, generation: 3 })
+  })
+
+  it('ignores a slow double click whose second click comes after 400 ms (detail 2 within the system double-click time)', () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(1_000_000)
+    const onDelete = vi.fn()
+    render(panel(view(4, [goal('Beta', 'draft', 'beta-id', 1)]), { onDelete }))
+    fireEvent.click(button('Beta', 'Delete Beta'), { detail: 1 })
+    vi.setSystemTime(1_000_450); fireEvent.click(button('Beta', 'Confirm delete Beta'), { detail: 2 })
+    expect(onDelete).not.toHaveBeenCalled()
+    expect(button('Beta', 'Confirm delete Beta')).toBeEnabled()
+  })
+
+  it.each([['Enter', '{Enter}'], ['Space', ' ']])('still confirms with %s right after opening', async (_, key) => {
+    const onDelete = vi.fn(), user = userEvent.setup()
+    render(panel(view(4, [goal('Beta', 'failed', 'beta-id', 3)]), { onDelete }))
+    await user.tab(); await user.keyboard('{Enter}')
+    await user.tab({ shift: true })
+    expect(button('Beta', 'Confirm delete Beta')).toHaveFocus()
+    await user.keyboard(key)
+    expect(onDelete).toHaveBeenCalledExactlyOnceWith({ goalId: 'beta-id', revision: 4, generation: 3 })
+  })
+})
+
 describe('goal delete through the real Host and Panel, synthetic service', () => {
   const ready = () => screen.findByRole('button', { name: 'Delete Beta' })
 
@@ -159,6 +210,20 @@ describe('goal delete through the real Host and Panel, synthetic service', () =>
       expect(button('Gamma', 'Activate Gamma')).toHaveFocus()
       expect(h.mutate).toHaveBeenCalledTimes(1); expect(h.list).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled()
     } finally { gate.resolve({ status: 'synthetic-cleanup' }) }
+  })
+
+  it('sends nothing for a double click on Delete and one delete for a later single click on Confirm', async () => {
+    h.mutate.mockImplementation(async req => ({ ...view(10, [current.goals[0], current.goals[2]]), status: 'applied', operationId: req.operationId }))
+    render(<Host {...props} conversationId="delete-double-click" />)
+    const del = await ready()
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(2_000_000)
+    try {
+      fireEvent.click(del, { detail: 1 }); fireEvent.click(button('Beta', 'Confirm delete Beta'), { detail: 2 })
+      expect(h.mutate).not.toHaveBeenCalled()
+      vi.setSystemTime(2_000_600); fireEvent.click(button('Beta', 'Confirm delete Beta'), { detail: 1 })
+    } finally { vi.useRealTimers() }
+    expect(h.mutate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ action: 'delete', goalId: 'Beta-id', expectedRevision: 9, expectedGeneration: 1 }))
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Beta' })).toBeNull())
   })
 
   it('gives a full view its Create button back after one delete and keeps every typed text', async () => {
