@@ -120,11 +120,18 @@ const importPathlessBlob = async (
   {
     mimeType,
     originalFileName,
+    displayName = originalFileName,
     storage
-  }: { mimeType: string; originalFileName: string; storage: ManagedMediaStorage }
+  }: {
+    mimeType: string
+    originalFileName: string
+    /** The name the user knows, for the refusal; defaults to originalFileName. */
+    displayName?: string
+    storage: ManagedMediaStorage
+  }
 ): Promise<Awaited<ReturnType<ManagedMediaSvc['importBytes']>>> => {
   if (blob.size > CHAT_PATHLESS_ATTACHMENT_MAX_BYTES) {
-    throw new ChatPathlessAttachmentTooLargeError(originalFileName, blob.size)
+    throw new ChatPathlessAttachmentTooLargeError(displayName, blob.size)
   }
   return service.importBytes({
     bytes: new Uint8Array(await readBlobArrayBuffer(blob)),
@@ -201,7 +208,9 @@ export const importChatAttachment = async ({
   storage = CHAT_ATTACHMENT_STORAGE
 }: ImportChatAttachmentInput): Promise<ChatAttachment> => {
   if (!service) throw new Error('Managed media service is unavailable')
-  const originalFileName = file.name || 'attachment'
+  const displayName = file.name || 'attachment'
+  // The name main stores under its own rule; the attachment keeps the file's name.
+  const originalFileName = toManagedOriginalFileName(file.name, 'attachment')
   const importMimeType = mimeType || file.type
   const pickedPath = readPickedFilePath(file, fileBridge)
   // A file on disk whose type the store does not hold (video, 3D model): main refuses the
@@ -222,13 +231,14 @@ export const importChatAttachment = async ({
     : await importPathlessBlob(service, file, {
         mimeType: importMimeType,
         originalFileName,
+        displayName,
         storage
       })
   return {
     type,
     url: imported.localMediaUrl,
     mimeType: mimeType || file.type,
-    fileName: originalFileName,
+    fileName: displayName,
     media: imported.reference,
     sizeBytes: file.size,
     relativePath,
@@ -289,13 +299,15 @@ export const importChatAttachmentUrl = async ({
     return { type: 'image', url, fileName, ...dimensions }
   }
   // A data: URL is already a string: it is sent as it is. A blob: URL is sent as bytes.
+  const originalFileName = toManagedOriginalFileName(fileName, 'image')
   const imported = url.startsWith('data:')
-    ? await service.importDataUrl({ dataUrl: url, originalFileName: fileName, storage })
+    ? await service.importDataUrl({ dataUrl: url, originalFileName, storage })
     : await (async () => {
         const blob = await fetchAttachmentBlob(url)
         return importPathlessBlob(service, blob, {
           mimeType: blob.type,
-          originalFileName: fileName,
+          originalFileName,
+          displayName: fileName,
           storage
         })
       })()
@@ -341,14 +353,36 @@ const isManagedImageMimeType = (mime: string): boolean => MANAGED_IMAGE_MIME_TYP
 const isStoreMimeType = (value: string): boolean =>
   MANAGED_IMAGE_MIME_TYPES.has(String(value || '').split(';', 1)[0].trim().toLowerCase())
 
-/** The store's file-name rule; the attachment keeps its own display name. */
-const toManagedOriginalFileName = (fileName: string | undefined, fallback: string): string => {
-  const cleaned = String(fileName || '')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, '_')
+const MANAGED_ORIGINAL_FILE_NAME_MAX_UTF8_BYTES = 255
+const utf8Length = (value: string): number => new TextEncoder().encode(value).length
+
+/**
+ * The name main stores with a managed copy, under the store's file-name rule (no control or
+ * reserved characters, no trailing dot or space, no device name, at most 255 UTF-8 bytes
+ * with the extension kept). Names a file system allows but the store does not ('what is
+ * this?.png', 'A:B test.png' from macOS) are changed, not refused; the attachment keeps its
+ * own display name.
+ */
+export const toManagedOriginalFileName = (
+  fileName: string | undefined,
+  fallback: string
+): string => {
+  let cleaned = String(fileName || '')
+    .normalize('NFC')
+    .replace(/[\p{Cc}<>:"/\\|?*]/gu, '_')
     .replace(/[. ]+$/u, '')
-    .slice(0, 255)
-  if (!cleaned || cleaned === '.' || cleaned === '..') return fallback
+  if (utf8Length(cleaned) > MANAGED_ORIGINAL_FILE_NAME_MAX_UTF8_BYTES) {
+    const dot = cleaned.lastIndexOf('.')
+    const extension = dot > 0 && cleaned.length - dot <= 16 ? cleaned.slice(dot) : ''
+    const stem = Array.from(extension ? cleaned.slice(0, dot) : cleaned)
+    while (
+      stem.length &&
+      utf8Length(stem.join('') + extension) > MANAGED_ORIGINAL_FILE_NAME_MAX_UTF8_BYTES
+    )
+      stem.pop()
+    cleaned = `${stem.join('')}${extension}`.replace(/[. ]+$/u, '')
+  }
+  if (!cleaned.trim() || cleaned === '.' || cleaned === '..') return fallback
   return /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/iu.test(cleaned) ? `_${cleaned}` : cleaned
 }
 
