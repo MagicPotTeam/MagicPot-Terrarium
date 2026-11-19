@@ -491,3 +491,51 @@ describe('trigger occurrence settlement of long runs and restarts', () => {
     expect(b.runAgent).not.toHaveBeenCalled()
   })
 })
+
+describe('trigger occurrence executor in-flight guard', () => {
+  const claim = (h: Harness, owner: string) => {
+    const claimed = h.runtime.occurrences.claimNext(h.clock.now, owner, LEASE_MS)
+    if (!claimed) throw new Error('expected a claimable occurrence')
+    const trigger = h.runtime.store.get(claimed.state.triggerId)
+    if (!trigger) throw new Error('expected the trigger')
+    return { occurrence: claimed.state, trigger: trigger.state }
+  }
+
+  it('refuses a second concurrent run of the same claimed attempt', async () => {
+    const h = harness()
+    enqueue(h)
+    const consume = passThroughConsume(h.authorization)
+    const { occurrence: claimed, trigger } = claim(h, 'owner-1')
+    const settled = await Promise.allSettled([
+      h.runtime.executor.executeOccurrence(trigger, claimed),
+      h.runtime.executor.executeOccurrence(trigger, claimed)
+    ])
+    expect(h.runAgent).toHaveBeenCalledTimes(1)
+    expect(consume).toHaveBeenCalledTimes(1)
+    expect(settled.map((item) => item.status)).toEqual(['fulfilled', 'rejected'])
+    expect(settled[1]).toMatchObject({
+      reason: { name: 'TriggerOccurrenceNotExecutedError', status: 'in-flight' }
+    })
+  })
+
+  it('releases the guard when a run ends and keeps other occurrences parallel', async () => {
+    const h = harness()
+    enqueue(h, agentTarget, 'occ-1')
+    enqueue(h, agentTarget, 'occ-2')
+    const first = claim(h, 'owner-1')
+    const second = claim(h, 'owner-2')
+    await expect(
+      Promise.all([
+        h.runtime.executor.executeOccurrence(first.trigger, first.occurrence),
+        h.runtime.executor.executeOccurrence(second.trigger, second.occurrence)
+      ])
+    ).resolves.toHaveLength(2)
+    expect(h.runAgent).toHaveBeenCalledTimes(2)
+    const again = await h.runtime.executor.executeOccurrence(first.trigger, first.occurrence).then(
+      () => 'executed',
+      (error: unknown) => error
+    )
+    expect(again).not.toMatchObject({ status: 'in-flight' })
+    expect(h.runAgent).toHaveBeenCalledTimes(2)
+  })
+})

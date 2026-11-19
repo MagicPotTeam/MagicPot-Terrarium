@@ -164,12 +164,30 @@ export class TriggerOutcomePersistenceError extends Error {
 
 export class ProductionTriggerExecutor<TResult = unknown> {
   private readonly now: () => number
+  // One claimed attempt runs at most once at a time in this process: a parallel second run would
+  // pass the idempotent marker and the replayed permit consumption and dispatch again.
+  private readonly runningOccurrences = new Set<string>()
 
   constructor(private readonly options: ProductionTriggerExecutorOptions<TResult>) {
     this.now = options.now ?? Date.now
   }
 
   async executeOccurrence(
+    trigger: PersistentTriggerState,
+    occurrence: TriggerOccurrenceState
+  ): Promise<TResult> {
+    const running = JSON.stringify([occurrence.occurrenceId, occurrence.attempt])
+    if (this.runningOccurrences.has(running))
+      throw new TriggerOccurrenceNotExecutedError('in-flight')
+    this.runningOccurrences.add(running)
+    try {
+      return await this.executeOccurrenceOnce(trigger, occurrence)
+    } finally {
+      this.runningOccurrences.delete(running)
+    }
+  }
+
+  private async executeOccurrenceOnce(
     trigger: PersistentTriggerState,
     occurrence: TriggerOccurrenceState
   ): Promise<TResult> {
