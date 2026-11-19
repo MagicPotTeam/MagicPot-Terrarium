@@ -161,4 +161,17 @@ describe('short-lived local media import grants', () => {
       expect(await authorizeLocalMediaImportSourcePathAsync(link, [])).toBe(picked)
     }
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses the double-slash form of an application-root file as an import source',
+    async () => {
+      const root = makeTempDir('magicpot-import-grants-')
+      const file = path.join(root, 'in-root.png')
+      fs.writeFileSync(file, 'png')
+      // The single-slash form is an application-root file ...
+      expect(await authorizeLocalMediaImportSourcePathAsync(file, [root])).toBe(file)
+      // ... but importFile keeps refusing every network-looking spelling without a grant.
+      expect(await authorizeLocalMediaImportSourcePathAsync(`/${file}`, [root])).toBeNull()
+    }
+  )
 })

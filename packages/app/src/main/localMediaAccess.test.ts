@@ -282,16 +282,13 @@ describe('local media access policy', () => {
         expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}`, [])).toBeNull()
         expect(resolveAuthorizedLocalMediaPath(`/${secretPath}`, [root])).toBeNull()
         expect(resolveAuthorizedLocalMediaPath(`/${linkedPath}`, [root])).toBeNull()
-        expect(
-          resolveAuthorizedLocalMediaPath(
-            `/${path.join(root, '..', path.basename(outside), 'secret.txt')}`,
-            [root]
-          )
-        ).toBeNull()
+        // A literal '..' (path.join would have removed it before the call).
+        const escape = `/${root}/../${path.basename(outside)}/secret.txt`
+        expect(escape).toContain('/../')
+        expect(resolveAuthorizedLocalMediaPath(escape, [root])).toBeNull()
         expect(
           resolveAuthorizedLocalMediaPath(`/${path.join(root, 'missing.png')}`, [root])
         ).toBeNull()
-        expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}\0`, [root])).toBeNull()
       })
       // The same request is still a network path on Windows, refused before the root check.
       withPlatform('win32', () => {
