@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { getAgentSessionKey, normalizeAgentRoute } from '@shared/agent'
+import { AGENT_GOAL_LIMITS } from '@shared/api/agentThreadGoal'
 import type {
   MagicAgentEventStore,
   ResourceMutationInput,
@@ -10,15 +11,20 @@ import type {
  * Thread authority records: durable MAIN records and checks that later automation (a trigger or
  * goal run that starts without a user message) must consult before it acts for a thread.
  *
- * What it is: a thread identity registry. MAIN issues an opaque thread id for one Agent thread
+ * What it is: (1) a thread identity registry. MAIN issues an opaque thread id for one Agent thread
  * target, with a generation; revoking the target ends that generation for ever, and the next issue
- * gets a new id and generation + 1, so nothing bound to an old pair can come back.
+ * gets a new id and generation + 1, so nothing bound to an old pair can come back. (2) Run grants:
+ * what the user allowed one trigger delivery or goal generation to spend in one thread generation,
+ * with hard limits on turns, tool calls and wall time (the turn, tool_call and walltime axes of
+ * upstream core/budget.py), an expiry and revocation. A run grant is not the policy ApprovalGrant
+ * of shared/magicAgentPlatform2/policy.ts and is never a grantProvider of the trigger lifecycle.
  *
  * What it is not: no IPC method, no scheduler, timer or startup hook, no approval producer and no
  * production caller (backlog item 54 wires it, after the owner approved the grant card). The
- * target values come from the renderer and are not authority: the caller must have authenticated
- * them. Only controlled API use and normal reopen are covered: a restored or rolled-back database
- * and arbitrary writers to the event store are not detected.
+ * approval verifier is injected and has no default or implementation here. The target values come
+ * from the renderer and are not authority: the caller must have authenticated them. Only
+ * controlled API use and normal reopen are covered: a restored or rolled-back database and
+ * arbitrary writers to the event store are not detected. Records hold ids, integers and enums only.
  *
  * It supersedes the TEST-ONLY sketch ThreadAdmissionDraft (triggers/threadAdmissionDraft.ts),
  * which keys an owner by a free string and takes its approval from an injected fake verifier.
@@ -32,8 +38,14 @@ import type {
 
 export const THREAD_IDENTITY_KIND = 'agent-thread-identity-v1'
 export const THREAD_IDENTITY_INDEX_KIND = 'agent-thread-identity-index-v1'
+export const RUN_GRANT_KIND = 'agent-thread-run-grant-v1'
+export const RUN_GRANT_STATE_KIND = 'agent-thread-run-grant-state-v1'
 /** Upper bound of the run grants one thread generation can be issued. */
 export const MAX_RUN_GRANTS_PER_GENERATION = 64
+/** Upper bound of expiresAt - issuedAt of a run grant (31 days). */
+export const MAX_RUN_GRANT_LIFETIME_MS = 31 * 24 * 60 * 60 * 1000
+/** The number of most recent charge ids a run grant state keeps for replay answers. */
+export const RUN_GRANT_CHARGE_HISTORY = 16
 
 export type ThreadAuthorityTarget = Readonly<{
   route: Readonly<{ channel: 'canvas'; scopeType: 'thread'; scopeId: string; threadId: string }>
@@ -52,11 +64,71 @@ export type VerifyThreadResult =
   | Readonly<{ ok: true; target: ThreadAuthorityTarget }>
   | Readonly<{ ok: false; reason: 'unknown' | 'stale' | 'revoked' }>
 export type RevokeThreadResult = Readonly<{ status: 'revoked' | 'already-revoked' | 'unknown' }>
+export type RunGrantAxis = 'turns' | 'toolCalls' | 'walltimeSeconds'
+export type RunGrantAmounts = Readonly<Record<RunGrantAxis, number>>
+export type RunGrantSubject =
+  | Readonly<{ kind: 'trigger'; deliveryId: string }>
+  | Readonly<{ kind: 'goal'; goalId: string; goalGeneration: number }>
+export type RunGrantApproval = Readonly<{ approvedAt: number; proofId: string }>
+export type RunGrantRequest = Readonly<{
+  threadId: string
+  generation: number
+  subject: RunGrantSubject
+  limits: RunGrantAmounts
+  expiresAt: number
+  approval: RunGrantApproval
+}>
+/** What the approval verifier is shown: exactly the values the grant stores, plus the target. */
+export type RunGrantApprovalRequest = Readonly<RunGrantRequest & { target: ThreadAuthorityTarget }>
+/** Approves only by returning the value true; any other value or a throw refuses. */
+export type RunGrantApprovalVerifier = (request: RunGrantApprovalRequest) => unknown
+export type RunGrantStatus = 'active' | 'revoked' | 'expired' | 'exhausted'
+export type RunGrantRevokeReason = 'paused' | 'user' | 'subject-ended'
+export type RunGrantEndReason = RunGrantRevokeReason | 'thread-revoked' | RunGrantAxis
+export type RunGrantView = Readonly<{
+  grantId: string
+  threadId: string
+  generation: number
+  subject: RunGrantSubject
+  limits: RunGrantAmounts
+  issuedAt: number
+  expiresAt: number
+  approval: RunGrantApproval
+  /** A stored terminal status wins; else the thread, then the clock decide. */
+  status: RunGrantStatus
+  reason?: RunGrantEndReason
+  /** Only for a terminal status that is stored. */
+  endedAt?: number
+  used: RunGrantAmounts
+  remaining: RunGrantAmounts
+  /** The status is active and the clock is not before issuedAt. */
+  usable: boolean
+}>
+export type IssueGrantResult =
+  | Readonly<{ ok: true; grant: RunGrantView }>
+  | Readonly<{
+      ok: false
+      reason:
+        | 'thread-unknown'
+        | 'thread-stale'
+        | 'thread-revoked'
+        | 'subject-has-active-grant'
+        | 'capacity'
+        | 'approval-refused'
+    }>
+export type ListGrantsResult =
+  | Readonly<{ ok: true; grants: readonly RunGrantView[] }>
+  | Readonly<{ ok: false; reason: 'thread-unknown' | 'thread-stale' }>
+export type RevokeGrantResult =
+  | Readonly<{ ok: true; changed: boolean; grant: RunGrantView }>
+  | Readonly<{ ok: false; reason: 'unknown' }>
 export type ThreadAuthorityStoreOptions = Readonly<{
   /** The only clock of the store (default Date.now). */
   now?: () => number
   /** The only id source of the store (default randomUUID). */
   newId?: () => string
+  /** Required; there is no default. Called once per issueGrant, after every other check. */
+  verifyApproval: RunGrantApprovalVerifier
 }>
 
 export class ThreadAuthorityUnavailableError extends Error {
@@ -80,6 +152,22 @@ type IdentityState = Readonly<{
 }>
 type IndexState = Readonly<{ v: 1; threadId: string; key: string; generation: number }>
 type LoadedIdentity = Readonly<{ row: StoredResource<unknown>; state: IdentityState }>
+type ResolvedThread = Readonly<{ index: IndexState; identity: LoadedIdentity }>
+type GrantRecord = Readonly<{ v: 1; grantId: string; issuedAt: number } & RunGrantRequest>
+type GrantStateRecord = Readonly<{
+  v: 1
+  grantId: string
+  status: RunGrantStatus
+  used: RunGrantAmounts
+  charges: readonly string[]
+  endedAt?: number
+  reason?: RunGrantEndReason
+}>
+type LoadedGrant = Readonly<{
+  grant: GrantRecord
+  stateRow: StoredResource<unknown>
+  state: GrantStateRecord
+}>
 type Write = Readonly<{ kind: string; id: string; state: object; row?: StoredResource<unknown> }>
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -98,6 +186,30 @@ const IDENTITY_LIVE_KEYS = [
 ] as const
 const IDENTITY_REVOKED_KEYS = [...IDENTITY_LIVE_KEYS, 'revokedAt'] as const
 const INDEX_KEYS = ['v', 'threadId', 'key', 'generation'] as const
+const AXES = ['turns', 'toolCalls', 'walltimeSeconds'] as const
+const AXIS_CEILINGS: RunGrantAmounts = {
+  turns: AGENT_GOAL_LIMITS.maxTurns,
+  toolCalls: AGENT_GOAL_LIMITS.maxToolCalls,
+  walltimeSeconds: AGENT_GOAL_LIMITS.maxWalltimeSeconds
+}
+const REQUEST_KEYS = [
+  'threadId',
+  'generation',
+  'subject',
+  'limits',
+  'expiresAt',
+  'approval'
+] as const
+const GRANT_KEYS = ['v', 'grantId', 'issuedAt', ...REQUEST_KEYS] as const
+const APPROVAL_KEYS = ['approvedAt', 'proofId'] as const
+const STATE_ACTIVE_KEYS = ['v', 'grantId', 'status', 'used', 'charges'] as const
+const STATE_EXPIRED_KEYS = [...STATE_ACTIVE_KEYS, 'endedAt'] as const
+const STATE_ENDED_KEYS = [...STATE_EXPIRED_KEYS, 'reason'] as const
+const REVOKE_REASONS: readonly string[] = ['paused', 'user', 'subject-ended']
+const STORED_REVOKE_REASONS: readonly string[] = [...REVOKE_REASONS, 'thread-revoked']
+const STATUSES: readonly string[] = ['active', 'revoked', 'expired', 'exhausted']
+const GOAL_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
+const ZERO: RunGrantAmounts = { turns: 0, toolCalls: 0, walltimeSeconds: 0 }
 
 const isId = (value: unknown): value is string =>
   typeof value === 'string' && ID_PATTERN.test(value)
@@ -124,6 +236,21 @@ const isIdList = (value: unknown, max: number): value is readonly string[] =>
   value.every(isId) &&
   new Set(value).size === value.length
 const unavailable = (): ThreadAuthorityUnavailableError => new ThreadAuthorityUnavailableError()
+/** Rethrows any failure of a stored-value check as unavailable. */
+function stored<T>(read: () => T): T {
+  try {
+    return read()
+  } catch {
+    throw unavailable()
+  }
+}
+function freezeDeep<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) freezeDeep(item)
+    Object.freeze(value)
+  }
+  return value
+}
 
 /**
  * Copies a target field by field (each value read once) and validates the copy with the rules of
@@ -206,13 +333,159 @@ const copyTarget = (target: ThreadAuthorityTarget): ThreadAuthorityTarget => ({
   storageScope: target.storageScope
 })
 
+function readSubject(value: unknown): RunGrantSubject {
+  if (!isRecord(value)) throw new TypeError('Invalid run grant subject.')
+  const kind = value.kind
+  if (kind === 'trigger' && hasExactKeys(value, ['kind', 'deliveryId'])) {
+    const deliveryId = value.deliveryId
+    if (isId(deliveryId)) return { kind, deliveryId }
+  } else if (kind === 'goal' && hasExactKeys(value, ['kind', 'goalId', 'goalGeneration'])) {
+    const goalId = value.goalId
+    const goalGeneration = value.goalGeneration
+    if (typeof goalId === 'string' && GOAL_ID_PATTERN.test(goalId) && isInteger(goalGeneration, 1))
+      return { kind, goalId, goalGeneration }
+  }
+  throw new TypeError('Invalid run grant subject.')
+}
+
+/** Three required axes, each an integer from 1 to its AGENT_GOAL_LIMITS ceiling. */
+function readLimits(value: unknown): RunGrantAmounts {
+  if (!isRecord(value) || !hasExactKeys(value, AXES))
+    throw new TypeError('Invalid run grant limits.')
+  const turns = value.turns
+  const toolCalls = value.toolCalls
+  const walltimeSeconds = value.walltimeSeconds
+  if (
+    !isInteger(turns, 1, AXIS_CEILINGS.turns) ||
+    !isInteger(toolCalls, 1, AXIS_CEILINGS.toolCalls) ||
+    !isInteger(walltimeSeconds, 1, AXIS_CEILINGS.walltimeSeconds)
+  )
+    throw new RangeError('Invalid run grant limits.')
+  return { turns, toolCalls, walltimeSeconds }
+}
+
+function readApproval(value: unknown): RunGrantApproval {
+  if (!isRecord(value) || !hasExactKeys(value, APPROVAL_KEYS))
+    throw new TypeError('Invalid run grant approval.')
+  const approvedAt = value.approvedAt
+  const proofId = value.proofId
+  if (!isTime(approvedAt) || !isId(proofId)) throw new TypeError('Invalid run grant approval.')
+  return { approvedAt, proofId }
+}
+
+/** A copy of the request, each value read once; expiry and approval time are checked against now. */
+function readGrantRequest(value: unknown, now: number): RunGrantRequest {
+  if (!isRecord(value) || !hasExactKeys(value, REQUEST_KEYS))
+    throw new TypeError('Invalid run grant request.')
+  const threadId = value.threadId
+  const generation = value.generation
+  const expiresAt = value.expiresAt
+  const subject = readSubject(value.subject)
+  const limits = readLimits(value.limits)
+  const approval = readApproval(value.approval)
+  if (!isId(threadId) || !isInteger(generation, 1)) throw new TypeError('Invalid thread pair.')
+  if (!isInteger(expiresAt, now + 1, now + MAX_RUN_GRANT_LIFETIME_MS))
+    throw new RangeError('Invalid run grant expiry.')
+  if (approval.approvedAt > now) throw new RangeError('Run grant approval lies in the future.')
+  return { threadId, generation, subject, limits, expiresAt, approval }
+}
+
+function parseGrant(value: unknown, grantId: string): GrantRecord {
+  if (!isRecord(value) || value.v !== 1 || !hasExactKeys(value, GRANT_KEYS)) throw unavailable()
+  const issuedAt = value.issuedAt
+  if (value.grantId !== grantId || !isTime(issuedAt)) throw unavailable()
+  const request = stored(() => {
+    const { v: _v, grantId: _grantId, issuedAt: _issuedAt, ...rest } = value
+    return readGrantRequest(rest, issuedAt)
+  })
+  return { v: 1, grantId, issuedAt, ...request }
+}
+
+function parseGrantState(value: unknown, grant: GrantRecord): GrantStateRecord {
+  if (!isRecord(value) || value.v !== 1 || typeof value.status !== 'string') throw unavailable()
+  const status = value.status
+  if (!STATUSES.includes(status)) throw unavailable()
+  const keys =
+    status === 'active'
+      ? STATE_ACTIVE_KEYS
+      : status === 'expired'
+        ? STATE_EXPIRED_KEYS
+        : STATE_ENDED_KEYS
+  if (!hasExactKeys(value, keys) || value.grantId !== grant.grantId) throw unavailable()
+  const used = value.used
+  if (
+    !isRecord(used) ||
+    !hasExactKeys(used, AXES) ||
+    !AXES.every((axis) => isInteger(used[axis], 0, grant.limits[axis])) ||
+    !isIdList(value.charges, RUN_GRANT_CHARGE_HISTORY) ||
+    (status !== 'active' && !isTime(value.endedAt)) ||
+    (status === 'revoked' && !STORED_REVOKE_REASONS.includes(value.reason as string)) ||
+    (status === 'exhausted' && !(AXES as readonly unknown[]).includes(value.reason))
+  )
+    throw unavailable()
+  return value as GrantStateRecord
+}
+
+const sameSubject = (a: RunGrantSubject, b: RunGrantSubject): boolean =>
+  a.kind === 'trigger'
+    ? b.kind === 'trigger' && a.deliveryId === b.deliveryId
+    : b.kind === 'goal' && a.goalId === b.goalId && a.goalGeneration === b.goalGeneration
+
+const copySubject = (subject: RunGrantSubject): RunGrantSubject => ({ ...subject })
+const copyAmounts = (amounts: RunGrantAmounts): RunGrantAmounts => ({
+  turns: amounts.turns,
+  toolCalls: amounts.toolCalls,
+  walltimeSeconds: amounts.walltimeSeconds
+})
+
+/** True when the identity is live in the thread id and generation the grant is bound to. */
+const threadIsLive = (identity: LoadedIdentity, grant: GrantRecord): boolean =>
+  identity.state.threadId === grant.threadId &&
+  identity.state.generation === grant.generation &&
+  identity.state.status === 'live'
+
+function grantView(
+  grant: GrantRecord,
+  state: GrantStateRecord,
+  live: boolean,
+  now: number
+): RunGrantView {
+  let status: RunGrantStatus = state.status
+  let reason = state.reason
+  if (status === 'active' && !live) {
+    status = 'revoked'
+    reason = 'thread-revoked'
+  } else if (status === 'active' && now >= grant.expiresAt) status = 'expired'
+  return {
+    grantId: grant.grantId,
+    threadId: grant.threadId,
+    generation: grant.generation,
+    subject: copySubject(grant.subject),
+    limits: copyAmounts(grant.limits),
+    issuedAt: grant.issuedAt,
+    expiresAt: grant.expiresAt,
+    approval: { ...grant.approval },
+    status,
+    ...(reason !== undefined ? { reason } : {}),
+    ...(state.endedAt !== undefined ? { endedAt: state.endedAt } : {}),
+    used: copyAmounts(state.used),
+    remaining: {
+      turns: grant.limits.turns - state.used.turns,
+      toolCalls: grant.limits.toolCalls - state.used.toolCalls,
+      walltimeSeconds: grant.limits.walltimeSeconds - state.used.walltimeSeconds
+    },
+    usable: status === 'active' && now >= grant.issuedAt
+  }
+}
+
 export class ThreadAuthorityStore {
   private readonly clock: () => number
   private readonly ids: () => string
+  private readonly verifyApproval: RunGrantApprovalVerifier
 
   constructor(
     private readonly store: MagicAgentEventStore,
-    options: ThreadAuthorityStoreOptions = {}
+    options: ThreadAuthorityStoreOptions
   ) {
     if (!store || typeof store.mutateResourcesBatch !== 'function')
       throw new TypeError('ThreadAuthorityStore requires an event store.')
@@ -221,8 +494,11 @@ export class ThreadAuthorityStore {
       throw new TypeError('Invalid thread authority clock.')
     if (options.newId !== undefined && typeof options.newId !== 'function')
       throw new TypeError('Invalid thread authority id source.')
+    if (typeof options.verifyApproval !== 'function')
+      throw new TypeError('ThreadAuthorityStore requires an approval verifier.')
     this.clock = options.now ?? Date.now
     this.ids = options.newId ?? randomUUID
+    this.verifyApproval = options.verifyApproval
   }
 
   /**
@@ -282,9 +558,9 @@ export class ThreadAuthorityStore {
    */
   verifyThread(threadId: string, generation: number): VerifyThreadResult {
     if (!isId(threadId) || !isInteger(generation, 1)) throw new TypeError('Invalid thread pair.')
-    const identity = this.resolveThread(threadId)
-    if (!identity) return { ok: false, reason: 'unknown' }
-    const state = identity.state
+    const resolved = this.resolveThread(threadId)
+    if (!resolved) return { ok: false, reason: 'unknown' }
+    const state = resolved.identity.state
     if (state.threadId !== threadId || state.generation !== generation)
       return { ok: false, reason: 'stale' }
     if (state.status !== 'live') return { ok: false, reason: 'revoked' }
@@ -292,8 +568,9 @@ export class ThreadAuthorityStore {
   }
 
   /**
-   * Ends the current generation of the target for ever. 'unknown' (never issued) and
-   * 'already-revoked' write nothing.
+   * Ends the current generation of the target for ever. One batch writes the identity and
+   * 'revoked' / 'thread-revoked' to every grant state of that generation whose stored status is
+   * active. 'unknown' (never issued) and 'already-revoked' write nothing.
    */
   revokeThread(target: ThreadAuthorityTarget): RevokeThreadResult {
     const key = identityKey(readTarget(target))
@@ -301,9 +578,139 @@ export class ThreadAuthorityStore {
     const current = this.loadIdentity(key)
     if (!current) return { status: 'unknown' }
     if (current.state.status === 'revoked') return { status: 'already-revoked' }
+    const grants = this.loadListedGrants(current)
     const identity: IdentityState = { ...current.state, status: 'revoked', revokedAt: now }
-    this.commit([{ kind: THREAD_IDENTITY_KIND, id: key, state: identity, row: current.row }], now)
+    this.commit(
+      [
+        { kind: THREAD_IDENTITY_KIND, id: key, state: identity, row: current.row },
+        ...grants
+          .filter((loaded) => loaded.state.status === 'active')
+          .map((loaded) => ({
+            kind: RUN_GRANT_STATE_KIND,
+            id: loaded.grant.grantId,
+            row: loaded.stateRow,
+            state: { ...loaded.state, status: 'revoked', reason: 'thread-revoked', endedAt: now }
+          }))
+      ],
+      now
+    )
     return { status: 'revoked' }
+  }
+
+  /**
+   * Issues a run grant for one live thread generation and one subject. Refusals write nothing:
+   * 'thread-unknown' | 'thread-stale' | 'thread-revoked' (from the identity),
+   * 'subject-has-active-grant' (a grant of this generation with the same subject whose stored
+   * status is active and which is not past its expiry), 'capacity' (the generation holds
+   * MAX_RUN_GRANTS_PER_GENERATION grants), 'approval-refused' (the verifier, called once after
+   * every other check with a frozen copy of the values stored, did not return true or threw).
+   * Success is one batch: the identity lists the grant id (closed by the revision read), the grant
+   * and its state (active, nothing used) are created.
+   */
+  issueGrant(request: RunGrantRequest): IssueGrantResult {
+    const now = this.now()
+    const value = readGrantRequest(request, now)
+    const resolved = this.resolveThread(value.threadId)
+    if (!resolved) return { ok: false, reason: 'thread-unknown' }
+    const identity = resolved.identity
+    if (
+      identity.state.threadId !== value.threadId ||
+      identity.state.generation !== value.generation
+    )
+      return { ok: false, reason: 'thread-stale' }
+    if (identity.state.status !== 'live') return { ok: false, reason: 'thread-revoked' }
+    const listed = this.loadListedGrants(identity)
+    if (
+      listed.some(
+        (loaded) =>
+          sameSubject(loaded.grant.subject, value.subject) &&
+          loaded.state.status === 'active' &&
+          now < loaded.grant.expiresAt
+      )
+    )
+      return { ok: false, reason: 'subject-has-active-grant' }
+    if (identity.state.grants.length >= MAX_RUN_GRANTS_PER_GENERATION)
+      return { ok: false, reason: 'capacity' }
+    const shown: RunGrantApprovalRequest = freezeDeep({
+      target: copyTarget(identity.state.target),
+      threadId: value.threadId,
+      generation: value.generation,
+      subject: copySubject(value.subject),
+      limits: copyAmounts(value.limits),
+      expiresAt: value.expiresAt,
+      approval: { ...value.approval }
+    })
+    const verify = this.verifyApproval
+    let approved: unknown
+    try {
+      approved = verify(shown)
+    } catch {
+      approved = false
+    }
+    if (approved !== true) return { ok: false, reason: 'approval-refused' }
+    const grantId = this.freshId([RUN_GRANT_KIND, RUN_GRANT_STATE_KIND])
+    const grant: GrantRecord = { v: 1, grantId, issuedAt: now, ...value }
+    const state: GrantStateRecord = { v: 1, grantId, status: 'active', used: ZERO, charges: [] }
+    this.commit(
+      [
+        {
+          kind: THREAD_IDENTITY_KIND,
+          id: identity.state.key,
+          row: identity.row,
+          state: { ...identity.state, grants: [...identity.state.grants, grantId] }
+        },
+        { kind: RUN_GRANT_KIND, id: grantId, state: grant },
+        { kind: RUN_GRANT_STATE_KIND, id: grantId, state }
+      ],
+      now
+    )
+    return { ok: true, grant: grantView(grant, state, true, now) }
+  }
+
+  /** Read-only. Undefined when the grant id was never issued. */
+  readGrant(grantId: string): RunGrantView | undefined {
+    if (!isId(grantId)) throw new TypeError('Invalid run grant id.')
+    const now = this.now()
+    const loaded = this.loadBoundGrant(grantId)
+    if (!loaded) return undefined
+    return grantView(loaded.grant, loaded.state, threadIsLive(loaded.identity, loaded.grant), now)
+  }
+
+  /**
+   * Read-only. The grants of a current thread generation (live or revoked). A pair MAIN never
+   * issued is 'thread-unknown'; a pair the identity has moved on from is 'thread-stale'.
+   */
+  listGrants(threadId: string, generation: number): ListGrantsResult {
+    if (!isId(threadId) || !isInteger(generation, 1)) throw new TypeError('Invalid thread pair.')
+    const now = this.now()
+    const resolved = this.resolveThread(threadId)
+    if (!resolved) return { ok: false, reason: 'thread-unknown' }
+    const identity = resolved.identity
+    if (identity.state.threadId !== threadId || identity.state.generation !== generation)
+      return { ok: false, reason: 'thread-stale' }
+    const grants = this.loadListedGrants(identity).map((loaded) =>
+      grantView(loaded.grant, loaded.state, threadIsLive(identity, loaded.grant), now)
+    )
+    return { ok: true, grants }
+  }
+
+  /**
+   * Revokes a grant whose stored status is active, with the given reason (pausing is revoking with
+   * 'paused'; there is no resume: a new grant needs a new approval). A grant whose stored status
+   * is terminal is returned unchanged and nothing is written: the first terminal status is final.
+   */
+  revokeGrant(grantId: string, reason: RunGrantRevokeReason): RevokeGrantResult {
+    if (!isId(grantId) || !REVOKE_REASONS.includes(reason))
+      throw new TypeError('Invalid run grant revoke.')
+    const now = this.now()
+    const loaded = this.loadBoundGrant(grantId)
+    if (!loaded) return { ok: false, reason: 'unknown' }
+    const live = threadIsLive(loaded.identity, loaded.grant)
+    if (loaded.state.status !== 'active')
+      return { ok: true, changed: false, grant: grantView(loaded.grant, loaded.state, live, now) }
+    const state: GrantStateRecord = { ...loaded.state, status: 'revoked', reason, endedAt: now }
+    this.commit([{ kind: RUN_GRANT_STATE_KIND, id: grantId, row: loaded.stateRow, state }], now)
+    return { ok: true, changed: true, grant: grantView(loaded.grant, state, live, now) }
   }
 
   private now(): number {
@@ -345,7 +752,7 @@ export class ThreadAuthorityStore {
   }
 
   /** The identity a MAIN thread id was issued for; undefined when no index exists for it. */
-  private resolveThread(threadId: string): LoadedIdentity | undefined {
+  private resolveThread(threadId: string): ResolvedThread | undefined {
     const indexRow = this.readRow(THREAD_IDENTITY_INDEX_KIND, threadId)
     if (!indexRow) return undefined
     const index = parseIndex(indexRow.state, threadId)
@@ -353,7 +760,54 @@ export class ThreadAuthorityStore {
     if (!identity) throw unavailable()
     if (identity.state.threadId !== threadId && index.generation >= identity.state.generation)
       throw unavailable()
-    return identity
+    return { index, identity }
+  }
+
+  /** A grant with its state; a grant without state or a state without grant is unavailable. */
+  private loadGrant(grantId: string): LoadedGrant | undefined {
+    const row = this.readRow(RUN_GRANT_KIND, grantId)
+    if (!row) {
+      if (this.store.hasResourceEvidence(RUN_GRANT_STATE_KIND, grantId)) throw unavailable()
+      return undefined
+    }
+    const grant = parseGrant(row.state, grantId)
+    const stateRow = this.readRow(RUN_GRANT_STATE_KIND, grantId)
+    if (!stateRow) throw unavailable()
+    return { grant, stateRow, state: parseGrantState(stateRow.state, grant) }
+  }
+
+  /**
+   * A grant with its state and the identity of its thread. The index of its thread id must name
+   * its generation, and while that generation is current the identity must list the grant.
+   */
+  private loadBoundGrant(
+    grantId: string
+  ): (LoadedGrant & { identity: LoadedIdentity }) | undefined {
+    const loaded = this.loadGrant(grantId)
+    if (!loaded) return undefined
+    const resolved = this.resolveThread(loaded.grant.threadId)
+    if (!resolved || resolved.index.generation !== loaded.grant.generation) throw unavailable()
+    const identity = resolved.identity
+    if (
+      identity.state.generation === loaded.grant.generation &&
+      !identity.state.grants.includes(grantId)
+    )
+      throw unavailable()
+    return { ...loaded, identity }
+  }
+
+  /** Every grant the identity lists for its current generation, each bound to it. */
+  private loadListedGrants(identity: LoadedIdentity): LoadedGrant[] {
+    return identity.state.grants.map((grantId) => {
+      const loaded = this.loadGrant(grantId)
+      if (
+        !loaded ||
+        loaded.grant.threadId !== identity.state.threadId ||
+        loaded.grant.generation !== identity.state.generation
+      )
+        throw unavailable()
+      return loaded
+    })
   }
 
   /**

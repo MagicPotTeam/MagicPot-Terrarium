@@ -15,6 +15,9 @@ import {
 
 vi.unmock('node:fs')
 
+/** The identity registry never asks for an approval; a verifier that refuses everything. */
+const refuse = () => false
+
 const dirs: string[] = []
 const stores: MagicAgentEventStore[] = []
 afterEach(() => {
@@ -38,7 +41,7 @@ function setup() {
     return store
   }
   const build = (store: MagicAgentEventStore) =>
-    new ThreadAuthorityStore(store, { now: () => clock.now, newId })
+    new ThreadAuthorityStore(store, { now: () => clock.now, newId, verifyApproval: refuse })
   const store = open()
   return { clock, open, build, store, authority: build(store) }
 }
@@ -311,25 +314,37 @@ describe('thread identity registry: issue, read, verify, revoke', () => {
     for (const now of [-1, 1.5, Number.NaN, '5']) {
       const broken = new ThreadAuthorityStore(store, {
         now: () => now as number,
-        newId: () => 'id-x'
+        newId: () => 'id-x',
+        verifyApproval: refuse
       })
       expect(() => broken.issueThread(target())).toThrow('clock')
     }
     for (const id of ['', 'bad id', 'x'.repeat(129)]) {
-      const broken = new ThreadAuthorityStore(store, { now: () => 5, newId: () => id })
+      const broken = new ThreadAuthorityStore(store, {
+        now: () => 5,
+        newId: () => id,
+        verifyApproval: refuse
+      })
       expect(() => broken.issueThread(target())).toThrow('id source')
     }
     expect(footprint(store)).toEqual([0, 0])
-    const repeating = new ThreadAuthorityStore(store, { now: () => 5, newId: () => 'same' })
+    const repeating = new ThreadAuthorityStore(store, {
+      now: () => 5,
+      newId: () => 'same',
+      verifyApproval: refuse
+    })
     expect(repeating.issueThread(target())).toEqual({ threadId: 'same', generation: 1 })
     const before = footprint(store)
     expect(() => repeating.issueThread(target({ threadId: 'thread-2' }))).toThrow(
       'id source repeated an id'
     )
     expect(footprint(store)).toEqual(before)
-    expect(() => new ThreadAuthorityStore(undefined as unknown as MagicAgentEventStore)).toThrow(
-      TypeError
-    )
+    expect(
+      () =>
+        new ThreadAuthorityStore(undefined as unknown as MagicAgentEventStore, {
+          verifyApproval: refuse
+        })
+    ).toThrow(TypeError)
   })
 })
 

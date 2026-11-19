@@ -55,12 +55,18 @@ describe('thread authority records stay unwired', () => {
     expect(imports, WIRING_NEEDS_APPROVAL).toEqual([
       '../persistence/eventStore',
       '@shared/agent',
+      '@shared/api/agentThreadGoal',
       'node:crypto'
     ])
     expect(code.match(/Date\.now/g)).toHaveLength(1)
     expect(code.match(/randomUUID/g)).toHaveLength(2)
     expect(code.match(/\?\? Date\.now\b/g)).toHaveLength(1)
     expect(code.match(/\?\? randomUUID\b/g)).toHaveLength(1)
+    // The approval verifier comes only from the caller: no default, no implementation here.
+    expect(code.match(/verifyApproval\s*(=(?!=)|\?\?|\|\|)[^\n]*/g)).toEqual([
+      'verifyApproval = options.verifyApproval'
+    ])
+    expect(code).not.toMatch(/export (const|function) verify/i)
     for (const forbidden of [
       /new Date\b/,
       /performance\.now/,
