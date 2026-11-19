@@ -194,6 +194,15 @@ it.each(['direct', 'channel', 'snapshot'] as const)('connects %s actual ChatPage
     expect(chatRequests.filter(req => req.conversationId === 'designer' && JSON.stringify(req.messages).includes('文案回复设计'))).toHaveLength(1)
     expect(claimRequests).toHaveLength(2)
     for (const claim of claimRequests.slice()) expect((await bridge.claimAgentTeamMessage(claim)).intent).toBeUndefined()
+    // MAIN admitted each delivery on its claim and recorded its start; no provider body carries a lease.
+    const deliveries = chatRequests.filter(req => req.teamMessageDelivery)
+    expect(deliveries.map(req => [req.conversationId, req.teamMessageHop])).toEqual([['writer', 1], ['designer', 2]])
+    for (const req of deliveries) expect(JSON.stringify(requests)).not.toContain(req.teamMessageDelivery.lease)
+    const { MagicAgentEventStore } = await import('../../../../main/magicAgentPlatform2/persistence/eventStore')
+    const db = new MagicAgentEventStore(path.join(h.dir.value, 'team-messages', 'messages.sqlite'))
+    try {
+      for (const req of deliveries) expect(db.getResource('llm-team-message-state-v1', req.teamMessageDelivery.id)?.state).toMatchObject({ status: 'closed', starts: [{ recipient: req.conversationId }] })
+    } finally { db.close() }
     }
   } catch (error) { failure = error }
   const errors: unknown[] = []

@@ -122,11 +122,22 @@ type FakeModel = (turn: ModelTurn) => ModelStep | Promise<ModelStep>
 const textOf = (content: unknown): string =>
   typeof content === 'string' ? content : JSON.stringify(content ?? '')
 
+type FakeQueueEntry = {
+  routeKey: string
+  view: AgentTeamMessageIntent
+  status: 'queued' | 'claimed' | 'closed'
+  /** Queued before this page's document or process (main/api/agentTeamMessageQueue.ts). */
+  carriedOver: boolean
+  lease?: string
+  starts: string[]
+}
+
 /**
  * In-memory stand-in for MAIN behind `window.api.svcLLMProxy`: the chat entry points, the team
- * message tools and the process-local team message queue (main/api/agentTeamMessageQueue.ts:
- * capacity 128, 60 s TTL, list by route + storage scope + lead, claim removes). Nothing here
- * leaves the process. Every request the page sent is kept for assertions.
+ * message tools and the durable team message queue (main/api/agentTeamMessageQueue.ts: at most
+ * 128 queued, list by route + storage scope + lead, a claim is a lease given out once, a delivery
+ * request presents it as teamMessageDelivery and MAIN records the start before the request runs).
+ * Nothing here leaves the process. Every request the page sent is kept for assertions.
  */
 class FakeTeamMain {
   readonly calls: { method: string; request: unknown }[] = []
@@ -139,9 +150,13 @@ class FakeTeamMain {
   readonly toolResults: { callId: string; name: TeamToolName; content: string }[] = []
   readonly enqueued: AgentTeamMessageIntent[] = []
   readonly claimRequests: AgentTeamMessageClaim[] = []
+  /** Every request start MAIN recorded for a claimed message (what the real store keeps in starts). */
+  readonly starts: { id: string; recipient: string }[] = []
+  /** Delivery requests MAIN refused ('Team message is no longer available.'). */
+  readonly refusedDeliveries: LLMChatReq[] = []
   /** Conversation IDs of requests that were cancelled while the model was still working. */
   readonly cancelledRuns: string[] = []
-  private readonly queue = new Map<string, { routeKey: string; view: AgentTeamMessageIntent }>()
+  private readonly queue = new Map<string, FakeQueueEntry>()
   private readonly running = new Map<string, { conversationId: string; abort: AbortController }>()
   private nextId = 0
   private pending = 0
@@ -184,9 +199,32 @@ class FakeTeamMain {
     return offered ? ['send_message', 'send_channel'] : []
   }
 
-  private prune(): void {
-    const now = Date.now()
-    for (const [id, entry] of this.queue) if ((entry.view.expiresAt ?? Infinity) <= now) this.queue.delete(id)
+  /** A message MAIN carried over (queued by a member before this page's document or process). */
+  carryOver(input: Omit<AgentTeamMessageIntent, 'id'>): string {
+    const view: AgentTeamMessageIntent = { id: `fixture-carried-${++this.nextId}`, ...structuredClone(input) }
+    this.queue.set(view.id, { routeKey: getAgentSessionKey(normalizeAgentRoute(ROUTE)), view, status: 'queued', carriedOver: true, starts: [] })
+    return view.id
+  }
+
+  /** MAIN's admission of a delivery request (agentTeamMessageQueue.ts admitDelivery). */
+  private admitDelivery(request: LLMChatReq): void {
+    if (!Object.hasOwn(request, 'teamMessageDelivery')) return
+    const delivery = request.teamMessageDelivery, member = request.teamMember
+    const entry = delivery ? this.queue.get(delivery.id) : undefined
+    const source = entry?.view.source
+    const admitted =
+      !!entry && !!delivery && !!member && !!source && entry.status !== 'queued' && entry.lease === delivery.lease &&
+      request.teamMessageHop === entry.view.hop && member.scope === source.scope && member.thread === source.thread && member.lead === source.lead &&
+      (entry.view.kind === 'message' ? member.member === entry.view.recipient : member.member !== source.member) &&
+      (entry.status === 'claimed' || entry.starts.includes(member.member))
+    if (!admitted) {
+      this.refusedDeliveries.push(structuredClone(request))
+      throw new Error('Team message is no longer available.')
+    }
+    if (entry.starts.includes(member.member)) return
+    entry.starts.push(member.member)
+    this.starts.push({ id: delivery.id, recipient: member.member })
+    if (entry.view.kind === 'message') entry.status = 'closed'
   }
 
   private callTeamTool(
@@ -204,20 +242,21 @@ class FakeTeamMain {
     ) {
       throw new Error('Invalid team message arguments.')
     }
-    this.prune()
-    if (this.queue.size >= 128) throw new Error('Team queue capacity reached.')
+    if ([...this.queue.values()].filter((entry) => entry.status === 'queued').length >= 128) throw new Error('Team queue capacity reached.')
     const view: AgentTeamMessageIntent = {
       id: `fixture-intent-${++this.nextId}`,
       source: { ...source },
       kind: step.tool === 'send_message' ? 'message' : 'channel',
       hop: request.teamMessageHop === 1 ? 2 : 1,
       ...(recipient === undefined ? {} : { recipient }),
-      text: step.args.text,
-      expiresAt: Date.now() + 60_000
+      text: step.args.text
     }
     this.queue.set(view.id, {
       routeKey: getAgentSessionKey(normalizeAgentRoute(request.route)),
-      view
+      view,
+      status: 'queued',
+      carriedOver: false,
+      starts: []
     })
     this.enqueued.push(structuredClone(view))
     return JSON.stringify({ status: 'queued', requestId: view.id })
@@ -266,10 +305,7 @@ class FakeTeamMain {
     return { id, signal: abort.signal }
   }
 
-  private queueMatches(
-    scope: AgentTeamMessageQueueScope,
-    entry: { routeKey: string; view: AgentTeamMessageIntent }
-  ): boolean {
+  private queueMatches(scope: AgentTeamMessageQueueScope, entry: FakeQueueEntry): boolean {
     return (
       entry.routeKey === getAgentSessionKey(normalizeAgentRoute(scope.route)) &&
       entry.view.source.scope === scope.storageScope &&
@@ -283,6 +319,8 @@ class FakeTeamMain {
       svcLLMProxy: {
         chatStream: (request: LLMChatReq, stream: ServerStreaming<LLMChatStreamResp>) =>
           this.track('chatStream', async (req: LLMChatReq) => {
+            // Before anything else: MAIN records the start of a delivery, or refuses it.
+            this.admitDelivery(req)
             const run = this.begin(req)
             stream.abortReceiver?.onAbort(() => this.running.get(run.id)?.abort.abort())
             try {
@@ -322,24 +360,21 @@ class FakeTeamMain {
         ),
         listAgentTeamMessages: this.track(
           'listAgentTeamMessages',
-          async (req: AgentTeamMessageQueueScope) => {
-            this.prune()
-            return {
-              intents: [...this.queue.values()]
-                .filter((entry) => this.queueMatches(req, entry))
-                .map((entry) => structuredClone(entry.view))
-            }
-          }
+          async (req: AgentTeamMessageQueueScope) => ({
+            intents: [...this.queue.values()]
+              .filter((entry) => entry.status === 'queued' && this.queueMatches(req, entry))
+              .map((entry) => ({ ...structuredClone(entry.view), ...(entry.carriedOver ? { carriedOver: true as const } : {}) }))
+          })
         ),
         claimAgentTeamMessage: this.track(
           'claimAgentTeamMessage',
           async (req: AgentTeamMessageClaim) => {
             this.claimRequests.push(structuredClone(req))
-            this.prune()
             const entry = this.queue.get(req.id)
-            if (!entry || !this.queueMatches(req, entry)) return {}
-            this.queue.delete(req.id)
-            return { intent: structuredClone(entry.view) }
+            if (!entry || entry.status !== 'queued' || !this.queueMatches(req, entry)) return {}
+            entry.status = 'claimed'
+            entry.lease = `fixture-lease-${++this.nextId}`
+            return { intent: { ...structuredClone(entry.view), ...(entry.carriedOver ? { carriedOver: true as const } : {}), lease: entry.lease } }
           }
         ),
         // The thread has no background jobs or processes, and a running request asks nothing.
@@ -420,12 +455,12 @@ const lead = (): ChatSession =>
     messages: [],
     teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
   }) as ChatSession
-const member = (id: string, role: string): ChatSession =>
+const member = (id: string, role: string, messages: ChatSession['messages'] = []): ChatSession =>
   ({
     id,
     title: id,
     profileId: PROFILE_ID,
-    messages: [],
+    messages,
     teamLeadId: 'lead',
     teamMemberName: id,
     teamRole: role
@@ -445,6 +480,10 @@ async function mountChannelPage(input: {
   props?: ChannelPageProps
   /** Extra fields of the seeded lead (for example its shared tasks). */
   lead?: Partial<ChatSession>
+  /** A second, visible pane of the same lead in the same window (its own page instance and rows). */
+  secondPane?: boolean
+  /** Prepares the fake MAIN before the page's first poll (for example carried-over messages). */
+  beforeMount?: (main: FakeTeamMain) => void
 }): Promise<ChannelPage> {
   if (mountedPage)
     throw new Error('mountChannelPage: finish() the earlier page of this test first.')
@@ -452,6 +491,7 @@ async function mountChannelPage(input: {
   const { ChatPage, storage } = await loadPageModules()
   idb.install((_name, fake) => allowChannelInMemoryIndexedDb(fake))
   const main = new FakeTeamMain(input.model)
+  input.beforeMount?.(main)
   allowChannelBridge('api', main.bridge())
 
   const config = structuredClone(DEFAULT_CONFIG) as Config
@@ -494,6 +534,8 @@ async function mountChannelPage(input: {
     </MemoryRouter>
   )
   const view = render(element())
+  let secondView: ReturnType<typeof render> | undefined
+  const secondRowsHost = document.createElement('div')
 
   const activity = (): number =>
     main.calls.length + Object.values(idb.stats.calls).reduce((sum, count) => sum + count, 0)
@@ -502,6 +544,8 @@ async function mountChannelPage(input: {
   // comes later than that finds its database refused by the guards and fails the test it lands in.
   const quiesce = async (): Promise<void> => {
     mountedPage = undefined
+    secondView?.unmount()
+    secondRowsHost.remove()
     view.unmount()
     rowsHost.remove()
     let seen = activity()
@@ -538,6 +582,19 @@ async function mountChannelPage(input: {
   expect(idb.stats.handedOut.slice(handedOutBeforeMount)).toEqual(
     expect.arrayContaining(expectedKeys)
   )
+  if (input.secondPane) {
+    document.body.appendChild(secondRowsHost)
+    secondView = render(
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage compact storageScope={SCOPE} route={ROUTE} threadSubRowsHost={secondRowsHost} {...input.props} />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    for (const session of input.members) await within(secondRowsHost).findByRole('button', { name: session.id })
+  }
+  // With a second pane the composer of the first one is meant.
+  const firstPage = input.secondPane ? within(view.container) : screen
 
   const page: ChannelPage = {
     main,
@@ -546,8 +603,8 @@ async function mountChannelPage(input: {
     stored: (id) => storage.loadSessionFromDB(id, SCOPE),
     rows: rowsHost,
     send: (text) => {
-      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: text } })
-      fireEvent.click(screen.getByRole('button', { name: 'chat.send_message' }))
+      fireEvent.change(firstPage.getByTestId('chat-composer-input'), { target: { value: text } })
+      fireEvent.click(firstPage.getByRole('button', { name: 'chat.send_message' }))
     },
     openTeamManagement: async () => {
       fireEvent.click(screen.getByTestId('chat-composer-add-menu-button'))
@@ -1136,6 +1193,16 @@ describe('real ChatPage team messages on in-memory fakes', () => {
       )
     ).toHaveLength(1)
 
+    // Each delivery presented its claim and MAIN recorded exactly one start, for its recipient.
+    expect(firstHop!.teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
+    expect(secondHop!.teamMessageDelivery).toEqual({ id: main.enqueued[1].id, lease: expect.stringMatching(/^fixture-lease-/) })
+    expect(main.chatRequests[0]).not.toHaveProperty('teamMessageDelivery')
+    expect(main.starts).toEqual([
+      { id: main.enqueued[0].id, recipient: 'writer' },
+      { id: main.enqueued[1].id, recipient: 'designer' }
+    ])
+    expect(main.refusedDeliveries).toEqual([])
+
     // Each intent was claimed exactly once, and a claim cannot be replayed.
     expect(main.claimRequests).toHaveLength(2)
     for (const claim of main.claimRequests.slice()) {
@@ -1214,6 +1281,11 @@ describe('real ChatPage team messages on in-memory fakes', () => {
       })
     ])
     expect(main.enqueued[0]).not.toHaveProperty('recipient')
+    // One claim, one lease for both recipients; MAIN recorded one start per recipient.
+    expect(byRecipient('writer')[0].teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
+    expect(byRecipient('reviewer')[0].teamMessageDelivery).toEqual(byRecipient('writer')[0].teamMessageDelivery)
+    expect(main.starts.map((start) => start.recipient).sort()).toEqual(['reviewer', 'writer'])
+    expect(main.refusedDeliveries).toEqual([])
 
     expect(main.claimRequests).toHaveLength(1)
     expect(
@@ -1304,9 +1376,11 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     ] as const) {
       expect(byRecipient(id, text)).toHaveLength(count)
     }
-    // A user broadcast never goes through the MAIN queue.
+    // A user broadcast never goes through the MAIN queue and presents no lease.
     expect(main.enqueued).toEqual([])
     expect(main.claimRequests).toEqual([])
+    expect(main.chatRequests.filter((request) => Object.hasOwn(request, 'teamMessageDelivery'))).toEqual([])
+    expect(main.starts).toEqual([])
     await page.finish()
   }, 20000)
 
@@ -1397,6 +1471,88 @@ describe('real ChatPage team messages on in-memory fakes', () => {
   }, 30000)
 })
 
+describe('real ChatPage member message leases on in-memory fakes', () => {
+  const requestText = (request: LLMChatReq): string => textOf(request.messages.at(-1)?.content)
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  it('delivers a member message once from two mounted panes of the lead: one request, one start', async () => {
+    const page = await mountChannelPage({
+      members: [member('designer', '设计师'), member('writer', '文案')],
+      secondPane: true,
+      model: ({ lastUserText, teamTools, toolResults }) => {
+        if (lastUserText.includes('来自成员的测试消息')) return { text: '文案已收到 fixture' }
+        if (!toolResults.length && teamTools.includes('send_message')) {
+          return { tool: 'send_message', callId: 'fixture-two-panes', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+        }
+        return { text: '发送成员完成 fixture' }
+      }
+    })
+    const { main } = page
+    const toWriter = () => main.chatRequests.filter((request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息'))
+
+    page.send('@designer 请联系文案')
+    await waitFor(() => expect(toWriter()).toHaveLength(1), { timeout: 10000 })
+    await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+    // Both panes poll the same lead every 500 ms: give the other one time to deliver it again.
+    await pause(2000)
+    expect(toWriter()).toHaveLength(1)
+    expect(main.starts).toEqual([{ id: main.enqueued[0].id, recipient: 'writer' }])
+    expect(main.refusedDeliveries).toEqual([])
+    expect(main.calls.filter((call) => call.method === 'listAgentTeamMessages').length).toBeGreaterThan(2)
+    await page.finish()
+  }, 30000)
+
+  it('presents the lease when a team message queued behind a busy recipient starts later', async () => {
+    let releaseBusy: (() => void) | undefined
+    const page = await mountChannelPage({
+      members: [member('designer', '设计师'), member('writer', '文案')],
+      model: ({ lastUserText, teamTools, toolResults }) => {
+        if (lastUserText.includes('hold writer busy')) {
+          return new Promise<ModelStep>((resolve) => {
+            releaseBusy = () => resolve({ text: 'writer busy reply fixture' })
+          })
+        }
+        if (lastUserText.includes('来自成员的测试消息')) return { text: '文案已收到 fixture' }
+        if (!toolResults.length && teamTools.includes('send_message')) {
+          return { tool: 'send_message', callId: 'fixture-busy-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+        }
+        return { text: '发送成员完成 fixture' }
+      }
+    })
+    const { main } = page
+    // The dispatcher checks the recipient right before it sends, so a recipient that turns busy in
+    // between cannot be produced from outside: its view of busy is blinded instead, and the send
+    // wrapper, which still sees the busy writer, queues the team message behind the writer's run.
+    const { TeamMessageDispatcher } = await import('./teamMessageDispatcher')
+    const pump = TeamMessageDispatcher.prototype.pump
+    const blinded = vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (this: InstanceType<typeof TeamMessageDispatcher>, recipient: string) {
+      Object.assign(this as object, { isRecipientBusy: () => false })
+      return pump.call(this, recipient)
+    })
+    const toWriter = () => main.chatRequests.filter((request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息'))
+    try {
+      page.send('@writer hold writer busy')
+      await waitFor(() => expect(releaseBusy).toBeDefined())
+      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
+      await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
+      await pause(1500)
+      expect(toWriter()).toHaveLength(0)
+      releaseBusy?.()
+      await waitFor(() => expect(toWriter()).toHaveLength(1), { timeout: 5000 })
+      expect(toWriter()[0].teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
+      expect(main.starts).toEqual([{ id: main.enqueued[0].id, recipient: 'writer' }])
+      await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+      await pause(1000)
+      expect(toWriter()).toHaveLength(1)
+      expect(main.refusedDeliveries).toEqual([])
+    } finally {
+      blinded.mockRestore()
+    }
+    await page.finish()
+  }, 30000)
+})
+
 // ---------------------------------------------------------------------------------------------
 // Restart on the same storage (backlog item 13 adds the MAIN-owned delivery cases here)
 // ---------------------------------------------------------------------------------------------
@@ -1456,6 +1612,98 @@ describe('real ChatPage restart on in-memory fakes', () => {
     })
     storageErrors.mockRestore()
   }, 20000)
+
+  const carriedTeam = (id: string) => ({ scope: SCOPE, thread: ROUTE.threadId, lead: 'lead', member: id })
+  const earlierWork = (task: string): ChatSession['messages'] => [
+    { role: 'user', content: task },
+    { role: 'assistant', content: `${task} done fixture` }
+  ] as ChatSession['messages']
+  const heldNote = 'chat.delegated.member_label — chat.delegated.held'
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  it('holds a carried-over member message until the user sends to its recipient, then delivers it once', async () => {
+    let carried = ''
+    const page = await mountChannelPage({
+      members: [member('designer', '设计师'), member('writer', '文案', earlierWork('earlier writer task'))],
+      beforeMount: (main) => {
+        carried = main.carryOver({ source: carriedTeam('designer'), kind: 'message', hop: 1, recipient: 'writer', text: '重启前的成员消息' })
+      },
+      model: ({ lastUserText }) => ({ text: lastUserText.includes('重启前的成员消息') ? '文案已收到 fixture' : '文案继续 fixture' })
+    })
+    const { main } = page
+    const toWriter = () =>
+      main.chatRequests.filter((request) => request.conversationId === 'writer').map((request) => textOf(request.messages.at(-1)?.content))
+
+    // Claimed at the first poll, but never delivered by itself: the writer is held, its row says so.
+    await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
+    expect(await screen.findByRole('button', { name: heldNote })).toBeInTheDocument()
+    await pause(2000)
+    expect(toWriter()).toEqual([])
+    expect(main.starts).toEqual([])
+
+    // The user's next send to the writer resumes it: the carried-over message follows, once.
+    page.send('@writer 请继续')
+    await waitFor(() => expect(toWriter()).toHaveLength(2), { timeout: 5000 })
+    expect(toWriter()[0]).toContain('请继续')
+    expect(toWriter()[1]).toContain('重启前的成员消息')
+    expect(main.chatRequests.find((request) => textOf(request.messages.at(-1)?.content).includes('重启前的成员消息'))?.teamMessageDelivery)
+      .toEqual({ id: carried, lease: expect.stringMatching(/^fixture-lease-/) })
+    expect(main.starts).toEqual([{ id: carried, recipient: 'writer' }])
+    await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+    await pause(1500)
+    expect(toWriter()).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: heldNote })).toBeNull()
+    expect(main.refusedDeliveries).toEqual([])
+    await page.finish()
+  }, 30000)
+
+  it('holds both subscribers of a carried-over channel message; each follows its own user send', async () => {
+    let carried = ''
+    const page = await mountChannelPage({
+      members: [
+        member('designer', '设计师'),
+        member('writer', '文案', earlierWork('earlier writer task')),
+        member('reviewer', 'reviewer', earlierWork('earlier reviewer task'))
+      ],
+      beforeMount: (main) => {
+        carried = main.carryOver({ source: carriedTeam('designer'), kind: 'channel', hop: 1, text: '重启前的频道消息' })
+      },
+      model: ({ lastUserText }) => ({ text: lastUserText.includes('重启前的频道消息') ? '频道收到 fixture' : '继续 fixture' })
+    })
+    const { main } = page
+    const to = (id: string) =>
+      main.chatRequests.filter((request) => request.conversationId === id).map((request) => textOf(request.messages.at(-1)?.content))
+
+    await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
+    await waitFor(() => expect(screen.getAllByRole('button', { name: heldNote })).toHaveLength(2))
+    await pause(2000)
+    expect([to('writer'), to('reviewer'), to('designer')]).toEqual([[], [], []])
+
+    page.send('@writer 请继续')
+    await waitFor(() => expect(to('writer')).toHaveLength(2), { timeout: 5000 })
+    expect(to('writer')[1]).toContain('重启前的频道消息')
+    await pause(1500)
+    // The reviewer is still held: only the user's own send to it releases it.
+    expect(to('reviewer')).toEqual([])
+    expect(screen.getAllByRole('button', { name: heldNote })).toHaveLength(1)
+    expect(main.starts).toEqual([{ id: carried, recipient: 'writer' }])
+
+    page.send('@reviewer 请继续')
+    await waitFor(() => expect(to('reviewer')).toHaveLength(2), { timeout: 5000 })
+    expect(to('reviewer')[1]).toContain('重启前的频道消息')
+    expect(main.starts).toEqual([
+      { id: carried, recipient: 'writer' },
+      { id: carried, recipient: 'reviewer' }
+    ])
+    await waitFor(async () => {
+      for (const id of ['writer', 'reviewer']) expect((await page.stored(id))?.messages.map((message) => message.content)).toContain('频道收到 fixture')
+    })
+    await pause(1000)
+    expect([to('writer').length, to('reviewer').length, to('designer').length]).toEqual([2, 2, 0])
+    expect(screen.queryByRole('button', { name: heldNote })).toBeNull()
+    expect(main.refusedDeliveries).toEqual([])
+    await page.finish()
+  }, 30000)
 })
 
 // ---------------------------------------------------------------------------------------------

@@ -9,6 +9,8 @@ export type TeamMessageIntent = Readonly<{
   hop: 1 | 2
   recipient?: string
   text: string
+  /** The claim's lease from MAIN (member messages only); the delivery request presents it. */
+  lease?: string
 }>
 /** 'held': waits for a stopped member until the user resumes it (see hold/release). */
 export type TeamDispatchStatus = 'queued' | 'held' | 'request_started' | 'response_received' | 'unavailable' | 'unknown'
@@ -38,7 +40,7 @@ export class TeamMessageDispatcher {
     private readonly isCurrent: () => boolean,
     private readonly isMember: (member: string) => boolean,
     initialMembers: readonly string[],
-    private readonly deliver: (delivery: TeamMessageDelivery, source: TeamMessageSource, stage: (stage: TeamDispatchStage) => void, hop: 1 | 2) => Promise<void>,
+    private readonly deliver: (delivery: TeamMessageDelivery, source: TeamMessageSource, stage: (stage: TeamDispatchStage) => void, hop: 1 | 2, lease?: string) => Promise<void>,
     private readonly onChange: (entries: readonly TeamDispatchEntry[]) => void = () => {},
     private readonly limit = 1000,
     private readonly isRecipientBusy: (member: string) => boolean = () => false,
@@ -134,7 +136,9 @@ export class TeamMessageDispatcher {
     const expectedRecipients = input.kind === 'message' ? 1 : [...this.subscriptions].filter(id => this.isMember(id) && (input.source.kind === 'user' || id !== input.source.member)).length
     if (!this.makeRoom(Math.max(1, expectedRecipients))) throw new Error('Team message activity limit reached.')
     const source = Object.freeze({ ...input.source })
-    const intent = Object.freeze({ id: input.id, source, kind: input.kind, hop: input.hop, ...(input.recipient === undefined ? {} : { recipient: input.recipient }), text: input.text })
+    // The lease belongs to this record's intent (not to an index, which pruning shifts); a user broadcast has none.
+    const lease = source.kind === 'member' && typeof input.lease === 'string' && input.lease ? { lease: input.lease } : {}
+    const intent = Object.freeze({ id: input.id, source, kind: input.kind, hop: input.hop, ...(input.recipient === undefined ? {} : { recipient: input.recipient }), text: input.text, ...lease })
     if (source.kind === 'user') this.service.sendUserChannel(intent.id, 'team', intent.text)
     else if (intent.kind === 'message') this.service.sendDirect(intent.id, source.member, intent.recipient!, intent.text)
     else this.service.sendChannel(intent.id, source.member, 'team', intent.text)
@@ -199,6 +203,11 @@ export class TeamMessageDispatcher {
 
   isHeld(member: string): boolean { return this.held.has(member) }
 
+  /** The members that records of this message are for. */
+  recipientsOf(id: string): string[] {
+    return [...new Set(this.records.flatMap(entry => entry.intent.id === id && entry.recipient ? [entry.recipient] : []))]
+  }
+
   /** A record for this member still waits for its delivery (queued and not claimed). */
   hasQueued(member: string): boolean {
     return this.records.some((entry, index) => entry.recipient === member && entry.status === 'queued' && !this.isClaimed(index))
@@ -229,7 +238,7 @@ export class TeamMessageDispatcher {
       if (value === 'response_received' && admitted && current === 'request_started') this.set(at(), 'response_received')
     }
     return (async () => {
-      try { await this.deliver(claimed, record.intent.source, stage, record.intent.hop) } catch { /* unknown after start, unavailable before */ }
+      try { await this.deliver(claimed, record.intent.source, stage, record.intent.hop, record.intent.lease) } catch { /* unknown after start, unavailable before */ }
       finally {
         stageOpen = false
         const current = this.records[at()].status

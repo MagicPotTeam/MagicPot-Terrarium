@@ -107,6 +107,7 @@ type ChatRequestPayload = {
   skillRuntime?: LLMChatSkillRuntime
   teamMember?: LLMTeamMember
   teamMessageHop?: 1 | 2
+  teamMessageDelivery?: { id: string; lease: string }
   goalProgressToken?: string
   sessionUrl?: string
   conversationId?: string
@@ -142,6 +143,8 @@ type RemoteRequestProfile = Pick<
 type RequestChatCompletionInput = {
   teamMember?: LLMTeamMember
   teamMessageHop?: 1 | 2
+  /** The claim of the member message this request delivers; sent to the local MAIN only, beside teamMessageHop. */
+  teamMessageDelivery?: { id: string; lease: string }
   /** In-memory host callbacks only; never serialized into IPC or model input. */
   beforeLocalDispatch?: () => void | Promise<void>
   onLocalDispatch?: () => void
@@ -1293,6 +1296,9 @@ const buildChatRequestPayload = (
     ...(input.skillRuntime ? { skillRuntime: input.skillRuntime } : {}),
     ...(input.teamMember ? { teamMember: input.teamMember } : {}),
     ...(input.teamMessageHop ? { teamMessageHop: input.teamMessageHop } : {}),
+    ...(input.teamMessageHop && input.teamMessageDelivery && destination.localMainBoundary === true
+      ? { teamMessageDelivery: { id: input.teamMessageDelivery.id, lease: input.teamMessageDelivery.lease } }
+      : {}),
     ...(input.goalProgressToken ? { goalProgressToken: input.goalProgressToken } : {}),
     sessionUrl: input.sessionUrl,
     conversationId: input.conversationId,

@@ -258,3 +258,18 @@ describe.each([false, true])('local team dispatch callbacks, stream=%s', streami
     expect(service.chatStream).not.toHaveBeenCalled()
   })
 })
+
+describe.each([false, true])('member message claim on the local request, stream=%s', streaming => {
+  const delivery = { id: 'fixture-message', lease: 'fixture-lease' }
+  it('sends the claim to the local MAIN only together with teamMessageHop', async () => {
+    const service = installService()
+    const ipc = streaming ? service.chatStream : service.chat
+    await request(streaming, { ...base(), ...team, teamMessageDelivery: delivery })
+    expect(ipc.mock.calls[0][0]).toMatchObject({ teamMessageHop: 1, teamMessageDelivery: delivery })
+    await request(streaming, { ...base(), teamMember: team.teamMember, teamMessageDelivery: delivery })
+    expect(ipc.mock.calls[1][0]).not.toHaveProperty('teamMessageDelivery')
+    await request(streaming, { ...base(), ...team })
+    expect(ipc.mock.calls[2][0]).not.toHaveProperty('teamMessageDelivery')
+    expect(ipc).toHaveBeenCalledTimes(3)
+  })
+})
