@@ -1259,6 +1259,19 @@ const listRequestTools = (
   })
 }
 
+// The End errors that the in-turn checks of a member request threw. A turn that fails with one of them was cut by its
+// team's End (not by Stop or a provider error) and keeps what it already started or finished.
+const teamEndCuts = new WeakSet<object>()
+const assertMemberTeamActive = (req: { teamMember?: LLMChatReq['teamMember'] }): void => {
+  try {
+    assertTeamRequestActive(req)
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Team has ended.') teamEndCuts.add(error)
+    throw error
+  }
+}
+const isTeamEndCut = (error: unknown): boolean => typeof error === 'object' && error !== null && teamEndCuts.has(error)
+
 const tryHandleSkillRuntimeToolCommand = async (
   req: LLMChatReq,
   options?: ChatExecutionOptions,
@@ -2455,7 +2468,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     assertTeamRequestActive(req)
     // Helper loops re-check End from the request as it entered; requests without teamMember get none.
     const entered = req
-    const assertTeamActive = Object.hasOwn(entered, 'teamMember') ? () => assertTeamRequestActive(entered) : undefined
+    const assertTeamActive = Object.hasOwn(entered, 'teamMember') ? () => assertMemberTeamActive(entered) : undefined
     req = ensureCorrelationId(req)
     const abortContext = this.createConversationAbortContext(
       req.conversationId,
@@ -2467,6 +2480,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let canvas: ReturnType<typeof prepareCanvasAgentTools> | undefined
     let detachDocumentAbort: (() => void) | undefined
     let successful = false
+    let endedByTeam = false
     let goalProgress: AgentGoalProgressContext | undefined
     try {
       // Before goal progress, provider, worker or canvas tool set-up.
@@ -2567,6 +2581,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           : new Error(
               'LLM request failed: ' + (typeof e === 'object' ? JSON.stringify(e) : String(e))
             )
+      endedByTeam = isTeamEndCut(e)
       console.error('[LLMProxy] chat failed at the top level:', err.message)
       // Only this final IPC-facing exit projects the typed reported failure.
       // Direct MAIN callers and chatStream keep their original throw contract.
@@ -2575,7 +2590,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       throw err
     } finally {
       detachDocumentAbort?.()
-      canvas?.dispose?.(successful)
+      canvas?.dispose?.(successful || (endedByTeam ? 'ended' : false))
       goalProgress?.dispose()
       abortContext.cleanup()
     }
@@ -3038,7 +3053,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         throwIfAborted(options?.signal)
         // No new model step (also the native fallback and protocol correction) once the
         // member's team has ended; a step already sent is never recalled.
-        assertTeamRequestActive(req)
+        assertMemberTeamActive(req)
         restricted?.assertCurrent()
         options?.assertSkillContext?.()
         if (modelStepCount >= MAX_AGENT_MODEL_STEPS) {
@@ -3079,7 +3094,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             onDelta: capped || restricted || failedEditExplanation ? undefined : (event) => {
               options?.goalProgress?.assertLive()
               // A capacity retry is a new provider request: refuse it after End.
-              if (event.type === 'retry') assertTeamRequestActive(req)
+              if (event.type === 'retry') assertMemberTeamActive(req)
               if (
                 (event.type === 'text-delta' && event.delta) ||
                 event.type === 'attachment' ||
@@ -3224,7 +3239,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         for (const [requestedIndex, requestedTool] of requested.entries()) {
           throwIfAborted(options?.signal)
           // No new tool call after End: it leaves no receipt, finished calls keep theirs.
-          assertTeamRequestActive(req)
+          assertMemberTeamActive(req)
           const toolCallId = `${runId}:tool:${batchStep + requestedIndex}`
           const toolOptions = {
             allowedToolNames,
@@ -3502,7 +3517,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     assertTeamRequestActive(req)
     // Helper loops re-check End from the request as it entered; requests without teamMember get none.
     const entered = req
-    const assertTeamActive = Object.hasOwn(entered, 'teamMember') ? () => assertTeamRequestActive(entered) : undefined
+    const assertTeamActive = Object.hasOwn(entered, 'teamMember') ? () => assertMemberTeamActive(entered) : undefined
     req = ensureCorrelationId(req)
     // Normalize once at the trusted main boundary. Structured streaming is
     // gated until its complete response satisfies this detached contract.
@@ -3523,6 +3538,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let detachDocumentAbort: (() => void) | undefined
     let localGoalProgress: AgentGoalProgressContext | undefined
     let localCanvasSuccess = false
+    let localCanvasEndedByTeam = false
     let streamedText = ''
     let lastSessionUrl = req.sessionUrl?.trim() || undefined
     const seenAttachmentKeys = new Set<string>()
@@ -4388,13 +4404,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         emitCancelledTerminal()
         return
       }
+      localCanvasEndedByTeam = isTeamEndCut(error)
       const message = isTrustedProviderJsonBudgetError(error)
         ? 'Provider request exceeds the size limit. Remove some attachments or send fewer images per message.'
         : boundRemoteErrorDetail(error instanceof Error ? error.message : String(error))
       emitErrorTerminal(message, error)
     } finally {
       detachDocumentAbort?.()
-      localCanvas?.dispose?.(localCanvasSuccess)
+      localCanvas?.dispose?.(localCanvasSuccess || (localCanvasEndedByTeam ? 'ended' : false))
       localGoalProgress?.dispose()
       cleanupRemoteStream?.()
       cleanupRemoteStream = undefined

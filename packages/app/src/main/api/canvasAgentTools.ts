@@ -117,7 +117,8 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
   prepareSkillContext?: (signal?: AbortSignal) => Promise<string>
   assertSkillContext?: () => void
   assertDocument?: () => void
-  dispose?: (success?: boolean) => void
+  /** 'ended': the turn was cut by its team's End. It keeps what it already started or finished. */
+  dispose?: (outcome?: boolean | 'ended') => void
 } {
   if (!options.local) return { request }
   const prepared = withCanvasFileTools(request, invocation)
@@ -359,11 +360,14 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
     },
     toolProvider,
     imageAttachments: imageTools?.completedAttachments,
-    dispose: (success = false) => {
+    dispose: (outcome: boolean | 'ended' = false) => {
       active = false
-      htmlApps?.release(success)
-      jobs?.release(success)
-      processes?.release(success)
+      // What was already sent is not recalled: a turn cut by its team's End releases its jobs, processes and
+      // HTML apps like a successful turn. Every other failed turn revokes them.
+      const keep = outcome !== false
+      htmlApps?.release(keep)
+      jobs?.release(keep)
+      processes?.release(keep)
       memoryFiles?.dispose()
       subagents?.dispose()
       interactions?.dispose()
