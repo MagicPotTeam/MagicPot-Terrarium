@@ -3847,11 +3847,19 @@ export function loadCanvasItemsMetadata(storeKey: string = KEY): Promise<{ items
   })
 }
 
+/** A file loadCanvasItemsMetadata falls back to could not be read or parsed. */
+export class CanvasMetadataFileError extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super('[Canvas Storage] A canvas file could not be read.', options)
+    this.name = 'CanvasMetadataFileError'
+  }
+}
+
 /**
  * The items of the autosave and project files loadCanvasFallback restores a board
  * from, as stored in them: nothing is decoded or restored. Every one of these files
  * is read (a load stops at the first it can restore); a missing file is skipped, any
- * other read or parse error rejects.
+ * other read or parse error rejects with a CanvasMetadataFileError.
  */
 async function readCanvasFallbackItemsMetadata(storeKey: string): Promise<unknown[]> {
   if (!window.api?.svcFs || !window.path) return []
@@ -3873,11 +3881,16 @@ async function readCanvasFallbackItemsMetadata(storeKey: string): Promise<unknow
       ;({ content } = await window.api.svcFs.readTextFile({ fullPath }))
     } catch (error) {
       if (isMissingMirrorFileError(error)) continue
-      throw error
+      throw new CanvasMetadataFileError({ cause: error })
     }
-    const parsed = JSON.parse(content) as Partial<CanvasFileData> | null
+    let parsed: Partial<CanvasFileData> | null
+    try {
+      parsed = JSON.parse(content) as Partial<CanvasFileData> | null
+    } catch (error) {
+      throw new CanvasMetadataFileError({ cause: error })
+    }
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items)) {
-      throw new Error('[Canvas Storage] Malformed canvas file.')
+      throw new CanvasMetadataFileError()
     }
     items.push(...parsed.items)
   }

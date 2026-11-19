@@ -3,12 +3,18 @@ import {
   hasRunningScopedChatRequests
 } from '../pages/ChatPage/chatPageShared'
 import { forEachStoredChatRecord } from '../pages/ChatPage/chatStorage'
-import { loadCanvasItemsMetadata } from '../pages/ProjectCanvasPage/canvasStorage'
+import {
+  CanvasMetadataFileError,
+  loadCanvasItemsMetadata
+} from '../pages/ProjectCanvasPage/canvasStorage'
 import { LEGACY_PROJECTS_STORAGE_KEY, PROJECTS_STORAGE_KEY } from '../pages/MainPage/projectStore'
 import { api } from '../utils/windowUtils'
 import {
+  ManagedMediaScanSourceError,
   scanManagedMediaReferenceIds,
-  type ManagedMediaReferenceScannerSources
+  type ManagedMediaReferenceScannerSources,
+  type ManagedMediaScanProblem,
+  type ManagedMediaScanSource
 } from './managedMediaReferenceScanner'
 
 const SNAPSHOT_DEBOUNCE_MS = 2_000
@@ -54,8 +60,21 @@ function createScannerSources(): ManagedMediaReferenceScannerSources {
       // (a full load would wrap every image of every board in a new object URL each scan).
       // One board at a time, so only one board's items are held; a board that cannot be read
       // fails the scan.
-      for (const projectId of readProjectIds()) {
-        visit((await loadCanvasItemsMetadata(projectId)).items)
+      let projectIds: string[]
+      try {
+        projectIds = readProjectIds()
+      } catch (error) {
+        throw new ManagedMediaScanSourceError({ source: 'project-index' }, { cause: error })
+      }
+      for (const projectId of projectIds) {
+        let items: unknown[]
+        try {
+          items = (await loadCanvasItemsMetadata(projectId)).items
+        } catch (error) {
+          const source = error instanceof CanvasMetadataFileError ? 'canvas-file' : 'canvas-board'
+          throw new ManagedMediaScanSourceError({ source, context: projectId }, { cause: error })
+        }
+        visit(items, projectId)
       }
     },
     // Draft backups of every scope are read from localStorage by the scanner itself.
@@ -63,8 +82,51 @@ function createScannerSources(): ManagedMediaReferenceScannerSources {
   }
 }
 
+const SCAN_WARNING_INTERVAL_MS = 60 * 60_000
+const SCAN_WARNING_CONTEXT_MAX_LENGTH = 120
+const lastScanWarningAt = new Map<ManagedMediaScanSource, number>()
+
+const quoted = (context: string | undefined): string =>
+  context === undefined ? '' : ` "${context.slice(0, SCAN_WARNING_CONTEXT_MAX_LENGTH)}"`
+
+function describeScanFailure({ source, context }: ManagedMediaScanProblem): string {
+  switch (source) {
+    case 'chat-store':
+      return 'the chat store could not be read'
+    case 'chat-media':
+      return `a chat record of scope${quoted(context)} holds a media value that is not a managed reference`
+    case 'canvas-board':
+      return `canvas board${quoted(context)} could not be read`
+    case 'canvas-file':
+      return `a stored file of canvas board${quoted(context)} could not be read or parsed`
+    case 'canvas-media':
+      return `canvas board${quoted(context)} holds a media value that is not a managed reference`
+    case 'project-index':
+      return 'the project index could not be read'
+    case 'draft-backup':
+      return `a draft backup of scope${quoted(context)} could not be read or parsed`
+    case 'draft-media':
+      return `a draft backup of scope${quoted(context)} holds a media value that is not a managed reference`
+    case 'local-storage':
+      return 'localStorage could not be read'
+  }
+}
+
+/** At most one warning per source per hour: a broken store fails every scan. */
+function warnIncompleteScan(failure: ManagedMediaScanProblem): void {
+  const now = Date.now()
+  const last = lastScanWarningAt.get(failure.source)
+  if (last !== undefined && now >= last && now - last < SCAN_WARNING_INTERVAL_MS) return
+  lastScanWarningAt.set(failure.source, now)
+  console.warn(
+    `[ManagedMedia] Reference scan incomplete: ${describeScanFailure(failure)}. ` +
+      'Unused managed media is not cleaned up until a scan completes.'
+  )
+}
+
 async function publishManagedMediaReferenceSnapshot(isCurrent: () => boolean): Promise<void> {
   const result = await scanManagedMediaReferenceIds(createScannerSources())
+  if (!result.ok) warnIncompleteScan(result.failure)
   // A deferral that began while this scan ran withdrew the snapshot: do not put one back.
   if (!isCurrent()) return
   await api().svcManagedMedia.updateReferenceSnapshot({

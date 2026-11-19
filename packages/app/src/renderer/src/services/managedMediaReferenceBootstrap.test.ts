@@ -11,6 +11,7 @@ vi.mock('../pages/ChatPage/chatStorage', () => ({
 }))
 
 vi.mock('../pages/ProjectCanvasPage/canvasStorage', () => ({
+  CanvasMetadataFileError: class CanvasMetadataFileError extends Error {},
   loadCanvasItemsMetadata: mocks.loadCanvasItems
 }))
 
@@ -59,6 +60,7 @@ describe('managed media reference bootstrap', () => {
 
   afterEach(() => {
     for (const stop of running.splice(0)) stop()
+    vi.restoreAllMocks()
     vi.useRealTimers()
     localStorage.clear()
     clearScopedActiveLoadingSessionIds()
@@ -294,6 +296,79 @@ describe('managed media reference bootstrap', () => {
       vi.setSystemTime(Date.now() - 60 * 60_000)
       await vi.advanceTimersByTimeAsync(15 * 60_000)
       expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
+      stop()
+    })
+  })
+
+  describe('when a scan is incomplete', () => {
+    beforeEach(() => {
+      mocks.forEachStoredChatRecord.mockResolvedValue(undefined)
+      mocks.loadCanvasItems.mockResolvedValue({ items: [] })
+      mocks.updateReferenceSnapshot.mockResolvedValue(undefined)
+    })
+
+    it('warns once per source per hour, naming the source and no media id', async () => {
+      vi.setSystemTime(new Date('2030-01-01T00:00:00Z'))
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const sha = 'a'.repeat(64)
+      mocks.forEachStoredChatRecord.mockImplementation(async (visit: (record: unknown) => void) => {
+        visit({
+          storageScope: 'project-a.agent-1',
+          messages: [
+            {
+              attachments: [
+                {
+                  media: { kind: 'managed', sha256: 'bad', relativePath: `originals/aa/${sha}.png` }
+                }
+              ]
+            }
+          ]
+        })
+      })
+      const stop = start()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ complete: false })
+      )
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls[0][0])).toContain('"project-a.agent-1"')
+      expect(String(warn.mock.calls[0][0])).toContain('not a managed reference')
+      expect(String(warn.mock.calls[0][0])).not.toContain(sha)
+
+      // The same source fails every scan: no second warning within the hour.
+      window.dispatchEvent(new Event('storage'))
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenCalledTimes(2)
+      expect(warn).toHaveBeenCalledTimes(1)
+
+      // Another source warns on its own.
+      mocks.forEachStoredChatRecord.mockResolvedValue(undefined)
+      localStorage.setItem('ai_engine_projects', JSON.stringify([{ id: 'board-1' }]))
+      mocks.loadCanvasItems.mockRejectedValue(new Error('IndexedDB failed'))
+      window.dispatchEvent(new Event('storage'))
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(warn).toHaveBeenCalledTimes(2)
+      expect(String(warn.mock.calls[1][0])).toContain('canvas board "board-1" could not be read')
+
+      // An hour later the first source warns again.
+      mocks.loadCanvasItems.mockResolvedValue({ items: [] })
+      mocks.forEachStoredChatRecord.mockRejectedValue(new Error('read failed'))
+      await vi.advanceTimersByTimeAsync(60 * 60_000)
+      expect(warn.mock.calls.map(([text]) => String(text))).toContainEqual(
+        expect.stringContaining('the chat store could not be read')
+      )
+      stop()
+    })
+
+    it('does not warn for a complete scan', async () => {
+      vi.setSystemTime(new Date('2030-02-01T00:00:00Z'))
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const stop = start()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.updateReferenceSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ complete: true })
+      )
+      expect(warn).not.toHaveBeenCalled()
       stop()
     })
   })

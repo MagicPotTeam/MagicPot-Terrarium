@@ -128,6 +128,8 @@ function createCanvasDb(records: Map<string, unknown>) {
 describe('managed media reference scan over the canvas boards', () => {
   const files = new Map<string, string>()
   let createObjectUrl: ReturnType<typeof vi.fn>
+  let warn: ReturnType<typeof vi.spyOn>
+  const warnings = (): string[] => warn.mock.calls.map(([text]) => String(text))
   let originalCreateObjectUrl: typeof URL.createObjectURL | undefined
 
   beforeEach(() => {
@@ -172,7 +174,7 @@ describe('managed media reference scan over the canvas boards', () => {
         basename: (value: string) => value.slice(value.lastIndexOf('/') + 1)
       }
     })
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.spyOn(console, 'error').mockImplementation(() => {})
   })
 
@@ -268,5 +270,25 @@ describe('managed media reference scan over the canvas boards', () => {
     const snapshot = await scanOnce()
 
     expect(snapshot).toMatchObject({ complete: false, ids: [] })
+    expect(warnings()).toEqual([
+      expect.stringContaining('canvas board "board-a" could not be read')
+    ])
+  })
+
+  it('names the board whose stored file cannot be parsed', async () => {
+    const canvas = seedBoards()
+    files.set(
+      `${AUTOSAVE_ROOT}/${buildProjectStorageDirName('board-b', 'board-b')}/project.mpcanvas`,
+      '{"magic": "MAGICPOT_CANVAS", "items": ['
+    )
+    vi.stubGlobal('indexedDB', canvas.api)
+
+    const snapshot = await scanOnce()
+
+    expect(snapshot).toMatchObject({ complete: false, ids: [] })
+    expect(warnings()).toEqual([
+      expect.stringContaining('a stored file of canvas board "board-b" could not be read or parsed')
+    ])
+    expect(warnings()[0]).not.toContain(AUTOSAVE_ROOT)
   })
 })

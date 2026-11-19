@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { scanManagedMediaReferenceIds } from './managedMediaReferenceScanner'
+import {
+  ManagedMediaScanSourceError,
+  scanManagedMediaReferenceIds
+} from './managedMediaReferenceScanner'
 
 const ref = (sha256: string) => ({
   version: 1,
@@ -79,7 +82,12 @@ describe('managed media reference scanner', () => {
         throw new Error('cursor failed')
       }
     })
-    expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
+    expect(result).toEqual({
+      ok: false,
+      ids: [],
+      referenceCounts: {},
+      failure: { source: 'chat-store' }
+    })
   })
 
   it('fails closed on a draft backup it cannot parse', async () => {
@@ -94,7 +102,12 @@ describe('managed media reference scanner', () => {
         getItem: (key) => storage.get(key) ?? null
       }
     })
-    expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
+    expect(result).toEqual({
+      ok: false,
+      ids: [],
+      referenceCounts: {},
+      failure: { source: 'draft-backup', context: 'project-a.agent-1' }
+    })
   })
 
   it('returns an empty fail-closed result when any store read fails', async () => {
@@ -104,16 +117,64 @@ describe('managed media reference scanner', () => {
         throw new Error('read failed')
       }
     })
-    expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
+    expect(result).toEqual({
+      ok: false,
+      ids: [],
+      referenceCounts: {},
+      failure: { source: 'canvas-board' }
+    })
   })
 
   it('fails closed for malformed or invalid media references', async () => {
     const result = await scanManagedMediaReferenceIds({
       ...sources(),
       visitChatRecords: async (visit) =>
-        visit({ messages: [{ attachments: [{ media: { kind: 'managed', sha256: 'bad' } }] }] })
+        visit({
+          storageScope: 'project-a.agent-1',
+          messages: [{ attachments: [{ media: { kind: 'managed', sha256: 'bad' } }] }]
+        })
     })
-    expect(result).toEqual({ ok: false, ids: [], referenceCounts: {} })
+    expect(result).toEqual({
+      ok: false,
+      ids: [],
+      referenceCounts: {},
+      failure: { source: 'chat-media', context: 'project-a.agent-1' }
+    })
+  })
+
+  it('names the source that failed the scan', async () => {
+    const failureOf = async (
+      overrides: Partial<Parameters<typeof scanManagedMediaReferenceIds>[0]>
+    ) => {
+      const result = await scanManagedMediaReferenceIds({ ...sources(), ...overrides })
+      return result.ok ? undefined : result.failure
+    }
+    const bad = { media: { kind: 'managed', sha256: 'bad' } }
+    expect(await failureOf({ visitCanvasItems: async (visit) => visit([bad], 'board-7') })).toEqual(
+      { source: 'canvas-media', context: 'board-7' }
+    )
+    expect(
+      await failureOf({
+        visitCanvasItems: async () => {
+          throw new ManagedMediaScanSourceError({ source: 'canvas-file', context: 'board-8' })
+        }
+      })
+    ).toEqual({ source: 'canvas-file', context: 'board-8' })
+    const draftStorage = new Map([['magicpot-chat-draft:default:s', JSON.stringify(bad)]])
+    expect(
+      await failureOf({
+        localStorage: {
+          get length() {
+            return draftStorage.size
+          },
+          key: (index) => [...draftStorage.keys()][index] ?? null,
+          getItem: (key) => draftStorage.get(key) ?? null
+        }
+      })
+    ).toEqual({ source: 'draft-media', context: 'default' })
+    expect(
+      await failureOf({ localStorage: { length: 1, key: () => null, getItem: () => null } })
+    ).toEqual({ source: 'local-storage' })
   })
 
   it('ignores unrelated localStorage keys', async () => {

@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../pages/ProjectCanvasPage/canvasStorage', () => ({
+  CanvasMetadataFileError: class CanvasMetadataFileError extends Error {},
   loadCanvasItemsMetadata: mocks.loadCanvasItemsMetadata
 }))
 
