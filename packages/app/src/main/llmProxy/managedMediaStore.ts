@@ -125,8 +125,8 @@ export function isPathInsideRoot(root: string, candidate: string): boolean {
  * drive or mount, see importSourceRootKey): at most IMPORT_SOURCE_MAX_CALLS_PER_ROOT calls
  * on one root and IMPORT_SOURCE_MAX_CALLS in all, stalled ones included (a slot is freed only
  * when its call really returns). A call's deadline starts when it gets its slot, so waiting
- * behind other calls never counts. A root with a call past its deadline does not respond:
- * its next calls are refused at once, and other roots keep working.
+ * behind other calls never counts. A root whose slots are all held by calls past their
+ * deadline does not respond: its next calls are refused at once, and other roots keep working.
  */
 export type ImportSourceGuard = {
   /**
@@ -237,9 +237,12 @@ export function createImportSourceGate({
     if (next > 0) map.set(key, next)
     else map.delete(key)
   }
-  // A root with a call past its deadline does not respond: a new call there would only take
-  // another thread. When every slot is held by such calls, nothing can run at all.
-  const refusesNow = (key: string): boolean => (overdueByKey.get(key) ?? 0) > 0 || overdue >= total
+  // A root whose every slot is held by calls past their deadline does not respond: a new call
+  // there would only wait. One slow file (a cloud placeholder that downloads on open) leaves
+  // the other slot to the rest of its drive. When every slot of the app is held by such
+  // calls, nothing can run at all.
+  const refusesNow = (key: string): boolean =>
+    (overdueByKey.get(key) ?? 0) >= perRoot || overdue >= total
   const pump = (): void => {
     const run: Array<() => void> = []
     for (let index = 0; index < waiting.length;) {

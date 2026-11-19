@@ -30,7 +30,7 @@ import {
   authorizeLocalMediaImportSourcePathAsync,
   clearScopedLocalMediaPathsForTest
 } from '../localMediaAccess'
-import { grantLocalMediaImportPath } from '../localMediaFileIntakeIpc'
+import { grantLocalMediaImportFile, grantLocalMediaImportPath } from '../localMediaFileIntakeIpc'
 import { ManagedMediaSvcImpl } from '../api/svcManagedMediaImpl'
 
 const PNG = Buffer.from(
@@ -420,6 +420,29 @@ describe('import source deadlines (a stalled or slow source never blocks main)',
     await vi.waitFor(() => expect(gate.active).toBe(0))
   })
 
+  it('keeps serving a drive while one slow file on it is past its deadline (cloud placeholder)', async () => {
+    // A OneDrive / iCloud placeholder and a plain local file share one key: the drive.
+    const oneDrive = 'C:\\Users\\me\\OneDrive\\Pictures\\big.jpg'
+    const local = 'C:\\Users\\me\\Pictures\\small.jpg'
+    expect(importSourceRootKey(oneDrive)).toBe(importSourceRootKey(local))
+    const gate = createImportSourceGate({ onSaturated: () => undefined })
+    let downloaded!: () => void
+    const slow = runImportSourceOperation(
+      () => new Promise<string>((resolve) => (downloaded = () => resolve('downloaded'))),
+      { key: importSourceRootKey(oneDrive), timeoutMs: 30, gate }
+    ).catch((error: unknown) => error)
+    await expect(slow).resolves.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+    expect(gate.overdue).toBe(1)
+    // The other file on the drive takes the free slot, as before this change.
+    const healthy = vi.fn(async () => 'ok')
+    await expect(
+      runImportSourceOperation(healthy, { key: importSourceRootKey(local), timeoutMs: 1_000, gate })
+    ).resolves.toBe('ok')
+    expect(healthy).toHaveBeenCalledOnce()
+    downloaded()
+    await vi.waitFor(() => expect(gate.active).toBe(0))
+  })
+
   it('counts a call cut by its copy cap as overdue once it stays stuck: nothing waits forever', async () => {
     const gate = createImportSourceGate({ onSaturated: () => undefined })
     const releases: Array<() => void> = []
@@ -785,6 +808,64 @@ describe('a slow but working source is never cut, a stalled one is', () => {
       })
     ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
     expect(performance.now() - startedAt).toBeLessThan(5_000)
+    await stagingIsEmpty()
+  })
+
+  it('grants and imports a healthy file next to a slow one whose read is past its deadline', async () => {
+    const slow = path.join(root, 'cloud-placeholder.png')
+    const healthy = path.join(root, 'local.png')
+    await fs.writeFile(slow, PNG)
+    await fs.writeFile(healthy, PNG)
+    let finishDownload!: () => void
+    const download = new Promise<void>((resolve) => (finishDownload = resolve))
+    // The placeholder's first read waits for its download, longer than the deadline.
+    const slowFs = {
+      ...fs,
+      open: (async (...args: Parameters<typeof fs.open>) => {
+        const handle = await fs.open(...args)
+        if (String(args[0]) !== slow) return handle
+        return new Proxy(handle, {
+          get(target, property) {
+            if (property === 'read')
+              return async (...readArgs: Parameters<Handle['read']>) => {
+                await download
+                return (target.read as Handle['read'])(...readArgs)
+              }
+            const value = Reflect.get(target, property) as unknown
+            return typeof value === 'function' ? value.bind(target) : value
+          }
+        })
+      }) as typeof fs.open
+    } as typeof fs
+    const guard = {
+      operationTimeoutMs: 80,
+      copyBaseTimeoutMs: 60_000,
+      copyMinBytesPerSecond: 64 * 1024
+    }
+    const importFrom = (sourcePath: string, fileSystem?: typeof fs) =>
+      importManagedMediaFile(
+        {
+          chatMediaRoot: media,
+          sourcePath,
+          mimeType: 'image/png',
+          originalFileName: path.basename(sourcePath),
+          provenance: { source: 'test' },
+          sourceGuard: guard
+        },
+        { authorizedRoot: media, ...(fileSystem ? { fs: fileSystem } : {}) }
+      )
+    await expect(importFrom(slow, slowFs)).rejects.toMatchObject({
+      code: 'MANAGED_MEDIA_IMPORT_TIMEOUT'
+    })
+    // Same directory, same key: still granted and imported (not "did not respond").
+    await expect(
+      grantLocalMediaImportFile(healthy, 'image/png', { timeoutMs: 1_000 })
+    ).resolves.toEqual({
+      path: healthy,
+      sizeBytes: PNG.length
+    })
+    await expect(importFrom(healthy)).resolves.toMatchObject({ reference: { kind: 'managed' } })
+    finishDownload()
     await stagingIsEmpty()
   })
 
