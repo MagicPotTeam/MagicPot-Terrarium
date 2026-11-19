@@ -1,7 +1,7 @@
 import type { LLMTeamMember } from './svcLLMProxy'
 import type { AgentThreadInteractionScope } from './agentThreadInteraction'
 
-/** MAIN-owned, process-local intent; not evidence of delivery or model processing. */
+/** MAIN-owned, durable intent; not evidence of delivery or model processing. */
 export type AgentTeamMessageIntent = {
   id: string
   source: LLMTeamMember
@@ -10,7 +10,12 @@ export type AgentTeamMessageIntent = {
   hop: 1 | 2
   recipient?: string
   text: string
-  expiresAt: number
+  /** No longer sent: queued messages do not expire. */
+  expiresAt?: number
+  /** Queued before this document or process: delivered only after the user's next send to the recipient. */
+  carriedOver?: true
+  /** Claim only: the lease token, given out once; a delivery request presents it as teamMessageDelivery. */
+  lease?: string
 }
 export type AgentTeamMessageQueueScope = AgentThreadInteractionScope & { storageScope: string }
 export type AgentTeamMessageClaim = AgentTeamMessageQueueScope & { id: string }

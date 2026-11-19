@@ -2479,7 +2479,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     }
   }
 
-  endTeam = async (req: LLMTeamIdentity): Promise<{ ended: true }> => getTeamEndStore().end(req)
+  endTeam = async (req: LLMTeamIdentity): Promise<{ ended: true }> => {
+    const ended = getTeamEndStore().end(req)
+    // End is recorded; a queued message that this misses is settled as 'ended' when it is claimed.
+    try { this.teamMessageQueue.endTeam(req) } catch { console.warn('[TeamQueue] Queued team messages are ended when claimed.') }
+    return ended
+  }
 
   chat = async (
     req: LLMChatReq,

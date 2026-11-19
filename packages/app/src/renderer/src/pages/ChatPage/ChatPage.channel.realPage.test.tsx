@@ -186,7 +186,7 @@ class FakeTeamMain {
 
   private prune(): void {
     const now = Date.now()
-    for (const [id, entry] of this.queue) if (entry.view.expiresAt <= now) this.queue.delete(id)
+    for (const [id, entry] of this.queue) if ((entry.view.expiresAt ?? Infinity) <= now) this.queue.delete(id)
   }
 
   private callTeamTool(
