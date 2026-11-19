@@ -31,8 +31,8 @@ const path: BuiltInPath = pkgPath as unknown as BuiltInPath
 const droppedLocalImages = createExternalImageDropAuthorization({
   target: typeof window === 'undefined' ? undefined : window,
   authorizePath: authorizeLocalMediaFilePath,
-  authorizeImportPath: async (filePath, mimeType) => {
-    const answer = await requestLocalMediaImportGrant(filePath, mimeType)
+  authorizeImportPath: async (filePath, mimeType, dropId) => {
+    const answer = await requestLocalMediaImportGrant(filePath, mimeType, dropId)
     if (answer && 'path' in answer) return answer
     // A mapped network drive: main read-granted the file once; the page reads it as bytes.
     if (answer?.refused === 'network' && answer.sizeBytes !== undefined)
@@ -242,14 +242,16 @@ type LocalMediaImportGrantRefusal =
 /** Main's one-use import grant for a path the preload itself obtained, or why not, or null. */
 async function requestLocalMediaImportGrant(
   filePath: string,
-  mimeType: string
+  mimeType: string,
+  dropId?: string
 ): Promise<DroppedLocalImageImportGrant | LocalMediaImportGrantRefusal | null> {
   if (!filePath) return null
   try {
     const granted: unknown = await ipcRenderer.invoke(
       'local-media:authorize-import-path',
       filePath,
-      mimeType
+      mimeType,
+      ...(dropId ? [dropId] : [])
     )
     const refusal = (granted as { refused?: unknown } | null)?.refused
     if (refusal === 'timeout') return { refused: 'timeout' }

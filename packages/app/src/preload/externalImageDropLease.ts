@@ -15,7 +15,7 @@ type DropLeaseEntry = {
   consumed: boolean
   pending?: { use: DropLeaseUse; result: Promise<unknown> }
 }
-type DropLease = { expiresAt: number; entries: Map<string, DropLeaseEntry> }
+type DropLease = { expiresAt: number; entries: Map<string, DropLeaseEntry>; id: string }
 
 /** Private preload state; neither event capture nor lease creation crosses the bridge. */
 export function createExternalImageDropAuthorization(options: {
@@ -25,7 +25,9 @@ export function createExternalImageDropAuthorization(options: {
   /** Records a one-use import grant in main (chat): no persisted grant, no bytes. */
   authorizeImportPath?: (
     filePath: string,
-    mimeType: string
+    mimeType: string,
+    /** One id per drop: main lets the grants of one drop wait for each other's imports. */
+    dropId: string
   ) => Promise<DroppedLocalImageImportGrant | null>
   now?: () => number
 }): {
@@ -38,6 +40,7 @@ export function createExternalImageDropAuthorization(options: {
 } {
   const now = options.now ?? (() => performance.now())
   let lease: DropLease | undefined
+  let leaseSerial = 0
   let disposed = false
   const invalidate = () => {
     lease = undefined
@@ -57,9 +60,11 @@ export function createExternalImageDropAuthorization(options: {
         html: dataTransfer.getData('text/html')
       })
       if (!content.fileUrls.length) return
+      leaseSerial += 1
       lease = {
         expiresAt: now() + EXTERNAL_IMAGE_DROP_LEASE_MS,
-        entries: new Map(content.fileUrls.map((url) => [url, { consumed: false }]))
+        entries: new Map(content.fileUrls.map((url) => [url, { consumed: false }])),
+        id: `drop-${leaseSerial}-${Math.random().toString(36).slice(2, 10)}`
       }
     } catch {
       invalidate()
@@ -76,7 +81,7 @@ export function createExternalImageDropAuthorization(options: {
     canonicalUrl: unknown,
     use: DropLeaseUse,
     refused: T,
-    grant: (filePath: string, isCurrent: () => boolean) => Promise<T>
+    grant: (filePath: string, isCurrent: () => boolean, dropId: string) => Promise<T>
   ): Promise<T> => {
     const current = lease
     if (
@@ -99,7 +104,7 @@ export function createExternalImageDropAuthorization(options: {
       .then(async () => {
         try {
           if (!isLive(current)) return refused
-          return await grant(fileURLToPath(canonicalUrl), () => isLive(current))
+          return await grant(fileURLToPath(canonicalUrl), () => isLive(current), current.id)
         } catch {
           return refused
         }
@@ -122,8 +127,8 @@ export function createExternalImageDropAuthorization(options: {
   ): Promise<DroppedLocalImageImportGrant | null> => {
     const authorizeImportPath = options.authorizeImportPath
     if (!authorizeImportPath || typeof mimeType !== 'string') return Promise.resolve(null)
-    return grantOnce(canonicalUrl, 'import', null, async (filePath, isCurrent) => {
-      const granted = await authorizeImportPath(filePath, mimeType)
+    return grantOnce(canonicalUrl, 'import', null, async (filePath, isCurrent, dropId) => {
+      const granted = await authorizeImportPath(filePath, mimeType, dropId)
       return granted && isCurrent() ? granted : null
     })
   }

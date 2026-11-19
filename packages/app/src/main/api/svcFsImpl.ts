@@ -724,19 +724,13 @@ export class FsSvcImpl implements FsSvc {
 
   readImageFromPath = async (req: ReadImageFromPathReq): Promise<ReadImageFromPathResp> => {
     const storageState = getCurrentUserDataDirectoryState()
-    // The temp media folder only once verified as main's own private directory. A file the
-    // user dropped from a mapped network drive is read once under its one-use read grant.
-    const fullPath =
-      resolveAuthorizedLocalMediaPath(req.fullPath, [
-        app.getPath('userData'),
-        ...getVerifiedLocalMediaTempRoots(),
-        storageState.projectRoot,
-        storageState.autoSaveRoot
-      ]) ?? consumeLocalMediaReadGrant(req.fullPath)
-
-    if (!fullPath) {
-      throw new Error('Local image path is not authorized')
-    }
+    // The temp media folder only once verified as main's own private directory.
+    const authorizedPath = resolveAuthorizedLocalMediaPath(req.fullPath, [
+      app.getPath('userData'),
+      ...getVerifiedLocalMediaTempRoots(),
+      storageState.projectRoot,
+      storageState.autoSaveRoot
+    ])
 
     if (
       req.maxBytes !== undefined &&
@@ -748,24 +742,37 @@ export class FsSvcImpl implements FsSvc {
     }
     const maxBytes = Math.min(MAX_FULL_FILE_BYTES, req.maxBytes ?? MAX_FULL_FILE_BYTES)
 
-    if (!(await pathExists(fullPath))) {
-      throw new Error(`File not found: ${fullPath}`)
+    // A file the user dropped from a mapped network drive is read once under its one-use
+    // read grant (spent only by a valid request).
+    const readGrant = authorizedPath ? null : consumeLocalMediaReadGrant(req.fullPath)
+    const fullPath = authorizedPath ?? readGrant?.canonicalPath
+    if (!fullPath) {
+      throw new Error('Local image path is not authorized')
     }
 
-    let buffer: Buffer
-    if (req.maxBytes !== undefined) {
-      buffer = await readImageFileWithinByteBudget(fullPath, maxBytes)
-    } else {
-      await assertReadableFileWithinLimit(fullPath, maxBytes)
-      buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
-    }
-    // A file may grow after stat; never return an oversized IPC payload.
-    requireBoundedPayload(buffer, maxBytes, 'Image')
-    const filename = path.basename(fullPath)
+    try {
+      if (!(await pathExists(fullPath))) {
+        throw new Error(`File not found: ${fullPath}`)
+      }
 
-    return {
-      image: new Uint8Array(buffer),
-      filename
+      let buffer: Buffer
+      if (req.maxBytes !== undefined) {
+        buffer = await readImageFileWithinByteBudget(fullPath, maxBytes)
+      } else {
+        await assertReadableFileWithinLimit(fullPath, maxBytes)
+        buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
+      }
+      // A file may grow after stat; never return an oversized IPC payload.
+      requireBoundedPayload(buffer, maxBytes, 'Image')
+      const filename = path.basename(fullPath)
+
+      return {
+        image: new Uint8Array(buffer),
+        filename
+      }
+    } finally {
+      // The next file of the same drop may now be read.
+      readGrant?.finished()
     }
   }
 

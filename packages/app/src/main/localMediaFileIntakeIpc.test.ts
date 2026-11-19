@@ -138,7 +138,26 @@ describe('local media file intake IPC', () => {
       await expect(
         importHandler({ sender: trustedSender }, '/picked/real.png', 'image/png')
       ).resolves.toEqual({ path: '/picked/real.png', sizeBytes: 3 })
-      expect(recordImportGrantMock).toHaveBeenCalledExactlyOnceWith('/picked/real.png', 0)
+      expect(recordImportGrantMock).toHaveBeenCalledExactlyOnceWith(
+        '/picked/real.png',
+        0,
+        'import',
+        {
+          batch: undefined
+        }
+      )
+      // A drop id from the preload goes with the grant; anything else is ignored.
+      recordImportGrantMock.mockClear()
+      await importHandler({ sender: trustedSender }, '/picked/real.png', 'image/png', 'drop-7-ab12')
+      expect(recordImportGrantMock).toHaveBeenLastCalledWith('/picked/real.png', 0, 'import', {
+        batch: 'drop-7-ab12'
+      })
+      for (const forged of ['../../etc', 'x'.repeat(65), 42, { id: 'drop' }]) {
+        await importHandler({ sender: trustedSender }, '/picked/real.png', 'image/png', forged)
+        expect(recordImportGrantMock).toHaveBeenLastCalledWith('/picked/real.png', 0, 'import', {
+          batch: undefined
+        })
+      }
     }
   )
 

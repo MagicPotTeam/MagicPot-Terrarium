@@ -129,10 +129,12 @@ describe('private trusted external-image drop leases', () => {
   )
 
   it('grants each URL of a drop once, whichever grant is asked first', async () => {
-    const authorizeImportPath = vi.fn(async (filePath: string) => ({
-      path: filePath,
-      sizeBytes: 9
-    }))
+    const authorizeImportPath = vi.fn(
+      async (filePath: string, _mimeType?: string, _dropId?: string) => ({
+        path: filePath,
+        sizeBytes: 9
+      })
+    )
     const listeners = new Map<string, EventListener>()
     const authorization = createExternalImageDropAuthorization({
       target: {
@@ -162,7 +164,21 @@ describe('private trusted external-image drop leases', () => {
       authorization.authorizeDroppedLocalImageForImport(`${prefix}other.png`, 'image/png')
     ).resolves.toBeNull()
     await expect(authorization.authorizeDroppedLocalImageForImport(second, 7)).resolves.toBeNull()
-    expect(authorizeImportPath).toHaveBeenCalledExactlyOnceWith(fileURLToPath(first), 'image/png')
+    expect(authorizeImportPath).toHaveBeenCalledExactlyOnceWith(
+      fileURLToPath(first),
+      'image/png',
+      expect.stringMatching(/^drop-/)
+    )
+    // The URLs of one drop share an id; the next drop gets another.
+    const firstDropId = authorizeImportPath.mock.calls[0][2]
+    await authorization.authorizeDroppedLocalImageForImport(second, 'image/png').catch(() => null)
+    dropOf({ 'text/plain': first })
+    await authorization.authorizeDroppedLocalImageForImport(first, 'image/png')
+    expect(authorizeImportPath.mock.calls.map((call) => call[2])).toEqual([
+      firstDropId,
+      firstDropId,
+      expect.not.stringMatching(new RegExp(`^${firstDropId}$`))
+    ])
   })
 
   it('rejects an expired lease before any authorization starts', async () => {

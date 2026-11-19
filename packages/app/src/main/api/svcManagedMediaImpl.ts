@@ -73,8 +73,11 @@ export type ManagedMediaSvcImplDependencies = {
   authorizeImportSourcePath?: (
     sourcePath: string
   ) => ImportSourceAuthorization | null | Promise<ImportSourceAuthorization | null>
-  /** Spends one import grant for a canonical path, now; false when none is live. */
-  consumeImportGrant?: (canonicalPath: string) => boolean
+  /**
+   * Spends one import grant for a canonical path, now; false or null when none is live. An
+   * object answer is told when the import is over (finished()), whatever its outcome.
+   */
+  consumeImportGrant?: (canonicalPath: string) => boolean | { finished(): void } | null
   /** Byte cap for importFile, checked on the stat and again on the bytes actually copied. */
   maxImportFileBytes?: number
   /** Deadlines for the source's filesystem calls and copy (renderer-named sources). */
@@ -313,6 +316,7 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
   }
 
   async importFile(req: ImportManagedMediaFileReq): Promise<ImportManagedMediaResp> {
+    let grantUse: { finished(): void } | undefined
     try {
       // Every check that needs no filesystem access comes first.
       const authorize = this.dependencies.authorizeImportSourcePath
@@ -338,11 +342,10 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
         // A one-use import grant is spent only now: after the checks above and only when the
         // authorization answered within its deadline (a late answer never reaches here), its
         // time to live judged at this moment. Synchronous, so two imports cannot share it.
-        if (
-          authorized.viaImportGrant &&
-          !this.dependencies.consumeImportGrant?.(authorized.canonicalPath)
-        ) {
-          throw forbidden()
+        if (authorized.viaImportGrant) {
+          const used = this.dependencies.consumeImportGrant?.(authorized.canonicalPath)
+          if (!used) throw forbidden()
+          if (typeof used === 'object') grantUse = used
         }
       }
       const { importRoot, authorizedRoot } = await resolveImportRoots(
@@ -383,6 +386,9 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
       throw new ServiceError('Unable to import managed media file', {
         code: 'MANAGED_MEDIA_IMPORT_FAILED'
       })
+    } finally {
+      // The next file of the same drop may now be imported (see spendLocalMediaImportGrant).
+      grantUse?.finished()
     }
   }
 

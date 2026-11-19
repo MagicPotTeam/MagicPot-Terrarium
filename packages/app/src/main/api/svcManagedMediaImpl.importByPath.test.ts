@@ -420,6 +420,31 @@ describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', 
       expect(countLocalMediaImportGrantsForTest()).toBe(1)
     })
 
+    it('tells the grant store when an import that spent a grant is over, success or failure', async () => {
+      const picked = path.join(outside, 'turn.png')
+      await fs.writeFile(picked, PNG)
+      const finished = vi.fn()
+      const consumeImportGrant = vi.fn(() => ({ finished }))
+      for (const outcome of ['imported', 'failed'] as const) {
+        expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+        finished.mockClear()
+        const { service } = create({
+          consumeImportGrant,
+          ...(outcome === 'failed'
+            ? {
+                importFile: vi.fn(async () => {
+                  throw new Error('copy failed')
+                })
+              }
+            : {})
+        })
+        const result = service.importFile(request(picked))
+        if (outcome === 'imported') await expect(result).resolves.toMatchObject({ reference: {} })
+        else await expect(result).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
+        expect(finished).toHaveBeenCalledOnce()
+      }
+    })
+
     it('refuses an import grant when no spender is wired (fails closed)', async () => {
       const picked = path.join(outside, 'unwired.png')
       await fs.writeFile(picked, PNG)

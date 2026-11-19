@@ -37,7 +37,13 @@ export type LocalMediaImportGrantDependencies = {
   now?: () => number
   /** Deadline for the realpath and stat (the file may sit on a stalled mount). */
   timeoutMs?: number
+  /** The drop this file came with (from the preload's drop lease), so its grants share a turn. */
+  batch?: string
 }
+
+/** A drop id from the preload; anything else is ignored. */
+export const toLocalMediaImportBatch = (value: unknown): string | undefined =>
+  typeof value === 'string' && /^[A-Za-z0-9-]{1,64}$/u.test(value) ? value : undefined
 
 /** A one-use import grant: the canonical path main will import, and its size when granted. */
 export type LocalMediaImportGrant = { path: string; sizeBytes: number }
@@ -76,7 +82,8 @@ export async function grantLocalMediaImportFile(
     realpath = (value) => fs.realpath(value),
     stat = (value) => fs.stat(value),
     now = localMediaImportGrantClock,
-    timeoutMs = DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs
+    timeoutMs = DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs,
+    batch
   }: LocalMediaImportGrantDependencies = {}
 ): Promise<LocalMediaImportGrant | LocalMediaImportGrantRefusal | null> {
   if (typeof filePath !== 'string' || typeof mimeType !== 'string') return null
@@ -90,7 +97,7 @@ export async function grantLocalMediaImportFile(
         if (isNetworkOrDevicePath(canonical)) {
           const stats = await stat(canonical)
           if (!stats.isFile()) return null
-          recordLocalMediaImportGrant(path.resolve(canonical), now(), 'read')
+          recordLocalMediaImportGrant(path.resolve(canonical), now(), 'read', { batch })
           return { refused: 'network', sizeBytes: stats.size }
         }
         const resolved = path.resolve(canonical)
@@ -101,7 +108,7 @@ export async function grantLocalMediaImportFile(
       { key: importSourceRootKey(filePath), timeoutMs }
     )
     if (!granted || !('path' in granted)) return granted
-    recordLocalMediaImportGrant(granted.path, now())
+    recordLocalMediaImportGrant(granted.path, now(), 'import', { batch })
     return granted
   } catch (error) {
     return (error as { code?: unknown })?.code === 'MANAGED_MEDIA_IMPORT_TIMEOUT'
@@ -134,10 +141,13 @@ export function registerLocalMediaFileIntakeIpc(getMainWindow: () => BrowserWind
     async (
       event,
       filePath: unknown,
-      mimeType: unknown
+      mimeType: unknown,
+      batch: unknown
     ): Promise<LocalMediaImportGrant | LocalMediaImportGrantRefusal | null> => {
       if (!isTrustedRenderer(event, getMainWindow)) return null
-      return grantLocalMediaImportFile(filePath, mimeType)
+      return grantLocalMediaImportFile(filePath, mimeType, {
+        batch: toLocalMediaImportBatch(batch)
+      })
     }
   )
 

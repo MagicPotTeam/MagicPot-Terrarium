@@ -20,7 +20,9 @@ import {
   clearScopedLocalMediaPathsForTest,
   consumeLocalMediaImportGrant,
   consumeLocalMediaReadGrant,
+  LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS,
   recordLocalMediaImportGrant,
+  spendLocalMediaImportGrant,
   countLocalMediaImportGrantsForTest,
   flushLocalMediaAccessGrants,
   initializeLocalMediaAccess,
@@ -105,8 +107,8 @@ describe('short-lived local media import grants', () => {
         removeEventListener: () => undefined
       } as unknown as Window,
       authorizePath: async (filePath) => authorizeScopedLocalMediaPath(filePath),
-      authorizeImportPath: async (filePath, mimeType) => {
-        const answer = await grantLocalMediaImportFile(filePath, mimeType)
+      authorizeImportPath: async (filePath, mimeType, dropId) => {
+        const answer = await grantLocalMediaImportFile(filePath, mimeType, { batch: dropId })
         return answer && 'path' in answer ? answer : null
       }
     })
@@ -257,6 +259,61 @@ describe('short-lived local media import grants', () => {
     expect(countLocalMediaImportGrantsForTest()).toBe(0)
   })
 
+  it('keeps the grants of one drop alive for its own imports, one after another, each spent once', () => {
+    const files = ['one.png', 'two.png', 'three.png'].map((name) => `/drop/${name}`)
+    const wall = 1_700_000_000_000
+    const at = (seconds: number) => [seconds * 1000, wall + seconds * 1000] as const
+    for (const file of files)
+      recordLocalMediaImportGrant(file, 0, 'import', { wallNow: wall, batch: 'drop-1-a' })
+    // A grant of another drop and one with no drop, recorded at the same time.
+    recordLocalMediaImportGrant('/other/x.png', 0, 'import', { wallNow: wall, batch: 'drop-2-b' })
+    recordLocalMediaImportGrant('/picked/y.png', 0, 'import', { wallNow: wall })
+
+    const first = spendLocalMediaImportGrant(files[0], 'import', ...at(10))
+    expect(first).not.toBeNull()
+    // The first import runs past the time to live: the rest of its drop waits for its turn,
+    // other grants expire as usual.
+    expect(countLocalMediaImportGrantsForTest(...at(70))).toBe(2)
+    first!.finished(...at(80))
+    // Each later grant lives a whole time to live after the previous import finished.
+    const second = spendLocalMediaImportGrant(files[1], 'import', ...at(139))
+    expect(second).not.toBeNull()
+    second!.finished(...at(200))
+    expect(spendLocalMediaImportGrant(files[2], 'import', ...at(259))).not.toBeNull()
+    // Each is spent once.
+    for (const file of files)
+      expect(spendLocalMediaImportGrant(file, 'import', ...at(260))).toBeNull()
+  })
+
+  it('never keeps a drop grant past its bounded total, even while an import of its drop hangs', () => {
+    const wall = 1_700_000_000_000
+    recordLocalMediaImportGrant('/drop/a.png', 0, 'import', { wallNow: wall, batch: 'drop-3-c' })
+    recordLocalMediaImportGrant('/drop/b.png', 0, 'import', { wallNow: wall, batch: 'drop-3-c' })
+    expect(spendLocalMediaImportGrant('/drop/a.png', 'import', 1_000, wall + 1_000)).not.toBeNull()
+    const end = LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS
+    expect(countLocalMediaImportGrantsForTest(end - 1, wall + end - 1)).toBe(1)
+    expect(spendLocalMediaImportGrant('/drop/b.png', 'import', end, wall + end)).toBeNull()
+  })
+
+  it('expires a grant when either clock passed its time (the monotonic one stops during sleep)', () => {
+    const wall = 1_700_000_000_000
+    recordLocalMediaImportGrant('/sleep/a.png', 0, 'import', { wallNow: wall })
+    recordLocalMediaImportGrant('/sleep/b.png', 0, 'import', { wallNow: wall })
+    // Asleep for an hour: the monotonic clock barely moved, the wall clock did.
+    expect(consumeLocalMediaImportGrant('/sleep/a.png', 1_000, 'import', wall + 3_600_000)).toBe(
+      false
+    )
+    // The wall clock set back does not extend a grant either.
+    expect(
+      consumeLocalMediaImportGrant(
+        '/sleep/b.png',
+        LOCAL_MEDIA_IMPORT_GRANT_TTL_MS,
+        'import',
+        wall - 1
+      )
+    ).toBe(false)
+  })
+
   it('lets readImageFromPath read a read-granted file once, and nothing else', async () => {
     const root = makeTempDir('magicpot-import-grants-')
     const mapped = path.join(root, 'mapped.png')
@@ -268,7 +325,7 @@ describe('short-lived local media import grants', () => {
     clearScopedLocalMediaPathsForTest()
     recordLocalMediaImportGrant(mapped, undefined, 'read')
     expect(await authorizeImport(mapped, [])).toBeNull()
-    expect(consumeLocalMediaReadGrant(mapped)).toBe(mapped)
+    expect(consumeLocalMediaReadGrant(mapped)).toMatchObject({ canonicalPath: mapped })
     expect(consumeLocalMediaReadGrant(mapped)).toBeNull()
     // A network path the page names is refused before any filesystem access (main would
     // contact that host).

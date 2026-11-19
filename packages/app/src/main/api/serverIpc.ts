@@ -32,7 +32,7 @@ import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
 import { MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES, ManagedMediaSvcImpl } from './svcManagedMediaImpl'
 import {
   authorizeLocalMediaImportSourcePathAsync,
-  consumeLocalMediaImportGrant
+  spendLocalMediaImportGrant
 } from '../localMediaAccess'
 import { getLocalMediaAllowedRoots } from '../localMediaAllowedRoots'
 import { ReportBundlesSvcImpl } from './svcReportBundlesImpl'
@@ -100,7 +100,7 @@ export const createServer = (
             timeoutMs: DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs
           }
         ),
-      consumeImportGrant: (canonicalPath) => consumeLocalMediaImportGrant(canonicalPath),
+      consumeImportGrant: (canonicalPath) => spendLocalMediaImportGrant(canonicalPath, 'import'),
       maxImportFileBytes: MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES,
       importSourceGuard: DEFAULT_IMPORT_SOURCE_GUARD,
       updateReferenceSnapshot: async (snapshot) => {

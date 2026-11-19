@@ -233,7 +233,8 @@ describe('preload capability boundary', () => {
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith(
       'local-media:authorize-import-path',
       fileURLToPath(url),
-      'image/png'
+      'image/png',
+      expect.stringMatching(/^drop-[a-z0-9-]+$/)
     )
     // Never the persisted grant channel.
     expect(invokeMock).not.toHaveBeenCalledWith(

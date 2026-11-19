@@ -47,7 +47,9 @@ const { createServiceClass, handleMock, onMock, catalogDelegateFactory, platform
     resolveAuthorizedLocalMediaPathMock: vi.fn((filePath: string, roots: readonly string[]) =>
       roots.some((root) => filePath.startsWith(`${root}/`)) ? filePath : null
     ),
-    consumeImportGrantMock: vi.fn((_canonicalPath: string) => true)
+    consumeImportGrantMock: vi.fn((_canonicalPath: string, _kind?: string) => ({
+      finished: vi.fn()
+    }))
   }
 })
 
@@ -85,12 +87,26 @@ vi.mock('./svcFsImpl', () => ({ FsSvcImpl: createServiceClass() }))
 vi.mock('./svcDccBridgeImpl', () => ({ DccBridgeSvcImpl: createServiceClass() }))
 vi.mock('./svcDuplicateCheckImpl', () => ({ DuplicateCheckSvcImpl: createServiceClass() }))
 vi.mock('./svcAppUpdateImpl', () => ({ AppUpdateSvcImpl: createServiceClass() }))
-vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: vi.fn(function (deps?: unknown) {
-  platformConstructor(deps); return new (createServiceClass())()
-}) }))
-vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({ createInstalledCatalogReadDelegate: catalogDelegateFactory }))
-vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: vi.fn(function (deps?: unknown) { managedMediaConstructor(deps); return new (createServiceClass())() }), MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES: 1024 }))
-vi.mock('../localMediaAccess', () => ({ authorizeLocalMediaImportSourcePathAsync: resolveAuthorizedLocalMediaPathMock, consumeLocalMediaImportGrant: consumeImportGrantMock }))
+vi.mock('./svcMagicAgentPlatformImpl', () => ({
+  MagicAgentPlatformSvcImpl: vi.fn(function (deps?: unknown) {
+    platformConstructor(deps)
+    return new (createServiceClass())()
+  })
+}))
+vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({
+  createInstalledCatalogReadDelegate: catalogDelegateFactory
+}))
+vi.mock('./svcManagedMediaImpl', () => ({
+  ManagedMediaSvcImpl: vi.fn(function (deps?: unknown) {
+    managedMediaConstructor(deps)
+    return new (createServiceClass())()
+  }),
+  MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES: 1024
+}))
+vi.mock('../localMediaAccess', () => ({
+  authorizeLocalMediaImportSourcePathAsync: resolveAuthorizedLocalMediaPathMock,
+  spendLocalMediaImportGrant: consumeImportGrantMock
+}))
 vi.mock('../localMediaAllowedRoots', () => ({ getLocalMediaAllowedRoots: () => ['/app-root'] }))
 vi.mock('./svcReportBundlesImpl', () => ({ ReportBundlesSvcImpl: createServiceClass() }))
 describe('serverIpc createServer', () => {
@@ -114,9 +130,11 @@ describe('serverIpc createServer', () => {
     await expect(deps.authorizeImportSourcePath?.('/elsewhere/a.png')).resolves.toBeNull()
     expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenLastCalledWith('/elsewhere/a.png', ['/app-root'])
     // importFile spends a one-use import grant through main's own grant store.
-    const { consumeImportGrant } = deps as { consumeImportGrant?: (canonicalPath: string) => boolean }
-    expect(consumeImportGrant?.('/picked/a.png')).toBe(true)
-    expect(consumeImportGrantMock).toHaveBeenCalledWith('/picked/a.png')
+    const { consumeImportGrant } = deps as {
+      consumeImportGrant?: (canonicalPath: string) => unknown
+    }
+    expect(consumeImportGrant?.('/picked/a.png')).toMatchObject({ finished: expect.any(Function) })
+    expect(consumeImportGrantMock).toHaveBeenCalledWith('/picked/a.png', 'import')
   })
 
   it('puts the source-path authorization under the import-source deadline, keyed by its root', async () => {

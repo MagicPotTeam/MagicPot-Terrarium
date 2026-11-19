@@ -288,6 +288,8 @@ export function resolveAuthorizedLocalMediaPath(
  * grants that canvas boards rely on.
  */
 export const LOCAL_MEDIA_IMPORT_GRANT_TTL_MS = 60_000
+/** The grants of one drop never live longer than this after they were recorded. */
+export const LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS = 10 * 60_000
 const MAX_LOCAL_MEDIA_IMPORT_GRANTS = 256
 /**
  * What a grant lets main do once: copy the file into managed media by its path ('import'),
@@ -295,17 +297,41 @@ const MAX_LOCAL_MEDIA_IMPORT_GRANTS = 256
  * network path, which main never imports by path, such as a file on a mapped drive).
  */
 export type LocalMediaImportGrantKind = 'import' | 'read'
-type LocalMediaImportGrantEntry = { expiresAt: number; kind: LocalMediaImportGrantKind }
+type LocalMediaImportGrantEntry = {
+  /** Expiry on the monotonic clock and on the wall clock: a grant expires at the first. */
+  expiresAt: number
+  wallExpiresAt: number
+  kind: LocalMediaImportGrantKind
+  /** The drop it belongs to: its imports run one after another (see spendLocalMediaImportGrant). */
+  batch?: string
+  batchDeadline?: number
+  batchWallDeadline?: number
+}
 /** Canonical-path key -> each grant for that path, oldest first. */
 const localMediaImportGrants = new Map<string, LocalMediaImportGrantEntry[]>()
+/** Drops with an import running now -> how many. */
+const localMediaImportBatchesInUse = new Map<string, number>()
 
-/** Monotonic: setting the clock back never extends a grant. */
+/**
+ * Monotonic: setting the clock back never extends a grant. It stops during system sleep, so
+ * a grant also expires when the wall clock passes its time (localMediaImportGrantWallClock).
+ */
 export const localMediaImportGrantClock = (): number => performance.now()
+export const localMediaImportGrantWallClock = (): number => Date.now()
 
-function pruneLocalMediaImportGrants(now: number): number {
+function isLiveGrant(entry: LocalMediaImportGrantEntry, now: number, wallNow: number): boolean {
+  if (entry.batch !== undefined) {
+    if (now >= (entry.batchDeadline ?? 0) || wallNow >= (entry.batchWallDeadline ?? 0)) return false
+    // While an import of its drop runs, the rest of the drop waits for its turn.
+    if (localMediaImportBatchesInUse.has(entry.batch)) return true
+  }
+  return now < entry.expiresAt && wallNow < entry.wallExpiresAt
+}
+
+function pruneLocalMediaImportGrants(now: number, wallNow: number): number {
   let total = 0
   for (const [key, entries] of localMediaImportGrants) {
-    const live = entries.filter((entry) => entry.expiresAt > now)
+    const live = entries.filter((entry) => isLiveGrant(entry, now, wallNow))
     if (live.length) {
       localMediaImportGrants.set(key, live)
       total += live.length
@@ -319,19 +345,32 @@ function pruneLocalMediaImportGrants(now: number): number {
 /**
  * Records one grant for a canonical path (the caller has canonicalised it and checked that
  * main would import, or read, it). The oldest grants go first when the bound is reached.
+ * `batch` names the drop it belongs to.
  */
 export function recordLocalMediaImportGrant(
   canonicalPath: string,
   now = localMediaImportGrantClock(),
-  kind: LocalMediaImportGrantKind = 'import'
+  kind: LocalMediaImportGrantKind = 'import',
+  { wallNow = localMediaImportGrantWallClock(), batch }: { wallNow?: number; batch?: string } = {}
 ): void {
   const key = comparisonKey(canonicalPath)
-  let total = pruneLocalMediaImportGrants(now)
+  let total = pruneLocalMediaImportGrants(now, wallNow)
   const entries = localMediaImportGrants.get(key) ?? []
   localMediaImportGrants.delete(key)
   localMediaImportGrants.set(key, [
     ...entries,
-    { expiresAt: now + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS, kind }
+    {
+      expiresAt: now + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS,
+      wallExpiresAt: wallNow + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS,
+      kind,
+      ...(batch !== undefined
+        ? {
+            batch,
+            batchDeadline: now + LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS,
+            batchWallDeadline: wallNow + LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS
+          }
+        : {})
+    }
   ])
   total += 1
   while (total > MAX_LOCAL_MEDIA_IMPORT_GRANTS) {
@@ -347,30 +386,75 @@ export function recordLocalMediaImportGrant(
 function hasLocalMediaImportGrant(
   canonicalPath: string,
   now: number,
-  kind: LocalMediaImportGrantKind = 'import'
+  kind: LocalMediaImportGrantKind = 'import',
+  wallNow = localMediaImportGrantWallClock()
 ): boolean {
   return (localMediaImportGrants.get(comparisonKey(canonicalPath)) ?? []).some(
-    (entry) => entry.kind === kind && entry.expiresAt > now
+    (entry) => entry.kind === kind && isLiveGrant(entry, now, wallNow)
   )
 }
 
+/** A spent grant; finished() when its import (or read) is over, whatever its outcome. */
+export type LocalMediaImportGrantUse = { finished(now?: number, wallNow?: number): void }
+
 /**
- * Spends one live grant of this kind for this canonical path; false when there is none. It
- * is synchronous, so two uses that both saw the grant cannot both spend it.
+ * Spends one live grant of this kind for this canonical path; null when there is none. It is
+ * synchronous, so two uses that both saw the grant cannot both spend it. The imports of one
+ * drop run one after another: while one of them runs, the drop's other grants wait, and when
+ * it is finished each of them lives LOCAL_MEDIA_IMPORT_GRANT_TTL_MS more, never past
+ * LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS after it was recorded. Each is still spent once.
  */
-export function consumeLocalMediaImportGrant(
+export function spendLocalMediaImportGrant(
   canonicalPath: string,
+  kind: LocalMediaImportGrantKind = 'import',
   now = localMediaImportGrantClock(),
-  kind: LocalMediaImportGrantKind = 'import'
-): boolean {
-  pruneLocalMediaImportGrants(now)
+  wallNow = localMediaImportGrantWallClock()
+): LocalMediaImportGrantUse | null {
+  pruneLocalMediaImportGrants(now, wallNow)
   const key = comparisonKey(canonicalPath)
   const entries = localMediaImportGrants.get(key)
   const index = entries?.findIndex((entry) => entry.kind === kind) ?? -1
-  if (!entries || index < 0) return false
-  entries.splice(index, 1)
+  if (!entries || index < 0) return null
+  const [spent] = entries.splice(index, 1)
   if (!entries.length) localMediaImportGrants.delete(key)
-  return true
+  const batch = spent.batch
+  if (batch === undefined) return { finished: () => undefined }
+  localMediaImportBatchesInUse.set(batch, (localMediaImportBatchesInUse.get(batch) ?? 0) + 1)
+  let done = false
+  return {
+    finished(
+      finishedAt = localMediaImportGrantClock(),
+      wallFinishedAt = localMediaImportGrantWallClock()
+    ) {
+      if (done) return
+      done = true
+      const running = (localMediaImportBatchesInUse.get(batch) ?? 1) - 1
+      if (running > 0) localMediaImportBatchesInUse.set(batch, running)
+      else localMediaImportBatchesInUse.delete(batch)
+      for (const others of localMediaImportGrants.values()) {
+        for (const entry of others) {
+          if (entry.batch !== batch) continue
+          entry.expiresAt = Math.max(entry.expiresAt, finishedAt + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS)
+          entry.wallExpiresAt = Math.max(
+            entry.wallExpiresAt,
+            wallFinishedAt + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS
+          )
+        }
+      }
+    }
+  }
+}
+
+/** spendLocalMediaImportGrant for a use that is over at once: true when a grant was spent. */
+export function consumeLocalMediaImportGrant(
+  canonicalPath: string,
+  now = localMediaImportGrantClock(),
+  kind: LocalMediaImportGrantKind = 'import',
+  wallNow = localMediaImportGrantWallClock()
+): boolean {
+  const use = spendLocalMediaImportGrant(canonicalPath, kind, now, wallNow)
+  use?.finished(now, wallNow)
+  return use !== null
 }
 
 /**
@@ -382,13 +466,14 @@ export function consumeLocalMediaImportGrant(
 export function consumeLocalMediaReadGrant(
   filePath: string,
   now = localMediaImportGrantClock()
-): string | null {
+): (LocalMediaImportGrantUse & { canonicalPath: string }) | null {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
   if (trimmed.startsWith('\\\\') || trimmed.startsWith('//')) return null
   const canonical = canonicalizeExistingPath(trimmed)
   if (!canonical) return null
-  return consumeLocalMediaImportGrant(canonical, now, 'read') ? canonical : null
+  const use = spendLocalMediaImportGrant(canonical, 'read', now)
+  return use ? { canonicalPath: canonical, finished: use.finished } : null
 }
 
 async function canonicalizeExistingPathAsync(
@@ -461,8 +546,11 @@ export async function authorizeLocalMediaImportSourcePathAsync(
     : null
 }
 
-export function countLocalMediaImportGrantsForTest(now = localMediaImportGrantClock()): number {
-  return pruneLocalMediaImportGrants(now)
+export function countLocalMediaImportGrantsForTest(
+  now = localMediaImportGrantClock(),
+  wallNow = localMediaImportGrantWallClock()
+): number {
+  return pruneLocalMediaImportGrants(now, wallNow)
 }
 
 /** Checks an already-authorized path without expanding the scoped allowlist. */
@@ -479,6 +567,7 @@ export function clearScopedLocalMediaPathsForTest(): void {
   scopedLocalMediaPaths.clear()
   scopedLocalMediaDirectories.clear()
   localMediaImportGrants.clear()
+  localMediaImportBatchesInUse.clear()
   localMediaGrantsPath = null
   localMediaGrantsDirty = false
 }

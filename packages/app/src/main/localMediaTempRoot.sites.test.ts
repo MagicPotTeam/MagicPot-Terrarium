@@ -28,7 +28,12 @@ vi.mock('./config/userDataDirectory', () => ({
 
 import { FsSvcImpl } from './api/svcFsImpl'
 import { CanvasThumbnailSvcImpl } from './api/svcCanvasThumbnailImpl'
-import { clearScopedLocalMediaPathsForTest, recordLocalMediaImportGrant } from './localMediaAccess'
+import {
+  clearScopedLocalMediaPathsForTest,
+  countLocalMediaImportGrantsForTest,
+  LOCAL_MEDIA_IMPORT_GRANT_TTL_MS,
+  recordLocalMediaImportGrant
+} from './localMediaAccess'
 import { forgetLocalMediaTempRootVerification } from './localMediaTempRoot'
 
 const PNG = Buffer.from(
@@ -128,5 +133,21 @@ describe('the temp media folder at every renderer-facing reader', () => {
     recordLocalMediaImportGrant(fs.realpathSync(dropped), undefined, 'read')
     await expect(reader.readImage()).resolves.toMatchObject({ filename: 'secret.png' })
     await expect(reader.readImage()).rejects.toThrow('not authorized')
+  })
+
+  it('hands the turn to the next file of the drop once a mapped-drive read is over', async () => {
+    const dropped = path.join(victim, 'secret.png')
+    // Two files of one drop: this one is read now, the other waits for its turn.
+    recordLocalMediaImportGrant(fs.realpathSync(dropped), undefined, 'read', { batch: 'drop-9-z' })
+    recordLocalMediaImportGrant('/elsewhere/next.png', undefined, 'import', { batch: 'drop-9-z' })
+    await expect(readers(dropped).readImage()).resolves.toMatchObject({ filename: 'secret.png' })
+    // The read is over: the next file lives one time to live from now, no longer.
+    const later = performance.now() + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS + 1_000
+    expect(
+      countLocalMediaImportGrantsForTest(
+        later,
+        Date.now() + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS + 1_000
+      )
+    ).toBe(0)
   })
 })
