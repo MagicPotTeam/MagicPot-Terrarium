@@ -412,9 +412,10 @@ type CanvasImageStreamPlanDraft = {
   /**
    * source-only: lazy tail of a huge batch, the renderer loads it on demand (no pixels from intake).
    * deferred: too large for an eager decode. thumbnail-first: identity and header size are known.
-   * decoded: everything else, loaded through an image element.
+   * decoded: everything else, loaded through an image element. failed: no header size and the
+   * decode failed: the frame gets the failed tile.
    */
-  mode: 'source-only' | 'deferred' | 'thumbnail-first' | 'decoded'
+  mode: 'source-only' | 'deferred' | 'thumbnail-first' | 'decoded' | 'failed'
   isLazyTail: boolean
   decoded?: LoadedCanvasImage
   sizeBytes?: number
@@ -1208,6 +1209,9 @@ async function resolveCanvasImageStreamEntryPixels({
 }): Promise<Omit<CanvasImageStreamPixelPatch, 'src'>> {
   const { source, sourceIndex } = entry
   try {
+    if (entry.mode === 'failed') {
+      throw new Error('The image could not be decoded.')
+    }
     if (entry.mode === 'deferred') {
       const resolveLazyTailDisplayAsset = entry.isLazyTail && Boolean(source.sourceFile)
       const deferred = await buildDeferredCanvasImageStreamEntry({
@@ -2244,10 +2248,19 @@ export function useCanvasAssetIntake({
                   source.src,
                   error
                 )
-                failedCount += 1
-                processedCount += 1
-                emitImportProgress('loading')
-                return null
+                // No header and no decode: a square frame that shows the failed tile, like any
+                // other image that cannot be decoded (counted when its pixels are resolved).
+                const { sourceWidth, sourceHeight } = resolveCanvasImageSourceDimensions(
+                  source,
+                  PROJECT_CANVAS_IMAGE_DEFERRED_PLACEHOLDER_MAX_SIDE
+                )
+                return {
+                  ...base,
+                  mode: 'failed',
+                  sourceWidth,
+                  sourceHeight,
+                  ...fitImageToCanvasSize(sourceWidth, sourceHeight)
+                }
               }
             }
           )

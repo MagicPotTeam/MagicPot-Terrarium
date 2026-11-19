@@ -381,6 +381,43 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
     expect(consoleError).toHaveBeenCalled()
   })
 
+  it('shows a failed tile for a file with no readable header that cannot be decoded', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const progress: CanvasImageBatchImportProgress[] = []
+    const store = createCanvasStore()
+    // No header size and no identity: the intake decodes it before the commit, which fails.
+    const broken: CanvasImageSourceInput = {
+      src: 'local-media:///C:/board/broken.bin.png',
+      fileName: 'broken.bin.png',
+      sizeBytes: 64
+    }
+    const sources = [...createSources(29), broken]
+    const { result } = renderIntake(store, {
+      onProgress: (event) => {
+        if (event) progress.push(event)
+      }
+    })
+
+    let imported: unknown[] = []
+    await act(async () => {
+      imported = await result.current.addImagesToCanvas(sources)
+    })
+
+    const frames = store.images()
+    const failed = frames.find((item) => item.fileName === 'broken.bin.png')
+    expect(frames).toHaveLength(sources.length)
+    expect(imported).toHaveLength(sources.length)
+    expect(isCanvasImagePlaceholderAsset(failed?.image)).toBe(true)
+    expect(isCanvasImagePendingPixelsAsset(failed?.image)).toBe(false)
+    expect(progress.at(-1)).toMatchObject({
+      phase: 'complete',
+      processed: sources.length,
+      imported: sources.length - 1,
+      failed: 1
+    })
+    expect(consoleError).toHaveBeenCalled()
+  })
+
   it('stops when the import is undone while it runs and never adds the frames back', async () => {
     const gates = new Map<string, ReturnType<typeof deferred<void>>>()
     thumbnailResolver.mockImplementation(async ({ src }) => {
