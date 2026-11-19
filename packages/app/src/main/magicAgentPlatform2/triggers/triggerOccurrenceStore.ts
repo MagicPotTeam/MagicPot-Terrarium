@@ -17,11 +17,24 @@ export type TriggerOccurrenceSource =
   | 'cron'
   | 'sdk'
   | 'custom'
-export type TriggerOccurrenceStatus = 'pending' | 'claimed' | 'completed' | 'failed' | 'dead-letter'
+/** 'unknown' is terminal: the execution permit step began, so the outcome cannot be retried safely. */
+export type TriggerOccurrenceStatus =
+  'pending' | 'claimed' | 'completed' | 'failed' | 'dead-letter' | 'unknown'
 export type TriggerOccurrenceClaim = Readonly<{
   owner: string
   claimedAt: number
   expiresAt: number
+}>
+/**
+ * Durable write-ahead marker: written by the claim owner before the execution permit is
+ * consumed. A marked record is never claimed again and the marker is never removed.
+ */
+export type TriggerOccurrencePermitMarker = Readonly<{
+  attempt: number
+  owner: string
+  markedAt: number
+  authorizationId: string
+  requestDigest: string
 }>
 export type TriggerOccurrenceState = Readonly<{
   schemaVersion: 1
@@ -37,6 +50,7 @@ export type TriggerOccurrenceState = Readonly<{
   claim?: TriggerOccurrenceClaim
   lastError?: Readonly<{ name: string; message: string }>
   nextRetryAt?: number
+  permit?: TriggerOccurrencePermitMarker
   createdAt: number
   updatedAt: number
   payloadDigest?: string
@@ -63,6 +77,7 @@ const event = (id: string, type: string, at: number, payload: unknown, revision:
   revision
 })
 
+// Keeps `permit`: a marker survives every transition.
 const withoutExecutionState = (
   state: TriggerOccurrenceState
 ): Omit<TriggerOccurrenceState, 'claim' | 'nextRetryAt' | 'lastError'> => {
@@ -72,6 +87,17 @@ const withoutExecutionState = (
   void lastError
   return base
 }
+
+const OUTCOME_UNKNOWN_EVENT = 'occurrence.outcome-unknown'
+const outcomeUnknown = (state: TriggerOccurrenceState, now: number): TriggerOccurrenceState => ({
+  ...withoutExecutionState(state),
+  status: 'unknown',
+  lastError: {
+    name: 'TriggerOccurrenceOutcomeUnknown',
+    message: 'Trigger occurrence outcome is unknown.'
+  },
+  updatedAt: now
+})
 
 const semantic = (input: {
   occurrenceId: string
@@ -167,12 +193,23 @@ export class TriggerOccurrenceStore {
     if (leaseMs <= 0) throw new Error('leaseMs must be positive.')
     if (!Number.isInteger(maxAttempts) || maxAttempts <= 0)
       throw new Error('maxAttempts must be a positive integer.')
-    const expiredMax = this.list().find(
+    const expired = this.list().filter(
       (item) =>
         item.state.status === 'claimed' &&
         (item.state.claim?.expiresAt ?? Infinity) <= now &&
-        item.state.attempt >= maxAttempts &&
         (mutable === undefined || mutable(item.state))
+    )
+    // Settle one expired marked claim per call; never-claimable does not depend on this.
+    const expiredMarked = expired.find((item) => item.state.permit !== undefined)
+    if (expiredMarked)
+      this.update(
+        expiredMarked,
+        outcomeUnknown(expiredMarked.state, now),
+        now,
+        OUTCOME_UNKNOWN_EVENT
+      )
+    const expiredMax = expired.find(
+      (item) => item.state.permit === undefined && item.state.attempt >= maxAttempts
     )
     if (expiredMax) {
       this.update(
@@ -185,6 +222,7 @@ export class TriggerOccurrenceStore {
     const candidate = this.list()
       .filter(
         (item) =>
+          item.state.permit === undefined &&
           ((item.state.status === 'pending' && item.state.scheduledAt <= now) ||
             (item.state.status === 'failed' &&
               item.state.scheduledAt <= now &&
@@ -219,6 +257,45 @@ export class TriggerOccurrenceStore {
       event: event(candidate.id, 'occurrence.claimed', now, state, candidate.revision + 1)
     }).resource as StoredResource<TriggerOccurrenceState>
   }
+  /**
+   * Writes the permit marker for the current attempt before the permit is consumed. Needs the
+   * live claim (owner and unexpired lease); repeating the same marker is a no-op, any other
+   * call on a marked record is refused.
+   */
+  markPermit(
+    id: string,
+    owner: string,
+    now: number,
+    input: Readonly<{ authorizationId: string; requestDigest: string }>
+  ): StoredResource<TriggerOccurrenceState> {
+    finite(now, 'now')
+    required(owner, 'owner')
+    required(input.authorizationId, 'authorizationId')
+    required(input.requestDigest, 'requestDigest')
+    const current = this.requireClaim(id, owner, now)
+    const marked = current.state.permit
+    if (marked) {
+      if (
+        marked.attempt === current.state.attempt &&
+        marked.authorizationId === input.authorizationId &&
+        marked.requestDigest === input.requestDigest
+      )
+        return current
+      throw new TriggerOccurrenceFencingError('Occurrence permit is already marked.')
+    }
+    const state: TriggerOccurrenceState = {
+      ...current.state,
+      permit: {
+        attempt: current.state.attempt,
+        owner,
+        markedAt: now,
+        authorizationId: input.authorizationId,
+        requestDigest: input.requestDigest
+      },
+      updatedAt: now
+    }
+    return this.update(current, state, now, 'occurrence.permit-marked')
+  }
   complete(id: string, owner: string, now: number): StoredResource<TriggerOccurrenceState> {
     return this.transition(id, owner, now, 'completed')
   }
@@ -235,7 +312,9 @@ export class TriggerOccurrenceStore {
     if (retryDelayMs < 0) throw new Error('retryDelayMs must be non-negative.')
     if (!Number.isInteger(maxAttempts) || maxAttempts <= 0)
       throw new Error('maxAttempts must be a positive integer.')
-    const current = this.requireClaim(id, owner, now)
+    const current = this.requireSettlementClaim(id, owner, now)
+    if (current.state.permit !== undefined)
+      return this.update(current, outcomeUnknown(current.state, now), now, OUTCOME_UNKNOWN_EVENT)
     const status = current.state.attempt >= maxAttempts ? 'dead-letter' : 'failed'
     const state: TriggerOccurrenceState = {
       ...withoutExecutionState(current.state),
@@ -265,8 +344,21 @@ export class TriggerOccurrenceStore {
       throw new TriggerOccurrenceFencingError('Claim fence rejected.')
     return current
   }
+  // A marked record is never claimed again, so its claim owner cannot change: settling it
+  // checks status and owner only. An unmarked record keeps the full lease fence.
+  private requireSettlementClaim(id: string, owner: string, now: number) {
+    const current = this.get(id)
+    if (
+      !current ||
+      current.state.status !== 'claimed' ||
+      current.state.claim?.owner !== owner ||
+      (current.state.permit === undefined && current.state.claim.expiresAt <= now)
+    )
+      throw new TriggerOccurrenceFencingError('Claim fence rejected.')
+    return current
+  }
   private transition(id: string, owner: string, now: number, status: 'completed') {
-    const current = this.requireClaim(id, owner, now)
+    const current = this.requireSettlementClaim(id, owner, now)
     return this.update(
       current,
       { ...withoutExecutionState(current.state), status, updatedAt: now },
