@@ -567,9 +567,18 @@ Return shape:
       // drag payload; abort the whole selection instead of silently dropping it.
       // The refusal never suggests removing the crop: that would expose the
       // whole original. A send or a new confirm proves the crop and keeps its
-      // pixels for the next drag.
-      if (attachmentSourceItems.some((item) => item.type === 'image' && item.crop)) {
-        notifyError(t('canvas.drag_cropped_image_unavailable'))
+      // pixels for the next drag, unless the crop is too large to keep.
+      const unresolvedCrops = attachmentSourceItems.filter(
+        (item): item is CanvasImageItem => item.type === 'image' && Boolean(item.crop)
+      )
+      if (unresolvedCrops.length > 0) {
+        notifyError(
+          t(
+            unresolvedCrops.some((item) => registry?.isTooLarge(item))
+              ? 'canvas.drag_cropped_image_too_large'
+              : 'canvas.drag_cropped_image_unavailable'
+          )
+        )
         throw new Error('CANVAS_CROP_EXPORT_UNAVAILABLE')
       }
       const dragManifestItems = attachmentSourceItems

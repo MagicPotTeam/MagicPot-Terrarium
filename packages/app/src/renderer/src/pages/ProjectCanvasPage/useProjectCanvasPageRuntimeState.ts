@@ -53,6 +53,39 @@ function resolveCanvasItemsUpdate(
   return typeof updater === 'function' ? updater(previous) : updater
 }
 
+/**
+ * A crop source record is a fact about the bytes of one source. An edit or set
+ * that gives an item another src while carrying its record over drops the
+ * record (and with it the crop's registry identity): the new source is proven
+ * again by a confirm, never by the old source's record. Returns next itself
+ * when nothing changes. Cheap: unchanged items are skipped by identity.
+ */
+export function dropCarriedCropSources(previous: CanvasItem[], next: CanvasItem[]): CanvasItem[] {
+  if (next === previous) return next
+  let previousById: Map<string, CanvasItem> | null = null
+  let result: CanvasItem[] | null = null
+  for (let index = 0; index < next.length; index += 1) {
+    const item = next[index]
+    if (item === previous[index] || item.type !== 'image' || item.cropSource === undefined) continue
+    let before: CanvasItem | undefined = previous[index]
+    if (before?.id !== item.id) {
+      previousById ??= new Map(previous.map((candidate) => [candidate.id, candidate]))
+      before = previousById.get(item.id)
+    }
+    if (
+      before?.type !== 'image' ||
+      before.src === item.src ||
+      before.cropSource !== item.cropSource
+    ) {
+      continue
+    }
+    const { cropSource: _carried, ...withoutRecord } = item
+    result ??= next.slice()
+    result[index] = withoutRecord
+  }
+  return result ?? next
+}
+
 function attestCanvasItemList(
   list: CanvasItem[],
   mapItem: CanvasItemAttestation
@@ -106,7 +139,10 @@ function reduceRuntimeItemsState(
   }
 
   if (action.type === 'set') {
-    const items = resolveCanvasItemsUpdate(action.updater, state.items)
+    const items = dropCarriedCropSources(
+      state.items,
+      resolveCanvasItemsUpdate(action.updater, state.items)
+    )
     // Non-history sets retain their existing selection-clear policy, even on item identity.
     return items === state.items && state.selectedHistoryRevision === null
       ? state
@@ -114,7 +150,10 @@ function reduceRuntimeItemsState(
   }
 
   if (action.type === 'edit') {
-    const items = resolveCanvasItemsUpdate(action.updater, state.items)
+    const items = dropCarriedCropSources(
+      state.items,
+      resolveCanvasItemsUpdate(action.updater, state.items)
+    )
     // Pure identity updaters reject the whole edit: no snapshot, redo loss or selection change.
     if (items === state.items) return state
     return {

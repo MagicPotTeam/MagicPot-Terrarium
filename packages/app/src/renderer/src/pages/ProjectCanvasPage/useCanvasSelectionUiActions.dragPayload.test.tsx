@@ -660,6 +660,52 @@ describe('useCanvasSelectionUiActions drag payload', () => {
     expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.drag_cropped_image_unavailable')
   })
 
+  it.each([
+    ['its PNG was over the per-entry cap', 'over-entry-cap'],
+    ['its output is over the draw cap', 'over-draw-cap']
+  ] as const)(
+    'says the crop is too large, not to send or confirm it again, when %s',
+    (_label, kind) => {
+      const huge = kind === 'over-draw-cap'
+      const record = huge
+        ? { ...PROVEN_CROP_SOURCE, width: 5000, height: 4000 }
+        : PROVEN_CROP_SOURCE
+      const tooLarge = createImageItem({
+        sourceWidth: record.width,
+        sourceHeight: record.height,
+        crop: huge
+          ? { x: 0, y: 0, width: 4500, height: 4000 }
+          : { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: record
+      })
+      const other = createImageItem({
+        id: 'image-2',
+        src: 'local-media:///C:/MagicPot/other.jpg',
+        fileName: 'other.jpg'
+      })
+      const registry = createCanvasProvenCropRegistry(
+        { maxEntryBytes: 8 },
+        { create: () => 'blob:never', revoke: vi.fn() }
+      )
+      // The confirm, the fill or a send drew a PNG the registry cannot keep.
+      if (!huge) {
+        const png = new Blob(['nine bytes'], { type: 'image/png' })
+        expect(registry.register(tooLarge, png, { width: 30, height: 40 })).toBeNull()
+      }
+      const notifyError = vi.fn()
+      const { result } = renderSelectionUiActions([tooLarge, other], vi.fn(), {
+        notifyError,
+        provenCropRegistry: registry
+      })
+      expect(() =>
+        result.current.buildCanvasDragPayload([tooLarge, other], {
+          objectUrl: 'blob:selection-snapshot'
+        })
+      ).toThrow('CANVAS_CROP_EXPORT_UNAVAILABLE')
+      expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.drag_cropped_image_too_large')
+    }
+  )
+
   it('refuses the whole selection when one of two cropped images has no proven crop', () => {
     const proven = createImageItem({ crop: { x: 10, y: 20, width: 30, height: 40 }, cropSource: PROVEN_CROP_SOURCE })
     const unproven = createImageItem({ id: 'image-2', crop: { x: 10, y: 20, width: 30, height: 40 }, cropSource: PROVEN_CROP_SOURCE })

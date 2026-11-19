@@ -1835,7 +1835,19 @@ export default function ProjectCanvasPageSelectionOverlays({
         t={t}
         onDragSelectedItems={(itemsToDrag, dataTransfer) => {
           const objectUrl = getQuickCanvasItemsImageUrl(itemsToDrag)
-          if (!objectUrl) return false
+          if (!objectUrl) {
+            // No snapshot yet. A cropped image without kept pixels is the usual
+            // reason: building the payload says so (it refuses with a message);
+            // otherwise the drag waits for the snapshot.
+            try {
+              buildCanvasDragPayload(itemsToDrag)
+            } catch (error) {
+              const refused =
+                error instanceof Error && error.message === 'CANVAS_CROP_EXPORT_UNAVAILABLE'
+              if (!refused) throw error
+            }
+            return false
+          }
 
           try {
             setCanvasDragPayload(

@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import { useCanvasAssetIntake } from './useCanvasAssetIntake'
 import { useCanvasLayerRuntime } from './useCanvasLayerRuntime'
 import { useCanvasMediaRuntime } from './useCanvasMediaRuntime'
@@ -271,6 +272,92 @@ describe('crop source records outside the undo history (F2 part 3)', () => {
     expect(result.current.historyRevision).toBe(revision)
     expect(result.current.historyCount).toBe(count)
     expect(recordOf(result.current.items)).toEqual(RECORD)
+  })
+})
+
+describe('crop source records follow the source (review of F2)', () => {
+  const RECORD = {
+    version: 1 as const,
+    origin: 'confirm' as const,
+    width: 400,
+    height: 300,
+    sizeBytes: 5000,
+    sha256: 'cd'.repeat(32)
+  }
+  const crop = { x: 10, y: 20, width: 100, height: 80 }
+  const image = (overrides: Partial<CanvasImageItem> = {}): CanvasImageItem => ({
+    id: 'image',
+    type: 'image',
+    src: 'local-media:///C:/images/source.png',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 80,
+    rotation: 0,
+    scaleX: 1,
+    scaleY: 1,
+    zIndex: 0,
+    locked: false,
+    sourceWidth: 400,
+    sourceHeight: 300,
+    crop,
+    cropSource: RECORD,
+    ...overrides
+  })
+  const only = (items: CanvasItem[]) => items[0] as CanvasImageItem
+  const withSrc = (src: string) => (prev: CanvasItem[]) =>
+    prev.map((item) => (item.type === 'image' ? { ...item, src } : item))
+
+  it('drops a record that an edit or a set carries to another source, and keeps it otherwise', () => {
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState())
+    act(() => result.current.setItemsWithHistory([makeText('note', 'n'), image()]))
+    act(() => result.current.setItemsWithHistory((prev) => [prev[1], prev[0]]))
+    // A move keeps it.
+    act(() => result.current.setItemsWithHistory((prev) => prev.map((item) => ({ ...item, x: 5 }))))
+    expect(only(result.current.items).cropSource).toBe(RECORD)
+
+    act(() => result.current.setItemsWithHistory(withSrc('local-media:///C:/images/other.png')))
+    expect(only(result.current.items)).toEqual(
+      expect.objectContaining({ src: 'local-media:///C:/images/other.png', crop })
+    )
+    expect(only(result.current.items)).not.toHaveProperty('cropSource')
+    // Undo shows the proven source again, with its record; redo does not.
+    act(() => result.current.handleUndo())
+    expect(only(result.current.items).cropSource).toBe(RECORD)
+    act(() => result.current.handleRedo())
+    expect(only(result.current.items)).not.toHaveProperty('cropSource')
+
+    act(() => result.current.setItems([image()]))
+    act(() => result.current.setItems(withSrc('local-media:///C:/images/third.png')))
+    expect(only(result.current.items)).not.toHaveProperty('cropSource')
+    // Items that arrive with their own record (a board load) keep it.
+    const loaded = image({ src: 'local-media:///C:/images/third.png', cropSource: { ...RECORD } })
+    act(() => result.current.setItems([loaded]))
+    expect(only(result.current.items)).toBe(loaded)
+  })
+
+  it('never lets an item take the PNG of another long source with the same sampled key', () => {
+    // Two 4 MiB data: sources that differ only between the sampled windows.
+    const first = `data:image/png;base64,${'A'.repeat(4 * 1024 * 1024)}`
+    const second = `${first.slice(0, 8000)}B${first.slice(8001)}`
+    const registry = createCanvasProvenCropRegistry(
+      {},
+      { create: () => 'blob:proven-first', revoke: vi.fn() }
+    )
+    const proven = image({ src: first })
+    expect(
+      registry.register(proven, new Blob(['first-crop'], { type: 'image/png' }), crop)
+    ).not.toBeNull()
+    // The sampled key alone does not tell the two sources apart.
+    expect(registry.lookup({ ...proven, src: second })).not.toBeNull()
+
+    const { result } = renderHook(() => useProjectCanvasPageRuntimeState())
+    act(() => result.current.setItems([proven]))
+    act(() => result.current.setItemsWithHistory(withSrc(second)))
+    const shown = only(result.current.items)
+    expect(shown.src).toBe(second)
+    expect(registry.lookup(shown)).toBeNull()
+    expect(registry.lookupPng(shown)).toBeNull()
   })
 })
 

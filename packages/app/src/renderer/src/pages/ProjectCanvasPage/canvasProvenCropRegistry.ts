@@ -31,6 +31,20 @@ export function isCanvasProvenCropDrawable(item: CanvasImageItem): boolean {
   return Boolean(size && size.width * size.height <= CANVAS_PROVEN_CROP_DRAW_MAX_PIXELS)
 }
 
+/**
+ * Whether the crop's output is above the draw cap, so it is never drawn for the
+ * registry. A crop without a record is measured by its own numbers: a later
+ * record only scales them up (thumbnail space) or keeps them.
+ */
+function isCanvasProvenCropOverDrawCap(item: CanvasImageItem): boolean {
+  if (item?.type !== 'image' || !item.crop) return false
+  const size = getCanvasProvenCropOutputSize(item) ?? {
+    width: Math.round(item.crop.width),
+    height: Math.round(item.crop.height)
+  }
+  return size.width * size.height > CANVAS_PROVEN_CROP_DRAW_MAX_PIXELS
+}
+
 export type CanvasProvenCrop = CanvasProvenCropPixels & { mimeType: 'image/png' }
 
 export type CanvasProvenCropObjectUrlApi = {
@@ -44,17 +58,24 @@ export type CanvasProvenCropRegistryLimits = {
   maxEntryBytes: number
 }
 
+export type CanvasProvenCropRegisterOptions = {
+  /** Items whose entries are never evicted for this one: it is refused instead. */
+  keep?: ReadonlySet<string>
+}
+
 export type CanvasProvenCropRegistry = {
   /**
    * Keeps the PNG drawn for an item's proven crop. The caller must have drawn
    * it from verified bytes; the registry only checks that the item still has a
    * verifiable crop and that the PNG has the crop's pixel size. Replaces an
-   * older entry of the same item. Null when refused.
+   * older entry of the same item. Null when refused; a PNG over the per-entry
+   * cap also marks the crop as too large (isTooLarge).
    */
   register: (
     item: CanvasImageItem,
     png: Blob,
-    size: { width: number; height: number }
+    size: { width: number; height: number },
+    options?: CanvasProvenCropRegisterOptions
   ) => CanvasProvenCrop | null
   /** The entry made for exactly this item id, source, record and crop, or null. */
   lookup: (item: CanvasImageItem) => CanvasProvenCrop | null
@@ -66,14 +87,27 @@ export type CanvasProvenCropRegistry = {
   lookupPng: (item: CanvasImageItem) => CanvasProvenCropPng | null
   /**
    * Drops the entries of items that are gone or now show another proven crop
-   * (or no crop). An item whose crop has no record yet keeps its entry: the
-   * record may still be landing. Returns the number of entries dropped.
+   * (or no crop). An item whose crop has no record yet keeps its entry while it
+   * shows the same source: the record may still be landing. Returns the number
+   * of entries dropped.
    */
   prune: (liveItems: readonly CanvasItem[]) => number
   /** Whether lookup would find an entry; does not change the recency order. */
   has: (item: CanvasImageItem) => boolean
   /** Whether a PNG of this many bytes fits without evicting another entry. */
   canAddWithoutEviction: (bytes: number) => boolean
+  /**
+   * Whether a PNG of this many bytes fits when only entries of items outside
+   * keep may be evicted for it.
+   */
+  canAddKeeping: (bytes: number, keep: ReadonlySet<string>) => boolean
+  /**
+   * Whether this crop can never be kept: its output is above the draw cap, or
+   * a PNG drawn for exactly this crop was over the per-entry cap.
+   */
+  isTooLarge: (item: CanvasImageItem) => boolean
+  /** Remembers that the PNG of exactly this crop is over the per-entry cap. */
+  markTooLarge: (item: CanvasImageItem) => void
   /**
    * Marks a proof of this item's crop as running (a confirm read or a fill),
    * so a second reader does not read and draw the same source. Returns the
@@ -91,6 +125,7 @@ export type CanvasProvenCropRegistry = {
   subscribe: (listener: (itemId: string) => void) => () => void
   readonly entryCount: number
   readonly totalBytes: number
+  readonly maxEntryBytes: number
 }
 
 export type CanvasProvenCropPng = {
@@ -102,6 +137,8 @@ export type CanvasProvenCropPng = {
 
 type RegistryEntry = CanvasProvenCrop & {
   key: string
+  /** The source part of the key, to drop the entry once the item shows another source. */
+  sourceKey: string
   itemId: string
   blob: Blob
   /** PNG bytes plus the key's UTF-16 bytes: what the entry keeps alive. */
@@ -116,6 +153,8 @@ const defaultObjectUrlApi: CanvasProvenCropObjectUrlApi = {
 /** Sources up to this length are part of a key verbatim; longer ones by fingerprint. */
 const SOURCE_KEY_MAX_LENGTH = 2048
 const KEY_BYTES_ALLOWANCE = 8 * 1024
+/** Crops whose PNG was over the per-entry cap are remembered up to this count. */
+const TOO_LARGE_KEY_LIMIT = 256
 const SOURCE_FINGERPRINT_WINDOWS = 256
 const SOURCE_FINGERPRINT_WINDOW_LENGTH = 16
 
@@ -194,7 +233,29 @@ export function createCanvasProvenCropRegistry(
   const entries = new Map<string, RegistryEntry>()
   const listeners = new Set<(itemId: string) => void>()
   const pendingCounts = new Map<string, number>()
+  const tooLargeKeys = new Set<string>()
   let totalBytes = 0
+
+  const markTooLarge = (key: string) => {
+    if (tooLargeKeys.has(key)) return
+    if (tooLargeKeys.size >= TOO_LARGE_KEY_LIMIT) {
+      const oldest = tooLargeKeys.values().next().value
+      if (oldest !== undefined) tooLargeKeys.delete(oldest)
+    }
+    tooLargeKeys.add(key)
+  }
+
+  /** Count and bytes of the entries that must stay (other items in keep). */
+  const measureKept = (keep: ReadonlySet<string>, exceptItemId?: string) => {
+    let count = 0
+    let bytes = 0
+    for (const entry of entries.values()) {
+      if (entry.itemId === exceptItemId || !keep.has(entry.itemId)) continue
+      count += 1
+      bytes += entry.retainedBytes
+    }
+    return { count, bytes }
+  }
 
   const revoke = (entry: RegistryEntry) => {
     try {
@@ -222,7 +283,7 @@ export function createCanvasProvenCropRegistry(
   })
 
   return {
-    register(item, png, size) {
+    register(item, png, size, options) {
       const key = getCanvasProvenCropKey(item)
       const expected = key ? getCanvasProvenCropOutputSize(item) : null
       if (!key || !expected) return null
@@ -231,11 +292,20 @@ export function createCanvasProvenCropRegistry(
         !(png instanceof Blob) ||
         png.type !== 'image/png' ||
         png.size <= 0 ||
-        png.size > maxEntryBytes ||
         size?.width !== expected.width ||
         size?.height !== expected.height
       ) {
         return null
+      }
+      if (png.size > maxEntryBytes) {
+        markTooLarge(key)
+        return null
+      }
+      const retainedBytes = png.size + key.length * 2
+      const keep = options?.keep
+      if (keep) {
+        const kept = measureKept(keep, item.id)
+        if (kept.count + 1 > maxEntries || kept.bytes + retainedBytes > maxBytes) return null
       }
       let url: string
       try {
@@ -254,6 +324,7 @@ export function createCanvasProvenCropRegistry(
       remove(item.id)
       const entry: RegistryEntry = {
         key,
+        sourceKey: getCanvasProvenCropSourceKey(item.src),
         itemId: item.id,
         blob: png,
         url,
@@ -262,13 +333,14 @@ export function createCanvasProvenCropRegistry(
         sizeBytes: png.size,
         width: expected.width,
         height: expected.height,
-        retainedBytes: png.size + key.length * 2
+        retainedBytes
       }
       entries.set(item.id, entry)
       totalBytes += entry.retainedBytes
-      for (const oldest of entries.values()) {
+      for (const oldest of Array.from(entries.values())) {
         if (entries.size <= maxEntries && totalBytes <= maxBytes) break
         if (oldest === entry) break
+        if (keep?.has(oldest.itemId)) continue
         remove(oldest.itemId)
       }
       for (const listener of Array.from(listeners)) {
@@ -315,7 +387,9 @@ export function createCanvasProvenCropRegistry(
         let keep = false
         if (live?.type === 'image' && live.crop) {
           const liveKey = getCanvasProvenCropKey(live)
-          keep = liveKey === null || liveKey === entry.key
+          keep =
+            liveKey === entry.key ||
+            (liveKey === null && getCanvasProvenCropSourceKey(live.src) === entry.sourceKey)
         }
         if (!keep) {
           remove(entry.itemId)
@@ -338,6 +412,20 @@ export function createCanvasProvenCropRegistry(
         totalBytes + bytes + KEY_BYTES_ALLOWANCE <= maxBytes
       )
     },
+    canAddKeeping(bytes, keep) {
+      if (!Number.isFinite(bytes) || bytes <= 0 || bytes > maxEntryBytes) return false
+      const kept = measureKept(keep)
+      return kept.count + 1 <= maxEntries && kept.bytes + bytes + KEY_BYTES_ALLOWANCE <= maxBytes
+    },
+    isTooLarge(item) {
+      if (isCanvasProvenCropOverDrawCap(item)) return true
+      const key = getCanvasProvenCropKey(item)
+      return Boolean(key && tooLargeKeys.has(key))
+    },
+    markTooLarge(item) {
+      const key = getCanvasProvenCropKey(item)
+      if (key) markTooLarge(key)
+    },
     beginPending(itemId) {
       pendingCounts.set(itemId, (pendingCounts.get(itemId) ?? 0) + 1)
       let done = false
@@ -355,6 +443,7 @@ export function createCanvasProvenCropRegistry(
     release() {
       const all = Array.from(entries.values())
       entries.clear()
+      tooLargeKeys.clear()
       totalBytes = 0
       for (const entry of all) revoke(entry)
     },
@@ -369,6 +458,9 @@ export function createCanvasProvenCropRegistry(
     },
     get totalBytes() {
       return totalBytes
+    },
+    get maxEntryBytes() {
+      return maxEntryBytes
     }
   }
 }
@@ -402,8 +494,12 @@ export function registerCanvasAgentSendProvenCrops(
     ) {
       return
     }
-    // Skip the decode of a PNG the registry would refuse for its size.
-    if ((prepared.sizeBytes ?? 0) > CANVAS_PROVEN_CROP_ENTRY_MAX_BYTES) return
+    // Skip the decode of a PNG the registry would refuse for its size; the drag
+    // then says the crop is too large instead of asking for a send.
+    if ((prepared.sizeBytes ?? 0) > registry.maxEntryBytes) {
+      registry.markTooLarge(original)
+      return
+    }
     try {
       const png = canvasPngDataUrlToBlob(prepared.src)
       if (!png) return

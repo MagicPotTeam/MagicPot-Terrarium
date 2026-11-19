@@ -254,6 +254,76 @@ describe('canvas proven crop registry', () => {
     expect(registry.lookupPng({ ...item, cropSource: undefined })).toBeNull()
   })
 
+  it('drops the entry of an item that shows another source, even before a new record (review of F2)', () => {
+    const { registry, revoke } = createRegistry()
+    const item = croppedItem()
+    const entry = registry.register(item, png(), CROP_SIZE)
+    // A src change drops the record; the entry for the old bytes goes too.
+    expect(
+      registry.prune([
+        { ...item, src: 'local-media:///C:/MagicPot/other.png', cropSource: undefined }
+      ])
+    ).toBe(1)
+    expect(revoke).toHaveBeenCalledExactlyOnceWith(entry!.url)
+    expect(registry.entryCount).toBe(0)
+  })
+
+  it('never evicts the entry of a kept item: it refuses the new PNG instead (review of F2)', () => {
+    // Two entries fit, plus the 8 KiB key allowance a check leaves for a third.
+    const entryBytes = 10_000 + keyBytes(croppedItem({ id: 'a' }))
+    const { registry, revoke } = createRegistry({ maxBytes: entryBytes * 2 + 8192 })
+    const [a, b, c] = ['a', 'b', 'c'].map((id) => croppedItem({ id }))
+    registry.register(a, png(10_000), CROP_SIZE)
+    registry.register(b, png(10_000), CROP_SIZE)
+    const both = new Set([a.id, b.id, c.id])
+    expect(registry.canAddKeeping(10_000, both)).toBe(false)
+    expect(registry.register(c, png(10_000), CROP_SIZE, { keep: both })).toBeNull()
+    expect([a, b, c].map((item) => registry.has(item))).toEqual([true, true, false])
+    expect(revoke).not.toHaveBeenCalled()
+
+    // Only b kept: a (unkept, least recently used) makes room.
+    const onlyB = new Set([b.id, c.id])
+    expect(registry.canAddKeeping(10_000, onlyB)).toBe(true)
+    expect(registry.register(c, png(10_000), CROP_SIZE, { keep: onlyB })).not.toBeNull()
+    expect([a, b, c].map((item) => registry.has(item))).toEqual([false, true, true])
+    expect(revoke).toHaveBeenCalledOnce()
+  })
+
+  it('knows a crop that can never be kept: over the draw cap or with a PNG over the entry cap (review of F2)', () => {
+    const { registry, create } = createRegistry({ maxEntryBytes: 64 })
+    const item = croppedItem()
+    expect(registry.isTooLarge(item)).toBe(false)
+    expect(registry.register(item, png(65), CROP_SIZE)).toBeNull()
+    expect(create).not.toHaveBeenCalled()
+    expect(registry.isTooLarge({ ...item })).toBe(true)
+    // Only for exactly that crop.
+    expect(registry.isTooLarge({ ...item, crop: { x: 0, y: 0, width: 60, height: 30 } })).toBe(
+      false
+    )
+    expect(registry.isTooLarge({ ...item, id: 'image-2' })).toBe(false)
+
+    const marked = croppedItem({ id: 'marked' })
+    registry.markTooLarge(marked)
+    expect(registry.isTooLarge(marked)).toBe(true)
+
+    // 4097 x 4096 output pixels: above the draw cap, with or without a record.
+    const huge = croppedItem({
+      id: 'huge',
+      sourceWidth: 5000,
+      sourceHeight: 5000,
+      crop: { x: 0, y: 0, width: 4097, height: 4096 },
+      cropSource: { ...RECORD, width: 5000, height: 5000 }
+    })
+    expect(registry.isTooLarge(huge)).toBe(true)
+    expect(registry.isTooLarge({ ...huge, cropSource: undefined })).toBe(true)
+    expect(registry.isTooLarge({ ...huge, crop: { x: 0, y: 0, width: 4096, height: 4096 } })).toBe(
+      false
+    )
+
+    registry.release()
+    expect(registry.isTooLarge(item)).toBe(false)
+  })
+
   it('draws at the crop size normalized against the record', () => {
     expect(getCanvasProvenCropOutputSize(croppedItem())).toEqual(CROP_SIZE)
     expect(
@@ -330,6 +400,19 @@ describe('crops proven by an Agent send', () => {
     const item = croppedItem()
     expect(registerCanvasAgentSendProvenCrops(registry, [item], [prepare(item)])).toBe(0)
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it('marks a crop whose sent PNG is over the entry limit as too large to drag', () => {
+    const { registry } = createRegistry()
+    const item = croppedItem()
+    expect(
+      registerCanvasAgentSendProvenCrops(
+        registry,
+        [item],
+        [sent(item, { sizeBytes: 33 * 1024 * 1024 })]
+      )
+    ).toBe(0)
+    expect(registry.isTooLarge(item)).toBe(true)
   })
 
   it('keeps nothing when the prepared PNG is the original data: source itself (F2 part 6)', () => {

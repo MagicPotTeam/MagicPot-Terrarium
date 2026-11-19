@@ -254,4 +254,129 @@ describe('useCanvasProvenCropRegistryFill', () => {
     })
     expect(readEvidence).not.toHaveBeenCalled()
   })
+
+  // The fill must not read, decode and encode a crop again on every click when
+  // the registry will not keep its PNG (review of F2, must-fix 1).
+  describe('does not churn', () => {
+    async function settle() {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+    }
+
+    function pngOf(bytes: number) {
+      return vi.fn(async (item: CanvasImageItem) => ({
+        blob: new Blob([new Uint8Array(bytes)], { type: 'image/png' }),
+        width: item.crop!.width,
+        height: item.crop!.height
+      }))
+    }
+
+    it('reads a selected crop whose PNG is over the per-entry cap once, however often the items change', async () => {
+      const item = provenItem('over-entry-cap')
+      const selectedIds = new Set([item.id])
+      const drawCrop = pngOf(200)
+      const { registry, readEvidence, rerender } = setup([item], {
+        selectedIds,
+        limits: { maxEntryBytes: 100 },
+        drawCrop
+      })
+      await settle()
+      for (let change = 1; change <= 5; change += 1) {
+        rerender({ items: [{ ...item, x: change }], selectedIds })
+        await settle()
+      }
+
+      expect(readEvidence).toHaveBeenCalledTimes(1)
+      expect(drawCrop).toHaveBeenCalledTimes(1)
+      expect(registry.entryCount).toBe(0)
+      // The drag tells the user the crop is too large, not to send it first.
+      expect(registry.isTooLarge(item)).toBe(true)
+    })
+
+    it('reads an unselected crop that does not fit next to the kept entries at most once', async () => {
+      const kept = provenItem('kept')
+      const waiting = provenItem('waiting')
+      const drawCrop = pngOf(12_000)
+      const { registry, readEvidence, revoke, rerender } = setup([], {
+        limits: { maxBytes: 20_000 },
+        drawCrop
+      })
+      expect(
+        registry.register(kept, new Blob([new Uint8Array(10_000)], { type: 'image/png' }), {
+          width: 100,
+          height: 80
+        })
+      ).not.toBeNull()
+      // Room for a tiny PNG, not for this crop's 12,000 bytes.
+      expect(registry.canAddWithoutEviction(1)).toBe(true)
+      expect(registry.canAddWithoutEviction(12_000)).toBe(false)
+      for (let change = 0; change <= 5; change += 1) {
+        rerender({ items: [kept, { ...waiting, x: change }], selectedIds: new Set() })
+        await settle()
+      }
+
+      expect(readEvidence).toHaveBeenCalledTimes(1)
+      expect(drawCrop).toHaveBeenCalledTimes(1)
+      expect(registry.has(kept)).toBe(true)
+      expect(registry.has(waiting)).toBe(false)
+      expect(revoke).not.toHaveBeenCalled()
+    })
+
+    it('never lets selected crops over the byte budget evict each other', async () => {
+      // Two of these PNGs fit the budget, three do not.
+      const [first, second, third] = ['first', 'second', 'third'].map((id) => provenItem(id))
+      const all = new Set([first.id, second.id, third.id])
+      const drawCrop = pngOf(14_000)
+      const { registry, readEvidence, revoke, rerender } = setup([first, second, third], {
+        selectedIds: all,
+        limits: { maxBytes: 40_000 },
+        drawCrop
+      })
+      await settle()
+      for (let change = 1; change <= 5; change += 1) {
+        rerender({ items: [first, second, { ...third, x: change }], selectedIds: all })
+        await settle()
+      }
+
+      // The first two are kept; the third is read once and then waits. A drag
+      // of all three is refused (no PNG for the third); none is read again.
+      expect(readEvidence).toHaveBeenCalledTimes(3)
+      expect([first, second, third].map((item) => registry.has(item))).toEqual([true, true, false])
+      expect(revoke).not.toHaveBeenCalled()
+
+      // Selected alone, the third is drawn once more and takes the oldest slot.
+      rerender({ items: [first, second, third], selectedIds: new Set([third.id]) })
+      await settle()
+      expect(readEvidence).toHaveBeenCalledTimes(4)
+      expect([first, second, third].map((item) => registry.has(item))).toEqual([false, true, true])
+
+      // All three selected again: the first does not fit next to the other two
+      // and is not read again.
+      for (let change = 1; change <= 3; change += 1) {
+        rerender({ items: [{ ...first, x: change }, second, third], selectedIds: all })
+        await settle()
+      }
+      expect(readEvidence).toHaveBeenCalledTimes(4)
+      expect([first, second, third].map((item) => registry.has(item))).toEqual([false, true, true])
+    })
+
+    it('does not read again when only the selection changes', async () => {
+      const item = provenItem('selection-only')
+      const items: CanvasItem[] = [item]
+      const drawCrop = pngOf(200)
+      const { readEvidence, rerender } = setup(items, {
+        limits: { maxEntryBytes: 100 },
+        drawCrop
+      })
+      await settle()
+      for (const ids of [['note'], ['note', 'shape'], [], ['shape']]) {
+        rerender({ items, selectedIds: new Set(ids) })
+        await settle()
+      }
+
+      expect(readEvidence).toHaveBeenCalledTimes(1)
+      expect(drawCrop).toHaveBeenCalledTimes(1)
+    })
+  })
 })

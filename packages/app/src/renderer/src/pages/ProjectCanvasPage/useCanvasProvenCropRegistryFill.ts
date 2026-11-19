@@ -8,11 +8,18 @@
 // same bounded read, hash and decode as a crop confirm, and only from bytes
 // whose byte size, SHA-256 and pixel size equal the item's record.
 //
-// Entries of deleted, uncropped or re-cropped items are dropped as soon as the
-// items change. Selected crops come first (a drag starts from the selection) and
-// may evict older entries. Other crops are drawn only while the registry has room, so the
-// fill never churns the registry. A crop that fails to prove is not read again
-// for the same key.
+// Entries of deleted, uncropped, re-cropped or re-sourced items are dropped as
+// soon as the items change. Selected crops come first (a drag starts from the
+// selection) and may evict the entries of unselected items, never those of
+// other selected items. Other crops are drawn only while the registry has room.
+//
+// No crop is read again for nothing: a crop that fails to prove, whose PNG the
+// registry refuses or whose PNG is over the per-entry cap is not read again for
+// the same key (and the drag calls the last kind too large). The size of every
+// drawn PNG is remembered, so a crop that did not fit, or whose entry was
+// evicted, is read again only once the registry has room for that size (for a
+// selected crop: next to the other selected crops' entries). Item and
+// selection changes start no read while that room is missing.
 import { useEffect, useRef } from 'react'
 import { drawVerifiedCanvasImageCropPng } from './canvasAgentAttachmentUtils'
 import {
@@ -41,8 +48,17 @@ const readFillEvidence: CanvasProvenCropFillEvidenceReader = (src, isCurrent) =>
     maxBytes: CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES
   })
 
-/** Keys that failed to prove are remembered up to this count. */
+/** Keys that failed to prove, and drawn PNG sizes, are remembered up to this count. */
 const FAILED_KEY_LIMIT = 512
+
+function rememberBounded<T>(map: Map<string, T>, key: string, value: T): void {
+  map.delete(key)
+  if (map.size >= FAILED_KEY_LIMIT) {
+    const oldest = map.keys().next().value
+    if (oldest !== undefined) map.delete(oldest)
+  }
+  map.set(key, value)
+}
 
 function waitForCanvasIdle(): Promise<void> {
   return new Promise((resolve) => {
@@ -60,6 +76,18 @@ function waitForCanvasIdle(): Promise<void> {
 }
 
 type CroppedImage = CanvasImageItem & { crop: NonNullable<CanvasImageItem['crop']> }
+
+/** A selected crop may evict entries of unselected items only; any other crop none at all. */
+function hasRoomForBytes(
+  registry: CanvasProvenCropRegistry,
+  bytes: number,
+  isSelected: boolean,
+  selectedIds: ReadonlySet<string>
+): boolean {
+  return isSelected
+    ? registry.canAddKeeping(bytes, selectedIds)
+    : registry.canAddWithoutEviction(bytes)
+}
 
 function isFillCandidate(item: CanvasItem): item is CroppedImage {
   return (
@@ -95,6 +123,8 @@ export function useCanvasProvenCropRegistryFill({
   const runningRef = useRef(false)
   const rerunRef = useRef(false)
   const failedKeysRef = useRef(new Set<string>())
+  // Key -> byte size of the PNG last drawn for it: no read until that size fits.
+  const drawnBytesRef = useRef(new Map<string, number>())
 
   useEffect(() => {
     mountedRef.current = true
@@ -124,13 +154,34 @@ export function useCanvasProvenCropRegistryFill({
       const activeRegistry = current.registry
       if (!activeRegistry) return
       const failedKeys = failedKeysRef.current
-      const candidates = current.items.filter(
-        (item): item is CroppedImage =>
-          isFillCandidate(item) &&
-          !activeRegistry.has(item) &&
-          !activeRegistry.isPending(item.id) &&
-          !failedKeys.has(getCanvasProvenCropKey(item) ?? '')
-      )
+      const drawnBytes = drawnBytesRef.current
+      const fail = (key: string) => {
+        if (failedKeys.size >= FAILED_KEY_LIMIT) failedKeys.clear()
+        failedKeys.add(key)
+        drawnBytes.delete(key)
+      }
+      // Room for this crop's PNG, at its known size once it was drawn.
+      const hasRoom = (key: string, isSelected: boolean) =>
+        hasRoomForBytes(
+          activeRegistry,
+          drawnBytes.get(key) ?? 1,
+          isSelected,
+          latestRef.current.selectedIds
+        )
+      const candidates = current.items.filter((item): item is CroppedImage => {
+        if (
+          !isFillCandidate(item) ||
+          activeRegistry.has(item) ||
+          activeRegistry.isPending(item.id) ||
+          activeRegistry.isTooLarge(item)
+        ) {
+          return false
+        }
+        const key = getCanvasProvenCropKey(item)
+        return Boolean(
+          key && !failedKeys.has(key) && hasRoom(key, current.selectedIds.has(item.id))
+        )
+      })
       // Selected crops first: a drag starts from the selection.
       const selected = current.selectedIds
       candidates.sort(
@@ -151,9 +202,8 @@ export function useCanvasProvenCropRegistryFill({
         ) {
           continue
         }
-        const isSelected = latestRef.current.selectedIds.has(live.id)
-        // Other crops never evict an entry: they wait until the registry has room.
-        if (!isSelected && !activeRegistry.canAddWithoutEviction(1)) continue
+        if (failedKeys.has(key) || activeRegistry.isTooLarge(live)) continue
+        if (!hasRoom(key, latestRef.current.selectedIds.has(live.id))) continue
         const isCurrent = () => {
           if (!mountedRef.current || latestRef.current.registry !== activeRegistry) return false
           const latest = findLive(live.id)
@@ -171,18 +221,33 @@ export function useCanvasProvenCropRegistryFill({
           }
           if (!isCurrent()) continue
           if (!evidence || !matchesCropSource(live, evidence)) {
-            if (failedKeys.size >= FAILED_KEY_LIMIT) failedKeys.clear()
-            failedKeys.add(key)
+            fail(key)
             continue
           }
           const png = await latestRef.current.drawCrop(live, evidence)
           if (!png || !isCurrent()) {
-            if (!png) failedKeys.add(key)
+            if (!png) fail(key)
             continue
           }
-          const stillSelected = latestRef.current.selectedIds.has(live.id)
-          if (!stillSelected && !activeRegistry.canAddWithoutEviction(png.blob.size)) continue
-          activeRegistry.register(live, png.blob, png)
+          if (png.blob.size > activeRegistry.maxEntryBytes) {
+            // Never kept: the drag says the crop is too large.
+            activeRegistry.markTooLarge(live)
+            fail(key)
+            continue
+          }
+          // Kept or not, its size decides whether it is read again (after an
+          // eviction too): only once the registry has room for it.
+          rememberBounded(drawnBytes, key, png.blob.size)
+          const selectedIds = latestRef.current.selectedIds
+          const stillSelected = selectedIds.has(live.id)
+          if (!hasRoomForBytes(activeRegistry, png.blob.size, stillSelected, selectedIds)) continue
+          const entry = activeRegistry.register(
+            live,
+            png.blob,
+            png,
+            stillSelected ? { keep: selectedIds } : undefined
+          )
+          if (!entry) fail(key)
         } finally {
           endPending()
         }

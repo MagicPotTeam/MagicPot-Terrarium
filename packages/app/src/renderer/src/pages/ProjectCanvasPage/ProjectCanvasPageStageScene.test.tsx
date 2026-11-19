@@ -5158,6 +5158,37 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
         }
       })
 
+      it('keeps nothing when the crop is undone while its PNG is still being encoded (review of F2)', async () => {
+        const target = {
+          ...createImageItem('registry-undo-encode'),
+          sourceWidth: 200,
+          sourceHeight: 120
+        }
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory } =
+            renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          const confirmed = applyConfirm(setItemsWithHistory, [target])
+          show(view, props, confirmed)
+          await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          show(view, props, applyRecord(setItemsWithoutHistory, confirmed))
+          // Undo while the encode runs: same item, source and size, no crop.
+          show(view, props, [target])
+          await act(async () => proven.finishEncode(new Blob(['crop'], { type: 'image/png' })))
+          await act(async () => {
+            await Promise.resolve()
+          })
+
+          expect(proven.kept).toEqual([])
+          expect(proven.registry.entryCount).toBe(0)
+        } finally {
+          proven.restore()
+        }
+      })
+
       it('keeps the newer crop when two confirm reads of one item resolve in reverse order (F2)', async () => {
         const target = { ...createImageItem('registry-reorder'), sourceWidth: 200, sourceHeight: 120 }
         const proven = setupRegistry()

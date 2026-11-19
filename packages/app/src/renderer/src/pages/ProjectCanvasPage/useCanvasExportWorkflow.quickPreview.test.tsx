@@ -71,12 +71,16 @@ function createStubRegistry(): CanvasProvenCropRegistry {
     prune: () => 0,
     has: (item) => Boolean(item.crop),
     canAddWithoutEviction: () => true,
+    canAddKeeping: () => true,
+    isTooLarge: () => false,
+    markTooLarge: () => undefined,
     beginPending: () => () => undefined,
     isPending: () => false,
     release: () => undefined,
     subscribe: () => () => undefined,
     entryCount: 0,
-    totalBytes: 0
+    totalBytes: 0,
+    maxEntryBytes: 32 * 1024 * 1024
   }
 }
 

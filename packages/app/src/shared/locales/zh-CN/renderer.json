@@ -1805,6 +1805,7 @@
     "group_conflict": "框选的部分有元素被创建在别的组合内。",
     "agent_send_cropped_image_failed": "无法安全发送已裁剪图片。移除裁剪后将发送完整原图；或者发送其他未裁剪图片。",
     "drag_cropped_image_unavailable": "这张裁剪图片暂时无法拖出。请先将它发送给 Agent，或重新确认一次裁剪，然后再拖动。",
+    "drag_cropped_image_too_large": "裁剪区域过大，无法拖出。请缩小裁剪范围。",
     "agent_send_overview_failed": "无法生成画布概览。请缩小选区或减小元素之间的距离后重试。",
     "send_to_agent_failed": "部分图片无法读取，请重新导入后重试。",
     "agent_edit_input_unavailable": "编辑消息时无法完整加入这组内容。请先完成或取消编辑，再重试。",
