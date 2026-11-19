@@ -1317,6 +1317,8 @@ const tryHandleSkillRuntimeToolCommand = async (
       ...(options?.canvasToolProvider ? { toolProvider: options.canvasToolProvider } : {})
     }
   )
+  // The explicit tool is a new start: none after the member's team has ended.
+  assertTeamRequestActive(req)
   const toolResult = options?.canvasToolAdmission
     ? await options.canvasToolAdmission.run(command.toolName, options.signal, execute)
     : await execute()
@@ -3030,6 +3032,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     try {
       for (let step = 0; ;) {
         throwIfAborted(options?.signal)
+        // No new model step (also the native fallback and protocol correction) once the
+        // member's team has ended; a step already sent is never recalled.
+        assertTeamRequestActive(req)
         restricted?.assertCurrent()
         options?.assertSkillContext?.()
         if (modelStepCount >= MAX_AGENT_MODEL_STEPS) {
@@ -3069,6 +3074,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             conversationId: req.conversationId,
             onDelta: capped || restricted || failedEditExplanation ? undefined : (event) => {
               options?.goalProgress?.assertLive()
+              // A capacity retry is a new provider request: refuse it after End.
+              if (event.type === 'retry') assertTeamRequestActive(req)
               if (
                 (event.type === 'text-delta' && event.delta) ||
                 event.type === 'attachment' ||
@@ -3212,6 +3219,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         const messagesBeforeBatch = conversationMessages.length
         for (const [requestedIndex, requestedTool] of requested.entries()) {
           throwIfAborted(options?.signal)
+          // No new tool call after End: it leaves no receipt, finished calls keep theirs.
+          assertTeamRequestActive(req)
           const toolCallId = `${runId}:tool:${batchStep + requestedIndex}`
           const toolOptions = {
             allowedToolNames,
@@ -3377,7 +3386,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             signal: options?.signal,
             sessionUrl: continuationUrl,
             conversationId: req.conversationId,
-            onDelta: finalStream.onDelta
+            onDelta: (event) => {
+              // No capacity retry after End; like the check above, the run keeps its budget error.
+              if (event.type === 'retry') assertTeamRequestActive(req)
+              finalStream.onDelta(event)
+            }
           }))
         } catch (error) {
           throwIfAborted(options?.signal)

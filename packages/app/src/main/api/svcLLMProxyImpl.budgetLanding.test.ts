@@ -288,7 +288,9 @@ describe('agent loop budget landing (native tools)', () => {
     const tuple = { scope: 's', thread: 't', lead: 'l', member: 'm' }
     let n = 0
     const chat = vi.fn(async (params: ChatParams) => {
-      if (n === 10) h.assertActive.mockImplementation(() => { throw new Error('Team has ended.') })
+      // End arrives while the step that returns the batch crossing the cap is in flight:
+      // that batch is refused by the cap, so the run reaches the landing check.
+      if (n === MAX_AGENT_TOOL_CALLS) h.assertActive.mockImplementation(() => { throw new Error('Team has ended.') })
       return params.tools ? { content: '', toolCalls: [call('t' + n++)] } : { content: SUMMARY }
     })
     vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
@@ -296,6 +298,25 @@ describe('agent loop budget landing (native tools)', () => {
     expect(error.message).toMatch(/tool-call budget exhausted/)
     expect(chat).toHaveBeenCalledTimes(65)
     expect(chat.mock.calls.every(([p]) => p.tools)).toBe(true)
+  })
+
+  it('sends no capacity retry of the final call after End and keeps the budget error', async () => {
+    const tuple = { scope: 's', thread: 't', lead: 'l', member: 'm' }
+    const notice = { type: 'retry', retry: { attempt: 1, delayMs: 2000, nextRetryAt: 1_000, reason: 'rate-limited' } }
+    let n = 0, noticeError: unknown
+    const chat = vi.fn(async (params: ChatParams & { onDelta?: (event: unknown) => void }) => {
+      if (params.tools) return { content: '', toolCalls: [call('r' + n++)] }
+      // End arrives while the final call is in flight; its provider reports a retry.
+      h.assertActive.mockImplementation(() => { throw new Error('Team has ended.') })
+      try { params.onDelta?.(notice) } catch (error) { noticeError = error; throw error }
+      return { content: SUMMARY }
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const error = await new LLMProxySvcImpl().chat(request({ teamMember: tuple })).catch(e => e)
+    expect(error.message).toMatch(/tool-call budget exhausted/)
+    expect((noticeError as Error)?.message).toBe('Team has ended.')
+    expect(error.cause).toBe(noticeError)
+    expect(chat).toHaveBeenCalledTimes(MAX_AGENT_TOOL_CALLS + 2)
   })
 
   it('lands a team member whose team is still active like any other run', async () => {

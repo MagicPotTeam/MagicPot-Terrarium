@@ -35,45 +35,221 @@ describe('model step after End (inert model)', () => {
     vi.mocked(getConfig).mockReturnValue(config)
     h.listTools.mockReturnValue([{ name: 'web_search', description: 'stub', inputSchema: { type: 'object', properties: {} } }])
   }
-  it('continues native fallback and final result after End without a second entry admission', async () => {
-    configure()
-    let finish!: () => void, started!: () => void
+  // Contract changed with backlog item 7: an admitted member turn starts no new model step,
+  // retry or tool call once its team has ended; what was already sent is not recalled.
+  const gate = () => {
+    let release!: () => void, started!: () => void
     const entered = new Promise<void>(resolve => { started = resolve })
-    const pending = new Promise<void>(resolve => { finish = resolve })
-    const chat = vi.fn().mockImplementationOnce(async () => { started(); await pending; throw Object.assign(Error('tools not supported'), { statusCode: 400 }) }).mockResolvedValueOnce('fallback result')
+    const pending = new Promise<void>(resolve => { release = resolve })
+    return { entered, pending, release, started }
+  }
+  const endTeam = () => h.assertActive.mockImplementation(() => { throw Error('Team has ended.') })
+  const nativeCall = (id: string, args = '{}') => ({ id, name: 'web_search', wireName: 'mp_tool_0', arguments: args })
+  it('sends no native fallback step when End is recorded while the first model call is in flight', async () => {
+    configure()
+    const step = gate()
+    const chat = vi.fn().mockImplementationOnce(async () => { step.started(); await step.pending; throw Object.assign(Error('tools not supported'), { statusCode: 400 }) }).mockResolvedValueOnce('fallback result')
     vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
     const service = new LLMProxySvcImpl(), result = service.chat(request)
-    await entered
-    h.assertActive.mockImplementation(() => { throw Error('Team has ended.') })
-    finish()
-    await expect(result).resolves.toMatchObject({ content: 'fallback result' })
-    expect(chat).toHaveBeenCalledTimes(2)
+    await step.entered
+    endTeam()
+    step.release()
+    await expect(result).rejects.toThrow('Team has ended.')
+    expect(chat).toHaveBeenCalledTimes(1)
     await expect(service.chat(request)).rejects.toThrow('Team has ended.')
-    expect(chat).toHaveBeenCalledTimes(2)
+    expect(chat).toHaveBeenCalledTimes(1)
   })
-  it('runs a tool and its continuation after End for an already admitted request', async () => {
+  it('starts no requested tool when End is recorded while the model call that asked for it is in flight', async () => {
     configure()
-    let finish!: () => void, started!: () => void
-    const entered = new Promise<void>(resolve => { started = resolve })
-    const pending = new Promise<void>(resolve => { finish = resolve })
+    const step = gate()
     h.callTool.mockResolvedValue({ content: 'stub tool output' })
     const chat = vi.fn().mockImplementationOnce(async () => {
-      started(); await pending
-      return { content: '', toolCalls: [{ id: 'call-1', name: 'web_search', wireName: 'mp_tool_0', arguments: '{}' }] }
+      step.started(); await step.pending
+      return { content: '', toolCalls: [nativeCall('call-1')] }
     }).mockResolvedValueOnce('completed with tool output')
     vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
     const service = new LLMProxySvcImpl(), result = service.chat(request)
-    await entered
-    h.assertActive.mockImplementation(() => { throw Error('Team has ended.') })
-    finish()
-    const response = await result
-    expect(response.content).toBe('completed with tool output')
-    expect(h.callTool).toHaveBeenCalledOnce()
-    expect(chat).toHaveBeenCalledTimes(2)
-    expect(chat.mock.calls[1][0].toolTurns).toEqual(expect.arrayContaining([expect.objectContaining({ results: [expect.objectContaining({ output: 'stub tool output' })] })]))
-    expect(response.metadata?.toolHistory).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: 'web_search', status: 'completed', content: 'stub tool output' })]))
+    await step.entered
+    endTeam()
+    step.release()
+    const error = await result.catch((e: unknown) => e) as Error & { metadata?: { toolHistory?: unknown[] } }
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe('Team has ended.')
+    expect(error.metadata?.toolHistory).toEqual([])
+    expect(h.callTool).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalledTimes(1)
     await expect(service.chat(request)).rejects.toThrow('Team has ended.')
+    expect(chat).toHaveBeenCalledTimes(1)
+  })
+  it('keeps a finished call of a native batch and starts none of the rest after End', async () => {
+    configure()
+    const tool = gate()
+    h.callTool.mockImplementationOnce(async () => { tool.started(); await tool.pending; return { content: 'first output' } })
+      .mockResolvedValueOnce({ content: 'second output' })
+    const chat = vi.fn().mockResolvedValueOnce({ content: '', toolCalls: [nativeCall('call-1'), nativeCall('call-2')] })
+      .mockResolvedValueOnce('answer after both tools')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const result = new LLMProxySvcImpl().chat(request)
+    await tool.entered
+    endTeam()
+    tool.release()
+    const error = await result.catch((e: unknown) => e) as Error & { metadata?: { toolHistory?: Array<Record<string, unknown>> } }
+    expect(error.message).toBe('Team has ended.')
+    expect(h.callTool).toHaveBeenCalledOnce()
+    expect(chat).toHaveBeenCalledOnce()
+    expect(error.metadata?.toolHistory).toHaveLength(1)
+    expect(error.metadata?.toolHistory?.[0]).toMatchObject({ toolName: 'web_search', status: 'completed', content: 'first output' })
+    expect(error.metadata?.toolHistory?.[0]).not.toHaveProperty('error')
+  })
+  it('returns the answer of a model step that was in flight after a completed tool round', async () => {
+    configure()
+    const step = gate()
+    h.callTool.mockResolvedValue({ content: 'stub tool output' })
+    const chat = vi.fn().mockResolvedValueOnce({ content: '', toolCalls: [nativeCall('call-1')] })
+      .mockImplementationOnce(async () => { step.started(); await step.pending; return 'answer after the tool' })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const result = new LLMProxySvcImpl().chat(request)
+    await step.entered
+    endTeam()
+    step.release()
+    const response = await result
+    expect(response.content).toBe('answer after the tool')
+    expect(response.metadata?.toolHistory).toEqual([expect.objectContaining({ toolName: 'web_search', status: 'completed', content: 'stub tool output' })])
     expect(chat).toHaveBeenCalledTimes(2)
+    expect(h.callTool).toHaveBeenCalledOnce()
+  })
+  it('refuses a capacity retry notice after End and forwards it unchanged while the team is active', async () => {
+    configure()
+    const notice = { type: 'retry' as const, retry: { attempt: 1, delayMs: 2000, nextRetryAt: 1_000, reason: 'rate-limited' as const } }
+    const step = gate()
+    let noticeError: unknown
+    const chat = vi.fn(async (params: { retryCapacity?: boolean; onDelta?: (event: typeof notice) => void }) => {
+      step.started(); await step.pending
+      try { params.onDelta?.(notice) } catch (error) { noticeError = error; throw error }
+      return 'answer after a retry'
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const ended = new LLMProxySvcImpl().chat(request)
+    await step.entered
+    endTeam()
+    step.release()
+    await expect(ended).rejects.toThrow('Team has ended.')
+    expect(noticeError).toBeInstanceOf(Error)
+    expect((noticeError as Error).message).toBe('Team has ended.')
+    expect(chat.mock.calls[0][0].retryCapacity).toBe(true)
+    expect(chat).toHaveBeenCalledOnce()
+    // Active team: the same notice reaches the stream unchanged and the turn completes.
+    configure()
+    chat.mockClear(); noticeError = undefined
+    const onData = vi.fn()
+    await new LLMProxySvcImpl().chatStream(request, { onData } as never)
+    expect(noticeError).toBeUndefined()
+    expect(onData).toHaveBeenCalledWith(expect.objectContaining({ type: 'retry', retry: notice.retry }))
+    expect(onData).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'done', finishReason: 'stop', fullContent: 'answer after a retry' }))
+    expect(h.assertActive).toHaveBeenCalledTimes(3) // entry, model step, retry notice
+  })
+  it('sends no second provider attempt of a rate-limited step after End', async () => {
+    configure()
+    const step = gate()
+    const { retryModelCapacity } = await import('@shared/llm/modelCapacityRetry')
+    const attempt = vi.fn().mockImplementationOnce(async () => { step.started(); await step.pending; throw Object.assign(Error('rate limited'), { statusCode: 429 }) })
+      .mockResolvedValueOnce('answer of a second attempt')
+    const chat = vi.fn((params: { onDelta?: () => void; signal?: AbortSignal }) => retryModelCapacity(params as never, attempt))
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const result = new LLMProxySvcImpl().chat(request)
+    await step.entered
+    endTeam()
+    step.release()
+    await expect(result).rejects.toThrow('Team has ended.')
+    expect(attempt).toHaveBeenCalledOnce()
+    expect(chat).toHaveBeenCalledOnce()
+  })
+  it('ends a stream with the End error and its streamed text, without starting the tool', async () => {
+    configure()
+    const step = gate()
+    h.callTool.mockResolvedValue({ content: 'stub tool output' })
+    const chat = vi.fn(async (params: { onDelta?: (event: { type: 'text-delta'; delta: string }) => void }) => {
+      params.onDelta?.({ type: 'text-delta', delta: 'Looking this up. ' })
+      step.started(); await step.pending
+      return { content: 'Looking this up. ', toolCalls: [nativeCall('call-1')] }
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const onData = vi.fn()
+    const result = new LLMProxySvcImpl().chatStream(request, { onData } as never)
+    await step.entered
+    endTeam()
+    step.release()
+    await result
+    const frames = onData.mock.calls.map(([frame]) => frame as Record<string, unknown>)
+    expect(frames.map(frame => frame.type)).toEqual(['text-delta', 'error', 'done'])
+    expect(frames[1]).toMatchObject({ error: 'Team has ended.', fullContent: 'Looking this up. ', finishReason: 'error' })
+    expect(frames[2]).toMatchObject({ error: 'Team has ended.', fullContent: 'Looking this up. ', finishReason: 'error' })
+    expect(frames.filter(frame => frame.type === 'done' && frame.finishReason !== 'error')).toEqual([])
+    expect(h.callTool).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalledOnce()
+  })
+  it('runs no explicit /tool command when End is recorded after the entry check', async () => {
+    configure()
+    h.callTool.mockResolvedValue({ content: 'stub tool output' })
+    const chat = vi.fn()
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const command = { ...request, messages: [{ role: 'user' as const, content: '/tool web_search {}' }] }
+    h.assertActive.mockImplementationOnce(() => undefined)
+    endTeam()
+    await expect(new LLMProxySvcImpl().chat(command)).rejects.toThrow('Team has ended.')
+    expect(h.callTool).not.toHaveBeenCalled()
+    expect(chat).not.toHaveBeenCalled()
+    // The /tools listing starts nothing and stays available to an admitted request.
+    h.assertActive.mockReset().mockImplementationOnce(() => undefined)
+    endTeam()
+    const listing = await new LLMProxySvcImpl().chat({ ...request, messages: [{ role: 'user' as const, content: '/tools' }] })
+    expect(listing.content).toContain('web_search')
+    expect(h.callTool).not.toHaveBeenCalled()
+  })
+  it('stops only the member of the ended team when two teams run at the same time', async () => {
+    configure()
+    const teamA = { ...tuple, thread: 'team-a' }, teamB = { ...tuple, thread: 'team-b' }
+    const ended = new Set<string>()
+    h.assertActive.mockImplementation((member: { thread: string }) => { if (ended.has(member.thread)) throw Error('Team has ended.') })
+    h.callTool.mockImplementation(async (_route: unknown, _name: string, args: { team: string }) => ({ content: 'output ' + args.team }))
+    const first = gate()
+    let inFlight = 0
+    const chat = vi.fn(async (params: { messages: Array<{ content: unknown }>; toolTurns?: unknown[] }) => {
+      const team = String(params.messages[0].content)
+      if (params.toolTurns?.length) return 'answer ' + team
+      if (++inFlight === 2) first.started()
+      await first.pending
+      return { content: '', toolCalls: [nativeCall('call-' + team, JSON.stringify({ team }))] }
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const service = new LLMProxySvcImpl()
+    const a = service.chat({ ...request, conversationId: 'member-a', messages: [{ role: 'user' as const, content: 'A' }], teamMember: teamA })
+    const b = service.chat({ ...request, conversationId: 'member-b', messages: [{ role: 'user' as const, content: 'B' }], teamMember: teamB })
+    await first.entered
+    ended.add('team-a')
+    first.release()
+    await expect(a).rejects.toThrow('Team has ended.')
+    const answer = await b
+    expect(answer.content).toBe('answer B')
+    expect(answer.metadata?.toolHistory).toEqual([expect.objectContaining({ status: 'completed', content: 'output B' })])
+    expect(h.callTool).toHaveBeenCalledOnce()
+    expect(h.callTool.mock.calls[0][2]).toEqual({ team: 'B' })
+    expect(chat).toHaveBeenCalledTimes(3)
+  })
+  it('never opens the End store for a request without teamMember across two tool rounds', async () => {
+    configure()
+    endTeam()
+    h.callTool.mockResolvedValue({ content: 'stub tool output' })
+    const chat = vi.fn().mockResolvedValueOnce({ content: '', toolCalls: [nativeCall('call-1')] })
+      .mockResolvedValueOnce({ content: '', toolCalls: [nativeCall('call-2')] })
+      .mockResolvedValueOnce('ordinary answer')
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const { teamMember: _member, ...ordinary } = request
+    const response = await new LLMProxySvcImpl().chat(ordinary)
+    expect(response.content).toBe('ordinary answer')
+    expect(h.callTool).toHaveBeenCalledTimes(2)
+    expect(chat).toHaveBeenCalledTimes(3)
+    expect(h.assertActive).not.toHaveBeenCalled()
   })
   it('finishes an admitted stream after End and rejects new streams before another provider call', async () => {
     configure()
