@@ -7,6 +7,7 @@ import {
   PROJECT_CANVAS_IMAGE_STREAM_PATCH_FRAME_LIMIT,
   getCanvasImageStreamPixelConcurrency,
   useCanvasAssetIntake,
+  withCanvasImageThumbnailDeadline,
   type CanvasImageBatchImportProgress
 } from './useCanvasAssetIntake'
 import {
@@ -53,7 +54,11 @@ vi.mock('./canvasStorage', () => ({
 const COLUMNS = 10
 const CELL = 200
 
-function createSources(count: number, label = 'stream'): CanvasImageSourceInput[] {
+function createSources(
+  count: number,
+  label = 'stream',
+  size: { width: number; height: number } = { width: 1024, height: 768 }
+): CanvasImageSourceInput[] {
   return Array.from({ length: count }, (_, index) => {
     const sizeBytes = 4096 + index
     const sourceIdentity = buildCanvasImageSourceIdentity({
@@ -65,8 +70,8 @@ function createSources(count: number, label = 'stream'): CanvasImageSourceInput[
       src: `local-media:///C:/board/${label}-${index}.png`,
       fileName: `${label}-${index}.png`,
       sizeBytes,
-      sourceWidthHint: 1024,
-      sourceHeightHint: 768,
+      sourceWidthHint: size.width,
+      sourceHeightHint: size.height,
       sourceIdentity: sourceIdentity!
     }
   })
@@ -661,6 +666,66 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
     expect(after?.image).toBeUndefined()
   })
 
+  it('works on very large photos one at a time instead of queueing them behind the pool budget', async () => {
+    let active = 0
+    let maxActive = 0
+    thumbnailResolver.mockImplementation(async ({ src }) => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      active -= 1
+      return createThumbnailResult(src)
+    })
+    const store = createCanvasStore()
+    const { result } = renderIntake(store)
+
+    // 8000 x 6000: one decoded photo and its levels take most of the pool's 256 MiB.
+    await act(async () => {
+      await result.current.addImagesToCanvas(
+        createSources(24, 'photo', { width: 8000, height: 6000 })
+      )
+    })
+    expect(countRealPixels(store.items)).toBe(24)
+    expect(maxActive).toBe(1)
+
+    // Small images still use every slot.
+    active = 0
+    maxActive = 0
+    await act(async () => {
+      await result.current.addImagesToCanvas(createSources(24, 'small'))
+    })
+    expect(maxActive).toBe(getCanvasImageStreamPixelConcurrency())
+  })
+
+  it('finishes a deferred source whose thumbnail timed out with a preview of its own', async () => {
+    // A deferred source: too large to decode eagerly. Its thumbnail resolve gives up.
+    thumbnailResolver.mockImplementation(async ({ src }) => {
+      if (src.includes('huge'))
+        throw new Error('Timed out resolving canvas image thumbnail for intake.')
+      return createThumbnailResult(src)
+    })
+    const store = createCanvasStore()
+    const { result } = renderIntake(store)
+
+    let imported: unknown[] = []
+    await act(async () => {
+      imported = await result.current.addImagesToCanvas([
+        ...createSources(4, 'huge', { width: 9000, height: 7000 }),
+        ...createSources(20, 'small')
+      ])
+    })
+
+    expect(imported).toHaveLength(24)
+    const huge = store.images().filter((item) => item.src.includes('huge'))
+    expect(huge).toHaveLength(4)
+    // Never left waiting: each has its deferred preview or the deferred placeholder.
+    expect(huge.every((item) => item.image && !isCanvasImagePendingPixelsAsset(item.image))).toBe(
+      true
+    )
+    expect(huge.every((item) => !item.thumbnailSet)).toBe(true)
+    expect(countRealPixels(store.items)).toBeGreaterThanOrEqual(20)
+  })
+
   it('shares the pixel concurrency between two imports started back to back', async () => {
     let active = 0
     let maxActive = 0
@@ -743,5 +808,67 @@ describe('useCanvasAssetIntake placeholder-first streaming import', () => {
     expect(store.images().every((item) => item.image === earlyImages.get(item.src))).toBe(true)
     expect(store.images().every((item) => Boolean(item.thumbnailSet))).toBe(true)
     expect(store.historyCommits).toBe(1)
+  })
+
+  describe('thumbnail deadline', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('gives up after the resolve time when no worker took the job, and aborts it', async () => {
+      vi.useFakeTimers()
+      let signal: AbortSignal | null = null
+      const result = withCanvasImageThumbnailDeadline(
+        (hooks) => {
+          signal = hooks.signal
+          return new Promise<string>(() => undefined)
+        },
+        'timed out',
+        { resolveTimeoutMs: 100, jobTimeoutMs: 1000 }
+      )
+      const rejected = expect(result).rejects.toThrow('timed out')
+      await vi.advanceTimersByTimeAsync(101)
+      await rejected
+      expect((signal as AbortSignal | null)?.aborted).toBe(true)
+    })
+
+    it('does not count the wait in the pool queue and gives a started job its own time', async () => {
+      vi.useFakeTimers()
+      let finish: (value: string) => void = () => undefined
+      let signal: AbortSignal | null = null
+      const result = withCanvasImageThumbnailDeadline(
+        (hooks) => {
+          signal = hooks.signal
+          setTimeout(hooks.onQueued, 50)
+          // Queued far longer than the resolve time ...
+          setTimeout(hooks.onDispatch, 5000)
+          // ... then the job runs longer than the resolve time, within its own time.
+          setTimeout(() => finish('levels'), 5800)
+          return new Promise<string>((resolve) => {
+            finish = resolve
+          })
+        },
+        'timed out',
+        { resolveTimeoutMs: 100, jobTimeoutMs: 1000 }
+      )
+      await vi.advanceTimersByTimeAsync(5800)
+      await expect(result).resolves.toBe('levels')
+      expect((signal as AbortSignal | null)?.aborted).toBe(false)
+    })
+
+    it('gives up on a started job that outlives its own time', async () => {
+      vi.useFakeTimers()
+      const result = withCanvasImageThumbnailDeadline(
+        (hooks) => {
+          setTimeout(hooks.onDispatch, 10)
+          return new Promise<string>(() => undefined)
+        },
+        'timed out',
+        { resolveTimeoutMs: 100, jobTimeoutMs: 1000 }
+      )
+      const rejected = expect(result).rejects.toThrow('timed out')
+      await vi.advanceTimersByTimeAsync(1011)
+      await rejected
+    })
   })
 })

@@ -323,6 +323,10 @@ export async function generateCanvasThumbnailLevels(
   if (workerLevels?.length) {
     return workerLevels
   }
+  // A caller that gave up gets no renderer-side generation on the main thread.
+  if (request.signal?.aborted) {
+    return []
+  }
 
   return await generateLevelsInRenderer(request)
 }
@@ -635,6 +639,9 @@ export async function ensureCanvasThumbnailSet({
   sourceHeight,
   firstLevelMaxSide,
   onFirstLevel,
+  signal,
+  onQueued,
+  onDispatch,
   skipWarmRead = false,
   bridge = getCanvasThumbnailIpcBridge()
 }: CanvasThumbnailGenerationRequest & {
@@ -675,11 +682,14 @@ export async function ensureCanvasThumbnailSet({
     sourceWidth,
     sourceHeight,
     firstLevelMaxSide,
-    onFirstLevel
+    onFirstLevel,
+    signal,
+    onQueued,
+    onDispatch
   }).catch(() => [] as CanvasGeneratedThumbnailLevel[])
   let status: CanvasThumbnailEnsureStatus = 'generated'
 
-  if (!generatedLevels.length) {
+  if (!generatedLevels.length && !signal?.aborted) {
     generatedLevels = await generateNativeThumbnailLevels({
       identity,
       bridge,

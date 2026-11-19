@@ -216,6 +216,15 @@ export type CanvasThumbnailGenerationRequest = {
    */
   firstLevelMaxSide?: number
   onFirstLevel?: (level: CanvasThumbnailWorkerGeneratedLevel) => void
+  /**
+   * The caller gave up: a job that still waits in the pool's queue is dropped (it never runs),
+   * and no renderer-side generation starts for it.
+   */
+  signal?: AbortSignal
+  /** Called when the job has to wait in the pool's queue (all workers or bytes are taken). */
+  onQueued?: () => void
+  /** Called once when a worker starts the job (at once when the request joins a running job). */
+  onDispatch?: () => void
 }
 
 export type CanvasThumbnailWorkerGenerateMessage = {

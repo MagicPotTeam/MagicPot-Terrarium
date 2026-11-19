@@ -42,7 +42,9 @@ export type CanvasThumbnailWorkerPoolOptions = {
  * estimated from the encoded size, generously.
  */
 export function estimateCanvasThumbnailJobBytes(
-  request: Pick<CanvasThumbnailGenerationRequest, 'source' | 'sourceWidth' | 'sourceHeight'>
+  request: Pick<CanvasThumbnailGenerationRequest, 'sourceWidth' | 'sourceHeight'> & {
+    source: Pick<Blob, 'size'>
+  }
 ): number {
   const { sourceWidth, sourceHeight } = request
   const decodedBytes =
@@ -70,6 +72,7 @@ export type CanvasThumbnailWorkerPoolMetrics = {
   inFlightKeyCount: number
   dedupedRequestCount: number
   rejectedRequestCount: number
+  cancelledRequestCount: number
   timedOutRequestCount: number
   failedWorkerCount: number
   completedRequestCount: number
@@ -90,6 +93,9 @@ type CanvasThumbnailWorkerJob = {
   bytes: number
   firstLevel: CanvasThumbnailWorkerGeneratedLevel | null
   firstLevelListeners: CanvasThumbnailFirstLevelListener[]
+  dispatchListeners: Array<() => void>
+  /** Callers still waiting for this job; a queued job nobody waits for is dropped. */
+  waitingCallers: number
   levels: readonly CanvasThumbnailLevelSize[]
   promise: Promise<readonly CanvasThumbnailWorkerGeneratedLevel[] | null>
   resolve: (levels: readonly CanvasThumbnailWorkerGeneratedLevel[] | null) => void
@@ -216,6 +222,7 @@ export class CanvasThumbnailWorkerPool {
   private idleTimeoutsByWorker = new Map<Worker, number>()
   private dedupedRequestCount = 0
   private rejectedRequestCount = 0
+  private cancelledRequestCount = 0
   private timedOutRequestCount = 0
   private failedWorkerCount = 0
   private completedRequestCount = 0
@@ -241,6 +248,9 @@ export class CanvasThumbnailWorkerPool {
   ): Promise<readonly CanvasThumbnailWorkerGeneratedLevel[] | null> {
     const levels = normalizeCanvasThumbnailWorkerLevels(request.levels)
     const key = createCanvasThumbnailWorkerPoolRequestKey({ ...request, levels })
+    if (request.signal?.aborted) {
+      return Promise.resolve(null)
+    }
     const existing = this.inFlightByKey.get(key)
     if (existing) {
       this.dedupedRequestCount += 1
@@ -251,6 +261,15 @@ export class CanvasThumbnailWorkerPool {
           existing.firstLevelListeners.push(request.onFirstLevel)
         }
       }
+      if (existing.worker) {
+        if (request.onDispatch) this.notifyDispatch(request.onDispatch)
+      } else {
+        if (request.onDispatch) existing.dispatchListeners.push(request.onDispatch)
+        if (request.onQueued && this.queue.includes(existing)) {
+          this.notifyDispatch(request.onQueued)
+        }
+      }
+      this.watchCaller(existing, request.signal)
       return existing.promise
     }
 
@@ -264,6 +283,8 @@ export class CanvasThumbnailWorkerPool {
       bytes: estimateCanvasThumbnailJobBytes(request),
       firstLevel: null,
       firstLevelListeners: request.onFirstLevel ? [request.onFirstLevel] : [],
+      dispatchListeners: request.onDispatch ? [request.onDispatch] : [],
+      waitingCallers: 0,
       levels,
       promise: new Promise<readonly CanvasThumbnailWorkerGeneratedLevel[] | null>(
         (resolve, reject) => {
@@ -278,6 +299,7 @@ export class CanvasThumbnailWorkerPool {
     }
 
     this.inFlightByKey.set(key, job)
+    this.watchCaller(job, request.signal)
     // First come, first served: a job never overtakes one that waits for its byte budget.
     const dispatched = this.queue.length > 0 ? 'full' : this.dispatch(job)
     if (dispatched === 'started') {
@@ -296,6 +318,9 @@ export class CanvasThumbnailWorkerPool {
     }
 
     this.queue.push(job)
+    if (request.onQueued) {
+      this.notifyDispatch(request.onQueued)
+    }
     return job.promise
   }
 
@@ -344,6 +369,7 @@ export class CanvasThumbnailWorkerPool {
   resetCounters(): void {
     this.dedupedRequestCount = 0
     this.rejectedRequestCount = 0
+    this.cancelledRequestCount = 0
     this.timedOutRequestCount = 0
     this.failedWorkerCount = 0
     this.completedRequestCount = 0
@@ -358,6 +384,7 @@ export class CanvasThumbnailWorkerPool {
       inFlightKeyCount: this.inFlightByKey.size,
       dedupedRequestCount: this.dedupedRequestCount,
       rejectedRequestCount: this.rejectedRequestCount,
+      cancelledRequestCount: this.cancelledRequestCount,
       timedOutRequestCount: this.timedOutRequestCount,
       failedWorkerCount: this.failedWorkerCount,
       completedRequestCount: this.completedRequestCount,
@@ -365,6 +392,44 @@ export class CanvasThumbnailWorkerPool {
       maxQueueSize: this.options.maxQueueSize,
       inFlightBytes: this.getInFlightBytes(),
       maxInFlightBytes: this.options.maxInFlightBytes
+    }
+  }
+
+  /**
+   * Counts a caller of the job. When every caller has given up while the job still waits in the
+   * queue, the job is dropped: it never takes a worker or bytes of the budget.
+   */
+  private watchCaller(job: CanvasThumbnailWorkerJob, signal: AbortSignal | undefined): void {
+    if (!signal) {
+      // A caller that cannot give up keeps the job for good.
+      job.waitingCallers = Number.POSITIVE_INFINITY
+      return
+    }
+    job.waitingCallers += 1
+    signal.addEventListener(
+      'abort',
+      () => {
+        job.waitingCallers -= 1
+        if (job.waitingCallers > 0 || job.worker) return
+        const index = this.queue.indexOf(job)
+        if (index < 0) return
+        this.queue.splice(index, 1)
+        if (this.inFlightByKey.get(job.key) === job) {
+          this.inFlightByKey.delete(job.key)
+        }
+        this.cancelledRequestCount += 1
+        job.resolve(null)
+        this.shortenIdleTimeoutsWhenDrained()
+      },
+      { once: true }
+    )
+  }
+
+  private notifyDispatch(listener: () => void): void {
+    try {
+      listener()
+    } catch (error) {
+      console.warn('[Canvas] Thumbnail dispatch listener failed.', error)
     }
   }
 
@@ -404,6 +469,9 @@ export class CanvasThumbnailWorkerPool {
 
     job.worker = worker
     this.activeJobsByWorker.set(worker, job)
+    for (const listener of job.dispatchListeners.splice(0)) {
+      this.notifyDispatch(listener)
+    }
     job.timeoutId = this.setTimeout(() => {
       this.failJob(job, new Error('Thumbnail worker timed out.'), true, true)
     }, this.options.requestTimeoutMs)

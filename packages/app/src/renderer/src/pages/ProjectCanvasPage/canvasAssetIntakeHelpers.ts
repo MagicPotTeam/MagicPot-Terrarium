@@ -865,6 +865,9 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
   sizeBytes,
   maxPreviewSide = CANVAS_IMAGE_PROXY_MAX_SIDE,
   onFirstImage,
+  signal,
+  onQueued,
+  onDispatch,
   loadImageFromSrcFn = loadImageFromSrc
 }: {
   src: string
@@ -882,6 +885,11 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
    * image the resolved result carries (the result adds the thumbnail set).
    */
   onFirstImage?: (image: CanvasImageAsset) => void
+  /** The caller gave up: a thumbnail job still waiting for a worker is dropped. */
+  signal?: AbortSignal
+  /** Called when the thumbnail job of this image waits for a worker, and when one starts it. */
+  onQueued?: () => void
+  onDispatch?: () => void
   loadImageFromSrcFn?: (src: string) => Promise<LoadedCanvasImage>
 }): Promise<{ image: CanvasImageAsset; thumbnailSet: CanvasImageThumbnailSet } | null> {
   if (!sourceIdentity) {
@@ -911,6 +919,9 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
           identity: sourceIdentity,
           // The cache was read just above.
           skipWarmRead: true,
+          ...(signal ? { signal } : {}),
+          ...(onQueued ? { onQueued } : {}),
+          ...(onDispatch ? { onDispatch } : {}),
           ...(typeof sourceWidth === 'number' && typeof sourceHeight === 'number'
             ? { sourceWidth, sourceHeight }
             : {}),

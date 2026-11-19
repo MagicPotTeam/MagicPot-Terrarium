@@ -77,6 +77,7 @@ import {
   getCanvasThumbnailWorkerPoolMetrics,
   prewarmCanvasThumbnailWorkers
 } from './canvasThumbnailWorkerClient'
+import { estimateCanvasThumbnailJobBytes } from './canvasThumbnailWorkerPool'
 import {
   buildBboxToCellIdsMap,
   buildCanvasPreviewSheetsFromOcrResult,
@@ -628,6 +629,55 @@ async function withCanvasImageIntakeTimeout<T>(
   }
 }
 
+/**
+ * A thumbnail job may wait in the worker pool's queue as long as it has to (the pool drains: each
+ * running job has the pool's own timeout), so only the steps around it are timed: the cache read
+ * and source read before it (the resolve timeout), and the job itself once a worker starts it
+ * (the pool's job timeout plus the resolve timeout for writing and loading the level). When the
+ * deadline passes the caller gives up: a job still queued is dropped and nothing is generated
+ * on the main thread for it.
+ */
+export const PROJECT_CANVAS_IMAGE_THUMBNAIL_JOB_TIMEOUT_MS =
+  30_000 + PROJECT_CANVAS_IMAGE_THUMBNAIL_RESOLVE_TIMEOUT_MS
+
+export async function withCanvasImageThumbnailDeadline<T>(
+  run: (hooks: { signal: AbortSignal; onQueued: () => void; onDispatch: () => void }) => Promise<T>,
+  errorMessage: string,
+  {
+    resolveTimeoutMs = PROJECT_CANVAS_IMAGE_THUMBNAIL_RESOLVE_TIMEOUT_MS,
+    jobTimeoutMs = PROJECT_CANVAS_IMAGE_THUMBNAIL_JOB_TIMEOUT_MS
+  }: { resolveTimeoutMs?: number; jobTimeoutMs?: number } = {}
+): Promise<T> {
+  const controller = new AbortController()
+  let timeoutId: ReturnType<typeof setTimeout> | null = null
+  let rejectDeadline: (error: Error) => void = () => undefined
+  const deadline = new Promise<never>((_, reject) => {
+    rejectDeadline = reject
+  })
+  const arm = (timeoutMs: number | null) => {
+    if (timeoutId) clearTimeout(timeoutId)
+    timeoutId = null
+    if (timeoutMs == null) return
+    timeoutId = setTimeout(() => {
+      controller.abort()
+      rejectDeadline(new Error(errorMessage))
+    }, timeoutMs)
+  }
+  arm(resolveTimeoutMs)
+  try {
+    return await Promise.race([
+      run({
+        signal: controller.signal,
+        onQueued: () => arm(null),
+        onDispatch: () => arm(jobTimeoutMs)
+      }),
+      deadline
+    ])
+  } finally {
+    arm(null)
+  }
+}
+
 function getPositiveCanvasImageSourceHint(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 }
@@ -988,18 +1038,21 @@ async function resolveCanvasImageIntakeThumbnail({
   const sourceWidth = getPositiveCanvasImageSourceHint(source.sourceWidthHint)
   const sourceHeight = getPositiveCanvasImageSourceHint(source.sourceHeightHint)
   try {
-    thumbnail = await withCanvasImageIntakeTimeout(
-      resolveCanvasImageThumbnailDisplayAsset({
-        src: source.src,
-        sourceIdentity: source.sourceIdentity,
-        thumbnailSet: source.thumbnailSet,
-        sourceFile: source.sourceFile,
-        ...(sourceWidth != null && sourceHeight != null ? { sourceWidth, sourceHeight } : {}),
-        ...(typeof source.sizeBytes === 'number' ? { sizeBytes: source.sizeBytes } : {}),
-        maxPreviewSide,
-        ...(onFirstImage ? { onFirstImage } : {})
-      }),
-      PROJECT_CANVAS_IMAGE_THUMBNAIL_RESOLVE_TIMEOUT_MS,
+    thumbnail = await withCanvasImageThumbnailDeadline(
+      ({ signal, onQueued, onDispatch }) =>
+        resolveCanvasImageThumbnailDisplayAsset({
+          src: source.src,
+          sourceIdentity: source.sourceIdentity,
+          thumbnailSet: source.thumbnailSet,
+          sourceFile: source.sourceFile,
+          ...(sourceWidth != null && sourceHeight != null ? { sourceWidth, sourceHeight } : {}),
+          ...(typeof source.sizeBytes === 'number' ? { sizeBytes: source.sizeBytes } : {}),
+          maxPreviewSide,
+          ...(onFirstImage ? { onFirstImage } : {}),
+          signal,
+          onQueued,
+          onDispatch
+        }),
       'Timed out resolving canvas image thumbnail for intake.'
     )
   } catch (error) {
@@ -1285,7 +1338,11 @@ export function useCanvasAssetIntake({
   const ownedCanvasImageObjectUrlsRef = useRef(new Set<string>())
   const ownedCanvasImageObjectUrlReleasesRef = useRef(new Map<string, () => void>())
   const intakeAbortControllerRef = useRef(new AbortController())
-  const pixelSlotsRef = useRef({ active: 0, waiters: [] as Array<() => void> })
+  const pixelSlotsRef = useRef({
+    active: 0,
+    bytes: 0,
+    waiters: [] as Array<{ bytes: number; start: () => void }>
+  })
   const isMountedRef = useRef(true)
   const canvasSceneImportCountRef = useRef(0)
   const isCanvasSceneImporting = useCallback(() => canvasSceneImportCountRef.current > 0, [])
@@ -1370,25 +1427,38 @@ export function useCanvasAssetIntake({
   /**
    * Thumbnail and decode work in flight for this canvas, shared by every running import: two
    * imports started back to back must not double the load, and a waiting job's timeout only
-   * starts once it holds a slot.
+   * starts once it holds a slot. Slots are counted and, like the worker pool, capped by the
+   * decoded bytes of the images in flight: an image never waits behind the pool's byte budget
+   * while it already holds a slot (ten 8000 x 6000 photos run one at a time, here and in the
+   * pool), first come first served. An image larger than the whole budget still gets a slot,
+   * alone.
    */
-  const acquirePixelSlot = useCallback((): Promise<() => void> => {
+  const acquirePixelSlot = useCallback((bytes: number): Promise<() => void> => {
     const slots = pixelSlotsRef.current
-    const grant = () => {
+    const fits = (candidate: number) =>
+      slots.active === 0 ||
+      (slots.active < getCanvasImageStreamPixelConcurrency() &&
+        slots.bytes + candidate <= getCanvasThumbnailWorkerPoolMetrics().maxInFlightBytes)
+    const grant = (granted: number) => {
+      slots.active += 1
+      slots.bytes += granted
       let released = false
       return () => {
         if (released) return
         released = true
-        const next = slots.waiters.shift()
-        if (next) next()
-        else slots.active -= 1
+        slots.active -= 1
+        slots.bytes -= granted
+        while (slots.waiters.length > 0 && fits(slots.waiters[0].bytes)) {
+          slots.waiters.shift()?.start()
+        }
       }
     }
-    if (slots.active < getCanvasImageStreamPixelConcurrency()) {
-      slots.active += 1
-      return Promise.resolve(grant())
+    if (slots.waiters.length === 0 && fits(bytes)) {
+      return Promise.resolve(grant(bytes))
     }
-    return new Promise((resolve) => slots.waiters.push(() => resolve(grant())))
+    return new Promise((resolve) => {
+      slots.waiters.push({ bytes, start: () => resolve(grant(bytes)) })
+    })
   }, [])
 
   const prepareCanvasImageSource = useCallback(
@@ -2467,7 +2537,13 @@ export function useCanvasAssetIntake({
               }
               const entry = takeNextPixelEntry()
               if (!entry) return
-              const releaseSlot = await acquirePixelSlot()
+              const releaseSlot = await acquirePixelSlot(
+                estimateCanvasThumbnailJobBytes({
+                  source: { size: entry.sizeBytes ?? 0 },
+                  sourceWidth: entry.sourceWidth,
+                  sourceHeight: entry.sourceHeight
+                })
+              )
               try {
                 assertActive()
                 if (abandoned) return

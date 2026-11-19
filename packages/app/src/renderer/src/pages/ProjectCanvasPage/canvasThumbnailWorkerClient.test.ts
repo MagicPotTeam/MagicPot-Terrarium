@@ -471,6 +471,23 @@ describe('canvasThumbnailWorkerClient', () => {
     )
   })
 
+  it('generates nothing on the main thread for a caller that gave up', async () => {
+    const { drawImage } = installRendererThumbnailMocks()
+    const createNativeThumbnail = vi.fn()
+    const result = await ensureCanvasThumbnailSet({
+      source: new Blob(['source'], { type: 'image/png' }),
+      identity: createIdentity(),
+      skipWarmRead: true,
+      signal: AbortSignal.abort(),
+      bridge: { createNativeThumbnail }
+    })
+
+    expect(result.status).toBe('failed')
+    expect(drawImage).not.toHaveBeenCalled()
+    expect(HTMLCanvasElement.prototype.toBlob).not.toHaveBeenCalled()
+    expect(createNativeThumbnail).not.toHaveBeenCalled()
+  })
+
   it('does not read the cache again when the caller has just missed it', async () => {
     const identity = createIdentity()
     installRendererThumbnailMocks()

@@ -543,6 +543,76 @@ describe('CanvasThumbnailWorkerPool', () => {
       expect(worker?.terminated).toBe(true)
     })
   })
+  describe('callers that give up', () => {
+    it('drops a queued job once every caller gave up, and never runs it', async () => {
+      const { pool } = createPool({ maxWorkers: 1, maxQueueSize: 4 })
+      const running = pool.generate(createRequest('running'))
+      const first = new AbortController()
+      const second = new AbortController()
+      const waiting = pool.generate({ ...createRequest('waiting'), signal: first.signal })
+      // A second caller of the same image joins the queued job.
+      const joined = pool.generate({ ...createRequest('waiting'), signal: second.signal })
+      expect(pool.getMetrics().queuedRequestCount).toBe(1)
+
+      first.abort()
+      expect(pool.getMetrics().queuedRequestCount).toBe(1)
+      second.abort()
+      await expect(waiting).resolves.toBeNull()
+      await expect(joined).resolves.toBeNull()
+      expect(pool.getMetrics()).toEqual(
+        expect.objectContaining({ queuedRequestCount: 0, cancelledRequestCount: 1 })
+      )
+
+      // The worker finishes its job and is not handed the dropped one.
+      const [worker] = MockThumbnailWorker.instances
+      worker?.emit(successMessage(worker))
+      await expect(running).resolves.toHaveLength(1)
+      expect(worker?.messages).toHaveLength(1)
+      await expect(
+        pool.generate({ ...createRequest('late'), signal: AbortSignal.abort() })
+      ).resolves.toBeNull()
+    })
+
+    it('keeps a running job when its caller gives up', async () => {
+      const { pool } = createPool({ maxWorkers: 1 })
+      const controller = new AbortController()
+      const running = pool.generate({ ...createRequest('running'), signal: controller.signal })
+      controller.abort()
+      const [worker] = MockThumbnailWorker.instances
+      worker?.emit(successMessage(worker))
+      // Its levels still reach the cache through the result.
+      await expect(running).resolves.toHaveLength(1)
+    })
+
+    it('tells a caller when its job waits and when a worker starts it', async () => {
+      const { pool } = createPool({ maxWorkers: 1, maxQueueSize: 4 })
+      const events: string[] = []
+      const first = pool.generate({
+        ...createRequest('first'),
+        onQueued: () => events.push('first queued'),
+        onDispatch: () => events.push('first started')
+      })
+      const second = pool.generate({
+        ...createRequest('second'),
+        onQueued: () => events.push('second queued'),
+        onDispatch: () => events.push('second started')
+      })
+      void pool.generate({
+        ...createRequest('second'),
+        onQueued: () => events.push('joined queued'),
+        onDispatch: () => events.push('joined started')
+      })
+      expect(events).toEqual(['first started', 'second queued', 'joined queued'])
+
+      const [worker] = MockThumbnailWorker.instances
+      worker?.emit(successMessage(worker))
+      await first
+      expect(events.slice(3)).toEqual(['second started', 'joined started'])
+      worker?.emit(successMessage(worker))
+      await second
+    })
+  })
+
   describe('bytes in flight', () => {
     const MB = 1024 * 1024
     const sized = (id: string, sourceWidth: number, sourceHeight: number) => ({
