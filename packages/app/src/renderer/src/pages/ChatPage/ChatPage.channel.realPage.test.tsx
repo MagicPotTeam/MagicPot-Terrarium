@@ -201,21 +201,41 @@ class FakeTeamMain {
 
   /** A message MAIN carried over (queued by a member before this page's document or process). */
   carryOver(input: Omit<AgentTeamMessageIntent, 'id'>): string {
-    const view: AgentTeamMessageIntent = { id: `fixture-carried-${++this.nextId}`, ...structuredClone(input) }
-    this.queue.set(view.id, { routeKey: getAgentSessionKey(normalizeAgentRoute(ROUTE)), view, status: 'queued', carriedOver: true, starts: [] })
+    const view: AgentTeamMessageIntent = {
+      id: `fixture-carried-${++this.nextId}`,
+      ...structuredClone(input)
+    }
+    this.queue.set(view.id, {
+      routeKey: getAgentSessionKey(normalizeAgentRoute(ROUTE)),
+      view,
+      status: 'queued',
+      carriedOver: true,
+      starts: []
+    })
     return view.id
   }
 
   /** MAIN's admission of a delivery request (agentTeamMessageQueue.ts admitDelivery). */
   private admitDelivery(request: LLMChatReq): void {
     if (!Object.hasOwn(request, 'teamMessageDelivery')) return
-    const delivery = request.teamMessageDelivery, member = request.teamMember
+    const delivery = request.teamMessageDelivery,
+      member = request.teamMember
     const entry = delivery ? this.queue.get(delivery.id) : undefined
     const source = entry?.view.source
     const admitted =
-      !!entry && !!delivery && !!member && !!source && entry.status !== 'queued' && entry.lease === delivery.lease &&
-      request.teamMessageHop === entry.view.hop && member.scope === source.scope && member.thread === source.thread && member.lead === source.lead &&
-      (entry.view.kind === 'message' ? member.member === entry.view.recipient : member.member !== source.member) &&
+      !!entry &&
+      !!delivery &&
+      !!member &&
+      !!source &&
+      entry.status !== 'queued' &&
+      entry.lease === delivery.lease &&
+      request.teamMessageHop === entry.view.hop &&
+      member.scope === source.scope &&
+      member.thread === source.thread &&
+      member.lead === source.lead &&
+      (entry.view.kind === 'message'
+        ? member.member === entry.view.recipient
+        : member.member !== source.member) &&
       (entry.status === 'claimed' || entry.starts.includes(member.member))
     if (!admitted) {
       this.refusedDeliveries.push(structuredClone(request))
@@ -242,7 +262,8 @@ class FakeTeamMain {
     ) {
       throw new Error('Invalid team message arguments.')
     }
-    if ([...this.queue.values()].filter((entry) => entry.status === 'queued').length >= 128) throw new Error('Team queue capacity reached.')
+    if ([...this.queue.values()].filter((entry) => entry.status === 'queued').length >= 128)
+      throw new Error('Team queue capacity reached.')
     const view: AgentTeamMessageIntent = {
       id: `fixture-intent-${++this.nextId}`,
       source: { ...source },
@@ -363,7 +384,10 @@ class FakeTeamMain {
           async (req: AgentTeamMessageQueueScope) => ({
             intents: [...this.queue.values()]
               .filter((entry) => entry.status === 'queued' && this.queueMatches(req, entry))
-              .map((entry) => ({ ...structuredClone(entry.view), ...(entry.carriedOver ? { carriedOver: true as const } : {}) }))
+              .map((entry) => ({
+                ...structuredClone(entry.view),
+                ...(entry.carriedOver ? { carriedOver: true as const } : {})
+              }))
           })
         ),
         claimAgentTeamMessage: this.track(
@@ -374,7 +398,13 @@ class FakeTeamMain {
             if (!entry || entry.status !== 'queued' || !this.queueMatches(req, entry)) return {}
             entry.status = 'claimed'
             entry.lease = `fixture-lease-${++this.nextId}`
-            return { intent: { ...structuredClone(entry.view), ...(entry.carriedOver ? { carriedOver: true as const } : {}), lease: entry.lease } }
+            return {
+              intent: {
+                ...structuredClone(entry.view),
+                ...(entry.carriedOver ? { carriedOver: true as const } : {}),
+                lease: entry.lease
+              }
+            }
           }
         ),
         // The thread has no background jobs or processes, and a running request asks nothing.
@@ -513,7 +543,8 @@ async function mountChannelPage(input: {
     .map(storageKey)
     .sort()
   if (!input.storage) {
-    for (const session of [{ ...lead(), ...input.lead }, ...input.members]) await storage.saveSessionToDB(session, SCOPE)
+    for (const session of [{ ...lead(), ...input.lead }, ...input.members])
+      await storage.saveSessionToDB(session, SCOPE)
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'lead')
     // The seed went into THIS fake, one record per session, and nothing else is in it.
     expect(idb.stats.calls.put).toBe(expectedKeys.length)
@@ -529,7 +560,14 @@ async function mountChannelPage(input: {
   const element = (props: ChannelPageProps = {}): React.ReactElement => (
     <MemoryRouter>
       <ThemeProvider theme={theme}>
-        <ChatPage compact storageScope={SCOPE} route={ROUTE} threadSubRowsHost={rowsHost} {...input.props} {...props} />
+        <ChatPage
+          compact
+          storageScope={SCOPE}
+          route={ROUTE}
+          threadSubRowsHost={rowsHost}
+          {...input.props}
+          {...props}
+        />
       </ThemeProvider>
     </MemoryRouter>
   )
@@ -587,11 +625,18 @@ async function mountChannelPage(input: {
     secondView = render(
       <MemoryRouter>
         <ThemeProvider theme={theme}>
-          <ChatPage compact storageScope={SCOPE} route={ROUTE} threadSubRowsHost={secondRowsHost} {...input.props} />
+          <ChatPage
+            compact
+            storageScope={SCOPE}
+            route={ROUTE}
+            threadSubRowsHost={secondRowsHost}
+            {...input.props}
+          />
         </ThemeProvider>
       </MemoryRouter>
     )
-    for (const session of input.members) await within(secondRowsHost).findByRole('button', { name: session.id })
+    for (const session of input.members)
+      await within(secondRowsHost).findByRole('button', { name: session.id })
   }
   // With a second pane the composer of the first one is meant.
   const firstPage = input.secondPane ? within(view.container) : screen
@@ -607,8 +652,8 @@ async function mountChannelPage(input: {
       fireEvent.click(firstPage.getByRole('button', { name: 'chat.send_message' }))
     },
     openTeamManagement: async () => {
-      fireEvent.click(screen.getByTestId('chat-composer-add-menu-button'))
-      fireEvent.click(await screen.findByTestId('chat-composer-menu-team'))
+      // Team management opens from the conversation header (the composer has no "+" menu).
+      fireEvent.click(await screen.findByTestId('agent-header-team'))
       return screen.findByRole('dialog', { name: '团队管理' })
     },
     memberNames,
@@ -1184,18 +1229,26 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     // The column lists no message activity: each message is seen as a request to its recipient.
     expect(
       main.chatRequests.filter(
-        (request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
+        (request) =>
+          request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
       )
     ).toHaveLength(1)
     expect(
       main.chatRequests.filter(
-        (request) => request.conversationId === 'designer' && requestText(request).includes('文案回复设计')
+        (request) =>
+          request.conversationId === 'designer' && requestText(request).includes('文案回复设计')
       )
     ).toHaveLength(1)
 
     // Each delivery presented its claim and MAIN recorded exactly one start, for its recipient.
-    expect(firstHop!.teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
-    expect(secondHop!.teamMessageDelivery).toEqual({ id: main.enqueued[1].id, lease: expect.stringMatching(/^fixture-lease-/) })
+    expect(firstHop!.teamMessageDelivery).toEqual({
+      id: main.enqueued[0].id,
+      lease: expect.stringMatching(/^fixture-lease-/)
+    })
+    expect(secondHop!.teamMessageDelivery).toEqual({
+      id: main.enqueued[1].id,
+      lease: expect.stringMatching(/^fixture-lease-/)
+    })
     expect(main.chatRequests[0]).not.toHaveProperty('teamMessageDelivery')
     expect(main.starts).toEqual([
       { id: main.enqueued[0].id, recipient: 'writer' },
@@ -1282,8 +1335,13 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     ])
     expect(main.enqueued[0]).not.toHaveProperty('recipient')
     // One claim, one lease for both recipients; MAIN recorded one start per recipient.
-    expect(byRecipient('writer')[0].teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
-    expect(byRecipient('reviewer')[0].teamMessageDelivery).toEqual(byRecipient('writer')[0].teamMessageDelivery)
+    expect(byRecipient('writer')[0].teamMessageDelivery).toEqual({
+      id: main.enqueued[0].id,
+      lease: expect.stringMatching(/^fixture-lease-/)
+    })
+    expect(byRecipient('reviewer')[0].teamMessageDelivery).toEqual(
+      byRecipient('writer')[0].teamMessageDelivery
+    )
     expect(main.starts.map((start) => start.recipient).sort()).toEqual(['reviewer', 'writer'])
     expect(main.refusedDeliveries).toEqual([])
 
@@ -1379,7 +1437,9 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     // A user broadcast never goes through the MAIN queue and presents no lease.
     expect(main.enqueued).toEqual([])
     expect(main.claimRequests).toEqual([])
-    expect(main.chatRequests.filter((request) => Object.hasOwn(request, 'teamMessageDelivery'))).toEqual([])
+    expect(
+      main.chatRequests.filter((request) => Object.hasOwn(request, 'teamMessageDelivery'))
+    ).toEqual([])
     expect(main.starts).toEqual([])
     await page.finish()
   }, 20000)
@@ -1395,10 +1455,14 @@ describe('real ChatPage team messages on in-memory fakes', () => {
             releaseBusy = () => resolve({ text: 'writer busy reply fixture' })
           })
         }
-        if (lastUserText.includes('来自成员的测试消息') || lastUserText.includes('隐藏时的第二条消息')) {
+        if (
+          lastUserText.includes('来自成员的测试消息') ||
+          lastUserText.includes('隐藏时的第二条消息')
+        ) {
           return { text: '文案已收到 fixture' }
         }
-        if (toolResults.length || !teamTools.includes('send_message')) return { text: '发送成员完成 fixture' }
+        if (toolResults.length || !teamTools.includes('send_message'))
+          return { text: '发送成员完成 fixture' }
         if (lastUserText.includes('hidden pane send')) {
           return new Promise<ModelStep>((resolve) => {
             releaseSender = () =>
@@ -1482,23 +1546,37 @@ describe('real ChatPage member message leases on in-memory fakes', () => {
       model: ({ lastUserText, teamTools, toolResults }) => {
         if (lastUserText.includes('来自成员的测试消息')) return { text: '文案已收到 fixture' }
         if (!toolResults.length && teamTools.includes('send_message')) {
-          return { tool: 'send_message', callId: 'fixture-two-panes', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+          return {
+            tool: 'send_message',
+            callId: 'fixture-two-panes',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
         }
         return { text: '发送成员完成 fixture' }
       }
     })
     const { main } = page
-    const toWriter = () => main.chatRequests.filter((request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息'))
+    const toWriter = () =>
+      main.chatRequests.filter(
+        (request) =>
+          request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
+      )
 
     page.send('@designer 请联系文案')
     await waitFor(() => expect(toWriter()).toHaveLength(1), { timeout: 10000 })
-    await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+    await waitFor(async () =>
+      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+        '文案已收到 fixture'
+      )
+    )
     // Both panes poll the same lead every 500 ms: give the other one time to deliver it again.
     await pause(2000)
     expect(toWriter()).toHaveLength(1)
     expect(main.starts).toEqual([{ id: main.enqueued[0].id, recipient: 'writer' }])
     expect(main.refusedDeliveries).toEqual([])
-    expect(main.calls.filter((call) => call.method === 'listAgentTeamMessages').length).toBeGreaterThan(2)
+    expect(
+      main.calls.filter((call) => call.method === 'listAgentTeamMessages').length
+    ).toBeGreaterThan(2)
     await page.finish()
   }, 30000)
 
@@ -1514,7 +1592,11 @@ describe('real ChatPage member message leases on in-memory fakes', () => {
         }
         if (lastUserText.includes('来自成员的测试消息')) return { text: '文案已收到 fixture' }
         if (!toolResults.length && teamTools.includes('send_message')) {
-          return { tool: 'send_message', callId: 'fixture-busy-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+          return {
+            tool: 'send_message',
+            callId: 'fixture-busy-send',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
         }
         return { text: '发送成员完成 fixture' }
       }
@@ -1525,24 +1607,40 @@ describe('real ChatPage member message leases on in-memory fakes', () => {
     // wrapper, which still sees the busy writer, queues the team message behind the writer's run.
     const { TeamMessageDispatcher } = await import('./teamMessageDispatcher')
     const pump = TeamMessageDispatcher.prototype.pump
-    const blinded = vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (this: InstanceType<typeof TeamMessageDispatcher>, recipient: string) {
+    const blinded = vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (
+      this: InstanceType<typeof TeamMessageDispatcher>,
+      recipient: string
+    ) {
       Object.assign(this as object, { isRecipientBusy: () => false })
       return pump.call(this, recipient)
     })
-    const toWriter = () => main.chatRequests.filter((request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息'))
+    const toWriter = () =>
+      main.chatRequests.filter(
+        (request) =>
+          request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
+      )
     try {
       page.send('@writer hold writer busy')
       await waitFor(() => expect(releaseBusy).toBeDefined())
-      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+      fireEvent.change(screen.getByTestId('chat-composer-input'), {
+        target: { value: '@designer 请联系文案' }
+      })
       fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
       await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
       await pause(1500)
       expect(toWriter()).toHaveLength(0)
       releaseBusy?.()
       await waitFor(() => expect(toWriter()).toHaveLength(1), { timeout: 5000 })
-      expect(toWriter()[0].teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
+      expect(toWriter()[0].teamMessageDelivery).toEqual({
+        id: main.enqueued[0].id,
+        lease: expect.stringMatching(/^fixture-lease-/)
+      })
       expect(main.starts).toEqual([{ id: main.enqueued[0].id, recipient: 'writer' }])
-      await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+      await waitFor(async () =>
+        expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+          '文案已收到 fixture'
+        )
+      )
       await pause(1000)
       expect(toWriter()).toHaveLength(1)
       expect(main.refusedDeliveries).toEqual([])
@@ -1613,26 +1711,45 @@ describe('real ChatPage restart on in-memory fakes', () => {
     storageErrors.mockRestore()
   }, 20000)
 
-  const carriedTeam = (id: string) => ({ scope: SCOPE, thread: ROUTE.threadId, lead: 'lead', member: id })
-  const earlierWork = (task: string): ChatSession['messages'] => [
-    { role: 'user', content: task },
-    { role: 'assistant', content: `${task} done fixture` }
-  ] as ChatSession['messages']
+  const carriedTeam = (id: string) => ({
+    scope: SCOPE,
+    thread: ROUTE.threadId,
+    lead: 'lead',
+    member: id
+  })
+  const earlierWork = (task: string): ChatSession['messages'] =>
+    [
+      { role: 'user', content: task },
+      { role: 'assistant', content: `${task} done fixture` }
+    ] as ChatSession['messages']
   const heldNote = 'chat.delegated.member_label — chat.delegated.held'
   const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
   it('holds a carried-over member message until the user sends to its recipient, then delivers it once', async () => {
     let carried = ''
     const page = await mountChannelPage({
-      members: [member('designer', '设计师'), member('writer', '文案', earlierWork('earlier writer task'))],
+      members: [
+        member('designer', '设计师'),
+        member('writer', '文案', earlierWork('earlier writer task'))
+      ],
       beforeMount: (main) => {
-        carried = main.carryOver({ source: carriedTeam('designer'), kind: 'message', hop: 1, recipient: 'writer', text: '重启前的成员消息' })
+        carried = main.carryOver({
+          source: carriedTeam('designer'),
+          kind: 'message',
+          hop: 1,
+          recipient: 'writer',
+          text: '重启前的成员消息'
+        })
       },
-      model: ({ lastUserText }) => ({ text: lastUserText.includes('重启前的成员消息') ? '文案已收到 fixture' : '文案继续 fixture' })
+      model: ({ lastUserText }) => ({
+        text: lastUserText.includes('重启前的成员消息') ? '文案已收到 fixture' : '文案继续 fixture'
+      })
     })
     const { main } = page
     const toWriter = () =>
-      main.chatRequests.filter((request) => request.conversationId === 'writer').map((request) => textOf(request.messages.at(-1)?.content))
+      main.chatRequests
+        .filter((request) => request.conversationId === 'writer')
+        .map((request) => textOf(request.messages.at(-1)?.content))
 
     // Claimed at the first poll, but never delivered by itself: the writer is held, its row says so.
     await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
@@ -1646,10 +1763,17 @@ describe('real ChatPage restart on in-memory fakes', () => {
     await waitFor(() => expect(toWriter()).toHaveLength(2), { timeout: 5000 })
     expect(toWriter()[0]).toContain('请继续')
     expect(toWriter()[1]).toContain('重启前的成员消息')
-    expect(main.chatRequests.find((request) => textOf(request.messages.at(-1)?.content).includes('重启前的成员消息'))?.teamMessageDelivery)
-      .toEqual({ id: carried, lease: expect.stringMatching(/^fixture-lease-/) })
+    expect(
+      main.chatRequests.find((request) =>
+        textOf(request.messages.at(-1)?.content).includes('重启前的成员消息')
+      )?.teamMessageDelivery
+    ).toEqual({ id: carried, lease: expect.stringMatching(/^fixture-lease-/) })
     expect(main.starts).toEqual([{ id: carried, recipient: 'writer' }])
-    await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+    await waitFor(async () =>
+      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+        '文案已收到 fixture'
+      )
+    )
     await pause(1500)
     expect(toWriter()).toHaveLength(2)
     expect(screen.queryByRole('button', { name: heldNote })).toBeNull()
@@ -1666,13 +1790,22 @@ describe('real ChatPage restart on in-memory fakes', () => {
         member('reviewer', 'reviewer', earlierWork('earlier reviewer task'))
       ],
       beforeMount: (main) => {
-        carried = main.carryOver({ source: carriedTeam('designer'), kind: 'channel', hop: 1, text: '重启前的频道消息' })
+        carried = main.carryOver({
+          source: carriedTeam('designer'),
+          kind: 'channel',
+          hop: 1,
+          text: '重启前的频道消息'
+        })
       },
-      model: ({ lastUserText }) => ({ text: lastUserText.includes('重启前的频道消息') ? '频道收到 fixture' : '继续 fixture' })
+      model: ({ lastUserText }) => ({
+        text: lastUserText.includes('重启前的频道消息') ? '频道收到 fixture' : '继续 fixture'
+      })
     })
     const { main } = page
     const to = (id: string) =>
-      main.chatRequests.filter((request) => request.conversationId === id).map((request) => textOf(request.messages.at(-1)?.content))
+      main.chatRequests
+        .filter((request) => request.conversationId === id)
+        .map((request) => textOf(request.messages.at(-1)?.content))
 
     await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
     await waitFor(() => expect(screen.getAllByRole('button', { name: heldNote })).toHaveLength(2))
@@ -1696,7 +1829,10 @@ describe('real ChatPage restart on in-memory fakes', () => {
       { id: carried, recipient: 'reviewer' }
     ])
     await waitFor(async () => {
-      for (const id of ['writer', 'reviewer']) expect((await page.stored(id))?.messages.map((message) => message.content)).toContain('频道收到 fixture')
+      for (const id of ['writer', 'reviewer'])
+        expect((await page.stored(id))?.messages.map((message) => message.content)).toContain(
+          '频道收到 fixture'
+        )
     })
     await pause(1000)
     expect([to('writer').length, to('reviewer').length, to('designer').length]).toEqual([2, 2, 0])
@@ -1744,8 +1880,13 @@ describe('real ChatPage stop on in-memory fakes', () => {
       model: ({ request, lastUserText, teamTools, toolResults }) => {
         if (request.conversationId === 'writer') {
           // Never answers: only the stop ends the writer's first run.
-          if (lastUserText.includes('hold writer busy')) return new Promise<ModelStep>(() => undefined)
-          return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+          if (lastUserText.includes('hold writer busy'))
+            return new Promise<ModelStep>(() => undefined)
+          return {
+            text: lastUserText.includes('来自成员的测试消息')
+              ? '文案已收到 fixture'
+              : '文案继续 fixture'
+          }
         }
         if (!toolResults.length && teamTools.includes('send_message')) {
           return {
@@ -1766,7 +1907,9 @@ describe('real ChatPage stop on in-memory fakes', () => {
     page.send('@writer hold writer busy')
     await waitFor(() => expect(toWriter()).toHaveLength(1))
     // Enter sends while a member runs (the lead's composer shows Stop).
-    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+    fireEvent.change(screen.getByTestId('chat-composer-input'), {
+      target: { value: '@designer 请联系文案' }
+    })
     fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
     await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
     await waitFor(async () =>
@@ -1798,21 +1941,42 @@ describe('real ChatPage stop on in-memory fakes', () => {
     await new Promise((resolve) => setTimeout(resolve, 1500))
     expect(toWriter()).toHaveLength(3)
     expect(main.claimRequests).toHaveLength(1)
-    expect(screen.queryByRole('button', { name: 'chat.delegated.member_label — chat.delegated.held' })).toBeNull()
+    expect(
+      screen.queryByRole('button', { name: 'chat.delegated.member_label — chat.delegated.held' })
+    ).toBeNull()
     await page.finish()
   }, 30000)
   it('releases a stopped member when the user dispatches a task to it: its held team message follows the task once', async () => {
     const page = await mountChannelPage({
       members: [member('designer', '设计师'), member('writer', '文案')],
-      lead: { teamTasks: [{ id: 'task-writer', title: '写文案', ownerId: 'writer', status: 'pending', dependsOn: [] }] },
+      lead: {
+        teamTasks: [
+          {
+            id: 'task-writer',
+            title: '写文案',
+            ownerId: 'writer',
+            status: 'pending',
+            dependsOn: []
+          }
+        ]
+      },
       model: ({ request, lastUserText, teamTools, toolResults }) => {
         if (request.conversationId === 'writer') {
-          if (lastUserText.includes('hold writer busy')) return new Promise<ModelStep>(() => undefined)
+          if (lastUserText.includes('hold writer busy'))
+            return new Promise<ModelStep>(() => undefined)
           if (lastUserText.includes('团队任务：写文案')) return { text: '文案任务完成 fixture' }
-          return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+          return {
+            text: lastUserText.includes('来自成员的测试消息')
+              ? '文案已收到 fixture'
+              : '文案继续 fixture'
+          }
         }
         if (!toolResults.length && teamTools.includes('send_message')) {
-          return { tool: 'send_message', callId: 'fixture-task-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+          return {
+            tool: 'send_message',
+            callId: 'fixture-task-send',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
         }
         return { text: '发送成员完成 fixture' }
       }
@@ -1825,11 +1989,15 @@ describe('real ChatPage stop on in-memory fakes', () => {
 
     page.send('@writer hold writer busy')
     await waitFor(() => expect(toWriter()).toHaveLength(1))
-    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+    fireEvent.change(screen.getByTestId('chat-composer-input'), {
+      target: { value: '@designer 请联系文案' }
+    })
     fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
     await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
     await waitFor(async () =>
-      expect((await page.stored('designer'))?.messages.map((message) => message.content)).toContain('发送成员完成 fixture')
+      expect((await page.stored('designer'))?.messages.map((message) => message.content)).toContain(
+        '发送成员完成 fixture'
+      )
     )
     fireEvent.click(await screen.findByRole('button', { name: 'chat.stop_generating' }))
     await waitFor(() => expect(main.cancelledRuns).toEqual(['writer']))
@@ -1845,10 +2013,18 @@ describe('real ChatPage stop on in-memory fakes', () => {
     expect(toWriter()[2]).toContain('来自成员的测试消息')
     await waitFor(async () => {
       const stored = await page.stored('lead')
-      expect(stored?.teamTasks?.[0]).toEqual({ id: 'task-writer', title: '写文案', ownerId: 'writer', status: 'done', dependsOn: [] })
+      expect(stored?.teamTasks?.[0]).toEqual({
+        id: 'task-writer',
+        title: '写文案',
+        ownerId: 'writer',
+        status: 'done',
+        dependsOn: []
+      })
     })
     await waitFor(async () =>
-      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture')
+      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+        '文案已收到 fixture'
+      )
     )
     await new Promise((resolve) => setTimeout(resolve, 1500))
     expect(toWriter()).toHaveLength(3)
@@ -1860,9 +2036,18 @@ describe('real ChatPage stop on in-memory fakes', () => {
     const page = await mountChannelPage({
       members: [member('designer', '设计师'), member('writer', '文案')],
       model: ({ request, lastUserText, teamTools, toolResults }) => {
-        if (request.conversationId === 'writer') return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+        if (request.conversationId === 'writer')
+          return {
+            text: lastUserText.includes('来自成员的测试消息')
+              ? '文案已收到 fixture'
+              : '文案继续 fixture'
+          }
         if (!toolResults.length && teamTools.includes('send_message')) {
-          return { tool: 'send_message', callId: 'fixture-ended-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+          return {
+            tool: 'send_message',
+            callId: 'fixture-ended-send',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
         }
         // The designer keeps running after its message: the lead's composer offers Stop.
         return new Promise<ModelStep>(() => undefined)
@@ -1874,7 +2059,11 @@ describe('real ChatPage stop on in-memory fakes', () => {
         .filter((request) => request.conversationId === 'writer')
         .map((request) => textOf(request.messages.at(-1)?.content))
     const writerExternalRun = (loading: boolean): void => {
-      window.dispatchEvent(new CustomEvent('chat:set-external-loading', { detail: { scope: SCOPE, sessionId: 'writer', loading } }))
+      window.dispatchEvent(
+        new CustomEvent('chat:set-external-loading', {
+          detail: { scope: SCOPE, sessionId: 'writer', loading }
+        })
+      )
     }
     try {
       // The writer is busy with a Canvas Target run, so the designer's message waits for it, queued.
@@ -1908,7 +2097,9 @@ describe('real ChatPage stop on in-memory fakes', () => {
   it('queues a user send to a session with a Canvas Target run and sends it exactly once after that run ends', async () => {
     const page = await mountChannelPage({
       members: [member('writer', '文案')],
-      model: ({ request }) => ({ text: request.conversationId === 'lead' ? '组长回复 fixture' : '文案回复 fixture' })
+      model: ({ request }) => ({
+        text: request.conversationId === 'lead' ? '组长回复 fixture' : '文案回复 fixture'
+      })
     })
     const { main } = page
     const toLead = () =>
@@ -1916,12 +2107,18 @@ describe('real ChatPage stop on in-memory fakes', () => {
         .filter((request) => request.conversationId === 'lead')
         .map((request) => textOf(request.messages.at(-1)?.content))
     const leadExternalRun = (loading: boolean): void => {
-      window.dispatchEvent(new CustomEvent('chat:set-external-loading', { detail: { scope: SCOPE, sessionId: 'lead', loading } }))
+      window.dispatchEvent(
+        new CustomEvent('chat:set-external-loading', {
+          detail: { scope: SCOPE, sessionId: 'lead', loading }
+        })
+      )
     }
     try {
       act(() => leadExternalRun(true))
       // Enter sends while the lead is busy (as a person would): the send waits behind the external run.
-      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '外部运行期间的消息' } })
+      fireEvent.change(screen.getByTestId('chat-composer-input'), {
+        target: { value: '外部运行期间的消息' }
+      })
       fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
       await new Promise((resolve) => setTimeout(resolve, 1500))
       expect(toLead()).toEqual([])
@@ -1929,7 +2126,10 @@ describe('real ChatPage stop on in-memory fakes', () => {
       await waitFor(() => expect(toLead()).toHaveLength(1), { timeout: 5000 })
       expect(toLead()[0]).toContain('外部运行期间的消息')
       await waitFor(async () =>
-        expect((await page.stored('lead'))?.messages.map((message) => message.content)).toEqual(['外部运行期间的消息', '组长回复 fixture'])
+        expect((await page.stored('lead'))?.messages.map((message) => message.content)).toEqual([
+          '外部运行期间的消息',
+          '组长回复 fixture'
+        ])
       )
       await new Promise((resolve) => setTimeout(resolve, 1500))
       expect(toLead()).toHaveLength(1)
