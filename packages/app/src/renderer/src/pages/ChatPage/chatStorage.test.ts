@@ -24,6 +24,9 @@ function cloneValue<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value))
 }
 
+/** Returns the release function of a hold taken on the request's transaction. */
+type TakeHold = () => () => void
+
 class FakeIDBObjectStore {
   constructor(
     private stores: StoreMap,
@@ -35,8 +38,25 @@ class FakeIDBObjectStore {
       getCount: number
       putCount: number
       clearCount: number
-    }
+    },
+    private takeHold: TakeHold = () => () => undefined
   ) {}
+
+  /**
+   * Run a request's callback on the next timer turn. The request holds its transaction open from
+   * now until its callback has returned, as in a browser, so a put made in onsuccess lands before
+   * the transaction completes.
+   */
+  private respond(callback: () => void): void {
+    const release = this.takeHold()
+    setTimeout(() => {
+      try {
+        callback()
+      } finally {
+        release()
+      }
+    }, 0)
+  }
 
   get(key: string): {
     result?: unknown
@@ -51,12 +71,12 @@ class FakeIDBObjectStore {
       onerror?: () => void
     } = {}
 
-    setTimeout(() => {
+    this.respond(() => {
       this.state.getCount += 1
       const value = this.stores.get(this.storeName)?.get(key)
       request.result = value === undefined ? undefined : cloneValue(value)
       request.onsuccess?.()
-    }, 0)
+    })
 
     return request
   }
@@ -74,7 +94,7 @@ class FakeIDBObjectStore {
       onerror?: () => void
     } = {}
 
-    setTimeout(() => {
+    this.respond(() => {
       this.state.getAllCount += 1
       if (this.state.failGetAllOnce) {
         this.state.failGetAllOnce = false
@@ -91,7 +111,7 @@ class FakeIDBObjectStore {
         .filter(([key]) => !range || range.includes(key))
         .map(([, value]) => cloneValue(value))
       request.onsuccess?.()
-    }, 0)
+    })
 
     return request
   }
@@ -99,10 +119,10 @@ class FakeIDBObjectStore {
   /** Keys only; the scoped readers use it once per connection to look for stray keys. */
   getAllKeys(): { result?: string[]; onsuccess?: () => void; onerror?: () => void } {
     const request: { result?: string[]; onsuccess?: () => void; onerror?: () => void } = {}
-    setTimeout(() => {
+    this.respond(() => {
       request.result = [...(this.stores.get(this.storeName)?.keys() || [])]
       request.onsuccess?.()
-    }, 0)
+    })
     return request
   }
 
@@ -150,6 +170,14 @@ class FakeIDBTransaction {
     setTimeout(() => this.onabort?.(), 0)
   }
 
+  // A transaction completes once it has lived 5 ms and no request is pending. A fixed 5 ms timer
+  // alone is not enough: on a busy machine (parallel test runs) Node runs every due timer of one
+  // duration before the timers of another, so this completion could fire before the 0 ms callback
+  // of a get issued in the same turn, and the save resolved before its put.
+  private holds = 0
+  private minimumLifetimeElapsed = false
+  private completed = false
+
   constructor(
     private stores: StoreMap,
     private state: {
@@ -162,7 +190,8 @@ class FakeIDBTransaction {
     }
   ) {
     setTimeout(() => {
-      if (!this.error && !this.aborted) this.oncomplete?.()
+      this.minimumLifetimeElapsed = true
+      this.settle()
     }, 5)
   }
 
@@ -171,7 +200,24 @@ class FakeIDBTransaction {
     if (!store) {
       throw new Error(`Missing fake object store: ${name}`)
     }
-    return new FakeIDBObjectStore(this.stores, name, this.state)
+    return new FakeIDBObjectStore(this.stores, name, this.state, () => this.takeHold())
+  }
+
+  private takeHold(): () => void {
+    this.holds += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.holds -= 1
+      this.settle()
+    }
+  }
+
+  private settle(): void {
+    if (this.completed || !this.minimumLifetimeElapsed || this.holds > 0) return
+    this.completed = true
+    if (!this.error && !this.aborted) this.oncomplete?.()
   }
 }
 
