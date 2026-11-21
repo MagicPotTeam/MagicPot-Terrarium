@@ -47,11 +47,16 @@ export const toDurableQueuedAttachments = (
 ): ChatAttachment[] | undefined => {
   if (!attachments?.length) return undefined
   return attachments.map((attachment) => {
-    if (isUnavailableQueuedAttachment(attachment)) return markQueuedAttachmentUnavailable(attachment)
+    if (isUnavailableQueuedAttachment(attachment))
+      return markQueuedAttachmentUnavailable(attachment)
     if (typeof attachment.url !== 'string' || attachment.url.startsWith('blob:')) {
       return markQueuedAttachmentUnavailable(attachment)
     }
-    if (attachment.media !== undefined && attachment.media !== null && !hasDurableMediaReference(attachment)) {
+    if (
+      attachment.media !== undefined &&
+      attachment.media !== null &&
+      !hasDurableMediaReference(attachment)
+    ) {
       return markQueuedAttachmentUnavailable(attachment)
     }
     if (attachment.url.startsWith('data:')) {
@@ -100,13 +105,16 @@ export const serializeQueuedSends = (
     // queue (no submission flag), whose hidden context is the composer's.
     const ownHiddenContext =
       item.originalComposerHiddenContext ??
-      (item.fromComposer && !item.overrides.composerSubmission ? item.overrides.hiddenContext : undefined)
+      (item.fromComposer && !item.overrides.composerSubmission
+        ? item.overrides.hiddenContext
+        : undefined)
     stored.push({
       id: item.persistId,
       content,
       ...(attachments?.length ? { attachments } : {}),
       ...(ownHiddenContext ? { originalComposerHiddenContext: ownHiddenContext } : {}),
-      queuedAt: typeof item.queuedAt === 'number' && Number.isFinite(item.queuedAt) ? item.queuedAt : 0
+      queuedAt:
+        typeof item.queuedAt === 'number' && Number.isFinite(item.queuedAt) ? item.queuedAt : 0
     })
   }
   return stored
@@ -133,7 +141,8 @@ export const normalizeStoredQueuedSends = (
         id: item.id,
         content,
         ...(attachments?.length ? { attachments } : {}),
-        ...(typeof item.originalComposerHiddenContext === 'string' && item.originalComposerHiddenContext
+        ...(typeof item.originalComposerHiddenContext === 'string' &&
+        item.originalComposerHiddenContext
           ? { originalComposerHiddenContext: item.originalComposerHiddenContext }
           : {}),
         queuedAt:
