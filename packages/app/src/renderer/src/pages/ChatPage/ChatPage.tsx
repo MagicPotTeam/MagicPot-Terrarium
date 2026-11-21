@@ -110,6 +110,7 @@ import {
   readSessionDraftBackup,
   hasSessionDeleteTombstone,
   migrateStoredSessionImages,
+  applyLegacyAttachmentReplacements,
   readSessionDeleteTombstones,
   sessionNeedsLegacyAttachmentMigration,
   debouncedSaveSessions,
@@ -125,6 +126,7 @@ import {
   createStoredImageMigrationProgress,
   startStoredImageMigration,
   STORED_IMAGE_MIGRATION_TIMING,
+  STORED_IMAGE_MIGRATION_IMPORT_TIMEOUT_MS,
   type StoredImageMigrationOutcome
 } from './chatStoredImageMigration'
 import { beginUnwrittenManagedMediaImports } from '@renderer/services/managedMediaUnwrittenImports'
@@ -3840,14 +3842,77 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const storedImageMigrationProgressRef = useRef(
     new Map<string, ReturnType<typeof createStoredImageMigrationProgress>>()
   )
+  // Managed references for inline images (by their old data: URLs) are written into the stored
+  // record this owner expects (its save baseline), in the save order, and into the live
+  // conversation. The save guard's background imports and the stored image migration use it once
+  // their imports have finished outside the save chain: only this compare-and-write waits in the
+  // chain. The references go into the newest record (the baseline, which a save made meanwhile
+  // has moved), or nothing is written: another writer's record, a deleted conversation, nothing
+  // left to replace. Resolves to the record written, or null.
+  const rewriteStoredReferences = useCallback(
+    (
+      scope: string,
+      sessionId: string,
+      apply: (session: ChatSession) => ChatSession
+    ): Promise<ChatSession | null> => {
+      const epoch = sessionLoadEpochRef.current
+      const key = getSessionStorageKey(scope, sessionId)
+      const notDeleted = (): boolean =>
+        !deletedSessionKeysRef.current.has(key) && !hasSessionDeleteTombstone(sessionId, scope)
+      return chatSaveBaselineRef.current.rewriteStored(
+        scope,
+        sessionId,
+        () =>
+          storageScopeRef.current === scope
+            ? (persistedSessionsRef.current.get(sessionId) ?? null)
+            : null,
+        async (expected) => {
+          if (!isMountedRef.current || !notDeleted()) return null
+          if (apply(expected) === expected) return null
+          const committed = await compareAndUpdateSessionInDB(sessionId, scope, {
+            expectedSession: expected,
+            shouldUpdate: notDeleted,
+            update: (current) => apply(current)
+          })
+          if (!committed) return null
+          // The record changed under any storage read still in progress: that read must not
+          // bring the inline form back.
+          noteSessionWriteAcknowledged(scope)
+          if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+            return committed
+          }
+          const persistedBefore = persistedSessionsRef.current.get(sessionId)
+          persistedSessionsRef.current.set(sessionId, committed)
+          const live = sessionsRef.current.find((session) => session.id === sessionId)
+          if (!live) return committed
+          // A clean conversation holds the record as written; one with newer changes gets the
+          // same references and is saved as usual (against the rewritten record, the new
+          // baseline).
+          const next = live === persistedBefore ? committed : apply(live)
+          if (next !== live) {
+            if (dirtySessionSnapshotsRef.current.get(key) === live) {
+              dirtySessionSnapshotsRef.current.set(key, next)
+            }
+            setSessions((previous) =>
+              previous.map((session) => (session === live ? next : session))
+            )
+          }
+          return committed
+        }
+      )
+    },
+    [getSessionStorageKey, noteSessionWriteAcknowledged, setSessions]
+  )
   const migrateStoredSessionImagesOfScope = useCallback(
     async (scope: string, sessionId: string): Promise<StoredImageMigrationOutcome> => {
       const epoch = sessionLoadEpochRef.current
       const key = getSessionStorageKey(scope, sessionId)
       const loaded = sessionsRef.current.find((session) => session.id === sessionId)
       if (!loaded || storageScopeRef.current !== scope) return 'gone'
-      // Only a conversation this page holds exactly as stored: no unsaved change, no save or
-      // reply running for it, not deleted.
+      // An attempt starts only for a conversation this page holds exactly as stored: no unsaved
+      // change, no save or reply running for it, not deleted. Once started it holds up no save:
+      // the images are imported outside the save chain, so a message, reply or draft saved
+      // meanwhile is written at once, and the references then go into the newest record.
       const untouched = (): boolean =>
         isMountedRef.current &&
         storageScopeRef.current === scope &&
@@ -3860,105 +3925,30 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !deletedSessionKeysRef.current.has(key) &&
         !hasSessionDeleteTombstone(sessionId, scope)
       if (!untouched() || chatSaveBaselineRef.current.isPending(scope, sessionId)) return 'busy'
-      let outcome: StoredImageMigrationOutcome = 'not-written'
       // Until the record names the imported images, the reference scanner must not publish.
       const written = beginUnwrittenManagedMediaImports()
       try {
-        await chatSaveBaselineRef.current.rewriteStored(
-          scope,
-          sessionId,
-          () => persistedSessionsRef.current.get(sessionId) ?? null,
-          async (expected) => {
-            if (!untouched()) {
-              outcome = 'busy'
-              return null
-            }
-            const result = await migrateStoredSessionImages(expected, scope, {
-              shouldUpdate: untouched
-            })
-            if (result.status !== 'migrated') {
-              outcome = result.status === 'unchanged' ? 'unchanged' : result.status
-              return null
-            }
-            outcome = 'migrated'
-            // The record changed under any storage read still in progress: that read must not
-            // bring the inline form back.
-            noteSessionWriteAcknowledged(scope)
-            if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
-              return result.session
-            }
-            persistedSessionsRef.current.set(sessionId, result.session)
-            const live = sessionsRef.current.find((session) => session.id === sessionId)
-            // A change made while the record was being written gets the same references and is
-            // saved as usual (against the migrated record, which becomes the baseline).
-            const next =
-              live === loaded
-                ? result.session
-                : live
-                  ? applyInlineAttachmentReplacements(live, result.replacements)
-                  : live
-            if (live && next && next !== live) {
-              setSessions((previous) =>
-                previous.map((session) => (session === live ? next : session))
-              )
-            }
-            return result.session
-          }
-        )
+        const result = await migrateStoredSessionImages(loaded, scope, {
+          importTimeoutMs: STORED_IMAGE_MIGRATION_IMPORT_TIMEOUT_MS,
+          write: (replacements) =>
+            rewriteStoredReferences(scope, sessionId, (session) =>
+              applyLegacyAttachmentReplacements(session, replacements)
+            )
+        })
+        return result.status
       } finally {
         written()
       }
-      return outcome
     },
-    [getSessionStorageKey, noteSessionWriteAcknowledged, setSessions]
+    [getSessionStorageKey, rewriteStoredReferences]
   )
-  // The save guard's imports finished outside the save chain: the stored record (the one this
-  // owner last wrote, its save baseline) gets the references, in the save order, and so does the
-  // live conversation. When the record is not the expected one (another writer), nothing is
-  // written; the next save writes the references from the guard's finished imports.
+  // The save guard's imports finished outside the save chain: the stored record gets the
+  // references, and so does the live conversation. When the record is not the expected one
+  // (another writer), nothing is written; the next save writes the references from the guard's
+  // finished imports.
   rewriteStoredInlineImagesRef.current = async (scope, sessionId, replacements) => {
-    const epoch = sessionLoadEpochRef.current
-    const key = getSessionStorageKey(scope, sessionId)
-    const notDeleted = (): boolean =>
-      !deletedSessionKeysRef.current.has(key) && !hasSessionDeleteTombstone(sessionId, scope)
-    await chatSaveBaselineRef.current.rewriteStored(
-      scope,
-      sessionId,
-      () =>
-        storageScopeRef.current === scope
-          ? (persistedSessionsRef.current.get(sessionId) ?? null)
-          : null,
-      async (expected) => {
-        if (!isMountedRef.current || !notDeleted()) return null
-        if (applyInlineAttachmentReplacements(expected, replacements) === expected) return null
-        const committed = await compareAndUpdateSessionInDB(sessionId, scope, {
-          expectedSession: expected,
-          shouldUpdate: notDeleted,
-          update: (current) => applyInlineAttachmentReplacements(current, replacements)
-        })
-        if (!committed) return null
-        noteSessionWriteAcknowledged(scope)
-        if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
-          return committed
-        }
-        const persistedBefore = persistedSessionsRef.current.get(sessionId)
-        persistedSessionsRef.current.set(sessionId, committed)
-        const live = sessionsRef.current.find((session) => session.id === sessionId)
-        if (!live) return committed
-        // A clean conversation holds the record as written; one with newer changes gets the same
-        // references and is saved as usual (against the rewritten record, the new baseline).
-        const next =
-          live === persistedBefore
-            ? committed
-            : applyInlineAttachmentReplacements(live, replacements)
-        if (next !== live) {
-          if (dirtySessionSnapshotsRef.current.get(key) === live) {
-            dirtySessionSnapshotsRef.current.set(key, next)
-          }
-          setSessions((previous) => previous.map((session) => (session === live ? next : session)))
-        }
-        return committed
-      }
+    await rewriteStoredReferences(scope, sessionId, (session) =>
+      applyInlineAttachmentReplacements(session, replacements)
     )
   }
   useEffect(() => {

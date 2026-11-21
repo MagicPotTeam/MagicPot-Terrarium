@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import type { MediaReference } from '@shared/mediaReference'
+import type { LegacyAttachmentReplacement } from './chatStorage'
 import { installFakeIDBKeyRange } from '../../testUtils/fakeIdbKeyRange'
 import { createFakeRestoredThreadIndexedDb } from '../../testUtils/fakeRestoredThreadIndexedDb'
 
@@ -178,6 +179,45 @@ describe('migrateStoredSessionImages', () => {
     expect(media.reclaimLegacyMigration).not.toHaveBeenCalled()
     // The image kept inline is tried again at a later start.
     expect(storage.sessionNeedsLegacyAttachmentMigration(stored)).toBe(true)
+  })
+
+  it('imports before it writes, and keeps an image whose import does not finish in time inline', async () => {
+    const storage = await import('./chatStorage')
+    const { session, first, second } = legacySession()
+    await storage.saveSessionToDB(session, SCOPE)
+    const expected = (await readRecord(storage, 'legacy'))!
+    const ok = media.migrateLegacyDataUrl.getMockImplementation()!
+    media.migrateLegacyDataUrl.mockImplementation((request: { dataUrl: string }) =>
+      request.dataUrl === second ? new Promise(() => undefined) : ok(request)
+    )
+    const write = vi.fn(async (replacements: ReadonlyMap<string, LegacyAttachmentReplacement>) => {
+      // Called once every import has settled, with what each imported image becomes.
+      expect(media.migrateLegacyDataUrl).toHaveBeenCalledTimes(3)
+      expect([...replacements.keys()]).not.toContain(second)
+      return storage.compareAndUpdateSessionInDB('legacy', SCOPE, {
+        expectedSession: expected,
+        update: (current) => storage.applyLegacyAttachmentReplacements(current, replacements)
+      })
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let result: Awaited<ReturnType<typeof storage.migrateStoredSessionImages>>
+    try {
+      result = await storage.migrateStoredSessionImages(expected, SCOPE, {
+        importTimeoutMs: 30,
+        write
+      })
+    } finally {
+      warn.mockRestore()
+    }
+    expect(result.status).toBe('migrated')
+    expect(write).toHaveBeenCalledTimes(1)
+    const stored = (await readRecord(storage, 'legacy'))!
+    expect(stored.messages[0].attachments?.map((attachment) => attachment.url)).toEqual([
+      `local-media:///managed/${referenceFor(first).relativePath}`,
+      second
+    ])
+    expect(stored.messages.map((message) => message.content)).toEqual(['look', 'answer'])
+    expect(stored.draft?.pendingAttachments[0]?.media).toBeTruthy()
   })
 
   it('leaves the record untouched when no image could be imported', async () => {

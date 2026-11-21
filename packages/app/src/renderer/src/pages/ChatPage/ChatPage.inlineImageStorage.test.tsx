@@ -90,7 +90,8 @@ vi.mock('./chatStoredImageMigration', async (importOriginal) => {
       pauseRetryMs: 50,
       busyRetryMs: 100,
       maxAttemptsPerSession: 3
-    }
+    },
+    STORED_IMAGE_MIGRATION_IMPORT_TIMEOUT_MS: 1_500
   }
 })
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
@@ -208,6 +209,9 @@ const sendComposer = async (text: string): Promise<void> => {
 
 const storedAttachments = (session: ChatSession | undefined): ChatAttachment[] =>
   (session?.messages || []).flatMap((message) => message.attachments || [])
+
+const contents = (session: ChatSession | undefined): string[] =>
+  (session?.messages || []).map((message) => message.content)
 
 const waitForStored = async (
   predicate: (session: ChatSession) => boolean,
@@ -650,6 +654,107 @@ describe('ChatPage stored image migration (FIX-PLAN item 4, part 2)', () => {
       const [record] = await loadAllSessions(SCOPE)
       expect(storedAttachments(record).map((attachment) => attachment.url)).toEqual([inline])
       expect(storedAttachments(readSessionFromUi() ?? undefined)[0]?.url).toBe(inline)
+      expect(fixture.notifyError).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+describe('ChatPage stored image migration outside the save chain', () => {
+  const seedLegacy = async (id: string, legacy: string): Promise<void> => {
+    await seed({
+      id,
+      title: id,
+      profileId: 'inline-vision-fixture',
+      messages: [
+        {
+          role: 'user',
+          content: 'old picture',
+          attachments: [{ type: 'image', url: legacy, fileName: 'old.png', mimeType: 'image/png' }]
+        },
+        { role: 'assistant', content: 'old answer' }
+      ]
+    })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), id)
+  }
+
+  it('stores a message sent while the import hangs at once, and the reference in it afterwards', async () => {
+    // Small enough that the save guard leaves it alone: only the migration imports it.
+    const legacy = inlinePng('hung-legacy', 2048)
+    const imports = fixture.migrateLegacyDataUrl.getMockImplementation()!
+    let answer: () => void = () => undefined
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    fixture.migrateLegacyDataUrl.mockImplementation(async (request: unknown) => {
+      await answered
+      return imports(request)
+    })
+    await seedLegacy('hung', legacy)
+    fixture.ipcChat.mockResolvedValue({ content: 'new answer' })
+
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('hung'))
+    // An attempt has started and main does not answer its import.
+    await waitFor(() => expect(fixture.migrateLegacyDataUrl).toHaveBeenCalledTimes(1), {
+      timeout: 3000
+    })
+    await sendComposer('new question')
+    // The message and the reply are stored at once, the old image still inline. Before, every
+    // save of this conversation waited in its save chain for the migration's import.
+    const early = await waitForStored(
+      (session) => session.id === 'hung' && contents(session).includes('new answer')
+    )
+    expect(contents(early)).toEqual(['old picture', 'old answer', 'new question', 'new answer'])
+    expect(storedAttachments(early)[0]?.url).toBe(legacy)
+
+    answer()
+    // The reference goes into the newest record: nothing saved meanwhile is lost.
+    const migrated = await waitForStored(
+      (session) => session.id === 'hung' && storedAttachments(session)[0]?.media?.kind === 'managed'
+    )
+    expect(contents(migrated)).toEqual(['old picture', 'old answer', 'new question', 'new answer'])
+    expect(storedAttachments(migrated)[0]).toMatchObject({ fileName: 'old.png' })
+    expect(JSON.stringify(migrated)).not.toContain('data:image')
+    await waitFor(() =>
+      expect(storedAttachments(readSessionFromUi() ?? undefined)[0]?.url).toMatch(
+        /^local-media:\/\//
+      )
+    )
+    expect(contents(readSessionFromUi() ?? undefined)).toEqual(contents(migrated))
+    expect(fixture.notifyError).not.toHaveBeenCalled()
+  })
+
+  it('gives up on an import that never answers, keeping the image and every message', async () => {
+    const legacy = inlinePng('never-legacy', 2048)
+    fixture.migrateLegacyDataUrl.mockImplementation(() => new Promise(() => undefined))
+    await seedLegacy('never', legacy)
+    fixture.ipcChat.mockResolvedValue({ content: 'still here' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      renderPage()
+      await waitFor(() => expect(readSessionFromUi()?.id).toBe('never'))
+      await waitFor(() => expect(fixture.migrateLegacyDataUrl).toHaveBeenCalledTimes(1), {
+        timeout: 3000
+      })
+      await sendComposer('are you there')
+      await waitForStored(
+        (session) => session.id === 'never' && contents(session).includes('still here')
+      )
+      // After the per-image timeout the attempt ends with the record as it is.
+      await waitFor(
+        () =>
+          expect(warn).toHaveBeenCalledWith(
+            expect.stringContaining('migration failed'),
+            expect.anything()
+          ),
+        { timeout: 4000 }
+      )
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(fixture.migrateLegacyDataUrl).toHaveBeenCalledTimes(1)
+      const [record] = await loadAllSessions(SCOPE)
+      expect(contents(record)).toEqual(['old picture', 'old answer', 'are you there', 'still here'])
+      expect(storedAttachments(record)[0]?.url).toBe(legacy)
+      expect(storedAttachments(readSessionFromUi() ?? undefined)[0]?.url).toBe(legacy)
       expect(fixture.notifyError).not.toHaveBeenCalled()
     } finally {
       warn.mockRestore()

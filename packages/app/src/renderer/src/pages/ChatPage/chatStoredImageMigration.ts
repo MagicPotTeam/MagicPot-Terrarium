@@ -1,7 +1,8 @@
 // Background migration of the inline images an open pane's stored conversations still hold
-// (FIX-PLAN item 4, part 2). One conversation at a time, in idle time, never while a reply runs or
-// the user is typing. Each conversation is tried a bounded number of times per start: a failure
-// leaves its record as it was and it is tried again at the next start, never in a loop.
+// (FIX-PLAN item 4, part 2). One conversation at a time, in idle time: an attempt never starts
+// while a reply runs or the user is typing, and once started it holds up no save. Each
+// conversation is tried a bounded number of times per start: a failure leaves its record as it
+// was and it is tried again at the next start, never in a loop.
 
 /** What one migration attempt of one conversation came to. */
 export type StoredImageMigrationOutcome =
@@ -38,6 +39,13 @@ export const STORED_IMAGE_MIGRATION_TIMING: StoredImageMigrationTiming = {
   busyRetryMs: 10_000,
   maxAttemptsPerSession: 3
 }
+
+/**
+ * Longest one image's import may take in an attempt; the image then stays inline. The imports
+ * run outside the conversation's save chain, so no save waits for them; this bounds how long an
+ * attempt (and the reference scanner's pause for its unwritten imports) lasts when main hangs.
+ */
+export const STORED_IMAGE_MIGRATION_IMPORT_TIMEOUT_MS = 30_000
 
 /** Attempts of this start, per conversation id; kept by the owner across pane (de)activations. */
 export type StoredImageMigrationProgress = {

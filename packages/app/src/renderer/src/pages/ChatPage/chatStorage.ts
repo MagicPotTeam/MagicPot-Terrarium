@@ -14,7 +14,10 @@ import { normalizeMediaReference } from '@shared/mediaReference'
 import { api } from '@renderer/utils/windowUtils'
 import { normalizeChatProfileIdForStorage } from './chatPageShared'
 import type { ChatContextCompressionSummary } from './chatContextCompression'
-import { CHAT_ATTACHMENT_STORAGE } from './chatManagedMediaAttachments'
+import {
+  CHAT_ATTACHMENT_STORAGE,
+  withIncomingChatImageImportTimeout
+} from './chatManagedMediaAttachments'
 import { readMemberModelChoice, resolveMemberModelSelection } from './agentTeam'
 import { markTeamMessageReceiptsUnknown } from './teamMessageReceipt'
 import type { ChatDraftQueuedSend } from '@renderer/features/chat/chatDraftUtils'
@@ -407,96 +410,81 @@ async function reclaimLegacyImports(
 /** What one image of a migrated record was replaced with, by its old data: URL. */
 export type LegacyAttachmentReplacement = Pick<ChatAttachment, 'url' | 'media'>
 
-type LegacyAttachmentMigrationPlan = {
-  /** The record with every imported legacy inline image replaced; null when none was imported. */
-  replacement: ChatSession | null
-  replacements: Map<string, LegacyAttachmentReplacement>
-}
+/**
+ * Longest one legacy image's import may take before it stays inline in this pass. Main that does
+ * not answer must not hold the migration (or a read that waits for it) for good.
+ */
+export const LEGACY_IMAGE_IMPORT_TIMEOUT_MS = 30_000
 
 /**
- * Imports the legacy inline images of `original` into managed media (one at a time) and builds
- * the record that references them. Nothing is written here. An image main cannot import (another
- * format, a payload that is not strict base64) is not sent and stays inline; one whose import
- * fails stays inline too, and the others are still migrated. Rejects only when images were tried
- * and none could be imported. The imports made are listed in `pendingReclaims`.
+ * Imports the legacy inline images of `original` into managed media, one at a time, and returns
+ * what each imported image becomes, by its old data: URL. Nothing is written here. An image main
+ * cannot import (another format, a payload that is not strict base64) is not sent and stays
+ * inline; one whose import fails or does not finish within `timeoutMs` stays inline too, and the
+ * others are still imported. Rejects only when images were tried and none could be imported. The
+ * imports made are listed in `pendingReclaims`. A timed-out import that main still finishes leaves
+ * an unreferenced file, which managed-media cleanup removes after its retention time.
  */
-async function planLegacyAttachmentMigration(
+async function importLegacyAttachments(
   original: ChatSession,
   service: ManagedMediaSvc,
-  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][]
-): Promise<LegacyAttachmentMigrationPlan> {
+  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][],
+  timeoutMs = LEGACY_IMAGE_IMPORT_TIMEOUT_MS
+): Promise<Map<string, LegacyAttachmentReplacement>> {
   const replacements = new Map<string, LegacyAttachmentReplacement>()
   // Images left inline in this pass: not importable, or their import failed.
   const keptInline = new Set<string>()
   let failure: { error: unknown } | undefined
-  const migrate = async (attachment: ChatAttachment): Promise<ChatAttachment> => {
-    if (!attachmentNeedsLegacyMigration(attachment)) return attachment
+  const importOne = async (attachment: ChatAttachment): Promise<void> => {
+    if (!attachment || typeof attachment.url !== 'string') return
+    if (!attachmentNeedsLegacyMigration(attachment)) return
     // The same image held twice (a message and its compacted copy) is imported once.
-    const known = replacements.get(attachment.url)
-    if (known) return { ...attachment, ...known }
-    if (keptInline.has(attachment.url)) return attachment
+    if (replacements.has(attachment.url) || keptInline.has(attachment.url)) return
     const dataUrl = importableLegacyDataUrl(attachment.url)
     if (!dataUrl) {
       keptInline.add(attachment.url)
-      return attachment
+      return
     }
     let migrated: MigrateLegacyManagedMediaResp
     try {
-      migrated = await service.migrateLegacyDataUrl({
-        dataUrl,
-        metadata: {
-          originalFileName: attachment.fileName || 'legacy-image',
-          sourceWidth: attachment.sourceWidth,
-          sourceHeight: attachment.sourceHeight
-        },
-        // Legacy chat images become durable user-owned media rather than task
-        // scratch data. The explicit namespace keeps old requests compatible
-        // while allowing the physical lifecycle policy to apply on migration.
-        storage: CHAT_ATTACHMENT_STORAGE
-      })
+      migrated = await withIncomingChatImageImportTimeout(
+        service.migrateLegacyDataUrl({
+          dataUrl,
+          metadata: {
+            originalFileName: attachment.fileName || 'legacy-image',
+            sourceWidth: attachment.sourceWidth,
+            sourceHeight: attachment.sourceHeight
+          },
+          // Legacy chat images become durable user-owned media rather than task
+          // scratch data. The explicit namespace keeps old requests compatible
+          // while allowing the physical lifecycle policy to apply on migration.
+          storage: CHAT_ATTACHMENT_STORAGE
+        }),
+        timeoutMs
+      )
     } catch (error) {
       keptInline.add(attachment.url)
       failure ??= { error }
-      return attachment
+      return
     }
     pendingReclaims.push(migrated.checkpoint)
-    const replacement = { url: migrated.localMediaUrl, media: migrated.reference }
-    replacements.set(attachment.url, replacement)
-    return { ...attachment, ...replacement }
+    replacements.set(attachment.url, { url: migrated.localMediaUrl, media: migrated.reference })
   }
-  const migrateMessages = async (source: ChatMessage[]): Promise<ChatMessage[]> => {
-    const messages: ChatMessage[] = []
-    for (const message of source) {
-      if (!message.attachments) {
-        messages.push(message)
-        continue
-      }
-      const attachments: ChatAttachment[] = []
-      for (const attachment of message.attachments) attachments.push(await migrate(attachment))
-      messages.push({ ...message, attachments })
+  const importMessages = async (messages?: readonly ChatMessage[]): Promise<void> => {
+    if (!Array.isArray(messages)) return
+    for (const message of messages) {
+      if (!Array.isArray(message?.attachments)) continue
+      for (const attachment of message.attachments) await importOne(attachment)
     }
-    return messages
   }
 
-  const messages = await migrateMessages(original.messages)
-  const compactedMessages = await migrateMessages(original.compactedMessages || [])
-  const replayImageMessages = await migrateMessages(
-    original.contextCompression?.replayImageMessages || []
-  )
-  const draft = original.draft
-    ? {
-        ...original.draft,
-        pendingAttachments: [] as ChatAttachment[]
-      }
-    : undefined
-  if (draft) {
-    for (const attachment of original.draft!.pendingAttachments) {
-      draft.pendingAttachments.push(await migrate(attachment))
-    }
-  }
+  await importMessages(original.messages)
+  await importMessages(original.compactedMessages)
+  await importMessages(original.contextCompression?.replayImageMessages)
+  for (const attachment of original.draft?.pendingAttachments ?? []) await importOne(attachment)
   if (replacements.size === 0) {
     if (failure) throw failure.error
-    return { replacement: null, replacements }
+    return replacements
   }
   if (failure) {
     console.warn(
@@ -504,22 +492,72 @@ async function planLegacyAttachmentMigration(
       failure.error
     )
   }
-  const contextCompression = original.contextCompression
-    ? {
-        ...original.contextCompression,
-        ...(replayImageMessages.length > 0 ? { replayImageMessages } : {})
-      }
-    : undefined
-  return {
-    replacement: {
-      ...original,
-      messages,
-      ...(original.compactedMessages ? { compactedMessages } : {}),
-      ...(draft ? { draft } : {}),
-      ...(contextCompression ? { contextCompression } : {})
-    },
+  return replacements
+}
+
+const replaceLegacyAttachments = (
+  attachments: ChatAttachment[] | undefined,
+  replacements: ReadonlyMap<string, LegacyAttachmentReplacement>
+): ChatAttachment[] | undefined => {
+  if (!Array.isArray(attachments)) return attachments
+  let next: ChatAttachment[] | undefined
+  attachments.forEach((attachment, index) => {
+    if (!attachment || typeof attachment.url !== 'string') return
+    const replacement = replacements.get(attachment.url)
+    if (!replacement || !attachmentNeedsLegacyMigration(attachment)) return
+    next ??= [...attachments]
+    next[index] = { ...attachment, ...replacement }
+  })
+  return next ?? attachments
+}
+
+const replaceLegacyInMessages = (
+  messages: ChatMessage[] | undefined,
+  replacements: ReadonlyMap<string, LegacyAttachmentReplacement>
+): ChatMessage[] | undefined => {
+  if (!Array.isArray(messages)) return messages
+  let next: ChatMessage[] | undefined
+  messages.forEach((message, index) => {
+    const attachments = replaceLegacyAttachments(message?.attachments, replacements)
+    if (attachments === message?.attachments) return
+    next ??= [...messages]
+    next[index] = { ...message, attachments }
+  })
+  return next ?? messages
+}
+
+/**
+ * `session` with each legacy inline image that has a replacement (by its data: URL) switched to
+ * its managed form, in the messages, the compacted history, the replay images and the draft: the
+ * same places importLegacyAttachments looks. Every other field is kept. The same object when
+ * nothing matches; unchanged messages and lists keep their identity.
+ */
+export function applyLegacyAttachmentReplacements(
+  session: ChatSession,
+  replacements: ReadonlyMap<string, LegacyAttachmentReplacement>
+): ChatSession {
+  if (replacements.size === 0) return session
+  const changes: Partial<ChatSession> = {}
+  const messages = replaceLegacyInMessages(session.messages, replacements)
+  if (messages !== session.messages) changes.messages = messages
+  const compactedMessages = replaceLegacyInMessages(session.compactedMessages, replacements)
+  if (compactedMessages !== session.compactedMessages) changes.compactedMessages = compactedMessages
+  const compression = session.contextCompression
+  const replayImageMessages = replaceLegacyInMessages(
+    compression?.replayImageMessages,
     replacements
+  )
+  if (compression && replayImageMessages !== compression.replayImageMessages) {
+    changes.contextCompression = { ...compression, replayImageMessages }
   }
+  const draft = session.draft
+  if (draft) {
+    const pendingAttachments = replaceLegacyAttachments(draft.pendingAttachments, replacements)
+    if (pendingAttachments && pendingAttachments !== draft.pendingAttachments) {
+      changes.draft = { ...draft, pendingAttachments }
+    }
+  }
+  return Object.keys(changes).length > 0 ? { ...session, ...changes } : session
 }
 
 const managedMediaService = (): ManagedMediaSvc | undefined =>
@@ -535,11 +573,11 @@ async function migrateLegacyAttachmentsInSession(
   if (!service?.migrateLegacyDataUrl) return original
 
   try {
-    const { replacement } = await planLegacyAttachmentMigration(original, service, pendingReclaims)
-    if (!replacement) return original
+    const replacements = await importLegacyAttachments(original, service, pendingReclaims)
+    if (replacements.size === 0) return original
     const persisted = await compareAndUpdateSessionInDB(original.id, scope, {
       expectedSession: original,
-      update: () => replacement
+      update: (current) => applyLegacyAttachmentReplacements(current, replacements)
     })
     if (persisted) return persisted
 
@@ -603,50 +641,70 @@ export type StoredSessionImageMigrationResult =
       session: ChatSession
       replacements: ReadonlyMap<string, LegacyAttachmentReplacement>
     }
-  /** Not written: the stored record is not `expected`, or `shouldUpdate` said no. Untouched. */
+  /** Not written: the stored record is not the expected one, or the writer said no. Untouched. */
   | { status: 'not-written' }
   /** Another migration of this conversation is running in this window. */
   | { status: 'busy' }
   /** An import or the write failed. The stored record is untouched. */
   | { status: 'failed' }
 
+export type StoredSessionImageMigrationOptions = {
+  /** For the default write: checked inside its transaction; false writes nothing. */
+  shouldUpdate?: () => boolean
+  /**
+   * Writes the finished imports, once every import has settled: resolves to the record it stored,
+   * or null when it stored nothing. Without it, one compare-and-update against `source` writes
+   * them. The imports run before it is called, so a writer that queues behind the
+   * conversation's saves (ChatSessionSaveBaseline.rewriteStored) holds them up only for the
+   * write itself.
+   */
+  write?: (
+    replacements: ReadonlyMap<string, LegacyAttachmentReplacement>
+  ) => Promise<ChatSession | null>
+  /** Longest one image's import may take; that image then stays inline. */
+  importTimeoutMs?: number
+}
+
 const storedImageMigrationFlights = new Map<string, Promise<StoredSessionImageMigrationResult>>()
 
 /**
  * The open page's migration of one stored conversation's legacy inline images (FIX-PLAN item 4,
- * part 2): the same imports as migrateLegacyAttachmentsSingleFlight, written by one
- * compare-and-update against `expected` (the record the caller's save baseline expects), never
- * retried against a different record. `shouldUpdate` runs inside the write's transaction. On any
- * failure the stored record is untouched and the imports are handed back for reclaim.
+ * part 2). The images of `source` are imported first, each within `importTimeoutMs`, and only
+ * then written: by `options.write` or else by one compare-and-update against `source`, never
+ * retried against a different record. On any failure the stored record is untouched and the
+ * imports are handed back for reclaim.
  */
 export function migrateStoredSessionImages(
-  expected: ChatSession,
+  source: ChatSession,
   scope: string,
-  options: { shouldUpdate?: () => boolean } = {}
+  options: StoredSessionImageMigrationOptions = {}
 ): Promise<StoredSessionImageMigrationResult> {
   const targetScope = normalizeScope(scope)
-  const key = createSessionStorageKey(expected.id, targetScope)
+  const key = createSessionStorageKey(source.id, targetScope)
   if (legacyMigrationFlights.has(key) || storedImageMigrationFlights.has(key)) {
     return Promise.resolve({ status: 'busy' })
   }
   const flight = (async (): Promise<StoredSessionImageMigrationResult> => {
     const service = managedMediaService()
-    if (!service?.migrateLegacyDataUrl || !sessionNeedsLegacyAttachmentMigration(expected)) {
+    if (!service?.migrateLegacyDataUrl || !sessionNeedsLegacyAttachmentMigration(source)) {
       return { status: 'unchanged' }
     }
     const pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][] = []
     try {
-      const { replacement, replacements } = await planLegacyAttachmentMigration(
-        expected,
+      const replacements = await importLegacyAttachments(
+        source,
         service,
-        pendingReclaims
+        pendingReclaims,
+        options.importTimeoutMs
       )
-      if (!replacement) return { status: 'unchanged' }
-      const persisted = await compareAndUpdateSessionInDB(expected.id, targetScope, {
-        expectedSession: expected,
-        ...(options.shouldUpdate ? { shouldUpdate: () => options.shouldUpdate!() } : {}),
-        update: () => replacement
-      })
+      if (replacements.size === 0) return { status: 'unchanged' }
+      const persisted = options.write
+        ? await options.write(replacements)
+        : await compareAndUpdateSessionInDB(source.id, targetScope, {
+            expectedSession: source,
+            ...(options.shouldUpdate ? { shouldUpdate: () => options.shouldUpdate!() } : {}),
+            update: (current) => applyLegacyAttachmentReplacements(current, replacements)
+          })
       if (persisted) return { status: 'migrated', session: persisted, replacements }
       await reclaimLegacyImports(service, pendingReclaims)
       return { status: 'not-written' }
