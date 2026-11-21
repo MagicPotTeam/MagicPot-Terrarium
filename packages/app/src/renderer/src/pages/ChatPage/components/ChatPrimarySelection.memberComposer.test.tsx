@@ -2,6 +2,8 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import ChatPrimarySelection from './ChatPrimarySelection'
 import type { LLMReasoningEffort } from '@shared/llm'
+import enUS from '@shared/locales/en-US/renderer.json'
+import zhCN from '@shared/locales/zh-CN/renderer.json'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -151,5 +153,167 @@ describe('ChatPrimarySelection member model in the composer', () => {
     expect(marked()).toEqual(['Lead model'])
     fireEvent.click(screen.getByRole('menuitem', { name: 'Lead model' }))
     expect(member).toHaveBeenCalledExactlyOnceWith('lead')
+  })
+
+  describe('the inherit-lead row', () => {
+    const inheritLead = (onSelect?: () => void) => ({
+      profileId: 'lead',
+      modelName: 'Lead model',
+      ...(onSelect ? { onSelect } : {})
+    })
+    const inheritRow = () => rows()[0]
+
+    it('comes first with the label and the lead model, marked while the member inherits', () => {
+      const member = vi.fn()
+      render(
+        <ChatPrimarySelection
+          {...base}
+          onSelectProfile={vi.fn()}
+          memberModel={{
+            state: 'inherited',
+            label: 'Lead model',
+            profileId: 'lead',
+            onSelectProfile: member,
+            selectableProfileIds: ['lead', 'other'],
+            inheritLead: inheritLead()
+          }}
+        />
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_inherited' }))
+      expect(rows().map((row) => row.textContent)).toEqual([
+        'chat.member_model_inheritLead model',
+        'Lead model',
+        'Other model'
+      ])
+      expect(within(inheritRow()).getByText('chat.member_model_inherit')).toBeInTheDocument()
+      expect(within(inheritRow()).getByText('Lead model')).toBeInTheDocument()
+      // The member inherits: the row is the one in use, not the lead's model row.
+      expect(marked()).toEqual(['chat.member_model_inheritLead model'])
+      expect(inheritRow()).toHaveFocus()
+      // Already in use: choosing it changes nothing.
+      fireEvent.click(inheritRow())
+      expect(member).not.toHaveBeenCalled()
+      // The lead's own model row still stores an explicit choice.
+      fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_inherited' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Lead model' }))
+      expect(member).toHaveBeenCalledExactlyOnceWith('lead')
+    })
+
+    it.each(['selected', 'unavailable'] as const)(
+      'clears a %s member choice once and hands no profile id on',
+      (state) => {
+        const ordinary = vi.fn()
+        const member = vi.fn()
+        const inherit = vi.fn()
+        const effort = vi.fn()
+        render(
+          <ChatPrimarySelection
+            {...base}
+            onSelectProfile={ordinary}
+            onSelectProfileReasoningEffort={effort}
+            memberModel={{
+              ...(state === 'selected'
+                ? { state, label: 'Other model', profileId: 'other' }
+                : { state }),
+              onSelectProfile: member,
+              selectableProfileIds: ['lead', 'other'],
+              inheritLead: inheritLead(inherit)
+            }}
+          />
+        )
+        fireEvent.click(screen.getByRole('button', { name: `chat.member_model_${state}` }))
+        expect(marked()).toEqual(state === 'selected' ? ['Other model'] : [])
+        fireEvent.click(inheritRow())
+        expect(inherit).toHaveBeenCalledTimes(1)
+        expect(member).not.toHaveBeenCalled()
+        expect(ordinary).not.toHaveBeenCalled()
+        expect(effort).not.toHaveBeenCalled()
+        expect(screen.queryByRole('menu')).toBeNull()
+      }
+    )
+
+    it('is reached with the arrow keys', () => {
+      render(
+        <ChatPrimarySelection
+          {...base}
+          onSelectProfile={vi.fn()}
+          memberModel={{
+            state: 'selected',
+            label: 'Other model',
+            profileId: 'other',
+            onSelectProfile: vi.fn(),
+            selectableProfileIds: ['lead', 'other'],
+            inheritLead: inheritLead(vi.fn())
+          }}
+        />
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
+      const other = screen.getByRole('menuitem', { name: 'Other model' })
+      expect(other).toHaveFocus()
+      fireEvent.keyDown(other, { key: 'ArrowDown' })
+      expect(inheritRow()).toHaveFocus()
+      fireEvent.keyDown(inheritRow(), { key: 'ArrowDown' })
+      expect(screen.getByRole('menuitem', { name: 'Lead model' })).toHaveFocus()
+      fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Lead model' }), { key: 'ArrowUp' })
+      expect(inheritRow()).toHaveFocus()
+    })
+
+    it('cannot be confused with a model whose id looks like the row', () => {
+      const member = vi.fn()
+      const inherit = vi.fn()
+      const lookalikes = [
+        { id: 'inherit-lead', model_name: 'Lookalike one' },
+        { id: 'profile:inherit-lead', model_name: 'Lookalike two' }
+      ]
+      render(
+        <ChatPrimarySelection
+          {...base}
+          availableProfiles={[...profiles, ...lookalikes]}
+          onSelectProfile={vi.fn()}
+          memberModel={{
+            state: 'selected',
+            label: 'Other model',
+            profileId: 'other',
+            onSelectProfile: member,
+            inheritLead: inheritLead(inherit)
+          }}
+        />
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
+      expect(rows()).toHaveLength(6)
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Lookalike one' }))
+      expect(member).toHaveBeenCalledExactlyOnceWith('inherit-lead')
+      fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Lookalike two' }))
+      expect(member).toHaveBeenLastCalledWith('profile:inherit-lead')
+      expect(inherit).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
+      fireEvent.click(inheritRow())
+      expect(inherit).toHaveBeenCalledTimes(1)
+      expect(member).toHaveBeenCalledTimes(2)
+    })
+
+    it('is absent without the lead model, and the pill texts stay as they were', () => {
+      render(
+        <ChatPrimarySelection
+          {...base}
+          onSelectProfile={vi.fn()}
+          memberModel={{
+            state: 'selected',
+            label: 'Other model',
+            profileId: 'other',
+            onSelectProfile: vi.fn(),
+            selectableProfileIds: ['lead', 'other']
+          }}
+        />
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
+      expect(rows().map((row) => row.textContent)).toEqual(['Lead model', 'Other model'])
+    })
+
+    it('has its label in both languages', () => {
+      expect(enUS.chat.member_model_inherit).toBe('Inherit lead')
+      expect(zhCN.chat.member_model_inherit).toBe('继承组长')
+    })
   })
 })

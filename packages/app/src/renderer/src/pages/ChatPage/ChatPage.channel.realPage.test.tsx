@@ -2151,6 +2151,8 @@ describe('real ChatPage member model on the real composer selector', () => {
   const A = { id: PROFILE_ID, model_name: 'fixture-model' }
   const B = { id: 'fixture-profile-b', model_name: 'fixture-model-b' }
   const INHERITED = 'Inherits lead: {{model}}'
+  // The first row of a member's menu while the lead's model can be used: label and that model.
+  const inheritRow = (model: string): string => `Inherit lead${model}`
   const SELECTED = 'Member model: {{model}}'
   let pillHost: HTMLElement
   let overlayHost: HTMLElement
@@ -2244,8 +2246,12 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(inherited).toBeEnabled()
     const leadBefore = await page.stored('lead')
     const menu = await openMenu(inherited)
-    expect(rowNames(menu)).toEqual(['fixture-model', 'fixture-model-b'])
-    expect(markedRows(menu)).toEqual(['fixture-model'])
+    expect(rowNames(menu)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-b'
+    ])
+    expect(markedRows(menu)).toEqual([inheritRow('fixture-model')])
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-b' }))
     await waitFor(async () =>
       expect((await page.stored('designer'))?.memberModelChoice).toEqual({
@@ -2258,7 +2264,11 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(Object.hasOwn(rawRow(page.idb, 'writer')!, 'memberModelChoice')).toBe(false)
     const selected = await within(slot()).findByRole('button', { name: SELECTED })
     const reopened = await openMenu(selected)
-    expect(rowNames(reopened)).toEqual(['fixture-model', 'fixture-model-b'])
+    expect(rowNames(reopened)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-b'
+    ])
     expect(markedRows(reopened)).toEqual(['fixture-model-b'])
     await closeMenu()
 
@@ -2338,7 +2348,7 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(Object.hasOwn(before.designer as object, 'memberModelChoice')).toBe(false)
     expect(before.lead).toMatchObject({ profileId: A.id, teamSettings: { defaultModel: B.id } })
     expect(markedRows(await openMenu(await openConversation(page, 'designer', INHERITED)))).toEqual(
-      ['fixture-model']
+      [inheritRow('fixture-model')]
     )
     await closeMenu()
     await quietPuts(page)
@@ -2409,7 +2419,11 @@ describe('real ChatPage member model on the real composer selector', () => {
     const before = await page.stored('designer')
     expect(before?.draft?.inputValue).toBe('designer task fixture')
     const menu = await openMenu(within(slot()).getByRole('button', { name: UNAVAILABLE }))
-    expect(rowNames(menu)).toEqual(['fixture-model', 'fixture-model-c'])
+    expect(rowNames(menu)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-c'
+    ])
     expect(markedRows(menu)).toEqual([])
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-c' }))
     await waitFor(async () =>
@@ -2432,4 +2446,56 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(h.notify.mock.calls).toEqual([['Team lead unavailable.']])
     expect(channelDeniedAttempts()).toEqual([])
   }, 30000)
+
+  it('lets a member inherit the lead again: it follows the lead model, across a restart too', async () => {
+    const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+    const pick = async (page: ChannelPage, name: string, row: string, label: string) => {
+      const menu = await openMenu(await openConversation(page, name, INHERITED))
+      fireEvent.click(within(menu).getByRole('menuitem', { name: row }))
+      await within(slot()).findByRole('button', { name: label })
+    }
+    const first = await mountTeam({ profiles: [A, B, C] })
+    await pick(first, 'designer', 'fixture-model-b', SELECTED)
+    await pick(first, 'writer', 'fixture-model-b', SELECTED)
+    // The designer follows the lead again.
+    const menu = await openMenu(await openConversation(first, 'designer', SELECTED))
+    expect(markedRows(menu)).toEqual(['fixture-model-b'])
+    const inherit = within(menu).getAllByRole('menuitem')[0]
+    expect(inherit).toHaveTextContent(inheritRow('fixture-model'))
+    fireEvent.click(inherit)
+    await within(slot()).findByRole('button', { name: INHERITED })
+    const designer = await first.stored('designer')
+    expect(Object.hasOwn(designer!, 'memberModelChoice')).toBe(false)
+    expect(Object.hasOwn(rawRow(first.idb, 'designer')!, 'memberModelChoice')).toBe(false)
+    expect((await first.stored('writer'))?.memberModelChoice).toEqual({
+      version: 1,
+      profileId: B.id
+    })
+    first.send('designer task fixture')
+    await waitFor(() => expect(requestProfiles(first, 'designer')).toEqual([A.id]))
+    await storedReply(first, 'designer', 1)
+
+    // The lead changes its own model: the inheriting member follows, the one with a pick does not.
+    const leadMenu = await openMenu(await openLead(first))
+    fireEvent.click(within(leadMenu).getByRole('menuitem', { name: 'fixture-model-c' }))
+    await within(slot()).findByRole('button', { name: 'fixture-model-c' })
+    await waitFor(async () => expect((await first.stored('lead'))?.profileId).toBe(C.id))
+    first.send('@designer next task')
+    await waitFor(() => expect(requestProfiles(first, 'designer')).toEqual([A.id, C.id]))
+    await storedReply(first, 'designer', 2)
+    first.send('@writer hi')
+    await waitFor(() => expect(requestProfiles(first, 'writer')).toEqual([B.id]))
+    await storedReply(first, 'writer', 1)
+    await first.finish()
+
+    const second = await mountTeam({ profiles: [A, B, C], storage: first.idb })
+    const reopened = await openMenu(await openConversation(second, 'designer', INHERITED))
+    expect(markedRows(reopened)).toEqual([inheritRow('fixture-model-c')])
+    await closeMenu()
+    expect(Object.hasOwn((await second.stored('designer'))!, 'memberModelChoice')).toBe(false)
+    second.send('designer after restart')
+    await waitFor(() => expect(requestProfiles(second, 'designer')).toEqual([C.id]))
+    await storedReply(second, 'designer', 3)
+    await second.finish()
+  }, 60000)
 })

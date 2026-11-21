@@ -7012,8 +7012,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [availableProfiles, resolveAvailableProfileId]
   )
 
+  // profileId null: clear the member's own choice, so it inherits the lead's model again.
   const selectMemberProfile = useCallback(
-    async (expectedMemberId: string, profileId: string): Promise<void> => {
+    async (expectedMemberId: string, profileId: string | null): Promise<void> => {
       const scope = storageScope
       const memberId = currentSessionIdRef.current
       if (memberId !== expectedMemberId) return
@@ -7021,6 +7022,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const lead = member?.teamLeadId
         ? sessionsRef.current.find((session) => session.id === member.teamLeadId)
         : undefined
+      const hasOwnChoice = (session: ChatSession): boolean => {
+        try {
+          return readMemberModelChoice(session) !== null
+        } catch {
+          return false
+        }
+      }
+      // A clear leads only to a usable lead model, and only from a readable own choice.
+      const leadProfileId = lead?.profileId ?? null
       if (
         !member ||
         !lead ||
@@ -7030,7 +7040,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         route?.channel !== 'canvas' ||
         route.scopeType !== 'thread' ||
         !route.threadId ||
-        !isSelectableMemberProfile(profileId)
+        (profileId === null
+          ? !leadProfileId || !isSelectableMemberProfile(leadProfileId) || !hasOwnChoice(member)
+          : !isSelectableMemberProfile(profileId))
       )
         return
       const key = `${scope}\u0000${member.id}`
@@ -7093,7 +7105,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         setSessions((previous) =>
           previous.map((session) => (session === member ? result.member : session))
         )
-        setSelectedProfileId(profileId)
+        setSelectedProfileId(profileId ?? leadProfileId)
       } catch {
         if (isMountedRef.current && storageScopeRef.current === scope)
           notifyWarning(t('chat.member_model_save_failed'))
@@ -7132,6 +7144,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return { state: 'unavailable' as const }
     }
     const memberId = currentSession.id
+    // The "inherit the lead" row, only when the lead's model can be used (else it leads nowhere);
+    // choosing it clears the member's own choice, so it exists only when there is one.
+    const leadProfile =
+      lead?.profileId && isSelectableMemberProfile(lead.profileId)
+        ? availableProfiles.find((item) => item.id === lead.profileId)
+        : undefined
     const controls = {
       pending: memberModelChoicePendingRef.current.has(`${storageScope}\u0000${memberId}`),
       disabled: config.use_remote_llm || !sessionsLoaded || Boolean(sessionLoadError) || isLoading,
@@ -7140,7 +7158,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
         .map((item) => item.id),
       onSelectProfile: (id: string) => {
         void selectMemberProfile(memberId, id)
-      }
+      },
+      ...(leadProfile
+        ? {
+            inheritLead: {
+              profileId: leadProfile.id,
+              modelName: leadProfile.model_name,
+              ...(choice !== null
+                ? {
+                    onSelect: () => {
+                      void selectMemberProfile(memberId, null)
+                    }
+                  }
+                : {})
+            }
+          }
+        : {})
     }
     // The same test as the send path, so the selector never names a model a send refuses.
     const profile =

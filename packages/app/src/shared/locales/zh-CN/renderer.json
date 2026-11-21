@@ -1308,6 +1308,7 @@
     "new_conversation": "新对话",
     "messages": "条消息",
     "model": "模型",
+    "member_model_inherit": "继承组长",
     "member_model_inherited": "继承组长：{{model}}",
     "member_model_selected": "成员模型：{{model}}",
     "member_model_unavailable": "成员模型不可用",
