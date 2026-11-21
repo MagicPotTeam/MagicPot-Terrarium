@@ -105,7 +105,7 @@ export async function grantLocalMediaImportFile(
         const stats = await stat(resolved)
         return stats.isFile() ? { path: resolved, sizeBytes: stats.size } : null
       },
-      { key: importSourceRootKey(filePath), timeoutMs }
+      { key: importSourceRootKey(filePath), file: filePath, timeoutMs }
     )
     if (!granted || !('path' in granted)) return granted
     recordLocalMediaImportGrant(granted.path, now(), 'import', { batch })

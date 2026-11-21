@@ -125,8 +125,11 @@ export function isPathInsideRoot(root: string, candidate: string): boolean {
  * drive or mount, see importSourceRootKey): at most IMPORT_SOURCE_MAX_CALLS_PER_ROOT calls
  * on one root and IMPORT_SOURCE_MAX_CALLS in all, stalled ones included (a slot is freed only
  * when its call really returns). A call's deadline starts when it gets its slot, so waiting
- * behind other calls never counts. A root whose slots are all held by calls past their
- * deadline does not respond: its next calls are refused at once, and other roots keep working.
+ * behind other calls never counts. A file with a call past its deadline does not respond: its
+ * next calls are refused at once. A root whose slots are all held by such calls is refused at
+ * once too, unless it answered since the first of them stalled (a drive with slow cloud
+ * placeholders): then its other files get one slot more while the app has one. When every
+ * slot of the app is held by calls past their deadline, every call is refused.
  */
 export type ImportSourceGuard = {
   /**
@@ -202,16 +205,28 @@ export function importSourceRootKey(filePath: string): string {
   return `/${segments.slice(0, depth).join('/')}`
 }
 
+/** One call holding a slot of the gate. */
+export type ImportSourceGateSlot = {
+  /** The call passed its deadline; it keeps its slot until it returns. */
+  markOverdue(): void
+  /** The call returned (`ran`: its operation really ran), or ended before it ran (false). */
+  release(ran: boolean): void
+}
+
 export type ImportSourceGate = {
   /**
-   * Calls start() once a slot of `key` is free, or refuse() when the root does not respond.
-   * Returns cancel(), which takes a call that is still waiting out of the queue (true) and
-   * does nothing once it has started or been refused (false).
+   * Calls start(slot) once a slot of `key` is free, or refuse() when the call would not be
+   * answered: its `file` (a comparison form of the source path, when given) already has a
+   * call past its deadline, its root does not respond, or every slot of the app is held by
+   * calls past their deadline. Returns cancel(), which takes a call that is still waiting out
+   * of the queue (true) and does nothing once it has started or been refused (false).
    */
-  acquire(key: string, start: () => void, refuse: () => void): () => boolean
-  /** The call holding a slot of `key` passed its deadline; it keeps the slot until it returns. */
-  markOverdue(key: string): void
-  release(key: string, overdue: boolean): void
+  acquire(
+    key: string,
+    start: (slot: ImportSourceGateSlot) => void,
+    refuse: () => void,
+    file?: string
+  ): () => boolean
   /** Calls holding a slot, stalled ones included. */
   readonly active: number
   /** Calls past their deadline that have not returned yet. */
@@ -226,50 +241,96 @@ export function createImportSourceGate({
       '[ManagedMedia] Every import source slot is held by a call past its deadline; imports are refused until one returns'
     )
 }: { perRoot?: number; total?: number; onSaturated?: () => void } = {}): ImportSourceGate {
-  const inFlight = new Map<string, number>()
-  const overdueByKey = new Map<string, number>()
-  let active = 0
-  let overdue = 0
-  let saturationLogged = false
-  const waiting: Array<{ key: string; start: () => void; refuse: () => void }> = []
-  const count = (map: Map<string, number>, key: string, delta: number): void => {
-    const next = (map.get(key) ?? 0) + delta
-    if (next > 0) map.set(key, next)
-    else map.delete(key)
+  type Waiter = {
+    key: string
+    file?: string
+    start: (slot: ImportSourceGateSlot) => void
+    refuse: () => void
   }
-  // A root whose every slot is held by calls past their deadline does not respond: a new call
-  // there would only wait. One slow file (a cloud placeholder that downloads on open) leaves
-  // the other slot to the rest of its drive. When every slot of the app is held by such
-  // calls, nothing can run at all.
-  const refusesNow = (key: string): boolean =>
-    (overdueByKey.get(key) ?? 0) >= perRoot || overdue >= total
+  /** `order` counts the calls in the order they started. */
+  type Call = { key: string; file?: string; order: number }
+  const inFlight = new Map<string, number>()
+  /** Calls past their deadline that have not returned. */
+  const late = new Set<Call>()
+  /** Root -> the order of the latest call there that returned within its deadline. */
+  const answered = new Map<string, number>()
+  let started = 0
+  let active = 0
+  let saturationLogged = false
+  const waiting: Waiter[] = []
+  const lateOn = (key: string): Call[] => Array.from(late).filter((call) => call.key === key)
+  // A root whose slots are all held by calls past their deadline gets one slot more, for its
+  // other files, only while it answers: a call there that started after the first of them
+  // returned within its deadline. A drive whose cloud placeholders are still downloading
+  // answers for its other files; a dead mount does not, so it never gets another thread.
+  const spare = (key: string): number => {
+    const stalled = lateOn(key)
+    if (stalled.length < perRoot) return 0
+    const firstStall = Math.min(...stalled.map((call) => call.order))
+    return (answered.get(key) ?? 0) > firstStall ? 1 : 0
+  }
+  // A file with a call past its deadline does not respond (a cloud placeholder still
+  // downloading, a file on a share that stopped answering): a new call there would only hold
+  // another thread. When every slot of the app is held by such calls, nothing can run at all.
+  const refusesNow = ({ key, file }: Waiter): boolean =>
+    (file !== undefined && Array.from(late).some((call) => call.file === file)) ||
+    late.size >= total ||
+    lateOn(key).length >= perRoot + spare(key)
   const pump = (): void => {
     const run: Array<() => void> = []
     for (let index = 0; index < waiting.length;) {
       const waiter = waiting[index]
-      if (refusesNow(waiter.key)) {
+      if (refusesNow(waiter)) {
         waiting.splice(index, 1)
         run.push(waiter.refuse)
-      } else if (active < total && (inFlight.get(waiter.key) ?? 0) < perRoot) {
+      } else if (active < total && (inFlight.get(waiter.key) ?? 0) < perRoot + spare(waiter.key)) {
         waiting.splice(index, 1)
         active += 1
-        count(inFlight, waiter.key, 1)
-        run.push(waiter.start)
+        inFlight.set(waiter.key, (inFlight.get(waiter.key) ?? 0) + 1)
+        const call: Call = { key: waiter.key, file: waiter.file, order: (started += 1) }
+        run.push(() => waiter.start(slotOf(call)))
       } else {
         index += 1
       }
     }
-    if (overdue >= total && !saturationLogged) {
+    if (late.size >= total && !saturationLogged) {
       saturationLogged = true
       onSaturated()
-    } else if (overdue < total) {
+    } else if (late.size < total) {
       saturationLogged = false
     }
     for (const next of run) next()
   }
+  const slotOf = (call: Call): ImportSourceGateSlot => {
+    let released = false
+    return {
+      markOverdue() {
+        if (released || late.has(call)) return
+        late.add(call)
+        pump()
+      },
+      release(ran) {
+        if (released) return
+        released = true
+        active = Math.max(0, active - 1)
+        const wasLate = late.delete(call)
+        const left = (inFlight.get(call.key) ?? 1) - 1
+        if (left > 0) {
+          inFlight.set(call.key, left)
+          if (!wasLate && ran)
+            answered.set(call.key, Math.max(answered.get(call.key) ?? 0, call.order))
+        } else {
+          // No call left on the root: a later stall starts after every answer so far.
+          inFlight.delete(call.key)
+          answered.delete(call.key)
+        }
+        pump()
+      }
+    }
+  }
   return {
-    acquire(key, start, refuse) {
-      const waiter = { key, start, refuse }
+    acquire(key, start, refuse, file) {
+      const waiter: Waiter = { key, file, start, refuse }
       waiting.push(waiter)
       pump()
       return () => {
@@ -279,25 +340,11 @@ export function createImportSourceGate({
         return true
       }
     },
-    markOverdue(key) {
-      overdue += 1
-      count(overdueByKey, key, 1)
-      pump()
-    },
-    release(key, wasOverdue) {
-      active = Math.max(0, active - 1)
-      count(inFlight, key, -1)
-      if (wasOverdue) {
-        overdue = Math.max(0, overdue - 1)
-        count(overdueByKey, key, -1)
-      }
-      pump()
-    },
     get active() {
       return active
     },
     get overdue() {
-      return overdue
+      return late.size
     }
   }
 }
@@ -308,15 +355,16 @@ const defaultImportSourceGate = createImportSourceGate()
  * Runs one filesystem call on an import source under the gate, rejecting with
  * MANAGED_MEDIA_IMPORT_TIMEOUT once timeoutMs has passed since the call got its slot, once
  * the monotonic time notAfter() has come (a copy's cap), when it waited waitTimeoutMs for a
- * slot, or at once when the source's root does not respond. The slot stays taken until the
- * call really settles; a call still pending timeoutMs after it started is counted as overdue
- * (its root does not respond), whatever cut it before. A result that arrives after the
- * deadline goes to onLateResult (to close a late file handle).
+ * slot, or at once when its file does not respond (see ImportSourceGuard). The slot stays
+ * taken until the call really settles; a call still pending timeoutMs after it started is
+ * counted as overdue (its file does not respond), whatever cut it before. A result that
+ * arrives after the deadline goes to onLateResult (to close a late file handle).
  */
 export function runImportSourceOperation<T>(
   operation: () => Promise<T>,
   {
     key = '',
+    file,
     timeoutMs,
     waitTimeoutMs = Math.max(0, timeoutMs) * IMPORT_SOURCE_WAIT_TIMEOUT_FACTOR,
     notAfter,
@@ -324,6 +372,8 @@ export function runImportSourceOperation<T>(
     onLateResult
   }: {
     key?: string
+    /** The source path the call is on: a file with an overdue call is refused at once. */
+    file?: string
     timeoutMs: number
     /** How long the call may wait for a slot (not counted in timeoutMs). */
     waitTimeoutMs?: number
@@ -332,29 +382,28 @@ export function runImportSourceOperation<T>(
     onLateResult?: (value: T) => void
   }
 ): Promise<T> {
+  const fileId = file === undefined ? undefined : comparisonPath(file)
   return new Promise<T>((resolve, reject) => {
     let settled = false
     let started = false
     let waitTimer: ReturnType<typeof setTimeout> | undefined
-    const start = (): void => {
+    const start = (slot: ImportSourceGateSlot): void => {
       started = true
       clearTimeout(waitTimer)
       const capLeft = notAfter ? notAfter() - monotonicNow() : Number.POSITIVE_INFINITY
       const stallLimit = Math.max(0, timeoutMs)
       if (capLeft <= 0) {
-        gate.release(key, false)
+        slot.release(false)
         settled = true
         reject(importSourceTimeoutError())
         return
       }
       let returned = false
-      let overdue = false
-      // Still pending a whole call deadline after it started: its root does not respond,
+      // Still pending a whole call deadline after it started: its file does not respond,
       // even when the copy's cap cut the call first (it would otherwise hold its slot unseen).
       const stallTimer = setTimeout(() => {
         if (returned) return
-        overdue = true
-        gate.markOverdue(key)
+        slot.markOverdue()
         if (settled) return
         settled = true
         reject(importSourceTimeoutError())
@@ -397,13 +446,18 @@ export function runImportSourceOperation<T>(
           }
         )
         .catch(() => undefined)
-        .finally(() => gate.release(key, overdue))
+        .finally(() => slot.release(true))
     }
-    const cancel = gate.acquire(key, start, () => {
-      clearTimeout(waitTimer)
-      settled = true
-      reject(importSourceTimeoutError())
-    })
+    const cancel = gate.acquire(
+      key,
+      start,
+      () => {
+        clearTimeout(waitTimer)
+        settled = true
+        reject(importSourceTimeoutError())
+      },
+      fileId
+    )
     // A call never waits for a slot without bound.
     if (!started && !settled) {
       waitTimer = setTimeout(
@@ -1349,6 +1403,7 @@ export async function importManagedMediaFile(
     if (!guard) return operation()
     return runImportSourceOperation(operation, {
       key: sourceKey,
+      file: resolvedSource,
       timeoutMs: guard.operationTimeoutMs,
       notAfter: () => copyDeadline,
       onLateResult
