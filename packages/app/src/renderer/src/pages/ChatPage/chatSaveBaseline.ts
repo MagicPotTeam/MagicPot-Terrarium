@@ -324,8 +324,25 @@ export class ChatSessionSaveBaseline {
       const epochIsCurrent = () =>
         this.epoch === callEpoch && (this.keyEpochs.get(key) ?? 0) === keyEpoch
       let current = session
+      // A stored form that had to wait: while it waited, a reconcile writer may have committed and
+      // moved the baseline (advance, fenceAndAdvance, reconcileTeamEnd) or the owner reset. The
+      // `expected` read above is then stale; comparing with it would turn the page's own write into
+      // a permanent conflict. Such a save is superseded instead, so the caller saves the live
+      // object again against the new baseline.
+      const supersededWhilePreparing = (): ChatSessionSaveSupersededError | null => {
+        if (epochIsCurrent()) return null
+        const superseded = new ChatSessionSaveSupersededError()
+        this.acknowledgementObservations.set(
+          key,
+          (this.acknowledgementObservations.get(key) ?? 0) + 1
+        )
+        noteAttempt(superseded, current)
+        return superseded
+      }
       const firstPrepared = this.prepareStored(scope, current)
       let stored = isPromiseLike(firstPrepared) ? await firstPrepared : firstPrepared
+      const supersededFirst = supersededWhilePreparing()
+      if (supersededFirst) throw supersededFirst
       let payload = structuredClone(stored)
       for (let attempt = 0; ; attempt++) {
         if (expected && !sameTeamLifecycle(payload, expected)) {
@@ -361,6 +378,8 @@ export class ChatSessionSaveBaseline {
           current = latest
           const retryPrepared = this.prepareStored(scope, current)
           stored = isPromiseLike(retryPrepared) ? await retryPrepared : retryPrepared
+          const supersededRetry = supersededWhilePreparing()
+          if (supersededRetry) throw supersededRetry
           payload = structuredClone(stored)
         }
       }
