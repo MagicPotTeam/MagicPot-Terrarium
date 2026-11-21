@@ -416,7 +416,7 @@ describe('CanvasThumbnailSvcImpl', () => {
   })
 
   it('reads an application-owned source without a grant', async () => {
-    const managedPath = path.join(electronMock.userDataRoot, 'chat-media', 'managed.png')
+    const managedPath = path.join(electronMock.userDataRoot, '.chat_media', 'managed.png')
     await fsp.mkdir(path.dirname(managedPath), { recursive: true })
     await fsp.writeFile(managedPath, Buffer.from([1, 2, 3]))
 
@@ -425,6 +425,27 @@ describe('CanvasThumbnailSvcImpl', () => {
       canonicalPath: fs.realpathSync.native(managedPath),
       sizeBytes: 3
     })
+  })
+
+  it('never looks at the app data outside its media folders, nor decodes it', async () => {
+    const userData = electronMock.userDataRoot
+    const secrets = [
+      path.join(userData, 'config.json'),
+      path.join(userData, 'local-media-grants.json'),
+      path.join(userData, 'customSkills', 'cat', 'cat.png'),
+      path.join(userData, 'Local Storage', 'leveldb', '000003.png')
+    ]
+    for (const secret of secrets) {
+      await fsp.mkdir(path.dirname(secret), { recursive: true })
+      await fsp.writeFile(secret, Buffer.from([1, 2, 3]))
+      await expect(service.getSourceFileMetadata({ fullPath: secret })).resolves.toMatchObject({
+        exists: false
+      })
+      await expect(
+        service.createNativeRegion({ fullPath: secret, x: 0, y: 0, width: 1, height: 1 })
+      ).rejects.toThrow(/not authorized/)
+    }
+    expect(electronMock.createFromPath).not.toHaveBeenCalledWith(expect.stringContaining('config'))
   })
 
   it('drops the cached thumbnails of a board item whose grant was evicted', async () => {
@@ -737,7 +758,7 @@ describe('CanvasThumbnailSvcImpl', () => {
 
   it('creates native regions with bounded crop and resize', async () => {
     const sourcePath = await createSourceFile()
-    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'source.png')
+    const authorizedSourcePath = path.join(electronMock.userDataRoot, '.chat_media', 'source.png')
     fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
     fs.copyFileSync(sourcePath, authorizedSourcePath)
     const png = Buffer.from([1, 2, 3, 4])
@@ -751,7 +772,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     })
 
     const response = await service.createNativeRegion({
-      fullPath: sourcePath.replace(testRoot, electronMock.userDataRoot),
+      fullPath: authorizedSourcePath,
       x: 4,
       y: 8,
       width: 64,
@@ -781,7 +802,11 @@ describe('CanvasThumbnailSvcImpl', () => {
 
   it('rejects native regions above the output pixel budget', async () => {
     const sourcePath = await createSourceFile()
-    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'budget-source.png')
+    const authorizedSourcePath = path.join(
+      electronMock.userDataRoot,
+      '.chat_media',
+      'budget-source.png'
+    )
     fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
     fs.copyFileSync(sourcePath, authorizedSourcePath)
     const callsBefore = electronMock.createFromPath.mock.calls.length
@@ -800,7 +825,11 @@ describe('CanvasThumbnailSvcImpl', () => {
 
   it('rejects non-finite native region dimensions before decoding', async () => {
     const sourcePath = await createSourceFile('invalid-region.png')
-    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'invalid-region.png')
+    const authorizedSourcePath = path.join(
+      electronMock.userDataRoot,
+      '.chat_media',
+      'invalid-region.png'
+    )
     fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
     fs.copyFileSync(sourcePath, authorizedSourcePath)
     const callsBefore = electronMock.createFromPath.mock.calls.length
@@ -821,7 +850,11 @@ describe('CanvasThumbnailSvcImpl', () => {
 
   it('rejects native sources above the source byte budget before decoding', async () => {
     const sourcePath = await createSourceFile('oversized-region.png')
-    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'oversized-region.png')
+    const authorizedSourcePath = path.join(
+      electronMock.userDataRoot,
+      '.chat_media',
+      'oversized-region.png'
+    )
     fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
     fs.copyFileSync(sourcePath, authorizedSourcePath)
     const originalSize = fs.statSync(authorizedSourcePath).size

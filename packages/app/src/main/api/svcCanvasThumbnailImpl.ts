@@ -6,9 +6,11 @@ import { pathToFileURL } from 'node:url'
 import { isWindowsNetworkLocalMediaPath, type LocalMediaRoot } from '../localMediaAccess'
 import {
   getLocalMediaAllowedRoots,
+  getUserDataMediaRoots,
   getVerifiedLocalMediaTempRoots
 } from '../localMediaAllowedRoots'
 import { authorizeRendererLocalPath } from '../rendererLocalPathAccess'
+import { CANVAS_THUMBNAIL_CACHE_DIRNAME } from '../userDataMediaFolders'
 import type {
   CanvasThumbnailManifest,
   CanvasThumbnailCacheRootReq,
@@ -32,7 +34,7 @@ import {
   type CanvasThumbnailSidecarBatchThumbnailResponse
 } from './canvasThumbnailSidecarAdapter'
 
-const THUMBNAIL_CACHE_DIRNAME = 'project-canvas-thumbnail-cache'
+const THUMBNAIL_CACHE_DIRNAME = CANVAS_THUMBNAIL_CACHE_DIRNAME
 const CACHE_KEY_PATTERN = /^[a-zA-Z0-9_-]{8,128}$/
 const CACHE_FILE_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,159}\.(?:png|webp)$/i
 const MANIFEST_FILENAME = 'manifest.json'
@@ -841,11 +843,12 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
     req: CanvasThumbnailNativeRegionReq
   ): Promise<CanvasThumbnailNativeRegionResp> => {
     const requestedPath = path.resolve(req.fullPath)
-    // The temp media folder only once verified as main's own private directory. Off main's
-    // event loop, with the import-source deadline (no gate: one call per spatial tile).
+    // The app's media folders and the temp media folder (only once verified as main's own
+    // private directory), never the rest of its data folder. Off main's event loop, with the
+    // import-source deadline (no gate: one call per spatial tile).
     const authorizedPath = await authorizeRendererLocalPath(
       requestedPath,
-      [app.getPath('userData'), ...getVerifiedLocalMediaTempRoots()],
+      [...getUserDataMediaRoots(), ...getVerifiedLocalMediaTempRoots()],
       { gate: null }
     )
     if (!authorizedPath) {

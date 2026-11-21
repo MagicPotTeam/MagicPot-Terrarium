@@ -40,6 +40,17 @@ import {
 const handlerFor = (channel: string): any =>
   handleMock.mock.calls.find(([name]) => name === channel)?.[1]
 
+/** The app's media folders, never its data folder itself. */
+const userDataMediaRootMatchers = [
+  '.chat_media',
+  'project-canvas-thumbnail-cache',
+  'qapp-input-images',
+  '.report_bundles',
+  'report-bundles'
+].map((name) =>
+  expect.stringMatching(new RegExp(`^C:[\\\\/]userData[\\\\/]${name.replace('.', '\\.')}$`))
+)
+
 describe('local media file intake IPC', () => {
   beforeEach(() => {
     resetLocalMediaFileIntakeIpcForTest()
@@ -89,7 +100,7 @@ describe('local media file intake IPC', () => {
     expect(resolveMock).toHaveBeenCalledWith(
       'C:/picked/image.png',
       [
-        expect.stringMatching(/C:[\\/]userData/),
+        ...userDataMediaRootMatchers,
         {
           pinnedCanonicalPath: expect.stringMatching(
             /C:[\\/]temp[\\/]magicpot-local-media-verified$/
@@ -121,7 +132,7 @@ describe('local media file intake IPC', () => {
     expect(resolveMock).toHaveBeenCalledWith(
       'C:/shared-thumbnail-cache/image.webp',
       [
-        expect.stringMatching(/C:[\\/]userData/),
+        ...userDataMediaRootMatchers,
         {
           pinnedCanonicalPath: expect.stringMatching(
             /C:[\\/]temp[\\/]magicpot-local-media-verified$/

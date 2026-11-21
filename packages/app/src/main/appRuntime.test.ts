@@ -1,4 +1,6 @@
+import fs from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('electron', () => ({
@@ -40,9 +42,17 @@ vi.mock('@electron-toolkit/utils', () => ({
   }
 }))
 
-const { initializeLocalMediaAccessMock, resolveAuthorizedLocalMediaPathMock } = vi.hoisted(() => ({
+const {
+  initializeLocalMediaAccessMock,
+  resolveAuthorizedLocalMediaPathMock,
+  setLocalMediaGrantExcludedFoldersMock,
+  realPolicy
+} = vi.hoisted(() => ({
   initializeLocalMediaAccessMock: vi.fn(),
-  resolveAuthorizedLocalMediaPathMock: vi.fn()
+  resolveAuthorizedLocalMediaPathMock: vi.fn(),
+  setLocalMediaGrantExcludedFoldersMock: vi.fn(),
+  // When set, the protocol runs the real policy on the in-memory filesystem.
+  realPolicy: { enabled: false }
 }))
 
 vi.mock('./localMediaAccess', async (importOriginal) => {
@@ -50,6 +60,10 @@ vi.mock('./localMediaAccess', async (importOriginal) => {
   return {
     ...actual,
     initializeLocalMediaAccess: initializeLocalMediaAccessMock,
+    setLocalMediaGrantExcludedFolders: (folders: string[]) => {
+      setLocalMediaGrantExcludedFoldersMock(folders)
+      if (realPolicy.enabled) actual.setLocalMediaGrantExcludedFolders(folders)
+    },
     // The protocol authorizes off main's event loop: only the async policy may be used.
     resolveAuthorizedLocalMediaPath: () => {
       throw new Error('the local-media protocol must not use the synchronous policy')
@@ -58,7 +72,11 @@ vi.mock('./localMediaAccess', async (importOriginal) => {
       throw new Error('the local-media protocol must say why it refused a path')
     },
     // The canonical path the test chooses; refused when it gives none, unavailable on 'stall'.
-    authorizeLocalMediaPathAsync: async (filePath: string, roots: unknown) => {
+    authorizeLocalMediaPathAsync: async (
+      filePath: string,
+      roots: Parameters<typeof actual.authorizeLocalMediaPathAsync>[1]
+    ) => {
+      if (realPolicy.enabled) return actual.authorizeLocalMediaPathAsync(filePath, roots)
       const canonicalPath = await resolveAuthorizedLocalMediaPathMock(filePath, roots)
       if (canonicalPath === 'stall') return new Promise(() => undefined)
       return canonicalPath ? { canonicalPath } : { canonicalPath: null, reason: 'refused' }
@@ -80,6 +98,10 @@ vi.mock('./testWindowRuntime', () => ({
 import { app, net, protocol } from 'electron'
 import { flushReportBundleRegistry } from './reportBundles/reportBundleRegistry'
 import { DEFAULT_IMPORT_SOURCE_GUARD } from './llmProxy/managedMediaStore'
+import {
+  authorizeScopedLocalMediaDirectory,
+  clearScopedLocalMediaPathsForTest
+} from './localMediaAccess'
 import {
   initializeMainProcessRuntime,
   setupReadyAppRuntime,
@@ -138,6 +160,12 @@ describe('appRuntime local-media protocol helpers', () => {
     expect(order).toEqual(['grants', 'protocol'])
   })
 
+  it('keeps the grants out of the app data folder: only its media folders are served there', async () => {
+    setLocalMediaGrantExcludedFoldersMock.mockClear()
+    await setupReadyAppRuntime()
+    expect(setLocalMediaGrantExcludedFoldersMock).toHaveBeenCalledWith(['C:/userData'])
+  })
+
   it('flushes the report-bundle registry when the app quits', async () => {
     vi.mocked(app.on).mockClear()
     await setupReadyAppRuntime()
@@ -159,7 +187,14 @@ describe('appRuntime local-media protocol helpers', () => {
 
     expect(response.status).toBe(403)
     expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenCalledWith('/outside/image.webp', [
-      path.win32.normalize('C:/userData'),
+      // The app's media folders, never the data folder that holds config.json.
+      ...[
+        '.chat_media',
+        'project-canvas-thumbnail-cache',
+        'qapp-input-images',
+        '.report_bundles',
+        'report-bundles'
+      ].map((name) => path.win32.normalize(`C:/userData/${name}`)),
       { pinnedCanonicalPath: expect.stringContaining('magicpot-local-media') },
       path.win32.normalize('C:/project'),
       path.win32.normalize('C:/autosave'),
@@ -240,6 +275,58 @@ describe('appRuntime local-media protocol helpers', () => {
       expect((await handler(new Request('local-media:///C:/images/c.png'))).status).toBe(200)
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('serves the media folders of the app data folder, never its config, grants, skills or profile', async () => {
+    // node:fs is the in-memory filesystem of the node test setup.
+    const base = path.join(process.cwd(), '.magicpot-trash', 'app-runtime-media-roots')
+    const userData = path.join(base, 'userData')
+    const write = (relative: string) => {
+      const file = path.join(userData, relative)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, 'bytes')
+      return file
+    }
+    const served = [
+      '.chat_media/task/a.png',
+      '.chat_media/derivatives/b.webp',
+      'project-canvas-thumbnail-cache/c/256.webp',
+      'qapp-input-images/d.png',
+      '.report_bundles/bundle-1/images/e.png',
+      'report-bundles/0123/manifest.json'
+    ].map(write)
+    const refused = [
+      'config.json',
+      'local-media-grants.json',
+      'customSkills/cat/cat.skill.json',
+      'customSkills/cat/notes.md',
+      'Cookies',
+      'Local Storage/leveldb/000003.log',
+      'Preferences'
+    ].map(write)
+    const getPath = vi.mocked(app.getPath)
+    getPath.mockImplementation((name: string) => path.join(base, name))
+    realPolicy.enabled = true
+    try {
+      vi.mocked(net.fetch).mockImplementation(async () => new Response('bytes'))
+      await setupReadyAppRuntime()
+      const handler = vi.mocked(protocol.handle).mock.calls.at(-1)?.[1] as (
+        request: Request
+      ) => Promise<Response>
+      const url = (file: string) => pathToFileURL(file).href.replace(/^file:/, 'local-media:')
+      for (const file of served) expect((await handler(new Request(url(file)))).status).toBe(200)
+      for (const file of refused) expect((await handler(new Request(url(file)))).status).toBe(403)
+      // Not even when the user once granted a folder that holds the app's data.
+      expect(authorizeScopedLocalMediaDirectory(base)).toBe(true)
+      for (const file of refused) expect((await handler(new Request(url(file)))).status).toBe(403)
+      expect((await handler(new Request(url(served[0])))).status).toBe(200)
+      expect(net.fetch).toHaveBeenCalledTimes(served.length + 1)
+    } finally {
+      realPolicy.enabled = false
+      getPath.mockImplementation((name: string) => `C:/${name}`)
+      clearScopedLocalMediaPathsForTest()
+      fs.rmSync(base, { recursive: true, force: true })
     }
   })
 

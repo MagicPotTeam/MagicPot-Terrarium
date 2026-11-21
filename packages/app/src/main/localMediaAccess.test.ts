@@ -4,14 +4,18 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   authorizeLocalMediaImportSourcePathAsync,
+  authorizeLocalMediaPathAsync,
   authorizeScopedLocalMediaDirectory,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
   flushLocalMediaAccessGrants,
   hasLocalMediaTraversal,
   initializeLocalMediaAccess,
+  isLexicallyCoveredLocalMediaPath,
   isWindowsNetworkLocalMediaPath,
-  resolveAuthorizedLocalMediaPath
+  recordLocalMediaImportGrant,
+  resolveAuthorizedLocalMediaPath,
+  setLocalMediaGrantExcludedFolders
 } from './localMediaAccess'
 import { normalizeLocalFilePath } from './utils/localFileUrl'
 
@@ -81,6 +85,44 @@ describe('local media access policy', () => {
       path.resolve(fs.realpathSync.native(selectedFile))
     )
     expect(resolveAuthorizedLocalMediaPath(outsideFile, [])).toBeNull()
+  })
+
+  it('never lets a grant reach into the app data folder: only its roots serve files there', async () => {
+    const home = makeTempDir('magicpot-home-')
+    const userData = path.join(home, 'Library', 'MagicPot')
+    const write = (filePath: string) => {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true })
+      fs.writeFileSync(filePath, 'x')
+      return filePath
+    }
+    const config = write(path.join(userData, 'config.json'))
+    const media = write(path.join(userData, '.chat_media', 'a.png'))
+    const picture = write(path.join(home, 'Pictures', 'b.png'))
+    const roots = [path.join(userData, '.chat_media')]
+    setLocalMediaGrantExcludedFolders([userData])
+    // The user granted their home folder, and dropped config.json itself once.
+    expect(authorizeScopedLocalMediaDirectory(home)).toBe(true)
+    expect(authorizeScopedLocalMediaPath(config)).toBe(true)
+
+    expect(resolveAuthorizedLocalMediaPath(config, roots)).toBeNull()
+    await expect(authorizeLocalMediaPathAsync(config, roots)).resolves.toEqual({
+      canonicalPath: null,
+      reason: 'refused'
+    })
+    await expect(authorizeLocalMediaImportSourcePathAsync(config, roots)).resolves.toBeNull()
+    expect(isLexicallyCoveredLocalMediaPath(config, roots)).toBe(false)
+    // Its media folder is a root; the rest of the grant is untouched.
+    for (const file of [media, picture]) {
+      expect(resolveAuthorizedLocalMediaPath(file, roots)).toBe(fs.realpathSync.native(file))
+      await expect(authorizeLocalMediaPathAsync(file, roots)).resolves.toEqual({
+        canonicalPath: fs.realpathSync.native(file)
+      })
+    }
+    // A one-use import grant is for the very file the user just picked or dropped.
+    recordLocalMediaImportGrant(fs.realpathSync.native(config))
+    await expect(authorizeLocalMediaImportSourcePathAsync(config, roots)).resolves.toMatchObject({
+      viaImportGrant: true
+    })
   })
 
   it('does not turn a file path into a directory grant', () => {

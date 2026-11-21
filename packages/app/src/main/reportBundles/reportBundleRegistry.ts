@@ -18,8 +18,8 @@
  *
  * Threat model: this protects against report descriptors that arrive as data (stored
  * conversations, imports, drags, model or tool replies). It does not protect against a
- * compromised renderer, which can already read every local-media root (userData included,
- * so it can read registry.json and the snapshots; bindings cannot be derived from them).
+ * compromised renderer, which can already read every local-media root (the snapshot folder
+ * included, so it can read registry.json and the snapshots; bindings cannot be derived from them).
  * Residual risks: verify checks the files, then the renderer reads the primary and the images
  * from the original bundle directory; a file swapped in that window is sent. A local process
  * can rewrite a file in place and restore its size and times (on Windows even its change
@@ -58,6 +58,7 @@ import type {
   VerifyReportBundlesResp
 } from '@shared/api/svcReportBundles'
 import { hasLocalMediaTraversal } from '../localMediaAccess'
+import { REPORT_BUNDLE_SNAPSHOT_DIRNAME } from '../userDataMediaFolders'
 
 export const REPORT_BUNDLE_TICKET_TTL_MS = 10 * 60_000
 /**
@@ -81,7 +82,7 @@ const MAX_MANIFEST_NAME_CHARS = 1024
 const MAX_MANIFEST_TITLE_CHARS = 4096
 const MAX_BUNDLE_NAME_CHARS = 255
 const READ_CHUNK_BYTES = 1024 * 1024
-const SNAPSHOT_DIR_NAME = 'report-bundles'
+const SNAPSHOT_DIR_NAME = REPORT_BUNDLE_SNAPSHOT_DIRNAME
 const REGISTRY_FILE_NAME = 'registry.json'
 const UNREADABLE_REGISTRY_SUFFIX = '.unreadable-'
 const SNAPSHOT_MANIFEST_NAME = 'manifest.json'

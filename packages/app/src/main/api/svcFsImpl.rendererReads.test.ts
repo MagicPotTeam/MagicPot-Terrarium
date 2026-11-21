@@ -31,10 +31,13 @@ vi.mock('child_process', async () => {
 
 import { FsSvcImpl } from './svcFsImpl'
 import {
+  authorizeLocalMediaImportSourcePathAsync,
   authorizeScopedLocalMediaDirectory,
   authorizeScopedLocalMediaPath,
-  clearScopedLocalMediaPathsForTest
+  clearScopedLocalMediaPathsForTest,
+  setLocalMediaGrantExcludedFolders
 } from '../localMediaAccess'
+import { getLocalMediaAllowedRoots } from '../localMediaAllowedRoots'
 import { isLocalFileNotFoundError, LOCAL_FILE_UNAVAILABLE_ERROR } from '@shared/api/svcFs'
 import {
   createImportSourceGate,
@@ -144,7 +147,7 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
   })
 
   it('reads the bytes of local-media files the app owns or the user dropped', async () => {
-    const managed = write(p('electron-userData', 'chat-media', 'a.png'), 'managed')
+    const managed = write(p('electron-userData', '.chat_media', 'a.png'), 'managed')
     const dropped = write(p('Desktop', 'dropped.svg'), '<svg/>')
     expect(authorizeScopedLocalMediaPath(dropped)).toBe(true)
 
@@ -156,6 +159,73 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
       data: new Uint8Array(Buffer.from('<svg/>')),
       filename: 'dropped.svg'
     })
+  })
+
+  it('reads as media only the media folders of the app data, never its config, grants, skills or profile', async () => {
+    const userData = p('electron-userData')
+    const media = [
+      '.chat_media/task/a.png',
+      '.chat_media/derivatives/b.webp',
+      'project-canvas-thumbnail-cache/k/256.webp',
+      'qapp-input-images/q.png',
+      '.report_bundles/bundle-1/images/r.png',
+      'report-bundles/0123/manifest.json'
+    ].map((relative) => write(path.join(userData, relative), 'media'))
+    const stored = [
+      write(p('Projects', 'board', 'assets', 'p.png'), 'media'),
+      write(p('AutoSave', 'board', 'assets', 's.png'), 'media')
+    ]
+    const secrets = [
+      'config.json',
+      'local-media-grants.json',
+      'customSkills/cat/cat.skill.json',
+      'customSkills/cat/cat.png',
+      'Cookies',
+      'Preferences',
+      'Local Storage/leveldb/000003.log',
+      'IndexedDB/file__0.indexeddb.leveldb/000003.log'
+    ].map((relative) => write(path.join(userData, relative), '{"api_key":"sk-secret"}'))
+    const refusesSecrets = async () => {
+      for (const file of secrets) {
+        await expect(service.readFileFromPath({ fullPath: file })).rejects.toThrow(NOT_AUTHORIZED)
+        await expect(service.readImageFromPath({ fullPath: file })).rejects.toThrow(
+          /not authorized/
+        )
+        // A board item naming it is never copied into the project's shared assets.
+        await expect(
+          service.copyCanvasMirrorAsset({
+            projectDirName: 'board',
+            assetFileName: `f-${'a'.repeat(40)}.png`,
+            sourcePath: file
+          })
+        ).rejects.toThrow(/not authorized/)
+        // Nor imported into managed media (serverIpc's import policy).
+        await expect(
+          authorizeLocalMediaImportSourcePathAsync(file, getLocalMediaAllowedRoots())
+        ).resolves.toBeNull()
+      }
+    }
+    const readsMedia = async () => {
+      for (const file of [...media, ...stored]) {
+        await expect(service.readFileFromPath({ fullPath: file })).resolves.toMatchObject({
+          filename: path.basename(file)
+        })
+        await expect(
+          authorizeLocalMediaImportSourcePathAsync(file, getLocalMediaAllowedRoots())
+        ).resolves.toMatchObject({ canonicalPath: fs.realpathSync(file) })
+      }
+    }
+    await refusesSecrets()
+    await readsMedia()
+    // The user once granted a folder that holds the app data (their home folder): the grant
+    // never reaches into it, as at startup.
+    setLocalMediaGrantExcludedFolders([userData])
+    expect(authorizeScopedLocalMediaDirectory(base)).toBe(true)
+    await refusesSecrets()
+    await readsMedia()
+    // Nothing was copied into a project's assets.
+    expect(fs.readdirSync(p('Projects', 'board', 'assets'))).toEqual(['p.png'])
+    expect(fs.readdirSync(p('AutoSave', 'board', 'assets'))).toEqual(['s.png'])
   })
 
   it('reads in the LoRA folder only what the trigger-word lookup reads', async () => {

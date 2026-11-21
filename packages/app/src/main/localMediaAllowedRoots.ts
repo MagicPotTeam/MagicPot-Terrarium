@@ -3,6 +3,7 @@ import { app } from 'electron'
 import { getCurrentUserDataDirectoryState } from './config/userDataDirectory'
 import type { LocalMediaRoot, PinnedLocalMediaRoot } from './localMediaAccess'
 import { getVerifiedLocalMediaTempRoot } from './localMediaTempRoot'
+import { USER_DATA_MEDIA_DIRNAMES } from './userDataMediaFolders'
 
 function isAbsoluteLocalMediaRoot(value: string): boolean {
   return path.isAbsolute(value) || path.win32.isAbsolute(value)
@@ -32,14 +33,24 @@ export function getVerifiedLocalMediaTempRoots(): PinnedLocalMediaRoot[] {
   return canonical ? [{ pinnedCanonicalPath: canonical }] : []
 }
 
-/** Returns the application-owned roots plus the narrowly scoped benchmark cache root. */
+/**
+ * The media folders of the app's data folder (see USER_DATA_MEDIA_DIRNAMES), never the data
+ * folder itself: it holds config.json (every API key), the grants file, chats, custom skills
+ * and Chromium's profile, and a board item, a skill or a chat attachment can name any path.
+ */
+export function getUserDataMediaRoots(): string[] {
+  const userData = app.getPath('userData')
+  return USER_DATA_MEDIA_DIRNAMES.map((name) => normalizeLocalMediaRoot(path.join(userData, name)))
+}
+
+/**
+ * The roots of every renderer-named media read (the local-media protocol, svcFs media reads,
+ * thumbnails, managed-media imports): the app's media folders, the private temp media folder
+ * once verified, the project and autosave folders, plus the narrowly scoped benchmark roots.
+ */
 export function getLocalMediaAllowedRoots(): LocalMediaRoot[] {
   const storageState = getCurrentUserDataDirectoryState()
-  const roots: string[] = [
-    app.getPath('userData'),
-    storageState.projectRoot,
-    storageState.autoSaveRoot
-  ]
+  const roots: string[] = [storageState.projectRoot, storageState.autoSaveRoot]
 
   const benchmarkCacheRoot = process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT?.trim()
   if (
@@ -59,6 +70,9 @@ export function getLocalMediaAllowedRoots(): LocalMediaRoot[] {
     roots.push(benchmarkArtifactRoot)
   }
 
-  const [userData, ...rest] = roots.map(normalizeLocalMediaRoot)
-  return [userData, ...getVerifiedLocalMediaTempRoots(), ...rest]
+  return [
+    ...getUserDataMediaRoots(),
+    ...getVerifiedLocalMediaTempRoots(),
+    ...roots.map(normalizeLocalMediaRoot)
+  ]
 }

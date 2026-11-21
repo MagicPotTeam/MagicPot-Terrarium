@@ -16,6 +16,11 @@ const scopedLocalMediaDirectories = new Map<string, string>()
  */
 const scopedNetworkFileSpellings = new Map<string, [string, string]>()
 const scopedNetworkDirectorySpellings = new Map<string, [string, string]>()
+/**
+ * Folders the user's grants never reach into: comparison key -> folder (as spelled and
+ * canonical). See setLocalMediaGrantExcludedFolders.
+ */
+const grantExcludedFolders = new Map<string, string>()
 let localMediaGrantsPath: string | null = null
 let localMediaGrantsDirty = false
 let localMediaGrantsFlushTimer: ReturnType<typeof setTimeout> | null = null
@@ -44,6 +49,32 @@ function canonicalizeExistingPath(filePath: string): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Sets the folders the user's grants never reach into: the app's data folder. A folder the user
+ * once picked or dropped that holds it (their home folder) must not serve config.json, the
+ * grants file, chats or Chromium's profile; only roots serve files there (its media folders,
+ * see getLocalMediaAllowedRoots). One-use import grants are not affected: they are for the
+ * very file the user just picked or dropped.
+ */
+export function setLocalMediaGrantExcludedFolders(folders: readonly string[]): void {
+  grantExcludedFolders.clear()
+  for (const folder of folders) {
+    const trimmed = String(folder || '').trim()
+    if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) continue
+    for (const candidate of [path.resolve(trimmed), canonicalizeExistingPath(trimmed)]) {
+      if (candidate) grantExcludedFolders.set(comparisonKey(candidate), candidate)
+    }
+  }
+}
+
+/** Whether a path (canonical, or resolved by its text) lies in a folder grants never reach. */
+function isInGrantExcludedFolder(filePath: string): boolean {
+  for (const folder of grantExcludedFolders.values()) {
+    if (isSameOrInside(folder, filePath)) return true
+  }
+  return false
 }
 
 function isExistingDirectory(filePath: string): boolean {
@@ -400,8 +431,12 @@ function precheckLocalMediaPath(
   return viaNetworkRoot ? { trimmed, isNetworkPath, viaNetworkRoot } : null
 }
 
-/** A canonical path the user granted: an exact picked file, or inside a picked directory. */
+/**
+ * A canonical path the user granted: an exact picked file, or inside a picked directory, and
+ * not in a folder grants never reach (setLocalMediaGrantExcludedFolders).
+ */
 function isScopedCanonicalLocalMediaPath(canonical: string): boolean {
+  if (isInGrantExcludedFolder(canonical)) return false
   return (
     scopedLocalMediaPaths.has(comparisonKey(canonical)) ||
     Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
@@ -556,6 +591,7 @@ export function isLexicallyCoveredLocalMediaPath(
   const resolved = path.resolve(trimmed)
   return (
     (grants &&
+      !isInGrantExcludedFolder(resolved) &&
       (scopedLocalMediaPaths.has(comparisonKey(resolved)) ||
         Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
           isSameOrInside(directory, resolved)
@@ -865,14 +901,7 @@ export async function authorizeLocalMediaImportSourcePathAsync(
   const canonical = await canonicalizeExistingPathAsync(trimmed, realpath)
   if (!canonical) return null
   const persisted = { canonicalPath: canonical, viaImportGrant: false }
-  if (scopedLocalMediaPaths.has(comparisonKey(canonical))) return persisted
-  if (
-    Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
-      isSameOrInside(directory, canonical)
-    )
-  ) {
-    return persisted
-  }
+  if (isScopedCanonicalLocalMediaPath(canonical)) return persisted
   if (!isNetworkPath) {
     for (const root of allowedRoots) {
       const canonicalRoot =
@@ -909,6 +938,7 @@ export function clearScopedLocalMediaPathsForTest(): void {
   scopedLocalMediaDirectories.clear()
   scopedNetworkFileSpellings.clear()
   scopedNetworkDirectorySpellings.clear()
+  grantExcludedFolders.clear()
   localMediaImportGrants.clear()
   localMediaImportBatchesInUse.clear()
   localMediaGrantsPath = null

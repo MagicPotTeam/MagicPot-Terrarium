@@ -4,7 +4,11 @@ import { getTestWindowPolicy } from './testWindowRuntime'
 import path from 'node:path'
 import { type TestUiPolicy } from './testUiPolicy'
 import { normalizeLocalFilePath, toFileUrl } from './utils/localFileUrl'
-import { hasLocalMediaTraversal, initializeLocalMediaAccess } from './localMediaAccess'
+import {
+  hasLocalMediaTraversal,
+  initializeLocalMediaAccess,
+  setLocalMediaGrantExcludedFolders
+} from './localMediaAccess'
 import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 import { checkRendererLocalPath } from './rendererLocalPathAccess'
 import {
@@ -230,6 +234,9 @@ export function initializeMainProcessRuntime(getMainWindow: () => BrowserWindow 
 
 export async function setupReadyAppRuntime(): Promise<void> {
   initializeLocalMediaAccess(path.join(app.getPath('userData'), 'local-media-grants.json'))
+  // A folder the user granted that holds the app's data (their home folder) never serves its
+  // config, grants, chats or Chromium profile: only its media folders are served, as roots.
+  setLocalMediaGrantExcludedFolders([app.getPath('userData')])
   initializeReportBundleRegistry({ userDataDir: app.getPath('userData') })
   app.on('will-quit', flushReportBundleRegistry)
   protocol.handle('local-media', handleLocalMediaRequest)

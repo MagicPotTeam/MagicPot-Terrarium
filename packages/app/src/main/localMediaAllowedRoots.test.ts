@@ -25,6 +25,16 @@ vi.mock('./config/userDataDirectory', () => ({
 
 import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 
+const userData = path.resolve(path.join(os.tmpdir(), 'magicpot-userData'))
+/** The app's media folders, never its data folder itself. */
+const userDataMediaRoots = [
+  '.chat_media',
+  'project-canvas-thumbnail-cache',
+  'qapp-input-images',
+  '.report_bundles',
+  'report-bundles'
+].map((name) => path.join(userData, name))
+
 describe('local media allowed roots', () => {
   afterEach(() => {
     verifiedTempRootMock.mockReset()
@@ -44,7 +54,7 @@ describe('local media allowed roots', () => {
     const roots = getLocalMediaAllowedRoots()
 
     expect(roots).toEqual([
-      path.resolve(path.join(os.tmpdir(), 'magicpot-userData')),
+      ...userDataMediaRoots,
       {
         pinnedCanonicalPath: `${path.resolve(path.join(os.tmpdir(), 'magicpot-temp', 'magicpot-local-media'))}-canonical`
       },
@@ -53,6 +63,25 @@ describe('local media allowed roots', () => {
     ])
     expect(roots).not.toContain(process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT)
     expect(roots).not.toContain(process.env.MAGICPOT_TEST_ARTIFACT_ROOT)
+  })
+
+  it('serves the media folders of the app data folder, never the data folder itself', () => {
+    const roots = getLocalMediaAllowedRoots()
+    expect(roots).not.toContain(userData)
+    // Nothing that holds config.json, the grants file, custom skills or Chromium's profile.
+    for (const root of roots) {
+      const folder = typeof root === 'string' ? root : root.pinnedCanonicalPath
+      for (const secret of [
+        'config.json',
+        'local-media-grants.json',
+        path.join('customSkills', 'cat', 'cat.skill.json'),
+        'Cookies',
+        path.join('Local Storage', 'leveldb', '000003.log')
+      ]) {
+        const relative = path.relative(folder, path.join(userData, secret))
+        expect(relative.startsWith('..') || path.isAbsolute(relative)).toBe(true)
+      }
+    }
   })
 
   it('adds only the explicitly configured absolute shared-thumbnail cache when enabled', () => {
@@ -65,19 +94,19 @@ describe('local media allowed roots', () => {
 
     expect(roots).toContain(path.resolve(cacheRoot))
     expect(roots).toContain(path.resolve(process.env.MAGICPOT_TEST_ARTIFACT_ROOT!))
-    expect(roots).toHaveLength(6)
+    expect(roots).toHaveLength(userDataMediaRoots.length + 5)
   })
 
   it('ignores blank and relative benchmark cache configuration', () => {
     process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK = '1'
     process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT = '   '
-    expect(getLocalMediaAllowedRoots()).toHaveLength(4)
+    expect(getLocalMediaAllowedRoots()).toHaveLength(userDataMediaRoots.length + 3)
 
     process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT = 'relative/cache'
-    expect(getLocalMediaAllowedRoots()).toHaveLength(4)
+    expect(getLocalMediaAllowedRoots()).toHaveLength(userDataMediaRoots.length + 3)
 
     process.env.MAGICPOT_TEST_ARTIFACT_ROOT = 'relative/artifacts'
-    expect(getLocalMediaAllowedRoots()).toHaveLength(4)
+    expect(getLocalMediaAllowedRoots()).toHaveLength(userDataMediaRoots.length + 3)
   })
 
   it('trusts the temp root only when it is verified, by the canonical path recorded then', () => {
@@ -91,7 +120,7 @@ describe('local media allowed roots', () => {
     verifiedTempRootMock.mockReturnValue(null)
     const roots = getLocalMediaAllowedRoots()
     expect(roots).toEqual([
-      path.resolve(path.join(os.tmpdir(), 'magicpot-userData')),
+      ...userDataMediaRoots,
       path.resolve(path.join(os.tmpdir(), 'magicpot-projects')),
       path.resolve(path.join(os.tmpdir(), 'magicpot-autosave'))
     ])

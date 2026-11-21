@@ -13,9 +13,9 @@ import path from 'path'
 import fs from 'fs'
 import { app } from 'electron'
 import { readTestUiEnv, resolveTestArtifactPath, resolveTestUiPolicy } from '../testUiPolicy'
+import { CHAT_MEDIA_DIRNAME as CHAT_MEDIA_ROOT_DIR } from '../userDataMediaFolders'
 
 let cachedBaseMediaDir: string | null = null
-const CHAT_MEDIA_ROOT_DIR = '.chat_media'
 
 /**
  * Physical lifecycle namespaces.  These are additive to the legacy scoped

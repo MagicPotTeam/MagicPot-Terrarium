@@ -50,8 +50,9 @@ import {
   isLexicallyCoveredLocalMediaPath,
   type LocalMediaRoot
 } from '../localMediaAccess'
-import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
+import { getLocalMediaAllowedRoots } from '../localMediaAllowedRoots'
 import { authorizeRendererLocalPath, checkRendererLocalPath } from '../rendererLocalPathAccess'
+import { QAPP_INPUT_IMAGE_DIRNAME } from '../userDataMediaFolders'
 import { CHAT_IMAGE_ATTACHMENT_MAX_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
@@ -65,7 +66,7 @@ import { promisify } from 'util'
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff']
 const MAX_CONCURRENT_FS_OPS = 16
-const QAPP_INPUT_IMAGE_DIR = 'qapp-input-images'
+const QAPP_INPUT_IMAGE_DIR = QAPP_INPUT_IMAGE_DIRNAME
 const LORA_TRIGGER_SIDECAR_EXE =
   process.platform === 'win32' ? 'lora-trigger-sidecar.exe' : 'lora-trigger-sidecar'
 const LORA_TRIGGER_SIDECAR_TIMEOUT_MS = 1500
@@ -1216,18 +1217,11 @@ export class FsSvcImpl implements FsSvc {
 
   /**
    * The application roots the renderer may read media from (readImageFromPath, readFileFromPath,
-   * copyCanvasMirrorAsset); the temp media folder only once verified as main's own private
-   * directory.
+   * copyCanvasMirrorAsset): those of the local-media protocol, so the app's media folders and
+   * never the rest of its data folder; the temp media folder only once verified as main's own
+   * private directory.
    */
-  private getMediaReadRoots = (): LocalMediaRoot[] => {
-    const storageState = getCurrentUserDataDirectoryState()
-    return [
-      app.getPath('userData'),
-      ...getVerifiedLocalMediaTempRoots(),
-      storageState.projectRoot,
-      storageState.autoSaveRoot
-    ]
-  }
+  private getMediaReadRoots = (): LocalMediaRoot[] => getLocalMediaAllowedRoots()
 
   copyCanvasMirrorAsset = async (req: CopyCanvasMirrorAssetReq): Promise<CanvasMirrorAssetResp> => {
     const assetFileName = requireCanvasMirrorAssetFileName(req.assetFileName)
