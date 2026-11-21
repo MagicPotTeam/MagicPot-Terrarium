@@ -790,10 +790,12 @@ export class ThreadAuthorityStore {
    * hard limit exactly succeeds; the next charge on that axis exhausts the grant.
    *
    * A call that throws has an unknown outcome: the caller must count the amount as spent. A
-   * repeat with the same charge id is answered as a replay if the first call committed and the
-   * grant is still active; a replay pays for the work of that first call only, never for new
-   * work. A charge id older than the last RUN_GRANT_CHARGE_HISTORY is charged again: this errs
-   * towards spending, never towards extra budget.
+   * repeat with the same charge id is answered as a replay if the first call committed and every
+   * earlier check still passes (stored active, thread live, clock inside the window). The amounts
+   * of a repeat are not compared: a replay pays for the work of that first call only, never for
+   * new work, so every new piece of work needs a new charge id. A charge id older than the last
+   * RUN_GRANT_CHARGE_HISTORY is charged again: this errs towards spending, never towards extra
+   * budget.
    */
   chargeGrant(
     grantId: string,
