@@ -2399,7 +2399,7 @@ describe('real ChatPage member model on the real composer selector', () => {
     await page.finish()
   }, 30000)
 
-  it('keeps a member marker of a newer build closed: no pick, no request, the record unchanged', async () => {
+  it('keeps a member marker of a newer build closed: no pick, no request; the marker and every other field stay unchanged, only the guarded draft save adds the kept text', async () => {
     let seeded: Record<string, unknown> | undefined
     const page = await mountTeam({
       beforePage: (idb) => {
