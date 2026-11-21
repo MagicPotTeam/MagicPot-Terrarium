@@ -39,6 +39,7 @@ const fixture = vi.hoisted(() => ({
   notifyError: vi.fn(),
   ipcChat: vi.fn(),
   importDataUrl: vi.fn(),
+  importBytes: vi.fn(),
   migrateLegacyDataUrl: vi.fn(),
   materializeForRequest: vi.fn()
 }))
@@ -230,6 +231,14 @@ beforeEach(() => {
   fixture.notifyError.mockReset()
   fixture.ipcChat.mockReset()
   fixture.importDataUrl.mockReset()
+  fixture.importBytes.mockReset()
+  fixture.importBytes.mockImplementation(
+    async (request: { bytes: Uint8Array; mimeType: string; originalFileName: string }) =>
+      importInto(
+        `data:${request.mimeType};base64,${btoa(String.fromCharCode(...request.bytes))}`,
+        request.originalFileName
+      )
+  )
   fixture.migrateLegacyDataUrl.mockReset()
   fixture.materializeForRequest.mockReset()
   mediaStore.clear()
@@ -264,6 +273,7 @@ beforeEach(() => {
       },
       svcManagedMedia: {
         importDataUrl: fixture.importDataUrl,
+        importBytes: fixture.importBytes,
         migrateLegacyDataUrl: fixture.migrateLegacyDataUrl,
         reclaimLegacyMigration: vi.fn(async () => ({ queued: true })),
         materializeForRequest: fixture.materializeForRequest
@@ -507,5 +517,64 @@ describe('ChatPage stored image migration (FIX-PLAN item 4, part 2)', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+describe('ChatPage queued images (FIX-PLAN item 4, part 3)', () => {
+  it('stores a queued blob: image as a managed reference, not as an unavailable tile', async () => {
+    const blobUrl = 'blob:file:///queued-composer-image'
+    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13])
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url !== blobUrl) throw new Error(`unexpected fetch ${url}`)
+        return { ok: true, blob: async () => new Blob([pngBytes], { type: 'image/png' }) }
+      })
+    )
+    await seed({
+      id: 'queue-images',
+      title: 'Queue images',
+      profileId: 'inline-vision-fixture',
+      messages: [],
+      // A composer image only this renderer can read (a blob: URL).
+      draft: {
+        inputValue: '',
+        pendingAttachments: [
+          { type: 'image', url: blobUrl, fileName: 'pasted.png', mimeType: 'image/png' }
+        ],
+        pendingHiddenContext: '',
+        updatedAt: 1
+      }
+    })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'queue-images')
+    // The first reply never arrives, so the next message is queued behind it.
+    fixture.ipcChat.mockImplementation(() => new Promise(() => undefined))
+
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('queue-images'))
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: { targetScope: SCOPE, autoSend: true, requestId: 'busy', text: 'first, slow' }
+        })
+      )
+    })
+    await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(1))
+    await sendComposer('queued with an image')
+
+    const backupKey = `magicpot-chat-draft:${SCOPE}:queue-images`
+    await waitFor(
+      () => {
+        const backup = JSON.parse(localStorage.getItem(backupKey) || 'null')
+        const queued = backup?.queuedSends?.[0]
+        expect(queued?.content).toBe('queued with an image')
+        expect(queued?.attachments?.[0]?.url).toMatch(/^local-media:/)
+        expect(queued?.attachments?.[0]?.media?.kind).toBe('managed')
+      },
+      { timeout: 3000 }
+    )
+    expect(localStorage.getItem(backupKey)).not.toContain('blob:')
+    expect(localStorage.getItem(backupKey)).not.toContain('queuedAttachmentUnavailable')
+    expect(fixture.importBytes).toHaveBeenCalledTimes(1)
   })
 })

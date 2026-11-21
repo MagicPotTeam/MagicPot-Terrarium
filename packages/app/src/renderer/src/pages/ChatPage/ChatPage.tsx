@@ -9761,12 +9761,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // FIX-PLAN item 4: a queued image is stored in a form that survives a reload. A blob: image (it
   // dies with this renderer) and an oversized inline image are imported into managed media once
   // the item is queued, so the stored queue keeps a reference instead of an unavailable tile.
+  // Only items the stored queue keeps (the person's own); other items resolve their images when
+  // they are sent, as before.
   const makeQueuedSendImagesDurable = useCallback(
     async (sessionId: string, itemId: number): Promise<void> => {
       const item = queuedSessionSendsRef.current
         .get(sessionId)
         ?.find((queued) => queued.id === itemId)
-      const attachments = item?.overrides?.attachments
+      if (!item?.persistId || !isUserQueuedSend(item)) return
+      const attachments = item.overrides?.attachments
       if (!attachments?.length) return
       const guard = inlineAttachmentGuardRef.current
       const durable = await importQueuedImages(attachments, (attachment) =>
