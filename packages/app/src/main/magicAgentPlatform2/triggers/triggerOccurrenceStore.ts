@@ -125,6 +125,14 @@ const outcomeUnknown = (state: TriggerOccurrenceState, now: number): TriggerOccu
 })
 
 const ARCHIVED_EVENT = 'occurrence.archived'
+/**
+ * The event store refuses a write stamped before the record's last update, so a clock that stepped
+ * back (or a record stamped by a clock ahead of this one) would make every claim and settlement of
+ * it fail, and a settled dispatch would stay claimed and run again after its lease. Writes are
+ * stamped no earlier than the record; leases, retries and markers still use the caller's clock.
+ */
+const writeTime = (now: number, current: StoredResource<TriggerOccurrenceState>) =>
+  Math.max(now, current.updatedAt)
 const isTerminal = (state: TriggerOccurrenceState) =>
   TRIGGER_OCCURRENCE_TERMINAL_STATUSES.has(state.status)
 const claimOrder = (
@@ -210,8 +218,7 @@ export class TriggerOccurrenceStore {
     try {
       this.eventStore.mutateResourcesBatch(
         archive.map((item) => {
-          // Resource timestamps never decrease; a clock step back must not stall archiving.
-          const at = Math.max(now, item.updatedAt)
+          const at = writeTime(now, item)
           return {
             operation: 'delete' as const,
             kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
@@ -351,12 +358,14 @@ export class TriggerOccurrenceStore {
       )
     }
     if (!candidate) return undefined
+    // The lease runs on this clock; the write is stamped no earlier than the record (see update).
+    const at = writeTime(now, candidate)
     const state: TriggerOccurrenceState = {
       ...withoutExecutionState(candidate.state),
       status: 'claimed',
       attempt: candidate.state.attempt + 1,
       claim: { owner, claimedAt: now, expiresAt: now + leaseMs },
-      updatedAt: now
+      updatedAt: at
     }
     return this.eventStore.mutateResource({
       operation: 'update',
@@ -365,8 +374,8 @@ export class TriggerOccurrenceStore {
       expectedRevision: candidate.revision,
       idempotencyKey: `${candidate.id}:claim:${owner}:${now}`,
       state,
-      createdAt: now,
-      event: event(candidate.id, 'occurrence.claimed', now, state, candidate.revision + 1)
+      createdAt: at,
+      event: event(candidate.id, 'occurrence.claimed', at, state, candidate.revision + 1)
     }).resource as StoredResource<TriggerOccurrenceState>
   }
   /**
@@ -480,10 +489,12 @@ export class TriggerOccurrenceStore {
   }
   private update(
     current: StoredResource<TriggerOccurrenceState>,
-    state: TriggerOccurrenceState,
+    next: TriggerOccurrenceState,
     now: number,
     type: string
   ) {
+    const at = writeTime(now, current)
+    const state: TriggerOccurrenceState = { ...next, updatedAt: at }
     return this.eventStore.mutateResource({
       operation: 'update',
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
@@ -491,8 +502,8 @@ export class TriggerOccurrenceStore {
       expectedRevision: current.revision,
       idempotencyKey: `${current.id}:${type}:${state.attempt}:${now}`,
       state,
-      createdAt: now,
-      event: event(current.id, type, now, state, current.revision + 1)
+      createdAt: at,
+      event: event(current.id, type, at, state, current.revision + 1)
     }).resource as StoredResource<TriggerOccurrenceState>
   }
 }
