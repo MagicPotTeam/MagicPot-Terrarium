@@ -202,10 +202,12 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
       const platform = os.platform()
       await this.ensurePhotoshopIsRunning(platform)
       const tempDir = await getPhotoshopTempDir()
-      // A plain name in the temp folder: a page-named name never leaves it.
+      // A plain name in the temp folder: a page-named name never leaves it, and never breaks
+      // the JSX or AppleScript that names the file (a quote or a control character would).
       const fileName =
         typeof req.fileName === 'string' &&
-        /^[^\\/:*?"<>|\0]{1,200}$/.test(req.fileName) &&
+        /^[^\\/:*?"<>|]{1,200}$/.test(req.fileName) &&
+        !Array.from(req.fileName).some((character) => character.charCodeAt(0) < 0x20) &&
         req.fileName !== '.' &&
         req.fileName !== '..'
           ? req.fileName

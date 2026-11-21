@@ -71,4 +71,28 @@ describe.runIf(process.platform === 'linux')('sendImageToPhotoshop', () => {
     expect(fs.existsSync(p('escape.png'))).toBe(false)
     expect(sent.filePath!.startsWith(p('electron-temp'))).toBe(true)
   })
+
+  it('never uses a name with a control character, which would break the script naming the file', async () => {
+    const service = new PhotoshopSvcImpl()
+    for (const fileName of [
+      'a\n");app.quit();//.png',
+      'a\r.png',
+      'a\tb.png',
+      'a\0.png',
+      'a\x1f.png'
+    ]) {
+      const sent = await service.sendImageToPhotoshop({
+        imageUrl: 'data:image/png;base64,AAEC',
+        fileName
+      })
+      expect(sent.success).toBe(true)
+      expect(path.basename(sent.filePath!)).toMatch(/^comfyui-image-\d+\.png$/)
+    }
+    // Other characters a file name may hold are kept.
+    const kept = await service.sendImageToPhotoshop({
+      imageUrl: 'data:image/png;base64,AAEC',
+      fileName: 'Selection (2) — 画板 #1.png'
+    })
+    expect(path.basename(kept.filePath!)).toBe('Selection (2) — 画板 #1.png')
+  })
 })
