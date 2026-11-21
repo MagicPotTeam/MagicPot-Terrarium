@@ -399,7 +399,8 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
     const inheritLead = memberModel.inheritLead
     const inheriting = memberModel.state === 'inherited'
     // The model in use is marked (none when it can no longer be used; the inherit row while the
-    // member inherits); the member's own choice is not stored again.
+    // member inherits); the member's own choice is not stored again. The rows are one radio group:
+    // `selected` only tints the row, so aria-checked tells a screen reader which one is in use.
     const currentProfileId =
       memberModel.state === 'unavailable' || (inheriting && inheritLead)
         ? null
@@ -490,6 +491,8 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             // Its key cannot equal a model row's key, and it never hands a profile id on.
             <MenuItem
               key="inherit-lead"
+              role="menuitemradio"
+              aria-checked={inheriting}
               selected={inheriting}
               onClick={() => {
                 if (canSelect && !inheriting) inheritLead.onSelect?.()
@@ -512,6 +515,8 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           {selectableMemberProfiles.map((profile) => (
             <MenuItem
               key={`profile:${profile.id}`}
+              role="menuitemradio"
+              aria-checked={profile.id === currentProfileId}
               selected={profile.id === currentProfileId}
               onClick={() => {
                 if (canSelect && profile.id !== ownChoiceId)
