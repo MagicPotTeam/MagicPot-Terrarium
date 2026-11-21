@@ -6,7 +6,9 @@ import { clearScopedLocalMediaPathsForTest } from './localMediaAccess'
 import {
   authorizeRendererLocalPath,
   checkRendererLocalPath,
-  createLocalPathBreaker
+  createLocalPathBreaker,
+  LOCAL_PATH_BREAKER_MAX_WAIT_MS,
+  LOCAL_PATH_BREAKER_SLOW_MS
 } from './rendererLocalPathAccess'
 
 // node:fs is the in-memory filesystem of the node test setup.
@@ -19,6 +21,40 @@ afterEach(() => {
 
 /** A realpath on a share that stopped answering. */
 const neverAnswers = () => new Promise<string>(() => undefined)
+
+const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+
+/** libuv's threadpool: `size` threads, queued work started in order, nothing cancelled. */
+function createThreadpool(size: number) {
+  let busy = 0
+  const queue: Array<() => void> = []
+  const pool = {
+    mostBusy: 0,
+    run<T>(work: () => Promise<T>): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        const start = () => {
+          busy += 1
+          pool.mostBusy = Math.max(pool.mostBusy, busy)
+          work().then(
+            (value) => {
+              busy -= 1
+              queue.shift()?.()
+              resolve(value)
+            },
+            (error) => {
+              busy -= 1
+              queue.shift()?.()
+              reject(error)
+            }
+          )
+        }
+        if (busy < size) start()
+        else queue.push(start)
+      })
+    }
+  }
+  return pool
+}
 
 describe('authorizeRendererLocalPath', () => {
   it('answers null at its deadline when the path never answers, with or without the gate', async () => {
@@ -123,19 +159,37 @@ describe('createLocalPathBreaker', () => {
   }
   const settle = () => new Promise((done) => setTimeout(done, 0))
 
-  it('never refuses a burst of healthy local images', async () => {
+  it('loads a healthy board of a thousand local images, never more than three checks at once', async () => {
     const breaker = createLocalPathBreaker()
-    const files = Array.from({ length: 1500 }, (_, index) =>
+    const files = Array.from({ length: 1000 }, (_, index) =>
       path.join(root, 'board', `${index}.png`)
     )
     for (const file of files) {
       fs.mkdirSync(path.dirname(file), { recursive: true })
       fs.writeFileSync(file, 'x')
     }
+    let running = 0
+    let mostRunning = 0
+    const realpath = async (value: string) => {
+      running += 1
+      mostRunning = Math.max(mostRunning, running)
+      try {
+        return await fs.promises.realpath(value)
+      } finally {
+        running -= 1
+      }
+    }
+    const started = performance.now()
     const results = await Promise.all(
-      files.map((file) => authorizeRendererLocalPath(file, [root], { gate: null, breaker }))
+      files.map((file) =>
+        authorizeRendererLocalPath(file, [root], { gate: null, breaker, realpath })
+      )
     )
     expect(results.filter((value) => value === null)).toEqual([])
+    expect(results[999]).toBe(fs.realpathSync.native(files[999]))
+    // Every check is a realpath of the image and of the root, two at a time on this root.
+    expect(mostRunning).toBeLessThanOrEqual(2)
+    expect(performance.now() - started).toBeLessThan(10_000)
   })
 
   it('refuses at once inside a folder that stopped answering, and only there', async () => {
@@ -202,23 +256,157 @@ describe('createLocalPathBreaker', () => {
     })
   })
 
-  it('caps the calls in flight on one root, without a queue', async () => {
-    const breaker = createLocalPathBreaker({ maxInFlight: 2, slowMs: 60_000 })
+  it('runs two calls at once on one root and queues the next, in order', async () => {
+    const breaker = createLocalPathBreaker({ slowMs: 60_000 })
     const held = deferred()
     const calls = [1, 2].map((index) =>
       breaker.run(path.join(root, `${index}.png`), () => held.promise, 60_000)
     )
-    const operation = vi.fn(async () => 'value')
-    await expect(breaker.run(path.join(root, '3.png'), operation, 60_000)).resolves.toBeNull()
-    expect(operation).not.toHaveBeenCalled()
-    // Another root has its own calls.
-    await expect(breaker.run('/Volumes/other/4.png', operation, 60_000)).resolves.toEqual({
-      value: 'value'
+    const order: string[] = []
+    const operation = (name: string) => async () => {
+      order.push(name)
+      return name
+    }
+    const third = breaker.run(path.join(root, '3.png'), operation('3'), 60_000)
+    const fourth = breaker.run(path.join(root, '4.png'), operation('4'), 60_000)
+    await settle()
+    expect(order).toEqual([])
+    // Another root has its own slots.
+    await expect(breaker.run('/Volumes/other/5.png', operation('5'), 60_000)).resolves.toEqual({
+      value: '5'
     })
     held.resolve('done')
     await Promise.all(calls)
-    await expect(breaker.run(path.join(root, '3.png'), operation, 60_000)).resolves.toEqual({
-      value: 'value'
-    })
+    await expect(third).resolves.toEqual({ value: '3' })
+    await expect(fourth).resolves.toEqual({ value: '4' })
+    expect(order).toEqual(['5', '3', '4'])
+  })
+
+  it('bounds a burst on dead mounts: three calls hold threads, the rest wait a bounded time', async () => {
+    vi.useFakeTimers()
+    try {
+      const breaker = createLocalPathBreaker({ maxQueuedPerRoot: 100, maxQueued: 250 })
+      let started = 0
+      const never = () => {
+        started += 1
+        return new Promise<never>(() => undefined)
+      }
+      const results: Array<Promise<unknown>> = []
+      for (const host of ['a', 'b', 'c', 'd']) {
+        for (let index = 0; index < 300; index += 1) {
+          results.push(breaker.run(`/Volumes/${host}/${index % 7}/img${index}.png`, never, 15_000))
+        }
+      }
+      // Below libuv's four threads, whatever the number of roots.
+      expect(started).toBe(3)
+      let settled = 0
+      for (const result of results) void result.then(() => (settled += 1))
+      // Past the queue bounds: refused at once.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).toBe(1200 - 3 - 250)
+      // Past the wait bound: every queued call is refused, and none of them ever ran.
+      await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_MAX_WAIT_MS)
+      expect(settled).toBe(1200 - 3)
+      expect(started).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never counts a healthy call queued behind a dead mount as slow', async () => {
+    vi.useFakeTimers()
+    try {
+      // libuv: four threads, queued work runs in order, a call that never returns keeps its thread.
+      const threads = createThreadpool(4)
+      const breaker = createLocalPathBreaker()
+      const dead = () => threads.run(() => new Promise<string>(() => undefined))
+      const healthy = () => threads.run(() => sleep(50).then(() => 'ok'))
+      for (let index = 0; index < 4; index += 1) {
+        void breaker.run(`/Volumes/nas/photos/${index}.png`, dead, 15_000)
+      }
+      const pictures = Array.from({ length: 30 }, (_, index) =>
+        breaker.run(`/Users/x/Pictures/${index}.png`, healthy, 15_000)
+      )
+      await vi.advanceTimersByTimeAsync(3_000)
+      await expect(Promise.all(pictures)).resolves.toEqual(pictures.map(() => ({ value: 'ok' })))
+      // The dead mount is closed; the pictures folder and the app's data still answer.
+      const operation = vi.fn(async () => 'value')
+      await expect(breaker.run('/Volumes/nas/photos/9.png', operation, 15_000)).resolves.toBeNull()
+      expect(operation).not.toHaveBeenCalled()
+      for (const file of [
+        '/Users/x/Pictures/new.png',
+        '/Users/x/Library/Application Support/MagicPot/.chat_media/a.png'
+      ]) {
+        await expect(breaker.run(file, operation, 15_000)).resolves.toEqual({ value: 'value' })
+      }
+      expect(threads.mostBusy).toBeLessThanOrEqual(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a stall in or just below a first directory from closing it, or a home folder', async () => {
+    vi.useFakeTimers()
+    try {
+      const breaker = createLocalPathBreaker()
+      const never = () => new Promise<never>(() => undefined)
+      void breaker.run('/Users/x.png', never, 15_000)
+      void breaker.run('/Users/y/link-to-dead-share.png', never, 15_000)
+      await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
+      const operation = vi.fn(async () => 'value')
+      // Only the stalled files are closed.
+      await expect(breaker.run('/Users/x.png', operation, 15_000)).resolves.toBeNull()
+      await expect(
+        breaker.run('/Users/y/link-to-dead-share.png', operation, 15_000)
+      ).resolves.toBeNull()
+      expect(operation).not.toHaveBeenCalled()
+      for (const file of [
+        '/Users/victim/Library/a.png',
+        '/Users/y/Pictures/b.png',
+        '/Users/y/c.png'
+      ]) {
+        await expect(breaker.run(file, operation, 15_000)).resolves.toEqual({ value: 'value' })
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('closes a dead mount as a whole once two of its folders stalled', async () => {
+    vi.useFakeTimers()
+    try {
+      const breaker = createLocalPathBreaker()
+      const never = () => new Promise<never>(() => undefined)
+      void breaker.run('/Volumes/nas/a/1.png', never, 15_000)
+      void breaker.run('/Volumes/nas/b.png', never, 15_000)
+      await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
+      const operation = vi.fn(async () => 'value')
+      await expect(breaker.run('/Volumes/nas/c/d/2.png', operation, 15_000)).resolves.toBeNull()
+      expect(operation).not.toHaveBeenCalled()
+      await expect(breaker.run('/Volumes/other/3.png', operation, 15_000)).resolves.toEqual({
+        value: 'value'
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('counts a call as slow from when it started, never while it waited for its turn', async () => {
+    vi.useFakeTimers()
+    try {
+      const breaker = createLocalPathBreaker()
+      // Each takes 1.5 s: below the slow mark once it runs, but the last ones wait far longer.
+      const calls = Array.from({ length: 6 }, (_, index) =>
+        breaker.run(`/Volumes/slow-but-alive/photos/${index}.png`, () => sleep(1_500), 15_000)
+      )
+      await vi.advanceTimersByTimeAsync(5_000)
+      await expect(Promise.all(calls)).resolves.toEqual(calls.map(() => ({ value: undefined })))
+      const operation = vi.fn(async () => 'value')
+      await expect(
+        breaker.run('/Volumes/slow-but-alive/photos/next.png', operation, 15_000)
+      ).resolves.toEqual({ value: 'value' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
