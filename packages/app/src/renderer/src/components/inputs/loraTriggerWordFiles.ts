@@ -512,29 +512,13 @@ const readMetadataSidecarTriggerWords = (content: string): string => {
 const readSidecarTriggerWords = (content: string, kind: LoraTriggerWordsSidecarKind): string =>
   kind === 'text' ? normalizeTriggerWords(content) : readMetadataSidecarTriggerWords(content)
 
-const filterExistingSidecarFiles = async (
-  fileRefs: LoraTriggerWordsSidecarFileRef[]
-): Promise<LoraTriggerWordsSidecarFileRef[]> => {
-  const fileExistsBatch = api().svcShell?.fileExistsBatch
-  if (typeof fileExistsBatch !== 'function' || fileRefs.length === 0) {
-    return fileRefs
-  }
-
-  try {
-    const exists = await fileExistsBatch(fileRefs.map((fileRef) => fileRef.fullPath))
-    return fileRefs.filter((_, index) => exists[index])
-  } catch {
-    return fileRefs
-  }
-}
-
 export const readLoraTriggerWordsSidecar = async (
   loraName: string,
   configUtils: ConfigUtils
 ): Promise<string> => {
-  const fileRefs = await filterExistingSidecarFiles(
-    resolveLoraTriggerWordsSidecarFiles(configUtils.getLoraDir(), loraName)
-  )
+  // No existence check first: a read of a missing sidecar fails like any other and the next
+  // naming convention is tried, while a check would stat each candidate on main's event loop.
+  const fileRefs = resolveLoraTriggerWordsSidecarFiles(configUtils.getLoraDir(), loraName)
   for (const fileRef of fileRefs) {
     try {
       const response = await api().svcFs.readTextFile({ fullPath: fileRef.fullPath })
