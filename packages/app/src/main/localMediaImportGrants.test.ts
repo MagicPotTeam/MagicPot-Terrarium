@@ -385,7 +385,7 @@ describe('short-lived local media import grants', () => {
       const file = path.join(root, 'in-root.png')
       fs.writeFileSync(file, 'png')
       // The single-slash form is an application-root file ...
-      expect(await authorizeLocalMediaImportSourcePathAsync(file, [root])).toBe(file)
+      expect(await authorizeLocalMediaImportSourcePathAsync(file, [root])).toMatchObject({ canonicalPath: file })
       // ... but importFile keeps refusing every network-looking spelling without a grant.
       expect(await authorizeLocalMediaImportSourcePathAsync(`/${file}`, [root])).toBeNull()
     }
