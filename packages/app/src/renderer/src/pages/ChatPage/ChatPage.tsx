@@ -126,6 +126,7 @@ import {
   STORED_IMAGE_MIGRATION_TIMING,
   type StoredImageMigrationOutcome
 } from './chatStoredImageMigration'
+import { beginUnwrittenManagedMediaImports } from '@renderer/services/managedMediaUnwrittenImports'
 import {
   applyInlineAttachmentReplacements,
   ChatInlineAttachmentGuard,
@@ -3807,47 +3808,53 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !hasSessionDeleteTombstone(sessionId, scope)
       if (!untouched() || chatSaveBaselineRef.current.isPending(scope, sessionId)) return 'busy'
       let outcome: StoredImageMigrationOutcome = 'not-written'
-      await chatSaveBaselineRef.current.rewriteStored(
-        scope,
-        sessionId,
-        () => persistedSessionsRef.current.get(sessionId) ?? null,
-        async (expected) => {
-          if (!untouched()) {
-            outcome = 'busy'
-            return null
-          }
-          const result = await migrateStoredSessionImages(expected, scope, {
-            shouldUpdate: untouched
-          })
-          if (result.status !== 'migrated') {
-            outcome = result.status === 'unchanged' ? 'unchanged' : result.status
-            return null
-          }
-          outcome = 'migrated'
-          // The record changed under any storage read still in progress: that read must not
-          // bring the inline form back.
-          noteSessionWriteAcknowledged(scope)
-          if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+      // Until the record names the imported images, the reference scanner must not publish.
+      const written = beginUnwrittenManagedMediaImports()
+      try {
+        await chatSaveBaselineRef.current.rewriteStored(
+          scope,
+          sessionId,
+          () => persistedSessionsRef.current.get(sessionId) ?? null,
+          async (expected) => {
+            if (!untouched()) {
+              outcome = 'busy'
+              return null
+            }
+            const result = await migrateStoredSessionImages(expected, scope, {
+              shouldUpdate: untouched
+            })
+            if (result.status !== 'migrated') {
+              outcome = result.status === 'unchanged' ? 'unchanged' : result.status
+              return null
+            }
+            outcome = 'migrated'
+            // The record changed under any storage read still in progress: that read must not
+            // bring the inline form back.
+            noteSessionWriteAcknowledged(scope)
+            if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+              return result.session
+            }
+            persistedSessionsRef.current.set(sessionId, result.session)
+            const live = sessionsRef.current.find((session) => session.id === sessionId)
+            // A change made while the record was being written gets the same references and is
+            // saved as usual (against the migrated record, which becomes the baseline).
+            const next =
+              live === loaded
+                ? result.session
+                : live
+                  ? applyInlineAttachmentReplacements(live, result.replacements)
+                  : live
+            if (live && next && next !== live) {
+              setSessions((previous) =>
+                previous.map((session) => (session === live ? next : session))
+              )
+            }
             return result.session
           }
-          persistedSessionsRef.current.set(sessionId, result.session)
-          const live = sessionsRef.current.find((session) => session.id === sessionId)
-          // A change made while the record was being written gets the same references and is
-          // saved as usual (against the migrated record, which becomes the baseline).
-          const next =
-            live === loaded
-              ? result.session
-              : live
-                ? applyInlineAttachmentReplacements(live, result.replacements)
-                : live
-          if (live && next && next !== live) {
-            setSessions((previous) =>
-              previous.map((session) => (session === live ? next : session))
-            )
-          }
-          return result.session
-        }
-      )
+        )
+      } finally {
+        written()
+      }
       return outcome
     },
     [getSessionStorageKey, noteSessionWriteAcknowledged, setSessions]
