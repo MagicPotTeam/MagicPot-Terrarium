@@ -1564,10 +1564,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // The written form replaces the live object it was prepared from. A live object that moved
       // on meanwhile (a streamed reply, a draft) gets the same references; it is saved as usual.
       adopt: (scope, session, stored) => {
+        // Read once: the map is keyed by the old data: URLs, and the stored object (the live one
+        // from now on) must not keep them alive.
+        const replacements = inlineAttachmentReplacementsRef.current.get(stored)
+        inlineAttachmentReplacementsRef.current.delete(stored)
         if (storageScopeRef.current !== scope) return stored
         const live = sessionsRef.current.find((candidate) => candidate.id === session.id)
         if (!live) return stored
-        const replacements = inlineAttachmentReplacementsRef.current.get(stored)
         const next =
           live === session
             ? stored

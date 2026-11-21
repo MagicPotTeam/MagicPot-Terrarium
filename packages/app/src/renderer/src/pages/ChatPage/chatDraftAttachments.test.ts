@@ -78,6 +78,35 @@ describe('serializeDraftAttachment', () => {
     expect(media.importBytes).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps no image bytes in its import cache, and no reference for long', async () => {
+    // A format the store does not hold: the result is the image itself, as a data: URL.
+    const bitmap = blobImage('image/bmp')
+    const first = await serializeDraftAttachment(bitmap)
+    expect(first?.url).toMatch(/^data:image\/bmp;base64,/)
+    await serializeDraftAttachment({ ...bitmap })
+    // Not served from a cache: read again from its blob.
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === bitmap.url)).toHaveLength(2)
+
+    const png = blobImage()
+    const now = vi.spyOn(Date, 'now')
+    try {
+      now.mockReturnValue(1_000_000)
+      await serializeDraftAttachment(png)
+      now.mockReturnValue(1_000_000 + 29 * 60_000)
+      await serializeDraftAttachment({ ...png })
+      expect(media.importBytes).toHaveBeenCalledTimes(1)
+      // Later the reference is imported again: the store's retention time of its file starts
+      // again, so an old cached reference can never point to a file the cleanup removed.
+      now.mockReturnValue(1_000_000 + 31 * 60_000)
+      await expect(serializeDraftAttachment({ ...png })).resolves.toMatchObject({
+        media: reference('a'.repeat(64))
+      })
+      expect(media.importBytes).toHaveBeenCalledTimes(2)
+    } finally {
+      now.mockRestore()
+    }
+  })
+
   it('keeps the former data: URL form when the import fails, never dropping the image', async () => {
     media.importBytes.mockRejectedValue(new Error('store unavailable'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
