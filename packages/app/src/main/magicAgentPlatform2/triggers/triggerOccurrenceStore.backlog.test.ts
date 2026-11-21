@@ -141,6 +141,7 @@ describe('TriggerOccurrenceScheduler after an upgrade with a stranded backlog', 
       let freshPoll: number | undefined
       while (live(eventStore) > TRIGGER_OCCURRENCE_ARCHIVE_ABOVE && polls.length < 300) {
         reads.rows = 0
+        // Main-thread time as CPU time of this file's own process, so a busy machine adds nothing.
         const started = process.cpuUsage()
         await scheduler.runOnce()
         const used = process.cpuUsage(started)
