@@ -262,6 +262,20 @@ describe('run grant: issue', () => {
     expect(store.countResources({ kind: GRANT, includeDeleted: true })).toBe(0)
   })
 
+  it('a verifier that revokes the thread while approving makes the issue throw the conflict', () => {
+    const { authority, store, verifier, request } = setup()
+    const pair = authority.issueThread(target())
+    verifier.answer = () => {
+      expect(authority.revokeThread(target())).toEqual({ status: 'revoked' })
+      return true
+    }
+    expect(() => authority.issueGrant(request(pair))).toThrow(ResourceRevisionConflictError)
+    expect(store.countResources({ kind: GRANT, includeDeleted: true })).toBe(0)
+    expect(store.countResources({ kind: STATE, includeDeleted: true })).toBe(0)
+    expect(authority.verifyThread(pair.threadId, 1)).toEqual({ ok: false, reason: 'revoked' })
+    expect(authority.issueGrant(request(pair))).toEqual({ ok: false, reason: 'thread-revoked' })
+  })
+
   it('a store built without a verifier throws in the constructor', () => {
     const { store } = setup()
     for (const options of [
