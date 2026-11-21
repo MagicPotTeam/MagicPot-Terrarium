@@ -47,6 +47,7 @@ import {
   type LocalMediaRoot
 } from '../localMediaAccess'
 import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
+import { CHAT_IMAGE_ATTACHMENT_MAX_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
   importSourceRootKey,
@@ -753,12 +754,17 @@ export class FsSvcImpl implements FsSvc {
     // read grant (spent only by a valid request). The grant is found by the dropped path's
     // text and names the canonical path main resolved when it granted the read, so nothing
     // here touches the share on main's event loop; the read itself runs under the import-source
-    // gate, each call with its deadline, like an import's.
+    // gate, each call with its deadline, like an import's. It is an image for the composer:
+    // never more than its image limit, nor than the size main measured when it granted it.
     const readGrant = consumeLocalMediaReadGrant(req.fullPath)
     if (readGrant) {
       try {
         const buffer = await readImportSourceFile(readGrant.canonicalPath, {
-          maxBytes,
+          maxBytes: Math.min(
+            maxBytes,
+            readGrant.sizeBytes ?? maxBytes,
+            CHAT_IMAGE_ATTACHMENT_MAX_BYTES
+          ),
           guard: this.dependencies.importSourceGuard ?? DEFAULT_IMPORT_SOURCE_GUARD,
           key: importSourceRootKey(readGrant.requestedPath),
           file: readGrant.requestedPath,

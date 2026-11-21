@@ -175,6 +175,41 @@ describe('readImageFromPath of a read-granted file (a mapped network drive)', ()
     await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce())
   })
 
+  it('reads no more than the image limit, even when the page names no limit', async () => {
+    fs.writeFileSync(canonical, Buffer.alloc(IMAGE_LIMIT + 1, 0x41))
+    recordLocalMediaImportGrant(canonical, undefined, 'read', { requestedPath: dropped })
+    await expect(new FsSvcImpl().readImageFromPath({ fullPath: dropped })).rejects.toMatchObject({
+      code: 'MANAGED_MEDIA_TOO_LARGE'
+    })
+    // At the limit it is read.
+    fs.writeFileSync(canonical, Buffer.alloc(IMAGE_LIMIT, 0x41))
+    recordLocalMediaImportGrant(canonical, undefined, 'read', { requestedPath: dropped })
+    const response = await new FsSvcImpl().readImageFromPath({ fullPath: dropped })
+    expect(response.image.byteLength).toBe(IMAGE_LIMIT)
+  })
+
+  it('reads no more than the size main measured when it granted the read', async () => {
+    await expect(
+      grantLocalMediaImportFile(dropped, 'image/png', {
+        realpath: async () => `/${canonical}`,
+        stat: (value) => fsPromises.stat(value)
+      })
+    ).resolves.toEqual({ refused: 'network', sizeBytes: PNG.length })
+    // The file at that path grows after the grant (still well below the image limit).
+    fs.writeFileSync(canonical, Buffer.concat([PNG, Buffer.alloc(1_000, 0x41)]))
+    await expect(
+      new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: IMAGE_LIMIT })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
+    // A page limit below the size is kept too.
+    recordLocalMediaImportGrant(canonical, undefined, 'read', {
+      requestedPath: dropped,
+      sizeBytes: PNG.length + 1_000
+    })
+    await expect(
+      new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: PNG.length })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
+  })
+
   it('closes a handle whose open answers only after the deadline', async () => {
     const gate = createImportSourceGate({ onSaturated: () => undefined })
     let answerOpen!: () => void

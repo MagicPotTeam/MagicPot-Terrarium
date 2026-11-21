@@ -308,6 +308,8 @@ type LocalMediaImportGrantEntry = {
   batchWallDeadline?: number
   /** A read grant: the canonical path main resolved when it granted the read, and reads. */
   readPath?: string
+  /** A read grant: the file's size main measured then (the read takes no more). */
+  sizeBytes?: number
 }
 /**
  * Path key -> each grant for that path, oldest first: the canonical path of an import grant,
@@ -352,7 +354,7 @@ function pruneLocalMediaImportGrants(now: number, wallNow: number): number {
  * main would import, or read, it). The oldest grants go first when the bound is reached.
  * `batch` names the drop it belongs to. A read grant is found by `requestedPath`, the path the
  * user dropped or picked (default: the canonical path), as the page names it when it spends
- * the grant: no filesystem call is needed to find it.
+ * the grant: no filesystem call is needed to find it. `sizeBytes` is the size main measured.
  */
 export function recordLocalMediaImportGrant(
   canonicalPath: string,
@@ -361,8 +363,9 @@ export function recordLocalMediaImportGrant(
   {
     wallNow = localMediaImportGrantWallClock(),
     batch,
-    requestedPath
-  }: { wallNow?: number; batch?: string; requestedPath?: string } = {}
+    requestedPath,
+    sizeBytes
+  }: { wallNow?: number; batch?: string; requestedPath?: string; sizeBytes?: number } = {}
 ): void {
   const key = comparisonKey(
     kind === 'read' && requestedPath !== undefined ? path.resolve(requestedPath) : canonicalPath
@@ -383,7 +386,9 @@ export function recordLocalMediaImportGrant(
             batchWallDeadline: wallNow + LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS
           }
         : {}),
-      ...(kind === 'read' ? { readPath: canonicalPath } : {})
+      ...(kind === 'read'
+        ? { readPath: canonicalPath, ...(sizeBytes !== undefined ? { sizeBytes } : {}) }
+        : {})
     }
   ])
   total += 1
@@ -487,24 +492,33 @@ export function consumeLocalMediaImportGrant(
 /**
  * Spends the one-use read grant of `filePath`, the path the user dropped or picked (a file on
  * a mapped network drive): readImageFromPath may then hand the renderer its bytes once,
- * reading `canonicalPath`, which main resolved when it granted the read. Found by the path's
- * text alone, so nothing touches the filesystem here (on main's event loop): a share that
- * stopped answering cannot block it. A UNC or device path named by the renderer is refused.
+ * reading `canonicalPath`, which main resolved when it granted the read, and no more than the
+ * `sizeBytes` it measured then. Found by the path's text alone, so nothing touches the
+ * filesystem here (on main's event loop): a share that stopped answering cannot block it. A
+ * UNC or device path named by the renderer is refused.
  */
 export function consumeLocalMediaReadGrant(
   filePath: string,
   now = localMediaImportGrantClock(),
   wallNow = localMediaImportGrantWallClock()
-): (LocalMediaImportGrantUse & { canonicalPath: string; requestedPath: string }) | null {
+):
+  | (LocalMediaImportGrantUse & {
+      canonicalPath: string
+      requestedPath: string
+      sizeBytes?: number
+    })
+  | null {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
   if (trimmed.startsWith('\\\\') || trimmed.startsWith('//')) return null
   const requestedPath = path.resolve(trimmed)
   const granted = spendLocalMediaGrantEntry(requestedPath, 'read', now, wallNow)
   if (!granted) return null
+  const { readPath, sizeBytes } = granted.spent
   return {
-    canonicalPath: granted.spent.readPath ?? requestedPath,
+    canonicalPath: readPath ?? requestedPath,
     requestedPath,
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
     finished: granted.use.finished
   }
 }

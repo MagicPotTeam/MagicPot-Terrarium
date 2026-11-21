@@ -19,5 +19,11 @@ export const MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES = 64 * 1024 * 1024
 export const MAX_CHAT_IMAGE_PREPARATION_SOURCE_BYTES = 20 * 1024 * 1024
 export const MAX_CHAT_IMAGE_PREPARATION_BATCH_SOURCE_BYTES = 32 * 1024 * 1024
 
+/**
+ * The composer's limit on one image attachment. MAIN also reads at most this much of a file it
+ * read-granted for the composer (an image dropped from a mapped network drive).
+ */
+export const CHAT_IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+
 /** MAIN's limit on the JSON body it forwards to a remote LLM server for one streamed request. */
 export const MAX_REMOTE_CHAT_STREAM_REQUEST_BYTES = 16 * 1024 * 1024

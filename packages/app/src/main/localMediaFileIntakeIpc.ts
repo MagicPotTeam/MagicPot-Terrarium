@@ -113,7 +113,8 @@ export async function grantLocalMediaImportFile(
       // Found later by the path the user dropped, which the page names when it reads it.
       recordLocalMediaImportGrant(granted.readPath, now(), 'read', {
         batch,
-        requestedPath: filePath
+        requestedPath: filePath,
+        sizeBytes: granted.sizeBytes
       })
       return { refused: 'network', sizeBytes: granted.sizeBytes }
     }
