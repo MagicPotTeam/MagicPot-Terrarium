@@ -67,7 +67,9 @@ import {
   clearScopedLocalMediaPathsForTest,
   flushLocalMediaAccessGrants,
   initializeLocalMediaAccess,
-  resolveAuthorizedLocalMediaPath
+  isLexicallyCoveredLocalMediaPath,
+  resolveAuthorizedLocalMediaPath,
+  resolveAuthorizedLocalMediaPathAsync
 } from './localMediaAccess'
 
 const GRANTS_PATH = 'C:\\Users\\u\\AppData\\Roaming\\MagicPot\\local-media-grants.json'
@@ -191,6 +193,112 @@ describe('Windows network paths with Windows path rules', () => {
     disk.calls.length = 0
     expect(resolveAuthorizedLocalMediaPath('//corp/dfs/photos/sub/y.png', [])).toBeNull()
     expect(resolveAuthorizedLocalMediaPath('//corp/dfs/photos/x.png', [])).toBeNull()
+    expect(disk.calls).toEqual([])
+  })
+})
+
+describe('the async policy (paths the renderer names) with Windows path rules', () => {
+  // A LoRA model folder the user configured on a share.
+  const NETWORK_ROOT = '\\\\nas\\models\\loras'
+  const NETWORK_FILE = `${NETWORK_ROOT}\\style.safetensors`
+
+  const withNetworkRoot = (): void => {
+    resetDisk()
+    disk.directories.add(NETWORK_ROOT.toLowerCase())
+    disk.files.add(NETWORK_FILE.toLowerCase())
+    disk.files.add(`${ROOT}\\media\\a.png`.toLowerCase())
+    disk.calls.length = 0
+  }
+
+  it('refuses every unscoped network spelling before any filesystem call', async () => {
+    withNetworkRoot()
+    for (const spelling of [
+      '\\\\attacker\\share\\x.png',
+      '//attacker/share/x.png',
+      '/\\attacker\\share\\x.png',
+      '\\/attacker/share/x.png',
+      '\\\\?\\UNC\\attacker\\share\\x.png',
+      '\\??\\UNC\\attacker\\share\\x.png',
+      '/??/UNC/nas/models/loras/style.safetensors',
+      // Inside the configured share, but network roots are off by default (the protocol).
+      NETWORK_FILE,
+      '//nas/models/loras/style.safetensors'
+    ]) {
+      await expect(
+        resolveAuthorizedLocalMediaPathAsync(spelling, [ROOT, NETWORK_ROOT])
+      ).resolves.toBeNull()
+      // With network roots: only a request inside one gets through, never another host.
+      if (!/nas/.test(spelling) || spelling.startsWith('/??')) {
+        await expect(
+          resolveAuthorizedLocalMediaPathAsync(spelling, [ROOT, NETWORK_ROOT], {
+            allowNetworkRoots: true
+          })
+        ).resolves.toBeNull()
+      }
+    }
+    expect(disk.calls).toEqual([])
+  })
+
+  it('reads a configured network folder only with network roots, contacting only that host', async () => {
+    withNetworkRoot()
+    await expect(
+      resolveAuthorizedLocalMediaPathAsync(
+        '//nas/models/loras/style.safetensors',
+        [ROOT, NETWORK_ROOT],
+        {
+          allowNetworkRoots: true
+        }
+      )
+    ).resolves.toBe(NETWORK_FILE)
+    // A sibling share of the same host, by its text: refused before any call.
+    disk.calls.length = 0
+    await expect(
+      resolveAuthorizedLocalMediaPathAsync('\\\\nas\\other\\style.safetensors', [NETWORK_ROOT], {
+        allowNetworkRoots: true
+      })
+    ).resolves.toBeNull()
+    // `..` cannot climb out of the share by its text either.
+    await expect(
+      resolveAuthorizedLocalMediaPathAsync(`${NETWORK_ROOT}\\..\\..\\x`, [NETWORK_ROOT], {
+        allowNetworkRoots: true
+      })
+    ).resolves.toBeNull()
+    expect(disk.calls).toEqual([])
+  })
+
+  it('never canonicalizes a network root for a local request', async () => {
+    withNetworkRoot()
+    await expect(
+      resolveAuthorizedLocalMediaPathAsync(`${ROOT}\\media\\a.png`, [NETWORK_ROOT, ROOT], {
+        allowNetworkRoots: true
+      })
+    ).resolves.toBe(`${ROOT}\\media\\a.png`)
+    await expect(
+      resolveAuthorizedLocalMediaPathAsync('C:\\elsewhere\\b.png', [NETWORK_ROOT, ROOT], {
+        allowNetworkRoots: true
+      })
+    ).resolves.toBeNull()
+    expect(disk.calls.filter((call) => /nas/i.test(call))).toEqual([])
+  })
+
+  it('serves a granted network file in its dropped spelling, as the sync policy does', async () => {
+    resetDisk()
+    expect(authorizeScopedLocalMediaPath(`${DROPPED_DIR}\\x.png`)).toBe(true)
+    await expect(resolveAuthorizedLocalMediaPathAsync('//corp/dfs/photos/x.png', [])).resolves.toBe(
+      `${CANONICAL_DIR}\\x.png`
+    )
+    disk.calls.length = 0
+    await expect(
+      resolveAuthorizedLocalMediaPathAsync(`${DROPPED_DIR}\\sub\\y.png`, [])
+    ).resolves.toBeNull()
+    expect(disk.calls).toEqual([])
+  })
+
+  it('tells a lexically covered path from one outside without any filesystem call', () => {
+    withNetworkRoot()
+    expect(isLexicallyCoveredLocalMediaPath(`${ROOT}\\missing.png`, [ROOT])).toBe(true)
+    expect(isLexicallyCoveredLocalMediaPath('C:\\Users\\u\\.ssh\\id_rsa', [ROOT])).toBe(false)
+    expect(isLexicallyCoveredLocalMediaPath('\\\\attacker\\share\\x', [ROOT])).toBe(false)
     expect(disk.calls).toEqual([])
   })
 })

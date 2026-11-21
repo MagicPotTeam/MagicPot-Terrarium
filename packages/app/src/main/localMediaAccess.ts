@@ -352,11 +352,25 @@ function isWindowsNetworkPathScoped(filePath: string): boolean {
 export type PinnedLocalMediaRoot = { readonly pinnedCanonicalPath: string }
 export type LocalMediaRoot = string | PinnedLocalMediaRoot
 
-/** Returns a canonical path only when it is under an application root or explicitly scoped. */
-export function resolveAuthorizedLocalMediaPath(
+type LocalMediaPathPrecheck = {
+  trimmed: string
+  /** A Windows network spelling (see isWindowsNetworkLocalMediaPath). */
+  isNetworkPath: boolean
+  /** A network spelling admitted only because it lies inside a network root (async policy). */
+  viaNetworkRoot: boolean
+}
+
+/**
+ * Everything decided before any filesystem call: null when the path is refused outright.
+ * On Windows an unscoped network spelling never reaches the filesystem, so main never contacts
+ * a host the user did not grant. `networkRoots` are roots whose own spelling is a Windows
+ * network path (a share the user configured): a request lexically inside one of them may go on
+ * to the filesystem, which contacts that host only.
+ */
+function precheckLocalMediaPath(
   filePath: string,
-  allowedRoots: readonly LocalMediaRoot[]
-): string | null {
+  networkRoots: readonly string[] = []
+): LocalMediaPathPrecheck | null {
   const trimmed = String(filePath || '').trim()
   // Only Windows has network (UNC) paths. On POSIX `//dir/file` is the local file `/dir/file`,
   // and that is the form every application-root file arrives in there: `local-media` is a
@@ -372,19 +386,41 @@ export function resolveAuthorizedLocalMediaPath(
   // Before any filesystem call: an unsolicited network path never makes main contact its host
   // (an NT namespace spelling never counts as scoped).
   if (process.platform === 'win32' && isWindowsNtNamespaceLocalMediaPath(trimmed)) return null
-  if (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) return null
+  if (!isNetworkPath || isWindowsNetworkPathScoped(trimmed)) {
+    return { trimmed, isNetworkPath, viaNetworkRoot: false }
+  }
+  const resolved = path.resolve(trimmed)
+  const viaNetworkRoot = networkRoots.some(
+    (root) =>
+      isWindowsNetworkLocalMediaPath(root) &&
+      !isWindowsNtNamespaceLocalMediaPath(root) &&
+      isSameOrInside(path.resolve(root), resolved)
+  )
+  return viaNetworkRoot ? { trimmed, isNetworkPath, viaNetworkRoot } : null
+}
 
-  const canonical = canonicalizeExistingPath(trimmed)
-  if (!canonical) return null
-  if (scopedLocalMediaPaths.has(comparisonKey(canonical))) return canonical
-  if (
+/** A canonical path the user granted: an exact picked file, or inside a picked directory. */
+function isScopedCanonicalLocalMediaPath(canonical: string): boolean {
+  return (
+    scopedLocalMediaPaths.has(comparisonKey(canonical)) ||
     Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
       isSameOrInside(directory, canonical)
     )
-  ) {
-    return canonical
-  }
-  if (isNetworkPath) return null
+  )
+}
+
+/** Returns a canonical path only when it is under an application root or explicitly scoped. */
+export function resolveAuthorizedLocalMediaPath(
+  filePath: string,
+  allowedRoots: readonly LocalMediaRoot[]
+): string | null {
+  const checked = precheckLocalMediaPath(filePath)
+  if (!checked) return null
+
+  const canonical = canonicalizeExistingPath(checked.trimmed)
+  if (!canonical) return null
+  if (isScopedCanonicalLocalMediaPath(canonical)) return canonical
+  if (checked.isNetworkPath) return null
 
   return allowedRoots.some((root) => {
     const canonicalRoot =
@@ -393,6 +429,88 @@ export function resolveAuthorizedLocalMediaPath(
   })
     ? canonical
     : null
+}
+
+export type LocalMediaPathAuthorizationOptions = {
+  realpath?: (value: string) => Promise<string>
+  /**
+   * Let a Windows network spelling through when it lies inside a root whose own spelling is a
+   * network path (a share the user configured as a storage or model folder). Off by default:
+   * the local-media protocol never serves an unscoped network path.
+   */
+  allowNetworkRoots?: boolean
+}
+
+/**
+ * resolveAuthorizedLocalMediaPath off main's event loop: the same decision, but every realpath
+ * (of the path and of each root) is fs.promises.realpath, on the threadpool. For a path the
+ * renderer names: a synchronous realpath of a path on a share that stopped answering would
+ * block main.
+ */
+export async function resolveAuthorizedLocalMediaPathAsync(
+  filePath: string,
+  allowedRoots: readonly LocalMediaRoot[],
+  {
+    realpath = (value: string) => fs.promises.realpath(value),
+    allowNetworkRoots = false
+  }: LocalMediaPathAuthorizationOptions = {}
+): Promise<string | null> {
+  const checked = precheckLocalMediaPath(
+    filePath,
+    allowNetworkRoots ? allowedRoots.filter((root): root is string => typeof root === 'string') : []
+  )
+  if (!checked) return null
+
+  const canonical = await canonicalizeExistingPathAsync(checked.trimmed, realpath)
+  if (!canonical) return null
+  if (isScopedCanonicalLocalMediaPath(canonical)) return canonical
+  if (checked.isNetworkPath && !checked.viaNetworkRoot) return null
+
+  const resolved = path.resolve(checked.trimmed)
+  for (const root of allowedRoots) {
+    // A network root is canonicalized only for a request inside it by its text (that host is
+    // contacted for the request anyway): any other request never makes main contact a share.
+    if (
+      typeof root === 'string' &&
+      process.platform === 'win32' &&
+      isWindowsNetworkLocalMediaPath(root) &&
+      !isSameOrInside(path.resolve(root), resolved)
+    ) {
+      continue
+    }
+    const canonicalRoot =
+      typeof root === 'string'
+        ? await canonicalizeExistingPathAsync(root, realpath)
+        : root.pinnedCanonicalPath
+    if (canonicalRoot && isSameOrInside(canonicalRoot, canonical)) return canonical
+  }
+  return null
+}
+
+/**
+ * Whether a path lies, by its text alone, where the policy above could authorize it: inside an
+ * allowed root or a granted directory, or a granted file. No filesystem call. Callers use it to
+ * tell "missing" from "not authorized" without revealing whether a file outside exists.
+ */
+export function isLexicallyCoveredLocalMediaPath(
+  filePath: string,
+  allowedRoots: readonly LocalMediaRoot[]
+): boolean {
+  const trimmed = String(filePath || '').trim()
+  if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return false
+  const resolved = path.resolve(trimmed)
+  return (
+    scopedLocalMediaPaths.has(comparisonKey(resolved)) ||
+    Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
+      isSameOrInside(directory, resolved)
+    ) ||
+    allowedRoots.some((root) =>
+      isSameOrInside(
+        typeof root === 'string' ? path.resolve(root) : root.pinnedCanonicalPath,
+        resolved
+      )
+    )
+  )
 }
 
 /**
