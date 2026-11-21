@@ -2189,6 +2189,12 @@ describe('real ChatPage member model on the real composer selector', () => {
     within(menu)
       .getAllByRole('menuitem')
       .map((item) => item.textContent ?? '?')
+  // The row of the model in use (MUI's selected state: the tint, and the focus on open).
+  const markedRows = (menu: HTMLElement): string[] =>
+    within(menu)
+      .getAllByRole('menuitem')
+      .filter((item) => item.classList.contains('Mui-selected'))
+      .map((item) => item.textContent ?? '?')
   const closeMenu = async () => {
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
@@ -2239,6 +2245,7 @@ describe('real ChatPage member model on the real composer selector', () => {
     const leadBefore = await page.stored('lead')
     const menu = await openMenu(inherited)
     expect(rowNames(menu)).toEqual(['fixture-model', 'fixture-model-b'])
+    expect(markedRows(menu)).toEqual(['fixture-model'])
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-b' }))
     await waitFor(async () =>
       expect((await page.stored('designer'))?.memberModelChoice).toEqual({
@@ -2250,7 +2257,9 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(Object.hasOwn((await page.stored('writer'))!, 'memberModelChoice')).toBe(false)
     expect(Object.hasOwn(rawRow(page.idb, 'writer')!, 'memberModelChoice')).toBe(false)
     const selected = await within(slot()).findByRole('button', { name: SELECTED })
-    expect(rowNames(await openMenu(selected))).toEqual(['fixture-model', 'fixture-model-b'])
+    const reopened = await openMenu(selected)
+    expect(rowNames(reopened)).toEqual(['fixture-model', 'fixture-model-b'])
+    expect(markedRows(reopened)).toEqual(['fixture-model-b'])
     await closeMenu()
 
     page.send('designer task fixture')
@@ -2295,8 +2304,11 @@ describe('real ChatPage member model on the real composer selector', () => {
     second.send('lead task fixture')
     await waitFor(() => expect(requestProfiles(second, 'lead')).toEqual([A.id]))
     await storedReply(second, 'lead', 1)
-    // No click on the selector: the stored pick is what the member shows and uses.
-    await openConversation(second, 'designer', SELECTED)
+    // No click on a model: the stored pick is what the member shows and uses.
+    expect(
+      markedRows(await openMenu(await openConversation(second, 'designer', SELECTED)))
+    ).toEqual(['fixture-model-b'])
+    await closeMenu()
     second.send('designer task fixture')
     await waitFor(() => expect(requestProfiles(second, 'designer')).toEqual([B.id]))
     await storedReply(second, 'designer', 1)
@@ -2325,7 +2337,10 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(before.designer).toMatchObject({ profileId: B.id })
     expect(Object.hasOwn(before.designer as object, 'memberModelChoice')).toBe(false)
     expect(before.lead).toMatchObject({ profileId: A.id, teamSettings: { defaultModel: B.id } })
-    await openConversation(page, 'designer', INHERITED)
+    expect(markedRows(await openMenu(await openConversation(page, 'designer', INHERITED)))).toEqual(
+      ['fixture-model']
+    )
+    await closeMenu()
     await quietPuts(page)
     expect(rawRow(page.idb, 'lead')).toBe(before.lead)
     expect(rawRow(page.idb, 'designer')).toBe(before.designer)
@@ -2369,6 +2384,52 @@ describe('real ChatPage member model on the real composer selector', () => {
     await page.quiesce()
     expect(h.notify.mock.calls).toEqual([['Team lead unavailable.']])
     expect(page.main.chatRequests).toEqual([])
+    expect(channelDeniedAttempts()).toEqual([])
+  }, 30000)
+
+  it('lets a member whose picked model was removed pick again and keeps the text it kept', async () => {
+    const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+    const UNAVAILABLE = 'Member model unavailable'
+    const page = await mountTeam({
+      profiles: [A, C],
+      beforePage: (idb) => {
+        const row = structuredClone(rawRow(idb, 'designer')!)
+        row.memberModelChoice = { version: 1, profileId: B.id }
+        idb.seedRows(SESSION_STORE, [{ key: storageKey('designer'), value: row }])
+      }
+    })
+    const unavailable = await openConversation(page, 'designer', UNAVAILABLE)
+    expect(unavailable).toBeEnabled()
+    page.send('designer task fixture')
+    await waitFor(() => expect(h.notify).toHaveBeenCalledWith('Team lead unavailable.'))
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('designer task fixture')
+    // The kept text is saved as the draft; once that save has settled the member can be repaired.
+    await quietPuts(page)
+    expect(page.main.chatRequests).toEqual([])
+    const before = await page.stored('designer')
+    expect(before?.draft?.inputValue).toBe('designer task fixture')
+    const menu = await openMenu(within(slot()).getByRole('button', { name: UNAVAILABLE }))
+    expect(rowNames(menu)).toEqual(['fixture-model', 'fixture-model-c'])
+    expect(markedRows(menu)).toEqual([])
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-c' }))
+    await waitFor(async () =>
+      expect((await page.stored('designer'))?.memberModelChoice).toEqual({
+        version: 1,
+        profileId: C.id
+      })
+    )
+    await within(slot()).findByRole('button', { name: SELECTED })
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('designer task fixture')
+    const after = await page.stored('designer')
+    expect(after?.draft).toEqual(before?.draft)
+    expect(after?.messages).toEqual(before?.messages)
+    expect(h.notify.mock.calls).toEqual([['Team lead unavailable.']])
+    page.send('designer task fixture')
+    await waitFor(() => expect(requestProfiles(page, 'designer')).toEqual([C.id]))
+    await storedReply(page, 'designer', 1)
+    expect(requestProfiles(page, 'designer')).toEqual([C.id])
+    await page.quiesce()
+    expect(h.notify.mock.calls).toEqual([['Team lead unavailable.']])
     expect(channelDeniedAttempts()).toEqual([])
   }, 30000)
 })

@@ -385,12 +385,17 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
               defaultValue: 'Member model: {{model}}',
               model: memberModel.label
             })
+    // A member whose model can no longer be used may pick again when the caller offers it.
     const canSelect =
       active &&
-      memberModel.state !== 'unavailable' &&
       !memberModel.disabled &&
       !memberModel.pending &&
       Boolean(memberModel.onSelectProfile)
+    // The model in use is marked (none when it can no longer be used); the member's own choice
+    // is not stored again.
+    const currentProfileId =
+      memberModel.state === 'unavailable' ? null : (memberModel.profileId ?? null)
+    const ownChoiceId = memberModel.state === 'selected' ? currentProfileId : null
     const selectableProfileIds = memberModel.selectableProfileIds
     const selectableMemberProfiles = selectableProfileIds
       ? availableProfiles.filter((profile) => selectableProfileIds.includes(profile.id))
@@ -475,8 +480,10 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           {selectableMemberProfiles.map((profile) => (
             <MenuItem
               key={profile.id}
+              selected={profile.id === currentProfileId}
               onClick={() => {
-                if (canSelect) memberModel.onSelectProfile?.(profile.id)
+                if (canSelect && profile.id !== ownChoiceId)
+                  memberModel.onSelectProfile?.(profile.id)
                 handleClose()
               }}
             >

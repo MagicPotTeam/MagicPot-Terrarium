@@ -7121,30 +7121,39 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const selectedMemberModel = useMemo(() => {
     if (!currentSession?.teamLeadId) return undefined
     const lead = sessions.find((session) => session.id === currentSession.teamLeadId)
+    let profileId: string | null
+    let choice: string | null
     try {
-      const { profileId } = resolveTeamRequestSettings(currentSession, lead)
-      const choice = readMemberModelChoice(currentSession)
-      const profile = availableProfiles.find((item) => item.id === profileId)
-      if (!profile || getBaseProfileId(profile.id) === HUNYUAN_3D_PROFILE_ID)
-        return { state: 'unavailable' as const }
-      return {
-        state: choice ? ('selected' as const) : ('inherited' as const),
-        label: profile.model_name,
-        profileId: profile.id,
-        pending: memberModelChoicePendingRef.current.has(
-          `${storageScope}\u0000${currentSession.id}`
-        ),
-        disabled:
-          config.use_remote_llm || !sessionsLoaded || Boolean(sessionLoadError) || isLoading,
-        selectableProfileIds: availableProfiles
-          .filter((item) => isSelectableMemberProfile(item.id))
-          .map((item) => item.id),
-        onSelectProfile: (id: string) => {
-          void selectMemberProfile(currentSession.id, id)
-        }
-      }
+      profileId = resolveTeamRequestSettings(currentSession, lead).profileId
+      choice = readMemberModelChoice(currentSession)
     } catch {
+      // A changed team, a legacy team selection or a marker this build cannot read stays
+      // closed: nothing is offered that could write over it.
       return { state: 'unavailable' as const }
+    }
+    const memberId = currentSession.id
+    const controls = {
+      pending: memberModelChoicePendingRef.current.has(`${storageScope}\u0000${memberId}`),
+      disabled: config.use_remote_llm || !sessionsLoaded || Boolean(sessionLoadError) || isLoading,
+      selectableProfileIds: availableProfiles
+        .filter((item) => isSelectableMemberProfile(item.id))
+        .map((item) => item.id),
+      onSelectProfile: (id: string) => {
+        void selectMemberProfile(memberId, id)
+      }
+    }
+    // The same test as the send path, so the selector never names a model a send refuses.
+    const profile =
+      profileId !== null && isSelectableMemberProfile(profileId)
+        ? availableProfiles.find((item) => item.id === profileId)
+        : undefined
+    // A model that can no longer be used is picked again by the person; none is picked for them.
+    if (!profile) return { state: 'unavailable' as const, ...controls }
+    return {
+      state: choice ? ('selected' as const) : ('inherited' as const),
+      label: profile.model_name,
+      profileId: profile.id,
+      ...controls
     }
   }, [
     availableProfiles,
