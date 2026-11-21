@@ -655,7 +655,8 @@ export class ThreadAuthorityStore {
    * MAX_RUN_GRANTS_PER_GENERATION grants), 'approval-refused' (the verifier, called once after
    * every other check with a frozen copy of the values stored, did not return true or threw).
    * Success is one batch: the identity lists the grant id (closed by the revision read), the grant
-   * and its state (active, nothing used) are created.
+   * and its state (active, nothing used) are created, and a grant of the same subject whose stored
+   * status is active but which is past its expiry (the issue relied on that) is recorded 'expired'.
    */
   issueGrant(request: RunGrantRequest): IssueGrantResult {
     const now = this.now()
@@ -669,15 +670,12 @@ export class ThreadAuthorityStore {
     )
       return { ok: false, reason: 'thread-stale' }
     if (identity.state.status !== 'live') return { ok: false, reason: 'thread-revoked' }
-    const listed = this.loadListedGrants(identity)
-    if (
-      listed.some(
-        (loaded) =>
-          sameSubject(loaded.grant.subject, value.subject) &&
-          loaded.state.status === 'active' &&
-          now < loaded.grant.expiresAt
-      )
+    const sameSubjectGrants = this.loadListedGrants(identity).filter((loaded) =>
+      sameSubject(loaded.grant.subject, value.subject)
     )
+    // Stored active; past this check, every one of them is past its expiry.
+    const lapsed = sameSubjectGrants.filter((loaded) => loaded.state.status === 'active')
+    if (lapsed.some((loaded) => now < loaded.grant.expiresAt))
       return { ok: false, reason: 'subject-has-active-grant' }
     if (identity.state.grants.length >= MAX_RUN_GRANTS_PER_GENERATION)
       return { ok: false, reason: 'capacity' }
@@ -709,6 +707,14 @@ export class ThreadAuthorityStore {
           row: identity.row,
           state: { ...identity.state, grants: [...identity.state.grants, grantId] }
         },
+        // The new grant exists because these lapsed: record it, so that a clock set back
+        // can never make two grants of one subject usable at once.
+        ...lapsed.map((loaded) => ({
+          kind: RUN_GRANT_STATE_KIND,
+          id: loaded.grant.grantId,
+          row: loaded.stateRow,
+          state: { ...loaded.state, status: 'expired', endedAt: now }
+        })),
         { kind: RUN_GRANT_KIND, id: grantId, state: grant },
         { kind: RUN_GRANT_STATE_KIND, id: grantId, state }
       ],
