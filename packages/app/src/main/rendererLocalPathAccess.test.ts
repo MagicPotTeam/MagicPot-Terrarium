@@ -372,13 +372,20 @@ describe('createLocalPathBreaker', () => {
     }
   })
 
-  it('closes a dead mount as a whole once two of its folders stalled', async () => {
+  it('closes a dead mount as a whole once two of its places stalled, never for one', async () => {
     vi.useFakeTimers()
     try {
       const breaker = createLocalPathBreaker()
       const never = () => new Promise<never>(() => undefined)
-      void breaker.run('/Volumes/nas/a/1.png', never, 15_000)
       void breaker.run('/Volumes/nas/b.png', never, 15_000)
+      await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
+      const quick = vi.fn(async () => 'value')
+      await expect(breaker.run('/Volumes/nas/b.png', quick, 15_000)).resolves.toBeNull()
+      await expect(breaker.run('/Volumes/nas/c.png', quick, 15_000)).resolves.toEqual({
+        value: 'value'
+      })
+      // A second place of the mount stalls too: the whole mount is closed.
+      void breaker.run('/Volumes/nas/a/1.png', never, 15_000)
       await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
       const operation = vi.fn(async () => 'value')
       await expect(breaker.run('/Volumes/nas/c/d/2.png', operation, 15_000)).resolves.toBeNull()

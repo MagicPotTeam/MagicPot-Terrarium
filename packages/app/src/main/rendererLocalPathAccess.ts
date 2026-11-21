@@ -40,11 +40,12 @@ export const rendererLocalPathGate: ImportSourceGate = createImportSourceGate({
  *   dead mount is never counted as slow;
  * - a call still pending `slowMs` after it started (or at its deadline, if sooner) marks where it
  *   stalled as not answering, and no new call is made there until it returns: its folder, or
- *   the closest folder that holds every stalled call of its root. That folder never reaches the
- *   root of a local drive or a first directory (/Users, /home), nor a folder directly in one
- *   (a home folder): a stall there closes only the stalled file, so one link to a dead mount in
- *   a home folder never closes the home folder, the app's data or the pictures in it. The root
- *   of a mount (a share, /Volumes/<name>, /media/<user>/<name>) can close as a whole.
+ *   the closest folder that holds every stalled call of its root. One stall never closes its
+ *   root, and that folder never reaches the root of a local drive or a first directory (/Users,
+ *   /home), nor a folder directly in one (a home folder): a stall there closes only the stalled
+ *   file, so one link to a dead mount in a home folder never closes the home folder, the app's
+ *   data or the pictures in it. A mount (a share, /Volumes/<name>, /media/<user>/<name>) closes
+ *   as a whole once stalls in two of its places show that it stopped answering.
  * Each call costs O(path length) to admit; queued calls are started or refused in O(1).
  */
 export type LocalPathBreaker = {
@@ -114,11 +115,13 @@ const pathDepth = (value: string): number => segmentCount(value)
  * The fewest segments a closed folder of the root `key` may have: the mount itself for a share
  * or a mount under a mount parent; for a drive letter or a first directory (/Users), a folder
  * two levels below it (C:\Users\x, /Users/x/Pictures), so that a home folder never closes.
+ * The folder of a single stalled call is never the root itself either.
  */
-function minClosedDepth(key: string): number {
+function closedDepths(key: string): { merged: number; single: number } {
   const depth = segmentCount(key)
   const isMount = key.startsWith('//') || (key.startsWith('/') && depth >= 2)
-  return isMount ? depth : depth + 2
+  const merged = isMount ? depth : depth + 2
+  return { merged, single: Math.max(merged, depth + 1) }
 }
 
 type BreakerWaiter = {
@@ -133,7 +136,8 @@ type BreakerWaiter = {
 
 type BreakerRoot = {
   key: string
-  minDepth: number
+  /** See closedDepths. */
+  depths: { merged: number; single: number }
   /** Running calls that are not slow. */
   running: number
   /** The resolved paths of the calls still pending past slowMs. */
@@ -172,14 +176,14 @@ export function createLocalPathBreaker({
   const close = (root: BreakerRoot): void => {
     const places = root.slow.map((resolved) => {
       const folder = path.dirname(resolved)
-      return pathDepth(folder) >= root.minDepth ? folder : resolved
+      return pathDepth(folder) >= root.depths.single ? folder : resolved
     })
     for (let merged = true; merged;) {
       merged = false
       for (let left = 0; left < places.length && !merged; left += 1) {
         for (let right = left + 1; right < places.length && !merged; right += 1) {
           const common = commonFolder(places[left], places[right])
-          if (pathDepth(common) >= root.minDepth) {
+          if (pathDepth(common) >= root.depths.merged) {
             places.splice(right, 1)
             places[left] = common
             merged = true
@@ -311,7 +315,7 @@ export function createLocalPathBreaker({
     if (!root) {
       root = {
         key,
-        minDepth: minClosedDepth(key),
+        depths: closedDepths(key),
         running: 0,
         slow: [],
         closed: [],
