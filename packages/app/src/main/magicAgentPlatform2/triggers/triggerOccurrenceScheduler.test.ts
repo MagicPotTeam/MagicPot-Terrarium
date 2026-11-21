@@ -28,7 +28,8 @@ const stores = (claimed = occurrence) => ({
     }
   })),
   complete: vi.fn(),
-  fail: vi.fn()
+  fail: vi.fn(),
+  archiveTerminal: vi.fn(() => 0)
 })
 const triggers = (state: unknown = { enabled: true }) => ({
   get: vi.fn(() => ({ id: 't', revision: 0, state }))

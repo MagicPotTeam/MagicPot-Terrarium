@@ -4,7 +4,12 @@ import {
   type PolicyJsonRecord
 } from '../../../shared/magicAgentPlatform2/policy'
 import type { MagicAgentEventStore, StoredResource } from '../persistence'
-import type { ResourceCursor } from '../persistence/eventStore'
+import {
+  MAX_RESOURCE_MUTATION_BATCH_SIZE,
+  ResourceNotFoundError,
+  ResourceRevisionConflictError,
+  type ResourceCursor
+} from '../persistence/eventStore'
 
 export const MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND = 'trigger-occurrence'
 export const TRIGGER_OCCURRENCE_SCHEMA_VERSION = 1 as const
@@ -21,6 +26,24 @@ export type TriggerOccurrenceSource =
 /** 'unknown' is terminal: the execution permit step began, so the outcome cannot be retried safely. */
 export type TriggerOccurrenceStatus =
   'pending' | 'claimed' | 'completed' | 'failed' | 'dead-letter' | 'unknown'
+/**
+ * Statuses no transition leaves. Only these are ever archived. 'failed' is not one: it is retried,
+ * and a 'failed' record an older build marked stays in the live index for good (harmless, rare).
+ */
+export const TRIGGER_OCCURRENCE_TERMINAL_STATUSES: ReadonlySet<TriggerOccurrenceStatus> = new Set([
+  'completed',
+  'dead-letter',
+  'unknown'
+])
+/**
+ * Live-index retention. Once more than ARCHIVE_ABOVE records are unarchived, a call archives the
+ * oldest terminal ones, at most ARCHIVE_BATCH, aiming at ARCHIVE_DOWN_TO. After a drain at most
+ * ARCHIVE_ABOVE remain, plus any non-terminal records beyond that. The gap between the two marks
+ * batches archive writes instead of one extra write per completion.
+ */
+export const TRIGGER_OCCURRENCE_ARCHIVE_ABOVE = 128
+export const TRIGGER_OCCURRENCE_ARCHIVE_DOWN_TO = 64
+export const TRIGGER_OCCURRENCE_ARCHIVE_BATCH = 100
 const SCAN_PAGE_SIZE = 500
 export type TriggerOccurrenceClaim = Readonly<{
   owner: string
@@ -101,6 +124,9 @@ const outcomeUnknown = (state: TriggerOccurrenceState, now: number): TriggerOccu
   updatedAt: now
 })
 
+const ARCHIVED_EVENT = 'occurrence.archived'
+const isTerminal = (state: TriggerOccurrenceState) =>
+  TRIGGER_OCCURRENCE_TERMINAL_STATUSES.has(state.status)
 const claimOrder = (
   a: StoredResource<TriggerOccurrenceState>,
   b: StoredResource<TriggerOccurrenceState>
@@ -121,11 +147,19 @@ const semantic = (input: {
 
 export class TriggerOccurrenceStore {
   constructor(private readonly eventStore: MagicAgentEventStore) {}
+  /**
+   * The record by id, archived or not. An archived record keeps its final state (`deleted` is
+   * true), so dedup, replayed responses and history read it exactly as before archiving.
+   */
   get(id: string): StoredResource<TriggerOccurrenceState> | undefined {
-    return this.eventStore.getResource(MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND, id) as
-      StoredResource<TriggerOccurrenceState> | undefined
+    return this.eventStore.getResource(MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND, id, {
+      includeDeleted: true
+    }) as StoredResource<TriggerOccurrenceState> | undefined
   }
-  /** Diagnostic snapshot of the oldest 1000 records; claiming, sweeping and dedup never use it. */
+  /**
+   * Diagnostic snapshot: the oldest 1000 unarchived records (every non-terminal one plus the most
+   * recent terminal ones). It is not complete, so claiming, sweeping and dedup never use it.
+   */
   list(): readonly StoredResource<TriggerOccurrenceState>[] {
     return this.eventStore.listResources({
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
@@ -133,7 +167,7 @@ export class TriggerOccurrenceStore {
     }) as readonly StoredResource<TriggerOccurrenceState>[]
   }
   /**
-   * Every non-deleted record, oldest update first, one page in memory at a time. A record only
+   * Every unarchived record, oldest update first, one page in memory at a time. A record only
    * moves forward in this order (updatedAt never decreases), so none is skipped while paging.
    */
   private *scanUnarchived(pageSize: number): Generator<StoredResource<TriggerOccurrenceState>> {
@@ -150,6 +184,53 @@ export class TriggerOccurrenceStore {
       after = { updatedAt: last.updatedAt, resourceKind: last.kind, resourceId: last.id }
     }
   }
+  /**
+   * Moves the oldest terminal records out of the live index (a soft delete that keeps the final
+   * state, the receipts and the events), so claimNext reads non-terminal records plus a bounded
+   * recent tail instead of the whole history. Bounded work per call: one count, the pages up to
+   * `limit` terminal records, one transaction. Returns how many were archived; `limit` means more
+   * may remain. Claiming never depends on this, it only bounds the cost of claiming.
+   */
+  archiveTerminal(now: number, limit = TRIGGER_OCCURRENCE_ARCHIVE_BATCH): number {
+    finite(now, 'now')
+    if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RESOURCE_MUTATION_BATCH_SIZE)
+      throw new Error(`limit must be an integer from 1 to ${MAX_RESOURCE_MUTATION_BATCH_SIZE}.`)
+    const unarchived = this.eventStore.countResources({
+      kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND
+    })
+    if (unarchived <= TRIGGER_OCCURRENCE_ARCHIVE_ABOVE) return 0
+    const wanted = Math.min(unarchived - TRIGGER_OCCURRENCE_ARCHIVE_DOWN_TO, limit)
+    const archive: StoredResource<TriggerOccurrenceState>[] = []
+    for (const item of this.scanUnarchived(wanted)) {
+      if (!isTerminal(item.state)) continue
+      archive.push(item)
+      if (archive.length >= wanted) break
+    }
+    if (archive.length === 0) return 0
+    try {
+      this.eventStore.mutateResourcesBatch(
+        archive.map((item) => {
+          // Resource timestamps never decrease; a clock step back must not stall archiving.
+          const at = Math.max(now, item.updatedAt)
+          return {
+            operation: 'delete' as const,
+            kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
+            id: item.id,
+            expectedRevision: item.revision,
+            idempotencyKey: `${item.id}:${ARCHIVED_EVENT}:${item.state.attempt}:${at}`,
+            createdAt: at,
+            event: event(item.id, ARCHIVED_EVENT, at, item.state, item.revision + 1)
+          }
+        })
+      )
+    } catch (error) {
+      // Another store archived one of them first; the whole batch rolled back. Retry next time.
+      if (error instanceof ResourceRevisionConflictError || error instanceof ResourceNotFoundError)
+        return 0
+      throw error
+    }
+    return archive.length
+  }
   enqueue(input: {
     occurrenceId: string
     triggerId: string
@@ -165,7 +246,7 @@ export class TriggerOccurrenceStore {
     finite(input.scheduledAt, 'scheduledAt')
     finite(input.requestedAt, 'requestedAt')
     const digest = semantic(input)
-    // Exact receipt lookup: unlike a list() scan it has no window.
+    // Exact receipt lookup: the key's create receipt outlives archiving and has no window.
     const receipt = this.eventStore.getResourceMutation(input.idempotencyKey)
     const sameKey =
       receipt?.resource.kind === MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND &&
@@ -225,7 +306,7 @@ export class TriggerOccurrenceStore {
     if (leaseMs <= 0) throw new Error('leaseMs must be positive.')
     if (!Number.isInteger(maxAttempts) || maxAttempts <= 0)
       throw new Error('maxAttempts must be a positive integer.')
-    // One pass over every stored record, one page in memory. The sweep targets are never
+    // One pass over every unarchived record, one page in memory. The sweep targets are never
     // candidates (marked, or out of attempts), so the pre-sweep candidate is the post-sweep one.
     let expiredMarked: StoredResource<TriggerOccurrenceState> | undefined
     let expiredMax: StoredResource<TriggerOccurrenceState> | undefined
