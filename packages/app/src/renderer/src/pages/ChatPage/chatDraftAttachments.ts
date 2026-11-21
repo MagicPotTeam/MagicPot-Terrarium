@@ -13,9 +13,16 @@ import {
 } from './chatManagedMediaAttachments'
 import { isOversizedInlineImageAttachment } from './chatInlineAttachmentGuard'
 
-/** blob: URL -> the import of its image. A blob's bytes never change: one import serves all saves. */
-const blobImageImports = new Map<string, Promise<ChatAttachment>>()
+/**
+ * blob: URL -> the import of its image. A blob's bytes never change, so one import serves the
+ * draft saves that follow. Only a managed reference is kept, for a while: a result that is the
+ * image itself (a data: URL, for a format the store does not hold) is dropped once it settles, so
+ * this cache never holds image bytes; and a reference is imported again after
+ * BLOB_IMAGE_IMPORT_REUSE_MS, which also starts the store's retention time of its file again.
+ */
+const blobImageImports = new Map<string, { flight: Promise<ChatAttachment>; at: number }>()
 const BLOB_IMAGE_IMPORTS_MAX = 64
+const BLOB_IMAGE_IMPORT_REUSE_MS = 30 * 60_000
 
 /** The fields an attachment takes from the import of the same blob. */
 const withImportedFields = (
@@ -36,20 +43,30 @@ const withImportedFields = (
  */
 export const importDraftBlobImage = async (attachment: ChatAttachment): Promise<ChatAttachment> => {
   const url = attachment.url
-  let flight = blobImageImports.get(url)
+  const now = Date.now()
+  const cached = blobImageImports.get(url)
+  let flight = cached && now - cached.at < BLOB_IMAGE_IMPORT_REUSE_MS ? cached.flight : undefined
   if (!flight) {
     const started = withIncomingChatImageImportTimeout(
       importIncomingChatImageAttachment(attachment, { service: api()?.svcManagedMedia })
     )
     flight = started
-    blobImageImports.set(url, started)
-    started.catch(() => {
-      if (blobImageImports.get(url) === started) blobImageImports.delete(url)
-    })
-    while (blobImageImports.size > BLOB_IMAGE_IMPORTS_MAX) {
-      const oldest = blobImageImports.keys().next().value
-      if (oldest === undefined) break
-      blobImageImports.delete(oldest)
+    const entry = { flight: started, at: now }
+    blobImageImports.delete(url)
+    blobImageImports.set(url, entry)
+    const forget = () => {
+      if (blobImageImports.get(url) === entry) blobImageImports.delete(url)
+    }
+    started.then((imported) => {
+      if (!imported.media || imported.url.startsWith('data:')) forget()
+    }, forget)
+    for (const [key, held] of blobImageImports) {
+      if (
+        blobImageImports.size <= BLOB_IMAGE_IMPORTS_MAX &&
+        now - held.at < BLOB_IMAGE_IMPORT_REUSE_MS
+      )
+        break
+      blobImageImports.delete(key)
     }
   }
   const imported = await flight

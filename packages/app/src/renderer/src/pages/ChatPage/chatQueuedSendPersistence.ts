@@ -47,11 +47,16 @@ export const toDurableQueuedAttachments = (
 ): ChatAttachment[] | undefined => {
   if (!attachments?.length) return undefined
   return attachments.map((attachment) => {
-    if (isUnavailableQueuedAttachment(attachment)) return markQueuedAttachmentUnavailable(attachment)
+    if (isUnavailableQueuedAttachment(attachment))
+      return markQueuedAttachmentUnavailable(attachment)
     if (typeof attachment.url !== 'string' || attachment.url.startsWith('blob:')) {
       return markQueuedAttachmentUnavailable(attachment)
     }
-    if (attachment.media !== undefined && attachment.media !== null && !hasDurableMediaReference(attachment)) {
+    if (
+      attachment.media !== undefined &&
+      attachment.media !== null &&
+      !hasDurableMediaReference(attachment)
+    ) {
       return markQueuedAttachmentUnavailable(attachment)
     }
     if (attachment.url.startsWith('data:')) {
@@ -69,6 +74,19 @@ export const toDurableQueuedAttachments = (
   })
 }
 
+/**
+ * The stored form of a queued item's attachments once their images are imported into managed
+ * media. The item itself keeps `source` (its blob: and inline images) for sending until a stored
+ * copy of the queue holds these references (adoptStoredQueuedAttachments): a reference only this
+ * renderer knows of is not seen by the reference scanner, and the cleanup could remove its file
+ * while the blob: URL still works.
+ */
+export type QueuedSendStoredAttachments = {
+  /** The item's `overrides.attachments` these were imported from (by identity). */
+  source: readonly ChatAttachment[]
+  attachments: readonly ChatAttachment[]
+}
+
 /** The in-memory fields of a queued send that its stored form is built from. */
 export type PersistableQueuedSend = QueuedSendState & {
   persistId?: string
@@ -79,6 +97,14 @@ export type PersistableQueuedSend = QueuedSendState & {
     attachments?: ChatAttachment[]
     hiddenContext?: string
   }
+  storedAttachments?: QueuedSendStoredAttachments
+}
+
+/** The attachments the stored form of `item` is built from. */
+const attachmentsToStore = (item: PersistableQueuedSend): readonly ChatAttachment[] | undefined => {
+  const source = item.overrides?.attachments
+  const stored = item.storedAttachments
+  return stored && stored.source === source ? stored.attachments : source
 }
 
 /**
@@ -94,22 +120,73 @@ export const serializeQueuedSends = (
   for (const item of queue ?? []) {
     if (!item.persistId || !item.overrides || !isUserQueuedSend(item)) continue
     const content = typeof item.overrides.content === 'string' ? item.overrides.content : ''
-    const attachments = toDurableQueuedAttachments(item.overrides.attachments, budget)
+    const attachments = toDurableQueuedAttachments(attachmentsToStore(item), budget)
     if (!content && !attachments?.length) continue
     // The composer's own hidden text: set for a composer submission, or the plain composer
     // queue (no submission flag), whose hidden context is the composer's.
     const ownHiddenContext =
       item.originalComposerHiddenContext ??
-      (item.fromComposer && !item.overrides.composerSubmission ? item.overrides.hiddenContext : undefined)
+      (item.fromComposer && !item.overrides.composerSubmission
+        ? item.overrides.hiddenContext
+        : undefined)
     stored.push({
       id: item.persistId,
       content,
       ...(attachments?.length ? { attachments } : {}),
       ...(ownHiddenContext ? { originalComposerHiddenContext: ownHiddenContext } : {}),
-      queuedAt: typeof item.queuedAt === 'number' && Number.isFinite(item.queuedAt) ? item.queuedAt : 0
+      queuedAt:
+        typeof item.queuedAt === 'number' && Number.isFinite(item.queuedAt) ? item.queuedAt : 0
     })
   }
   return stored
+}
+
+/**
+ * Takes the imported attachments of queued items into use once `stored`, a stored copy of the
+ * queue (the draft backup or the session record), holds them: the item then sends the managed
+ * references, and the blob: URLs they replace are `released` (the caller revokes those nothing
+ * else uses). An item being sent is left as it is. Null when nothing changes.
+ */
+export const adoptStoredQueuedAttachments = <T extends PersistableQueuedSend>(
+  queue: readonly T[],
+  stored: readonly ChatDraftQueuedSend[]
+): { queue: T[]; released: string[] } | null => {
+  if (!queue.some((item) => item.storedAttachments)) return null
+  const storedById = new Map(stored.map((item) => [item.id, item]))
+  const released: string[] = []
+  let changed = false
+  const next = queue.map((item): T => {
+    const imported = item.storedAttachments
+    if (!imported || item.inFlight || !item.overrides) return item
+    const source = item.overrides.attachments
+    if (!source || imported.source !== source) {
+      // The item's attachments changed since: the imported form no longer stands for them.
+      changed = true
+      const { storedAttachments: _stale, ...rest } = item
+      return rest as T
+    }
+    const copy = item.persistId ? storedById.get(item.persistId) : undefined
+    const holdsAll =
+      Boolean(copy) &&
+      imported.attachments.length === source.length &&
+      imported.attachments.every(
+        (attachment, index) =>
+          attachment === source[index] || copy?.attachments?.[index]?.url === attachment.url
+      )
+    if (!holdsAll) return item
+    changed = true
+    source.forEach((original, index) => {
+      if (original !== imported.attachments[index] && original.url.startsWith('blob:')) {
+        released.push(original.url)
+      }
+    })
+    const { storedAttachments: _adopted, ...rest } = item
+    return {
+      ...rest,
+      overrides: { ...item.overrides, attachments: [...imported.attachments] }
+    } as T
+  })
+  return changed ? { queue: next, released } : null
 }
 
 /** Normalizes stored queued sends read back from storage (untrusted shape). */
@@ -133,7 +210,8 @@ export const normalizeStoredQueuedSends = (
         id: item.id,
         content,
         ...(attachments?.length ? { attachments } : {}),
-        ...(typeof item.originalComposerHiddenContext === 'string' && item.originalComposerHiddenContext
+        ...(typeof item.originalComposerHiddenContext === 'string' &&
+        item.originalComposerHiddenContext
           ? { originalComposerHiddenContext: item.originalComposerHiddenContext }
           : {}),
         queuedAt:

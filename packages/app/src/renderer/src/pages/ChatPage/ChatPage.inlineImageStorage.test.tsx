@@ -26,11 +26,12 @@ installFakeIDBKeyRange()
 const SCOPE = 'inline-storage-project.pane-a'
 const OTHER_SCOPE = 'inline-storage-project.pane-b'
 
-/** A base64 PNG data: URL of about `chars` characters, distinct per seed. */
+/** A strict base64 PNG data: URL of about `chars` characters, distinct per seed. */
 const inlinePng = (seed: string, chars = 70 * 1024): string => {
   const prefix = 'data:image/png;base64,'
   const stem = btoa(`${seed}-`.padEnd(48, '.')).replace(/=+$/u, '')
-  return `${prefix}${stem}${'A'.repeat(chars - prefix.length - stem.length)}`
+  const fill = chars - prefix.length - stem.length
+  return `${prefix}${stem}${'A'.repeat(fill - ((stem.length + fill) % 4))}`
 }
 
 const fixture = vi.hoisted(() => ({
@@ -340,6 +341,115 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
     expect(fixture.notifyError).not.toHaveBeenCalled()
   })
 
+  it('stores the reply at once while its image import hangs, and the reference after it', async () => {
+    const generated = inlinePng('slow')
+    let finishImport: () => void = () => undefined
+    const imported = new Promise<void>((resolve) => (finishImport = resolve))
+    fixture.importDataUrl.mockImplementation(
+      async (request: { dataUrl: string; originalFileName: string }) => {
+        await imported
+        return importInto(request.dataUrl, request.originalFileName)
+      }
+    )
+    await seed({ id: 'slow', title: 'Slow', profileId: 'inline-vision-fixture', messages: [] })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'slow')
+    fixture.ipcChat.mockResolvedValue({ content: 'slow reply', imageUrl: generated })
+
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('slow'))
+    await sendComposer('draw a fox')
+    // The import has not finished: the message and the reply are stored anyway, the image as it
+    // is. Before, the save waited for the import (up to 30 s per image).
+    const early = await waitForStored(
+      (session) =>
+        session.id === 'slow' &&
+        session.messages.some((message: ChatMessage) => message.content === 'slow reply')
+    )
+    expect(early.messages.map((message: ChatMessage) => message.content)).toEqual([
+      'draw a fox',
+      'slow reply'
+    ])
+    expect(storedAttachments(early).map((attachment) => attachment.url)).toEqual([generated])
+    await waitFor(() => expect(fixture.importDataUrl).toHaveBeenCalledTimes(1))
+
+    finishImport()
+    const rewritten = await waitForStored(
+      (session) =>
+        session.id === 'slow' &&
+        storedAttachments(session).some((attachment) => attachment.media?.kind === 'managed')
+    )
+    expect(JSON.stringify(rewritten)).not.toContain('data:image/png;base64')
+    expect(rewritten.messages.map((message: ChatMessage) => message.content)).toEqual([
+      'draw a fox',
+      'slow reply'
+    ])
+    await waitFor(() => {
+      const shown = storedAttachments(readSessionFromUi() ?? undefined)
+      expect(shown).toHaveLength(1)
+      expect(shown[0]?.url).toMatch(/^local-media:\/\//)
+    })
+    expect(fixture.importDataUrl).toHaveBeenCalledTimes(1)
+    expect(fixture.notifyError).not.toHaveBeenCalled()
+  })
+
+  it('auto-saves a generated image once, also after its stored form replaced the inline copy', async () => {
+    const generated = inlinePng('auto-saved')
+    const hex = (bytes: ArrayBuffer): string =>
+      Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    const bytesOf = (dataUrl: string): Uint8Array<ArrayBuffer> =>
+      Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(',') + 1)), (char) => char.charCodeAt(0))
+    // As main does: the managed id is the SHA-256 of the image's bytes.
+    fixture.importDataUrl.mockImplementation(
+      async (request: { dataUrl: string; originalFileName: string }) => {
+        const id = hex(await crypto.subtle.digest('SHA-256', bytesOf(request.dataUrl)))
+        mediaStore.set(id, request.dataUrl)
+        const reference: MediaReference = {
+          version: 1,
+          kind: 'managed',
+          relativePath: `originals/${id.slice(0, 2)}/${id}.png`,
+          sha256: id,
+          sizeBytes: bytesOf(request.dataUrl).length,
+          mimeType: 'image/png',
+          originalFileName: request.originalFileName,
+          status: 'ready'
+        }
+        return { reference, localMediaUrl: `local-media:///managed/originals/${id}.png` }
+      }
+    )
+    const realFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const managed = /([0-9a-f]{64})\.png$/u.exec(url)
+      if (url.startsWith('local-media:') && managed) {
+        return realFetch(mediaStore.get(managed[1]) ?? 'data:,')
+      }
+      return realFetch(input, init)
+    })
+    const saveImageToDir = (
+      window as unknown as { api: { svcHyper: { saveImageToDir: ReturnType<typeof vi.fn> } } }
+    ).api.svcHyper.saveImageToDir
+    await seed({ id: 'auto', title: 'Auto', profileId: 'inline-vision-fixture', messages: [] })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'auto')
+    fixture.ipcChat
+      .mockResolvedValueOnce({ content: 'auto reply', imageUrl: generated })
+      .mockResolvedValue({ content: 'you are welcome' })
+
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('auto'))
+    await sendComposer('draw an owl')
+    await waitFor(() => {
+      const shown = storedAttachments(readSessionFromUi() ?? undefined)
+      expect(shown[0]?.url).toMatch(/^local-media:\/\//)
+    })
+    // The page scans its last message again after each change.
+    await sendComposer('thanks')
+    await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
+    expect(saveImageToDir).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the image inline, and saves, when the managed import fails', async () => {
     const generated = inlinePng('refused')
     fixture.importDataUrl.mockRejectedValue(new Error('media store unavailable'))
@@ -367,6 +477,33 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+describe('ChatPage draft backup (FIX-PLAN item 4, part 3)', () => {
+  it('keeps a long text draft in the backup when the window unloads', async () => {
+    await seed({ id: 'long-draft', title: 'Long draft', messages: [] })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'long-draft')
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('long-draft'))
+    // A pasted log longer than the draft backup's inline image cap.
+    const log = 'error: something failed; '.repeat(15_000)
+    await act(async () => {
+      const input = screen.getByTestId('inline-storage-input')
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      setter?.call(input, log)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    })
+    localStorage.removeItem(`magicpot-chat-draft:${SCOPE}:long-draft`)
+    // The synchronous safety net: written before any asynchronous work of the flush.
+    window.dispatchEvent(new Event('beforeunload'))
+    const raw = localStorage.getItem(`magicpot-chat-draft:${SCOPE}:long-draft`)
+    expect(raw).toBeTruthy()
+    expect((JSON.parse(raw!) as { draft?: { inputValue?: string } }).draft?.inputValue).toBe(log)
   })
 })
 
@@ -549,6 +686,9 @@ describe('ChatPage queued images (FIX-PLAN item 4, part 3)', () => {
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'queue-images')
     // The first reply never arrives, so the next message is queued behind it.
     fixture.ipcChat.mockImplementation(() => new Promise(() => undefined))
+    const revoked: string[] = []
+    const revokeObjectURL = vi.fn((url: string) => revoked.push(url))
+    vi.stubGlobal('URL', Object.assign(URL, { revokeObjectURL }))
 
     renderPage()
     await waitFor(() => expect(readSessionFromUi()?.id).toBe('queue-images'))
@@ -576,5 +716,84 @@ describe('ChatPage queued images (FIX-PLAN item 4, part 3)', () => {
     expect(localStorage.getItem(backupKey)).not.toContain('blob:')
     expect(localStorage.getItem(backupKey)).not.toContain('queuedAttachmentUnavailable')
     expect(fixture.importBytes).toHaveBeenCalledTimes(1)
+    // The item kept its blob: URL until the backup held the reference; then the blob is released.
+    await waitFor(() => expect(revoked).toContain(blobUrl))
+  })
+
+  it('keeps the blob: URL of a queued image while no stored copy holds its reference', async () => {
+    const blobUrl = 'blob:file:///queued-unstored-image'
+    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13])
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url !== blobUrl) throw new Error(`unexpected fetch ${url}`)
+        return { ok: true, blob: async () => new Blob([pngBytes], { type: 'image/png' }) }
+      })
+    )
+    await seed({
+      id: 'queue-unstored',
+      title: 'Queue unstored',
+      profileId: 'inline-vision-fixture',
+      messages: [],
+      draft: {
+        inputValue: '',
+        pendingAttachments: [
+          { type: 'image', url: blobUrl, fileName: 'pasted.png', mimeType: 'image/png' }
+        ],
+        pendingHiddenContext: '',
+        updatedAt: 1
+      }
+    })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'queue-unstored')
+    fixture.ipcChat.mockImplementation(() => new Promise(() => undefined))
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { revokeObjectURL }))
+    // Neither stored copy can hold the queue: the backup is refused and the record is held by
+    // another writer.
+    const backupKey = `magicpot-chat-draft:${SCOPE}:queue-unstored`
+    const setItem = Storage.prototype.setItem
+    const refuse = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string
+    ) {
+      if (key === backupKey && value.includes('local-media:')) throw new Error('quota exceeded')
+      return setItem.call(this, key, value)
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      renderPage()
+      await waitFor(() => expect(readSessionFromUi()?.id).toBe('queue-unstored'))
+      const stores = activeFakeDb!.state.stores
+      for (const store of stores.values()) {
+        for (const [key, value] of store) {
+          if ((value as ChatSession).id === 'queue-unstored') {
+            store.set(key, { ...(value as ChatSession), title: 'Renamed in another window' })
+          }
+        }
+      }
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: { targetScope: SCOPE, autoSend: true, requestId: 'busy', text: 'first, slow' }
+          })
+        )
+      })
+      await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(1))
+      await sendComposer('queued, nowhere stored')
+      await waitFor(() => expect(fixture.importBytes).toHaveBeenCalledTimes(1))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 800))
+      })
+      const record = (await loadAllSessions(SCOPE)).find(
+        (session) => session.id === 'queue-unstored'
+      )
+      expect(JSON.stringify(record ?? null)).not.toContain('local-media:')
+      expect(localStorage.getItem(backupKey) ?? '').not.toContain('local-media:')
+      expect(revokeObjectURL).not.toHaveBeenCalledWith(blobUrl)
+    } finally {
+      warn.mockRestore()
+      refuse.mockRestore()
+    }
   })
 })

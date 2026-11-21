@@ -10,6 +10,10 @@ import {
 import { LEGACY_PROJECTS_STORAGE_KEY, PROJECTS_STORAGE_KEY } from '../pages/MainPage/projectStore'
 import { api } from '../utils/windowUtils'
 import {
+  hasUnwrittenManagedMediaImports,
+  MANAGED_MEDIA_UNWRITTEN_IMPORTS_EVENT
+} from './managedMediaUnwrittenImports'
+import {
   ManagedMediaScanSourceError,
   scanManagedMediaReferenceIds,
   type ManagedMediaReferenceScannerSources,
@@ -170,6 +174,13 @@ async function withdrawManagedMediaReferenceSnapshot(): Promise<void> {
   })
 }
 
+/**
+ * A scan waits while a chat request runs or a managed reference was imported but is not stored
+ * yet (see managedMediaUnwrittenImports).
+ */
+const scanMustWait = (): boolean =>
+  hasRunningScopedChatRequests() || hasUnwrittenManagedMediaImports()
+
 export function startManagedMediaReferenceScanner(): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined
   let stopped = false
@@ -177,20 +188,22 @@ export function startManagedMediaReferenceScanner(): () => void {
   let deferredSince: number | undefined
   // Moves when a deferral withdraws the snapshot; a scan that started before is not published.
   let epoch = 0
+  const beginWait = (now: number) => {
+    if (deferredSince !== undefined) return
+    deferredSince = now
+    epoch += 1
+    void withdrawManagedMediaReferenceSnapshot().catch(() => undefined)
+  }
   const scan = () => {
     timer = undefined
     if (stopped) return
     // A scan never starts while a chat request runs: it waits for the requests to end. Main
     // would keep planning its daily cleanup from the last complete snapshot, however old, so
     // the wait starts by withdrawing it, and it is bounded: past the cap the scan runs anyway.
-    if (hasRunningScopedChatRequests()) {
+    if (scanMustWait()) {
       const now = Date.now()
-      if (deferredSince === undefined) {
-        deferredSince = now
-        epoch += 1
-        void withdrawManagedMediaReferenceSnapshot().catch(() => undefined)
-      }
-      const waited = now - deferredSince
+      beginWait(now)
+      const waited = now - (deferredSince ?? now)
       // A clock set back (a negative wait) counts as a wait past the cap.
       if (waited >= 0 && waited < SNAPSHOT_MAX_DEFER_MS) {
         timer = setTimeout(scan, SNAPSHOT_MAX_DEFER_MS - waited)
@@ -207,7 +220,15 @@ export function startManagedMediaReferenceScanner(): () => void {
     timer = setTimeout(scan, SNAPSHOT_DEBOUNCE_MS)
   }
   const onChatLoadingState = () => {
-    if (deferredSince !== undefined && !hasRunningScopedChatRequests()) schedule()
+    if (deferredSince !== undefined && !scanMustWait()) schedule()
+  }
+  // An import whose reference is about to be written withdraws the snapshot at once, not only
+  // when a scan comes due: main must not clean up from the snapshot taken before it. Once the
+  // last such import is stored (or given up), a scan sees the reference.
+  const onUnwrittenImports = () => {
+    if (stopped) return
+    if (hasUnwrittenManagedMediaImports()) beginWait(Date.now())
+    else if (deferredSince !== undefined && !scanMustWait()) schedule()
   }
   schedule()
   const reconcileTimer = setInterval(schedule, SNAPSHOT_RECONCILE_MS)
@@ -215,6 +236,8 @@ export function startManagedMediaReferenceScanner(): () => void {
   // to run then (start, the reconcile timer and other windows' storage writes cover it).
   window.addEventListener('storage', schedule)
   window.addEventListener(CHAT_SESSION_LOADING_STATE_EVENT, onChatLoadingState)
+  window.addEventListener(MANAGED_MEDIA_UNWRITTEN_IMPORTS_EVENT, onUnwrittenImports)
+  if (hasUnwrittenManagedMediaImports()) onUnwrittenImports()
   return () => {
     stopped = true
     if (timer) clearTimeout(timer)
@@ -222,5 +245,6 @@ export function startManagedMediaReferenceScanner(): () => void {
     clearInterval(reconcileTimer)
     window.removeEventListener('storage', schedule)
     window.removeEventListener(CHAT_SESSION_LOADING_STATE_EVENT, onChatLoadingState)
+    window.removeEventListener(MANAGED_MEDIA_UNWRITTEN_IMPORTS_EVENT, onUnwrittenImports)
   }
 }

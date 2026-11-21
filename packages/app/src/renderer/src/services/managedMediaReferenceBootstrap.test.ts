@@ -30,6 +30,7 @@ import {
   updateScopedExternalLoadingSessionId
 } from '../pages/ChatPage/chatPageShared'
 import { startManagedMediaReferenceScanner } from './managedMediaReferenceBootstrap'
+import { beginUnwrittenManagedMediaImports } from './managedMediaUnwrittenImports'
 
 const reference = (id: string) => ({
   version: 1 as const,
@@ -198,6 +199,47 @@ describe('managed media reference bootstrap', () => {
       updateScopedExternalLoadingSessionId('project-b.agent-2', 'thread-2', false)
       await vi.advanceTimersByTimeAsync(2_000)
       expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
+      expect(sentSnapshots()).toEqual([false, true])
+      stop()
+    })
+
+    it('withdraws the snapshot as soon as an imported reference waits to be written, and scans after', async () => {
+      const stop = start()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(sentSnapshots()).toEqual([true])
+
+      // The save guard or the stored image migration imported an image (main may have reused an
+      // old orphan's file); the record that names it is not written yet.
+      const written = beginUnwrittenManagedMediaImports()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(sentSnapshots()).toEqual([true, false])
+      window.dispatchEvent(new Event('storage'))
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
+      expect(sentSnapshots()).toEqual([true, false])
+
+      written()
+      written()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(2)
+      expect(sentSnapshots()).toEqual([true, false, true])
+      stop()
+    })
+
+    it('does not publish a scan that was reading when an import began to wait for its write', async () => {
+      let finishRead: () => void = () => undefined
+      mocks.forEachStoredChatRecord.mockImplementationOnce(
+        () => new Promise<void>((resolve) => (finishRead = resolve))
+      )
+      const stop = start()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(mocks.forEachStoredChatRecord).toHaveBeenCalledTimes(1)
+      const written = beginUnwrittenManagedMediaImports()
+      finishRead()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(sentSnapshots()).toEqual([false])
+      written()
+      await vi.advanceTimersByTimeAsync(2_000)
       expect(sentSnapshots()).toEqual([false, true])
       stop()
     })

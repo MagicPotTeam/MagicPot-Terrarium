@@ -5,8 +5,9 @@ import { installFakeIDBKeyRange } from '../../testUtils/fakeIdbKeyRange'
 import { createFakeRestoredThreadIndexedDb } from '../../testUtils/fakeRestoredThreadIndexedDb'
 
 // FIX-PLAN item 4, part 2: the open page migrates the legacy inline images of one stored
-// conversation with one compare-and-update against the record its save baseline expects. Any
-// failure leaves the stored record exactly as it was.
+// conversation with one compare-and-update against the record its save baseline expects. An image
+// main cannot import stays inline and the others are still migrated; a failed write leaves the
+// stored record exactly as it was.
 
 installFakeIDBKeyRange()
 
@@ -17,10 +18,12 @@ const media = vi.hoisted(() => ({
 vi.mock('../../utils/windowUtils', () => ({ api: () => ({ svcManagedMedia: media }) }))
 
 const SCOPE = 'project-a.pane-1'
-const inline = (seed: string, chars = 70 * 1024): string => {
-  const prefix = 'data:image/png;base64,'
+const inline = (seed: string, chars = 70 * 1024, type = 'png'): string => {
+  const prefix = `data:image/${type};base64,`
   const stem = btoa(seed.padEnd(24, '.'))
-  return `${prefix}${stem}${'A'.repeat(chars - prefix.length - stem.length)}`
+  const fill = chars - prefix.length - stem.length
+  // Strict base64, as main requires: a payload length divisible by four.
+  return `${prefix}${stem}${'A'.repeat(fill - ((stem.length + fill) % 4))}`
 }
 const image = (url: string, fileName = 'image.png'): ChatAttachment => ({
   type: 'image',
@@ -146,17 +149,44 @@ describe('migrateStoredSessionImages', () => {
     expect(media.reclaimLegacyMigration).not.toHaveBeenCalled()
   })
 
-  it('leaves the record untouched and hands the imports back when one import fails', async () => {
+  it('keeps an image whose import fails inline and still migrates the others', async () => {
     const storage = await import('./chatStorage')
-    const { session, second } = legacySession()
+    const { session, first, second } = legacySession()
     await storage.saveSessionToDB(session, SCOPE)
     const expected = (await readRecord(storage, 'legacy'))!
-    const before = JSON.stringify(expected)
     const ok = media.migrateLegacyDataUrl.getMockImplementation()!
     media.migrateLegacyDataUrl.mockImplementation(async (request: { dataUrl: string }) => {
       if (request.dataUrl === second) throw new Error('disk full')
       return ok(request)
     })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let result: Awaited<ReturnType<typeof storage.migrateStoredSessionImages>>
+    try {
+      result = await storage.migrateStoredSessionImages(expected, SCOPE)
+    } finally {
+      warn.mockRestore()
+    }
+    expect(result.status).toBe('migrated')
+    const stored = (await readRecord(storage, 'legacy'))!
+    expect(stored.messages[0].attachments?.map((attachment) => attachment.url)).toEqual([
+      `local-media:///managed/${referenceFor(first).relativePath}`,
+      second
+    ])
+    expect(stored.messages[0].attachments?.[1]?.media).toBeUndefined()
+    expect(stored.compactedMessages?.[0].attachments?.[0]?.media).toEqual(referenceFor(first))
+    expect(stored.draft?.pendingAttachments[0]?.media).toBeTruthy()
+    expect(media.reclaimLegacyMigration).not.toHaveBeenCalled()
+    // The image kept inline is tried again at a later start.
+    expect(storage.sessionNeedsLegacyAttachmentMigration(stored)).toBe(true)
+  })
+
+  it('leaves the record untouched when no image could be imported', async () => {
+    const storage = await import('./chatStorage')
+    const { session } = legacySession()
+    await storage.saveSessionToDB(session, SCOPE)
+    const expected = (await readRecord(storage, 'legacy'))!
+    const before = JSON.stringify(expected)
+    media.migrateLegacyDataUrl.mockRejectedValue(new Error('main is gone'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
       await expect(storage.migrateStoredSessionImages(expected, SCOPE)).resolves.toEqual({
@@ -166,7 +196,44 @@ describe('migrateStoredSessionImages', () => {
       warn.mockRestore()
     }
     expect(JSON.stringify(await readRecord(storage, 'legacy'))).toBe(before)
-    expect(media.reclaimLegacyMigration).toHaveBeenCalledTimes(1)
+  })
+
+  it('migrates the images main can import and leaves the others inline, unsent', async () => {
+    const storage = await import('./chatStorage')
+    const pngs = Array.from({ length: 8 }, (_, index) => inline(`png-${index}`))
+    const jpg = inline('jpg', 70 * 1024, 'jpg')
+    const bmp = inline('bmp', 70 * 1024, 'bmp')
+    const svg = `data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg"/>')}`
+    // Line breaks in the payload (an old MIME-style encoder): not strict base64.
+    const wrapped = (() => {
+      const valid = inline('wrapped')
+      const cut = 'data:image/png;base64,'.length + 76
+      return `${valid.slice(0, cut)}\r\n${valid.slice(cut, -2)}`
+    })()
+    const unpadded = inline('unpadded').slice(0, -1)
+    const attachments = [...pngs, jpg, bmp, svg, wrapped, unpadded].map((url) => image(url))
+    await storage.saveSessionToDB(
+      {
+        id: 'mixed',
+        title: 'Mixed',
+        messages: [{ role: 'user', content: 'all of them', attachments }]
+      },
+      SCOPE
+    )
+    const expected = (await readRecord(storage, 'mixed'))!
+    const result = await storage.migrateStoredSessionImages(expected, SCOPE)
+
+    expect(result.status).toBe('migrated')
+    const sent = media.migrateLegacyDataUrl.mock.calls.map(
+      ([request]) => (request as { dataUrl: string }).dataUrl
+    )
+    // Only what main accepts is sent; image/jpg goes as image/jpeg, with the same payload.
+    expect(sent).toEqual([...pngs, `data:image/jpeg;base64,${jpg.slice(jpg.indexOf(',') + 1)}`])
+    const stored = (await readRecord(storage, 'mixed'))!
+    const urls = stored.messages[0].attachments!.map((attachment) => attachment.url)
+    expect(urls.slice(0, 9).every((url) => url.startsWith('local-media:'))).toBe(true)
+    expect(urls.slice(9)).toEqual([bmp, svg, wrapped, unpadded])
+    expect(stored.messages[0].attachments).toHaveLength(13)
   })
 
   it('never writes over a record that is not the expected one', async () => {

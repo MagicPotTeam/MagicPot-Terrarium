@@ -118,6 +118,70 @@ export function isPathInsideRoot(root: string, candidate: string): boolean {
   const relative = path.relative(comparisonPath(root), comparisonPath(candidate))
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
+
+// An import and the orphan cleanup of the same media ID never run at the same time. The import
+// publishes (or reuses) the files and refreshes their timestamps under this lock; the cleanup
+// checks an ID again under it just before each delete. Without it a cleanup planned while an
+// old orphan was unreferenced could delete the file an import has just handed out again.
+const mediaIdLocks = new Map<string, Promise<void>>()
+// When this process last imported each media ID, newest last. An import counts as a reference
+// for the cleanup's retention time, also when the file's timestamp could not be refreshed.
+const recentImports = new Map<string, number>()
+const RECENT_IMPORTS_MAX = 4096
+const RECENT_IMPORTS_KEEP_MS = 7 * 24 * 60 * 60 * 1_000
+
+/** Runs `task` while no import and no cleanup of `mediaId` runs. */
+export async function withManagedMediaIdLock<T>(
+  mediaId: string,
+  task: () => Promise<T>
+): Promise<T> {
+  const previous = mediaIdLocks.get(mediaId) ?? Promise.resolve()
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const tail = previous.then(() => held)
+  mediaIdLocks.set(mediaId, tail)
+  try {
+    await previous
+    return await task()
+  } finally {
+    release()
+    if (mediaIdLocks.get(mediaId) === tail) mediaIdLocks.delete(mediaId)
+  }
+}
+
+function noteManagedMediaImport(mediaId: string): void {
+  const now = Date.now()
+  recentImports.delete(mediaId)
+  recentImports.set(mediaId, now)
+  for (const [id, at] of recentImports) {
+    if (recentImports.size <= RECENT_IMPORTS_MAX && now - at <= RECENT_IMPORTS_KEEP_MS) break
+    recentImports.delete(id)
+  }
+}
+
+/** When this process last imported `mediaId` (wall-clock milliseconds), if it did. */
+export function lastManagedMediaImportAt(mediaId: string): number | undefined {
+  return recentImports.get(mediaId)
+}
+
+/**
+ * Sets the timestamps of a file an import reuses to now, so the orphan cleanup's retention time
+ * counts from this import. Best effort: the in-process import record keeps protecting the file
+ * when this fails.
+ */
+async function refreshReusedFileTimes(
+  filePath: string,
+  fileSystem: typeof fs,
+  now: Date
+): Promise<void> {
+  try {
+    await fileSystem.lutimes(filePath, now, now)
+  } catch {
+    // Kept as it is; see above.
+  }
+}
 /**
  * Deadlines for reading a source the renderer named, which may sit on a stalled network
  * mount. A filesystem call that never returns holds one of libuv's four threadpool threads
@@ -1282,83 +1346,94 @@ async function publishImport(
   await prepareContainedDirectory(canonicalRoot, metadataDirectory, fileSystem)
   const absolutePath = path.join(canonicalRoot, ...relativePath.split('/'))
   const metadataPath = path.join(metadataDirectory, `${staged.sha256}.json`)
-  const originalPublication = await publishStagedNoClobber(
-    canonicalRoot,
-    absolutePath,
-    staged.stagedPath,
-    staged.size,
-    fileSystem
-  )
-  let metadataCreated = false
-  try {
-    const originalHandle = await fileSystem.open(absolutePath, fsConstants.O_RDONLY | NOFOLLOW)
-    try {
-      const stat = await originalHandle.stat()
-      if (
-        !stat.isFile() ||
-        stat.size !== staged.size ||
-        (await hashHandle(originalHandle, staged.size)) !== staged.sha256
-      )
-        throw new Error('Managed media destination conflicts with existing content')
-    } finally {
-      await originalHandle.close()
-    }
-    const metadata: ManagedMediaMetadata = {
-      schema: METADATA_SCHEMA,
-      version: MANAGED_MEDIA_METADATA_VERSION,
-      sha256: staged.sha256,
-      sizeBytes: staged.size,
-      mimeType,
-      extension,
-      relativePath
-    }
-    const metadataBytes = Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`)
-    if (metadataBytes.length > MAX_METADATA_BYTES)
-      throw new Error('Managed media metadata is too large')
-    const metadataPublication = await publishBytesNoClobber(
+  return withManagedMediaIdLock(staged.sha256, async () => {
+    noteManagedMediaImport(staged.sha256)
+    const originalPublication = await publishStagedNoClobber(
       canonicalRoot,
-      metadataPath,
-      metadataBytes,
-      fileSystem,
-      randomId
+      absolutePath,
+      staged.stagedPath,
+      staged.size,
+      fileSystem
     )
-    metadataCreated = metadataPublication === 'created'
-    if (metadataPublication === 'exists') {
-      let valid = false
+    let metadataCreated = false
+    try {
+      const originalHandle = await fileSystem.open(absolutePath, fsConstants.O_RDONLY | NOFOLLOW)
       try {
-        valid = metadataIsConsistent(
-          JSON.parse(
-            (await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)).toString()
-          ),
-          metadata
+        const stat = await originalHandle.stat()
+        if (
+          !stat.isFile() ||
+          stat.size !== staged.size ||
+          (await hashHandle(originalHandle, staged.size)) !== staged.sha256
         )
-      } catch {
-        valid = false
+          throw new Error('Managed media destination conflicts with existing content')
+      } finally {
+        await originalHandle.close()
       }
-      if (!valid) throw new Error('Managed media metadata conflicts with existing content')
+      // Wall-clock time: the cleanup's retention time is measured against it.
+      const reusedAt = new Date()
+      // The same bytes were stored before (perhaps as an orphan past its retention time): this
+      // import hands them out again, so their retention time starts again too.
+      if (originalPublication === 'exists')
+        await refreshReusedFileTimes(absolutePath, fileSystem, reusedAt)
+      const metadata: ManagedMediaMetadata = {
+        schema: METADATA_SCHEMA,
+        version: MANAGED_MEDIA_METADATA_VERSION,
+        sha256: staged.sha256,
+        sizeBytes: staged.size,
+        mimeType,
+        extension,
+        relativePath
+      }
+      const metadataBytes = Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`)
+      if (metadataBytes.length > MAX_METADATA_BYTES)
+        throw new Error('Managed media metadata is too large')
+      const metadataPublication = await publishBytesNoClobber(
+        canonicalRoot,
+        metadataPath,
+        metadataBytes,
+        fileSystem,
+        randomId
+      )
+      metadataCreated = metadataPublication === 'created'
+      if (metadataPublication === 'exists') {
+        let valid = false
+        try {
+          valid = metadataIsConsistent(
+            JSON.parse(
+              (await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)).toString()
+            ),
+            metadata
+          )
+        } catch {
+          valid = false
+        }
+        if (!valid) throw new Error('Managed media metadata conflicts with existing content')
+        await refreshReusedFileTimes(metadataPath, fileSystem, reusedAt)
+      }
+      const stored = JSON.parse(
+        (await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)).toString()
+      ) as unknown
+      if (!metadataIsConsistent(stored, metadata))
+        throw new Error('Managed media metadata conflicts with existing content')
+      const reference = normalizeMediaReference({
+        version: MEDIA_REFERENCE_VERSION,
+        kind: 'managed',
+        relativePath: referencePath,
+        sha256: staged.sha256,
+        sizeBytes: staged.size,
+        mimeType,
+        originalFileName
+      })
+      if (!reference) throw new Error('Failed to construct managed media reference')
+      noteManagedMediaImport(staged.sha256)
+      return { reference, absolutePath, localMediaUrl: localUrl(absolutePath), metadataPath }
+    } catch (error) {
+      if (originalPublication === 'created')
+        await fileSystem.unlink(absolutePath).catch(() => undefined)
+      if (metadataCreated) await fileSystem.unlink(metadataPath).catch(() => undefined)
+      throw error
     }
-    const stored = JSON.parse(
-      (await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)).toString()
-    ) as unknown
-    if (!metadataIsConsistent(stored, metadata))
-      throw new Error('Managed media metadata conflicts with existing content')
-    const reference = normalizeMediaReference({
-      version: MEDIA_REFERENCE_VERSION,
-      kind: 'managed',
-      relativePath: referencePath,
-      sha256: staged.sha256,
-      sizeBytes: staged.size,
-      mimeType,
-      originalFileName
-    })
-    if (!reference) throw new Error('Failed to construct managed media reference')
-    return { reference, absolutePath, localMediaUrl: localUrl(absolutePath), metadataPath }
-  } catch (error) {
-    if (originalPublication === 'created')
-      await fileSystem.unlink(absolutePath).catch(() => undefined)
-    if (metadataCreated) await fileSystem.unlink(metadataPath).catch(() => undefined)
-    throw error
-  }
+  })
 }
 
 export async function importManagedMediaStream(

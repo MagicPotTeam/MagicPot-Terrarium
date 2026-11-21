@@ -116,6 +116,7 @@ import {
   setSessionDeleteTombstone,
   writeSessionDraftBackup,
   writeSessionQueuedSendsBackup,
+  type ChatDraftQueuedSend,
   type ChatSession,
   type ChatSessionDraft
 } from './chatStorage'
@@ -126,10 +127,13 @@ import {
   STORED_IMAGE_MIGRATION_TIMING,
   type StoredImageMigrationOutcome
 } from './chatStoredImageMigration'
+import { beginUnwrittenManagedMediaImports } from '@renderer/services/managedMediaUnwrittenImports'
 import {
   applyInlineAttachmentReplacements,
   ChatInlineAttachmentGuard,
-  type InlineAttachmentReplacement
+  InlineAttachmentBackgroundImports,
+  type InlineAttachmentReplacement,
+  type InlineAttachmentsImported
 } from './chatInlineAttachmentGuard'
 import { importQueuedImages, serializeDraftAttachments } from './chatDraftAttachments'
 import {
@@ -435,9 +439,11 @@ import {
 } from './chatQueuedSends'
 import ChatQueueStrip, { type ChatQueueStripItem } from './components/ChatQueueStrip'
 import {
+  adoptStoredQueuedAttachments,
   isUnavailableQueuedAttachment,
   restoreQueuedSends,
-  serializeQueuedSends
+  serializeQueuedSends,
+  type QueuedSendStoredAttachments
 } from './chatQueuedSendPersistence'
 import { hasDelegatedWork } from './agentTeamDelegatedWork'
 import AgentTeamTargetSelect from './components/AgentTeamTargetSelect'
@@ -605,6 +611,8 @@ type QueuedSessionSend = {
   /** Identity of a user item in the draft record; stable across reloads. */
   persistId?: string
   queuedAt?: number
+  /** Its attachments imported into managed media, stored in their place until adopted. */
+  storedAttachments?: QueuedSendStoredAttachments
 }
 
 type ExternalInitialChatMessage = {
@@ -647,8 +655,8 @@ const HY3D_SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const CHAT_INPUT_STATE_COMMIT_DELAY_MS = 80
 const CHAT_DRAFT_PERSIST_DELAY_MS = 200
 /**
- * Longest a save waits for one oversized inline image to be imported before it writes the image as
- * it is: the save chain of that conversation is held while it waits.
+ * Longest the guard's background import of one oversized inline image may take before the image
+ * stays inline (no save waits for it: it runs outside the save chain).
  */
 const STORED_INLINE_IMAGE_IMPORT_TIMEOUT_MS = 30_000
 /** The stored image migration does not start while the composer changed this recently. */
@@ -804,6 +812,18 @@ const buildChatImageAttachmentAutoSaveFileName = (
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const extension = normalizeImageAttachmentExtension(attachment.mimeType, attachment.fileName)
   return `chat_upload_${timestamp}_${index + 1}.${extension}`
+}
+
+/** The hex SHA-256 of `bytes`, the id managed media gives the same image; null when unavailable. */
+const sha256HexOf = async (bytes: Uint8Array): Promise<string | null> => {
+  try {
+    const subtle = globalThis.crypto?.subtle
+    if (!subtle) return null
+    const digest = new Uint8Array(await subtle.digest('SHA-256', bytes as BufferSource))
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return null
+  }
 }
 
 const readBlobAsUint8Array = (blob: Blob): Promise<Uint8Array> => {
@@ -1453,6 +1473,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const inlineAttachmentReplacementsRef = useRef(
     new WeakMap<ChatSession, ReadonlyMap<string, InlineAttachmentReplacement>>()
   )
+  // Writes the guard's finished imports back (assigned below, once its dependencies exist).
+  const rewriteStoredInlineImagesRef = useRef<InlineAttachmentsImported>(async () => undefined)
+  const inlineAttachmentImportsRef = useRef<InlineAttachmentBackgroundImports | null>(null)
+  inlineAttachmentImportsRef.current ??= new InlineAttachmentBackgroundImports(
+    inlineAttachmentGuardRef.current,
+    (scope, sessionId, replacements) =>
+      rewriteStoredInlineImagesRef.current(scope, sessionId, replacements)
+  )
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
   const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
@@ -1525,21 +1553,29 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [])
   useLayoutEffect(() => {
     chatSaveBaselineRef.current.setStoredForm({
-      prepare: (_scope, session) => {
+      // Never waits: the user's message and the reply reach storage at once. Images imported
+      // already are written as references; the others are written as they are and imported
+      // outside the save chain, and the stored record is rewritten once they are.
+      prepare: (scope, session) => {
         const guard = inlineAttachmentGuardRef.current
         if (!guard?.needsImport(session)) return session
-        return guard.externalize(session).then(({ session: stored, replacements }) => {
-          if (stored !== session) inlineAttachmentReplacementsRef.current.set(stored, replacements)
-          return stored
-        })
+        const known = guard.externalizeKnown(session)
+        if (known.pending) inlineAttachmentImportsRef.current?.request(scope, session)
+        if (known.session !== session) {
+          inlineAttachmentReplacementsRef.current.set(known.session, known.replacements)
+        }
+        return known.session
       },
       // The written form replaces the live object it was prepared from. A live object that moved
       // on meanwhile (a streamed reply, a draft) gets the same references; it is saved as usual.
       adopt: (scope, session, stored) => {
+        // Read once: the map is keyed by the old data: URLs, and the stored object (the live one
+        // from now on) must not keep them alive.
+        const replacements = inlineAttachmentReplacementsRef.current.get(stored)
+        inlineAttachmentReplacementsRef.current.delete(stored)
         if (storageScopeRef.current !== scope) return stored
         const live = sessionsRef.current.find((candidate) => candidate.id === session.id)
         if (!live) return stored
-        const replacements = inlineAttachmentReplacementsRef.current.get(stored)
         const next =
           live === session
             ? stored
@@ -2421,6 +2457,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const queuedSendDraftSyncRef = useRef<(options: { updateSessions: boolean }) => void>(
     () => undefined
   )
+  // Takes a queued item's imported attachments into use once a stored copy holds them (assigned
+  // below, once its dependencies exist; see makeQueuedSendImagesDurable).
+  const adoptStoredQueuedImagesRef = useRef<
+    (updates: ReadonlyArray<readonly [string, readonly ChatDraftQueuedSend[]]>) => void
+  >(() => undefined)
   const updateQueuedSessionSends = useCallback((next: Map<string, QueuedSessionSend[]>) => {
     queuedSessionSendsRef.current = next
     setQueuedSessionSends(next)
@@ -3714,6 +3755,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setQueuedSessionSends(queues)
     }
 
+    // Stored copies of queues whose items wait to take their imported attachments into use.
+    const storedCopies: Array<readonly [string, readonly ChatDraftQueuedSend[]]> = []
     // Store every restored session whose queue changed: accepted and removed items leave the record.
     const sessionUpdates = new Map<
       string,
@@ -3749,6 +3792,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
           ...(stored ? {} : { backupFailed: true, attemptedAt: now })
         }
         queuedSendDraftStateRef.current.set(key, state)
+        if (stored && queue?.some((item) => item.storedAttachments)) {
+          storedCopies.push([session.id, queuedSends])
+        }
+      }
+      const persistedQueue = persistedSessionsRef.current.get(session.id)?.draft?.queuedSends
+      if (persistedQueue?.length && queue?.some((item) => item.storedAttachments)) {
+        storedCopies.push([session.id, persistedQueue])
       }
       const sessionQueue = readDraftQueuedSends(session.draft)
       // The session record must carry the state the backup could not hold, an empty queue included.
@@ -3761,6 +3811,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionUpdates.set(session.id, { queuedSends, updatedAt: state.updatedAt })
       }
     }
+    if (storedCopies.length) adoptStoredQueuedImagesRef.current(storedCopies)
     if (!sessionUpdates.size) return
     setSessions((previous) =>
       previous.map((session) => {
@@ -3807,51 +3858,106 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !hasSessionDeleteTombstone(sessionId, scope)
       if (!untouched() || chatSaveBaselineRef.current.isPending(scope, sessionId)) return 'busy'
       let outcome: StoredImageMigrationOutcome = 'not-written'
-      await chatSaveBaselineRef.current.rewriteStored(
-        scope,
-        sessionId,
-        () => persistedSessionsRef.current.get(sessionId) ?? null,
-        async (expected) => {
-          if (!untouched()) {
-            outcome = 'busy'
-            return null
-          }
-          const result = await migrateStoredSessionImages(expected, scope, {
-            shouldUpdate: untouched
-          })
-          if (result.status !== 'migrated') {
-            outcome = result.status === 'unchanged' ? 'unchanged' : result.status
-            return null
-          }
-          outcome = 'migrated'
-          // The record changed under any storage read still in progress: that read must not
-          // bring the inline form back.
-          noteSessionWriteAcknowledged(scope)
-          if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+      // Until the record names the imported images, the reference scanner must not publish.
+      const written = beginUnwrittenManagedMediaImports()
+      try {
+        await chatSaveBaselineRef.current.rewriteStored(
+          scope,
+          sessionId,
+          () => persistedSessionsRef.current.get(sessionId) ?? null,
+          async (expected) => {
+            if (!untouched()) {
+              outcome = 'busy'
+              return null
+            }
+            const result = await migrateStoredSessionImages(expected, scope, {
+              shouldUpdate: untouched
+            })
+            if (result.status !== 'migrated') {
+              outcome = result.status === 'unchanged' ? 'unchanged' : result.status
+              return null
+            }
+            outcome = 'migrated'
+            // The record changed under any storage read still in progress: that read must not
+            // bring the inline form back.
+            noteSessionWriteAcknowledged(scope)
+            if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+              return result.session
+            }
+            persistedSessionsRef.current.set(sessionId, result.session)
+            const live = sessionsRef.current.find((session) => session.id === sessionId)
+            // A change made while the record was being written gets the same references and is
+            // saved as usual (against the migrated record, which becomes the baseline).
+            const next =
+              live === loaded
+                ? result.session
+                : live
+                  ? applyInlineAttachmentReplacements(live, result.replacements)
+                  : live
+            if (live && next && next !== live) {
+              setSessions((previous) =>
+                previous.map((session) => (session === live ? next : session))
+              )
+            }
             return result.session
           }
-          persistedSessionsRef.current.set(sessionId, result.session)
-          const live = sessionsRef.current.find((session) => session.id === sessionId)
-          // A change made while the record was being written gets the same references and is
-          // saved as usual (against the migrated record, which becomes the baseline).
-          const next =
-            live === loaded
-              ? result.session
-              : live
-                ? applyInlineAttachmentReplacements(live, result.replacements)
-                : live
-          if (live && next && next !== live) {
-            setSessions((previous) =>
-              previous.map((session) => (session === live ? next : session))
-            )
-          }
-          return result.session
-        }
-      )
+        )
+      } finally {
+        written()
+      }
       return outcome
     },
     [getSessionStorageKey, noteSessionWriteAcknowledged, setSessions]
   )
+  // The save guard's imports finished outside the save chain: the stored record (the one this
+  // owner last wrote, its save baseline) gets the references, in the save order, and so does the
+  // live conversation. When the record is not the expected one (another writer), nothing is
+  // written; the next save writes the references from the guard's finished imports.
+  rewriteStoredInlineImagesRef.current = async (scope, sessionId, replacements) => {
+    const epoch = sessionLoadEpochRef.current
+    const key = getSessionStorageKey(scope, sessionId)
+    const notDeleted = (): boolean =>
+      !deletedSessionKeysRef.current.has(key) && !hasSessionDeleteTombstone(sessionId, scope)
+    await chatSaveBaselineRef.current.rewriteStored(
+      scope,
+      sessionId,
+      () =>
+        storageScopeRef.current === scope
+          ? (persistedSessionsRef.current.get(sessionId) ?? null)
+          : null,
+      async (expected) => {
+        if (!isMountedRef.current || !notDeleted()) return null
+        if (applyInlineAttachmentReplacements(expected, replacements) === expected) return null
+        const committed = await compareAndUpdateSessionInDB(sessionId, scope, {
+          expectedSession: expected,
+          shouldUpdate: notDeleted,
+          update: (current) => applyInlineAttachmentReplacements(current, replacements)
+        })
+        if (!committed) return null
+        noteSessionWriteAcknowledged(scope)
+        if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+          return committed
+        }
+        const persistedBefore = persistedSessionsRef.current.get(sessionId)
+        persistedSessionsRef.current.set(sessionId, committed)
+        const live = sessionsRef.current.find((session) => session.id === sessionId)
+        if (!live) return committed
+        // A clean conversation holds the record as written; one with newer changes gets the same
+        // references and is saved as usual (against the rewritten record, the new baseline).
+        const next =
+          live === persistedBefore
+            ? committed
+            : applyInlineAttachmentReplacements(live, replacements)
+        if (next !== live) {
+          if (dirtySessionSnapshotsRef.current.get(key) === live) {
+            dirtySessionSnapshotsRef.current.set(key, next)
+          }
+          setSessions((previous) => previous.map((session) => (session === live ? next : session)))
+        }
+        return committed
+      }
+    )
+  }
   useEffect(() => {
     if (!sessionsLoaded || !active) return
     const scope = storageScope
@@ -5308,12 +5414,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
               const attachment = message.attachments[attachmentIndex]
               if (attachment.type === 'image' && attachment.url) {
                 if (/^file:\/\//i.test(attachment.url)) continue
-                const trackerKey = buildAutoSavedChatImageKey({
-                  sessionId: session.id,
-                  messageIndex,
-                  attachmentIndex,
-                  url: attachment.url
-                })
+                // The image's own identity where there is one: the save guard turns an inline
+                // image into a managed reference (data: becomes local-media:), and the same image
+                // must not look new and be saved again.
+                const keyFor = (identity: string): string =>
+                  buildAutoSavedChatImageKey({
+                    sessionId: session.id,
+                    messageIndex,
+                    attachmentIndex,
+                    url: identity
+                  })
+                const reference = normalizeMediaReference(attachment.media)
+                const managedSha256 =
+                  reference?.kind === 'managed' && reference.sha256 ? reference.sha256 : null
+                const trackerKey = managedSha256
+                  ? keyFor(`sha256:${managedSha256}`)
+                  : keyFor(attachment.url)
                 if (hasAutoSavedChatImageKey(trackerKey)) continue
                 recordAutoSavedChatImageKey(trackerKey)
 
@@ -5327,6 +5443,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   const response = await fetch(attachment.url)
                   const blob = await response.blob()
                   const data = await readBlobAsUint8Array(blob)
+                  if (!managedSha256) {
+                    // Its managed id comes from its bytes: an image saved already under that id
+                    // (after the guard adopted its reference) is not saved twice.
+                    const sha256 = await sha256HexOf(data)
+                    if (sha256) {
+                      const contentKey = keyFor(`sha256:${sha256}`)
+                      if (hasAutoSavedChatImageKey(contentKey)) continue
+                      recordAutoSavedChatImageKey(contentKey)
+                    }
+                  }
                   const res = await api().svcHyper.saveImageToDir({
                     data,
                     fileName,
@@ -9803,6 +9929,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // FIX-PLAN item 4: a queued image is stored in a form that survives a reload. A blob: image (it
   // dies with this renderer) and an oversized inline image are imported into managed media once
   // the item is queued, so the stored queue keeps a reference instead of an unavailable tile.
+  // The item keeps its own images for sending until a stored copy of the queue holds the
+  // references (adoptStoredQueuedImagesRef): only then can the reference scanner see them.
   // Only items the stored queue keeps (the person's own); other items resolve their images when
   // they are sent, as before.
   const makeQueuedSendImagesDurable = useCallback(
@@ -9830,13 +9958,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       ) {
         return
       }
-      const overrides = current.overrides
       const nextQueues = new Map(queues)
       nextQueues.set(
         sessionId,
         queue.map((queued, position) =>
           position === index
-            ? { ...queued, overrides: { ...overrides, attachments: [...durable] } }
+            ? { ...queued, storedAttachments: { source: attachments, attachments: [...durable] } }
             : queued
         )
       )
@@ -13052,6 +13179,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
       isChatAttachmentUrlInUseBy(url, pendingAttachmentsRef.current, excludeIndex),
     [isChatAttachmentUrlInUseBy]
   )
+  adoptStoredQueuedImagesRef.current = (updates) => {
+    let queues = queuedSessionSendsRef.current
+    const released: string[] = []
+    for (const [sessionId, stored] of updates) {
+      const adopted = adoptStoredQueuedAttachments(queues.get(sessionId) ?? [], stored)
+      if (!adopted) continue
+      if (queues === queuedSessionSendsRef.current) queues = new Map(queues)
+      queues.set(sessionId, adopted.queue)
+      released.push(...adopted.released)
+    }
+    if (queues === queuedSessionSendsRef.current) return
+    updateQueuedSessionSends(queues)
+    // A stored copy holds the references now: the blob: URLs they replace go with their last user.
+    for (const url of new Set(released)) {
+      if (!isChatAttachmentUrlInUseBy(url, pendingAttachmentsRef.current, -1)) revokeBlobUrl(url)
+    }
+  }
 
   const removeAttachment = (index: number) => {
     setPendingAttachments((prev) => {

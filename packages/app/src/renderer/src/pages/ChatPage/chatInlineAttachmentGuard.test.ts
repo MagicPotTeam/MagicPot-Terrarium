@@ -15,6 +15,7 @@ import {
   CHAT_STORED_INLINE_ATTACHMENT_MAX_CHARS,
   ChatInlineAttachmentGuard,
   INLINE_ATTACHMENT_IMPORT_RETRY_MS,
+  InlineAttachmentBackgroundImports,
   isOversizedInlineImageAttachment,
   type InlineAttachmentReplacement
 } from './chatInlineAttachmentGuard'
@@ -414,5 +415,133 @@ describe('the save baseline with the inline image guard', () => {
     expect(prepare).toHaveBeenCalledTimes(1)
     expect(importer).not.toHaveBeenCalled()
     expect(fake.save.mock.calls[0][0]).toEqual(original)
+  })
+})
+
+describe('the guard outside the save chain', () => {
+  const conversation = (...urls: string[]): ChatSession => ({
+    id: 'background',
+    title: 'Background',
+    messages: urls.map((url) => ({ role: 'assistant', content: '', attachments: [image(url)] }))
+  })
+
+  it('applies finished imports without waiting and says which are still to come', async () => {
+    const first = inlinePng('known')
+    const second = inlinePng('unknown')
+    const { importer } = createImporter()
+    const guard = new ChatInlineAttachmentGuard(importer)
+    const session = conversation(first, second)
+
+    const before = guard.externalizeKnown(session)
+    expect(before.session).toBe(session)
+    expect(before.pending).toBe(true)
+    expect(importer).not.toHaveBeenCalled()
+
+    await guard.importInlineImage(image(first))
+    const after = guard.externalizeKnown(session)
+    expect(after.pending).toBe(true)
+    expect(after.session.messages[0].attachments?.[0]?.media).toMatchObject({ kind: 'managed' })
+    expect(after.session.messages[1].attachments?.[0]?.url).toBe(second)
+
+    await guard.importInlineImage(image(second))
+    expect(guard.externalizeKnown(session).pending).toBe(false)
+    expect(importer).toHaveBeenCalledTimes(2)
+  })
+
+  it('imports once per conversation at a time, takes up requests made meanwhile, and keeps the scanner waiting', async () => {
+    const first = inlinePng('first')
+    const later = inlinePng('later')
+    const releases: Array<() => void> = []
+    const { importer: managed } = createImporter()
+    const importer = vi.fn(async (attachment: ChatAttachment) => {
+      await new Promise<void>((resolve) => releases.push(resolve))
+      return managed(attachment)
+    })
+    const guard = new ChatInlineAttachmentGuard(importer)
+    const written: Array<string[]> = []
+    const onImported = vi.fn(
+      async (_scope: string, _id: string, replacements: ReadonlyMap<string, unknown>) => {
+        written.push([...replacements.keys()])
+      }
+    )
+    const close = vi.fn()
+    const open = vi.fn(() => close)
+    const imports = new InlineAttachmentBackgroundImports(guard, onImported, open)
+
+    imports.request('scope', conversation(first))
+    imports.request('scope', conversation(first))
+    await vi.waitFor(() => expect(importer).toHaveBeenCalledTimes(1))
+    expect(imports.isRunning('scope', 'background')).toBe(true)
+    // A save while the import runs: a newer image arrived.
+    imports.request('scope', conversation(first, later))
+    releases.shift()!()
+    await vi.waitFor(() => expect(importer).toHaveBeenCalledTimes(2))
+    releases.shift()!()
+    await vi.waitFor(() => expect(imports.isRunning('scope', 'background')).toBe(false))
+
+    expect(importer.mock.calls.map(([attachment]) => attachment.url)).toEqual([first, later])
+    expect(written).toEqual([[first], [first, later]])
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the guard caches', () => {
+  /** Two images that agree at both ends and in the middle, and differ in between. */
+  const twins = (): [string, string] => {
+    const prefix = 'data:image/png;base64,'
+    const length = 64 * 1024
+    const body = (marker: string) => {
+      const chars = 'A'.repeat(length).split('')
+      chars[10_000] = marker
+      return chars.join('')
+    }
+    return [`${prefix}${body('B')}`, `${prefix}${body('C')}`]
+  }
+
+  it('never takes one image for another that differs only where a sample would not look', async () => {
+    const [first, second] = twins()
+    const { importer } = createImporter()
+    const failing = vi.fn(async (attachment: ChatAttachment) => {
+      if (attachment.url === first) throw new Error('refused')
+      return importer(attachment)
+    })
+    const guard = new ChatInlineAttachmentGuard(failing)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await expect(guard.importInlineImage(image(first))).resolves.toMatchObject({ url: first })
+      // The failure of the first holds back neither the import nor the reuse of the second.
+      const imported = await guard.importInlineImage(image(second))
+      expect(imported.media).toMatchObject({ kind: 'managed' })
+      const again = guard.externalizeKnown({
+        id: 'twins',
+        title: 'Twins',
+        messages: [{ role: 'user', content: '', attachments: [image(first), image(second)] }]
+      })
+      expect(again.session.messages[0].attachments?.[0]?.url).toBe(first)
+      expect(again.session.messages[0].attachments?.[1]?.url).toBe(imported.url)
+      expect(failing).toHaveBeenCalledTimes(2)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('keeps no data: URL alive in its caches', async () => {
+    const urls = Array.from({ length: 4 }, (_, index) => inlinePng(`cached-${index}`))
+    const { importer } = createImporter()
+    const guard = new ChatInlineAttachmentGuard(async (attachment) => {
+      if (attachment.url === urls[3]) throw new Error('refused')
+      return importer(attachment)
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      for (const url of urls) await guard.importInlineImage(image(url))
+    } finally {
+      warn.mockRestore()
+    }
+    const internals = guard as unknown as Record<string, Map<string, unknown>>
+    const keys = ['recent', 'failures', 'inFlight'].flatMap((name) => [...internals[name].keys()])
+    expect(keys.length).toBeGreaterThanOrEqual(4)
+    expect(Math.max(...keys.map((key) => key.length))).toBeLessThan(64)
   })
 })
