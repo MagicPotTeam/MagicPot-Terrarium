@@ -247,12 +247,17 @@ describe('FsSvcImpl', () => {
   })
 
   describe('bounded reads and writes', () => {
+    // Media reads through the user's grant; text and slices only where they are read: the
+    // canvas project folder (project files) and the LoRA folder (safetensors headers).
     beforeEach(() => {
       expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+      service = new FsSvcImpl({
+        getConfiguredReadRoots: async () => ({ projectDirs: [testRoot], loraDirs: [testRoot] })
+      })
     })
 
     it('rejects full-file reads over the limit while the slice API remains usable', async () => {
-      const fullPath = path.join(testRoot, 'large.bin')
+      const fullPath = path.join(testRoot, 'large.safetensors')
       fs.writeFileSync(fullPath, Buffer.alloc(1))
       fs.truncateSync(fullPath, MAX_FULL_FILE_BYTES + 1)
 
@@ -264,7 +269,7 @@ describe('FsSvcImpl', () => {
     })
 
     it('refuses a whole-file read of a file that grows while it is read', async () => {
-      const fullPath = path.join(testRoot, 'growing.txt')
+      const fullPath = path.join(testRoot, 'growing.mpcanvas')
       fs.writeFileSync(fullPath, 'abc')
       for (const read of [
         () => service.readTextFile({ fullPath }),
@@ -287,7 +292,7 @@ describe('FsSvcImpl', () => {
     })
 
     it('rejects oversized text reads and writes', async () => {
-      const fullPath = path.join(testRoot, 'large.txt')
+      const fullPath = path.join(testRoot, 'large.mpcanvas')
       fs.writeFileSync(fullPath, Buffer.alloc(1))
       fs.truncateSync(fullPath, MAX_TEXT_FILE_BYTES + 1)
 
@@ -349,8 +354,11 @@ describe('FsSvcImpl', () => {
   })
 
   describe('readFileSlice', () => {
+    // Slices are the safetensors headers of the LoRA folder.
     beforeEach(() => {
-      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+      service = new FsSvcImpl({
+        getConfiguredReadRoots: async () => ({ projectDirs: [], loraDirs: [testRoot] })
+      })
     })
 
     it('reads only the requested file slice and reports file size', async () => {
@@ -391,9 +399,11 @@ describe('FsSvcImpl', () => {
     })
 
     it('rejects directories instead of reading them as files', async () => {
+      const folder = path.join(testRoot, 'folder.safetensors')
+      fs.mkdirSync(folder)
       await expect(
-        service.readFileSlice({ fullPath: testRoot, offset: 0, length: 1 })
-      ).rejects.toThrow(`Path is not a file: ${testRoot}`)
+        service.readFileSlice({ fullPath: folder, offset: 0, length: 1 })
+      ).rejects.toThrow(`Path is not a file: ${folder}`)
     })
   })
 

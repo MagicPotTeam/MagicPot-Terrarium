@@ -672,10 +672,13 @@ const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredRe
  * What a renderer read is for, and so where it may read (see getRendererReadAreas):
  * - 'media': a local-media file (a canvas item, a chat attachment), authorized exactly as the
  *   local-media protocol and readImageFromPath authorize it;
- * - 'text', 'slice', 'directory': the same, and the configured project folder, and inside the
- *   LoRA folder only the files the trigger-word lookup reads;
- * - 'skill-resource': a file a skill names as a resource: only the custom skill folder or a
- *   file the user granted, never the app's config, grants or chats, nor a skill definition.
+ * - 'text': a canvas project file, or a trigger-word sidecar in the LoRA folder;
+ * - 'slice': a safetensors header in the LoRA folder;
+ * - 'directory': a project folder, the LoRA folder or a granted folder (listings, the sidecar);
+ * - 'skill-resource': a file a skill names as a resource.
+ * A skill or a board file names these paths, so text, slices, listings and skill resources
+ * reach only what their callers read: never the app's config, grants or chats. 'media' keeps
+ * the local-media protocol's policy (the app's data folder, where managed media lives).
  */
 type RendererReadKind = 'media' | 'text' | 'slice' | 'directory' | 'skill-resource'
 
@@ -690,6 +693,7 @@ type RendererReadArea = {
   allowNetworkRoots: boolean
 }
 
+const PROJECT_CANVAS_FILE_EXTENSION = '.mpcanvas'
 /** Inside the LoRA folder: <name>.txt, <name>.json, <name>.metadata.json, <name>.civitai.info. */
 const LORA_TEXT_EXTENSIONS = ['.txt', '.json', '.info']
 const LORA_SLICE_EXTENSIONS = ['.safetensors']
@@ -744,30 +748,28 @@ export class FsSvcImpl implements FsSvc {
     const configured = await (
       this.dependencies.getConfiguredReadRoots ?? readConfiguredReadRootsFromConfig
     )()
-    const roots = [...this.getMediaReadRoots(), ...configured.projectDirs]
+    const storageState = getCurrentUserDataDirectoryState()
+    const projectRoots = [
+      storageState.projectRoot,
+      storageState.autoSaveRoot,
+      ...configured.projectDirs
+    ]
     // A storage or model folder the user configured on a share stays readable there.
     const area = (
       roots: LocalMediaRoot[],
-      fits: (filePath: string) => boolean
-    ): RendererReadArea => ({
-      roots,
-      grants: true,
-      fits,
-      allowNetworkRoots: true
-    })
+      fits: (filePath: string) => boolean,
+      grants = false
+    ): RendererReadArea => ({ roots, grants, fits, allowNetworkRoots: true })
     switch (kind) {
       case 'text':
         return [
-          area(roots, anyFile),
+          area(projectRoots, withExtension([PROJECT_CANVAS_FILE_EXTENSION])),
           area(configured.loraDirs, withExtension(LORA_TEXT_EXTENSIONS))
         ]
       case 'slice':
-        return [
-          area(roots, anyFile),
-          area(configured.loraDirs, withExtension(LORA_SLICE_EXTENSIONS))
-        ]
+        return [area(configured.loraDirs, withExtension(LORA_SLICE_EXTENSIONS))]
       case 'directory':
-        return [area(roots, anyFile), area(configured.loraDirs, anyFile)]
+        return [area([...projectRoots, ...configured.loraDirs], anyFile, true)]
     }
   }
 

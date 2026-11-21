@@ -156,11 +156,6 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
       data: new Uint8Array(Buffer.from('<svg/>')),
       filename: 'dropped.svg'
     })
-    // A skill resource file kept with the app's data.
-    const resource = write(p('electron-userData', 'customSkills', 'pkg', 'guide.md'), '# guide')
-    await expect(service.readTextFile({ fullPath: resource })).resolves.toMatchObject({
-      content: '# guide'
-    })
   })
 
   it('reads in the LoRA folder only what the trigger-word lookup reads', async () => {
@@ -338,5 +333,34 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
         fullPath: path.join(userData, 'customSkills', 'Writing', 'config.md')
       })
     ).rejects.toThrow(/not found|not authorized/)
+  })
+
+  it('reads no app secret, chat data or other file through the text and slice reads', async () => {
+    const userData = p('electron-userData')
+    const config = write(path.join(userData, 'config.json'), '{"api_key":"sk-secret"}')
+    const grants = write(path.join(userData, 'local-media-grants.json'), '{"version":1}')
+    const chat = write(path.join(userData, 'chat-history', 'thread.json'), '{"messages":[]}')
+    const resource = write(path.join(userData, 'customSkills', 'pkg', 'guide.md'), '# guide')
+    const projectNote = write(p('CustomProjects', 'notes', 'secret.env'), 'TOKEN=1')
+    const autosaveOther = write(p('AutoSave', '.board__board', 'notes.json'), '{}')
+    for (const fullPath of [config, grants, chat, resource, projectNote, autosaveOther]) {
+      await expect(service.readTextFile({ fullPath })).rejects.toThrow(/not found|not authorized/)
+      await expect(service.readFileSlice({ fullPath, length: 64 })).rejects.toThrow(
+        /not found|not authorized/
+      )
+    }
+    // Not through a grant either: no text read needs one.
+    expect(authorizeScopedLocalMediaDirectory(base)).toBe(true)
+    for (const fullPath of [config, grants, chat]) {
+      await expect(service.readTextFile({ fullPath })).rejects.toThrow(/not found|not authorized/)
+      await expect(service.readFileSlice({ fullPath, length: 64 })).rejects.toThrow(
+        /not found|not authorized/
+      )
+    }
+    // The canvas project files stay readable.
+    const project = write(p('CustomProjects', '.board__board', 'project.mpcanvas'), '{"items":[]}')
+    await expect(service.readTextFile({ fullPath: project })).resolves.toMatchObject({
+      content: '{"items":[]}'
+    })
   })
 })
