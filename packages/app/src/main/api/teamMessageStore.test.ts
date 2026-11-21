@@ -411,19 +411,21 @@ describe('durable team message store, real SQLite', () => {
     const claimed = store.append(direct).intent.id
     store.claim(claimed)
     db.close()
-    const child = spawn(
-      process.execPath,
-      ['-e', "process.stdout.write('READY\\n'); setInterval(() => {}, 1000)"],
-      { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'ignore'] }
-    )
+    // Another process holds the file: its MagicAgentEventStore's instance lease, as acquireInstanceLease takes it
+    // (the lease file, then its proper-lockfile lock).
+    const script =
+      "const fs = require('node:fs'); const lease = require('node:path').join(process.argv[1], process.pid + '-' + require('node:crypto').randomUUID() + '.lease'); fs.writeFileSync(lease, '{}', { flag: 'wx' }); require('proper-lockfile').lockSync(lease, { realpath: false, stale: 30000, update: 10000, retries: 0 }); process.stdout.write('READY\\n'); setInterval(() => {}, 1000)"
+    const child = spawn(process.execPath, ['-e', script, instanceLeaseDirectory(path)], {
+      cwd: join(__dirname, '../../../../..'),
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
     children.push(child)
     await new Promise<void>((resolve) =>
       child.stdout!.on('data', (chunk) => {
         if (String(chunk).includes('READY')) resolve()
       })
     )
-    // The lease another process's MagicAgentEventStore holds while it has this file open.
-    writeFileSync(join(instanceLeaseDirectory(path), `${child.pid}-${randomUUID()}.lease`), '{}')
 
     ;({ db, store } = open(path, 'boot-b'))
     expect(store.unavailable).toBe(true)

@@ -19,7 +19,8 @@ vi.mock('node:fs/promises', async (importActual) => importActual())
 import {
   acquireEventStoreWriteLock,
   acquireInstanceLease,
-  activeInstanceLeasePids
+  activeInstanceLeasePids,
+  instanceLeaseDirectory
 } from './writeLock'
 
 const children = new Set<ChildProcess>()
@@ -220,6 +221,56 @@ async function liveChild(): Promise<ChildProcess> {
   return child
 }
 
+/**
+ * Another process that holds a lease next to `databasePath` exactly as acquireInstanceLease does:
+ * the lease file, then its proper-lockfile lock (same options). A line on stdin makes it exit
+ * normally, which runs proper-lockfile's exit handler.
+ */
+async function leaseHolder(databasePath: string): Promise<{ child: ChildProcess; lease: string }> {
+  const script = `
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { randomUUID } = require('node:crypto');
+    const lockfile = require('proper-lockfile');
+    const directory = process.argv[1];
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const lease = path.join(directory, process.pid + '-' + randomUUID() + '.lease');
+    fs.writeFileSync(lease, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), { flag: 'wx', mode: 0o600 });
+    lockfile.lockSync(lease, { realpath: false, stale: 30000, update: 10000, retries: 0 });
+    process.stdin.on('data', () => process.exit(0));
+    process.stdout.write('READY ' + lease + '\\n');
+    setInterval(() => {}, 1000);
+  `
+  const child = spawn(process.execPath, ['-e', script, instanceLeaseDirectory(databasePath)], {
+    cwd: resolve(__dirname, '../../../../../..'),
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    stdio: ['pipe', 'pipe', 'pipe']
+  })
+  children.add(child)
+  const lease = await new Promise<string>((resolveReady, reject) => {
+    let stdout = ''
+    let stderr = ''
+    const timer = setTimeout(() => reject(new Error(`holder timeout: ${stderr}`)), 10_000)
+    child.stderr?.on('data', (chunk) => (stderr += String(chunk)))
+    child.stdout?.on('data', (chunk) => {
+      stdout += String(chunk)
+      const ready = /READY (.+\.lease)\n/.exec(stdout)
+      if (ready) {
+        clearTimeout(timer)
+        resolveReady(ready[1])
+      }
+    })
+  })
+  return { child, lease }
+}
+
+async function exitNormally(child: ChildProcess): Promise<void> {
+  const exited = new Promise<void>((resolveExit) => child.once('exit', () => resolveExit()))
+  child.stdin?.write('exit\n')
+  await exited
+  children.delete(child)
+}
+
 describe('activeInstanceLeasePids (read-only)', () => {
   it('reports no holder and creates nothing when the lease directory does not exist', async () => {
     const path = await database()
@@ -227,25 +278,61 @@ describe('activeInstanceLeasePids (read-only)', () => {
     expect(readdirSync(dirname(path))).toEqual([])
   })
 
-  it('reports a live holder, never a dead one, and deletes no lease file', async () => {
+  it('reports a lease only while a live process holds it, and deletes no lease file', async () => {
     const path = await database()
     const own = acquireInstanceLease(path)
     expect(activeInstanceLeasePids(path)).toEqual([process.pid])
-    const directory = dirname(own.path)
-    const child = await liveChild()
-    const live = join(directory, `${child.pid}-${randomUUID()}.lease`)
-    const dead = join(directory, `${deadOwner().pid}-${randomUUID()}.lease`)
-    writeFileSync(live, '{}')
-    writeFileSync(dead, '{}')
-    writeFileSync(join(directory, 'unrelated-entry'), '')
-    expect(activeInstanceLeasePids(path).sort()).toEqual([process.pid, child.pid].sort())
-    await terminate(child)
-    children.delete(child)
+    const exiting = await leaseHolder(path)
+    const killed = await leaseHolder(path)
+    expect(activeInstanceLeasePids(path).sort()).toEqual(
+      [process.pid, exiting.child.pid, killed.child.pid].sort()
+    )
+    writeFileSync(join(dirname(own.path), 'unrelated-entry'), '')
+    // A normal exit removes the lock and leaves the lease file behind.
+    await exitNormally(exiting.child)
+    expect(existsSync(exiting.lease)).toBe(true)
+    expect(existsSync(`${exiting.lease}.lock`)).toBe(false)
+    expect(activeInstanceLeasePids(path).sort()).toEqual([process.pid, killed.child.pid].sort())
+    // A killed holder leaves both; its PID is dead.
+    await terminate(killed.child)
+    children.delete(killed.child)
+    expect(existsSync(`${killed.lease}.lock`)).toBe(true)
     expect(activeInstanceLeasePids(path)).toEqual([process.pid])
     own.release()
     expect(activeInstanceLeasePids(path)).toEqual([])
-    // Read-only: the dead and the stopped holder's leases stay where they were.
-    expect(existsSync(live)).toBe(true)
-    expect(existsSync(dead)).toBe(true)
+    // Read-only: the leftovers stay where they were.
+    expect(existsSync(exiting.lease)).toBe(true)
+    expect(existsSync(killed.lease)).toBe(true)
+    expect(existsSync(`${killed.lease}.lock`)).toBe(true)
+  })
+
+  it('does not take a leftover lease for a holder when its PID now belongs to another process', async () => {
+    const path = await database()
+    const directory = instanceLeaseDirectory(path)
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    // An unrelated live process: its PID stands for one the system reused after the holder ended.
+    const reused = (await liveChild()).pid!
+    const lease = (state: 'exited' | 'killed' | 'held' | 'odd-lock'): string => {
+      const file = join(directory, `${reused}-${randomUUID()}.lease`)
+      writeFileSync(file, '{}')
+      if (state === 'killed' || state === 'held') mkdirSync(`${file}.lock`)
+      // A kill leaves a lock that nobody refreshes any more.
+      if (state === 'killed') {
+        const hoursAgo = new Date(Date.now() - 2 * 60 * 60_000)
+        utimesSync(`${file}.lock`, hoursAgo, hoursAgo)
+      }
+      if (state === 'odd-lock') writeFileSync(`${file}.lock`, '')
+      return file
+    }
+    lease('exited')
+    lease('killed')
+    expect(activeInstanceLeasePids(path)).toEqual([])
+    // A lock refreshed within the last hour is held (fail closed), as is a lock of another shape.
+    const held = lease('held')
+    expect(activeInstanceLeasePids(path)).toEqual([reused])
+    await rm(`${held}.lock`, { recursive: true })
+    expect(activeInstanceLeasePids(path)).toEqual([])
+    lease('odd-lock')
+    expect(activeInstanceLeasePids(path)).toEqual([reused])
   })
 })

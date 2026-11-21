@@ -8,6 +8,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -368,7 +369,10 @@ describe('durable team message queue', () => {
     sender(1)
     const { q, file } = queue()
     mkdirSync(instanceLeaseDirectory(file), { recursive: true })
-    writeFileSync(join(instanceLeaseDirectory(file), `${process.ppid}-${randomUUID()}.lease`), '{}')
+    // The holder's lease and its lock (refreshed just now), as acquireInstanceLease keeps them.
+    const lease = join(instanceLeaseDirectory(file), `${process.ppid}-${randomUUID()}.lease`)
+    writeFileSync(lease, '{}')
+    mkdirSync(`${lease}.lock`)
     writeFileSync(file, '')
     expect(list(q, 1)).toEqual([])
     expect(() => q.enqueue(intent, options())).toThrow('Team queue unavailable.')
@@ -376,6 +380,26 @@ describe('durable team message queue', () => {
       'messages.sqlite',
       'messages.sqlite.magicagent.instances'
     ])
+  })
+
+  it('serves on after earlier runs left their leases behind, also when their PIDs are in use again', () => {
+    sender(1)
+    const first = queue()
+    const { requestId } = first.q.enqueue(intent, options())
+    first.q.dispose()
+    // An earlier run that exited (its lock removed at exit) and one that was killed (its lock not refreshed for
+    // hours); their PIDs now belong to a live process.
+    const exited = join(instanceLeaseDirectory(first.file), `${process.ppid}-${randomUUID()}.lease`)
+    const killed = join(instanceLeaseDirectory(first.file), `${process.ppid}-${randomUUID()}.lease`)
+    writeFileSync(exited, '{}')
+    writeFileSync(killed, '{}')
+    mkdirSync(`${killed}.lock`)
+    const hoursAgo = new Date(Date.now() - 3 * 60 * 60_000)
+    utimesSync(`${killed}.lock`, hoursAgo, hoursAgo)
+    const { q } = queue(first.file)
+    expect(list(q, 1)).toEqual([{ id: requestId, ...intent, carriedOver: true }])
+    expect(() => q.enqueue(intent, options())).not.toThrow()
+    expect(existsSync(exited) && existsSync(killed)).toBe(true)
   })
 
   it('serves nothing when another process took the file while it was being opened', () => {
