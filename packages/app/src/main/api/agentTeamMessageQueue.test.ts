@@ -365,6 +365,44 @@ describe('durable team message queue', () => {
     expect(readFileSync(file, 'utf8')).toBe('not a database')
   })
 
+  it('waits longer after each failed open of the file, and checks for another holder every 30 s', () => {
+    sender(1)
+    let now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const attempts = vi.mocked(activeInstanceLeasePids)
+    // Each attempt starts with the check for another holder: one call per attempt.
+    const pollsAt = (poll: () => void, waits: number[]): void => {
+      attempts.mockClear()
+      let at = now
+      poll()
+      for (const [index, wait] of waits.entries()) {
+        now = at + wait - 1
+        poll()
+        expect(attempts).toHaveBeenCalledTimes(index + 1)
+        now = at += wait
+        poll()
+        expect(attempts).toHaveBeenCalledTimes(index + 2)
+      }
+    }
+    // A file that cannot be opened: every attempt reads and audits it on the main thread.
+    const broken = queue()
+    mkdirSync(join(broken.file, '..'), { recursive: true })
+    writeFileSync(broken.file, 'not a database')
+    pollsAt(
+      () => expect(() => list(broken.q, 1)).toThrow(),
+      [30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000]
+    )
+    expect(readFileSync(broken.file, 'utf8')).toBe('not a database')
+    // Another live process holds the file: only the cheap check, every 30 s.
+    const held = queue()
+    mkdirSync(instanceLeaseDirectory(held.file), { recursive: true })
+    const lease = join(instanceLeaseDirectory(held.file), `${process.ppid}-${randomUUID()}.lease`)
+    writeFileSync(lease, '{}')
+    mkdirSync(`${lease}.lock`)
+    writeFileSync(held.file, '')
+    pollsAt(() => expect(list(held.q, 1)).toEqual([]), [30_000, 30_000, 30_000, 30_000])
+  })
+
   it('serves nothing while another live process holds the file', () => {
     sender(1)
     const { q, file } = queue()

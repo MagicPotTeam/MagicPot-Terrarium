@@ -17,7 +17,8 @@ import { TEAM_QUEUE_UNAVAILABLE, TeamMessageStore, type TeamMessageEntry } from 
 
 const TEAM_CAPACITY = 128,
   TOTAL_CAPACITY = 1024,
-  RETRY_MS = 30_000
+  RETRY_MS = 30_000,
+  MAX_RETRY_MS = 10 * 60_000
 /** This MAIN process. A claim made by another boot is over (see TeamMessageStore). Memory only. */
 const BOOT = randomUUID()
 const valid = (x: unknown): x is string =>
@@ -38,21 +39,27 @@ export type TeamMessageStoreOpener = {
 
 /**
  * Opens <file> on first use, like getTeamEndStore. A failure is remembered and the file is not
- * opened again for RETRY_MS (no open, and no audit of the whole file, on every poll). While another
- * live process holds the file nothing is opened or recovered: every call throws 'Team queue unavailable.'.
+ * opened again for a while (no open, and no audit of the whole file, on every poll). While another
+ * live process holds the file nothing is opened or recovered: every call throws 'Team queue unavailable.',
+ * and the cheap check for that holder runs again after RETRY_MS. A failed open of the file itself
+ * read and audited all of it on the main thread (seconds for a large file): the wait after it
+ * doubles with each failure in a row, up to MAX_RETRY_MS.
  */
 export function teamMessageStoreOpener(file: string, boot: string): TeamMessageStoreOpener {
   let store: TeamMessageStore | undefined,
     failure: unknown,
-    retryAt = 0
+    retryAt = 0,
+    failedOpens = 0
   return {
     open(create) {
       if (store) return store
       if (Date.now() < retryAt) throw failure
       if (!create && !existsSync(file)) return undefined
+      let opening = false
       try {
         if (activeInstanceLeasePids(file).some((pid) => pid !== process.pid))
           throw new Error(TEAM_QUEUE_UNAVAILABLE)
+        opening = true
         mkdirSync(dirname(file), { recursive: true })
         const db = new MagicAgentEventStore(file)
         let opened: TeamMessageStore
@@ -70,7 +77,8 @@ export function teamMessageStoreOpener(file: string, boot: string): TeamMessageS
         return store
       } catch (error) {
         failure = error
-        retryAt = Date.now() + RETRY_MS
+        retryAt =
+          Date.now() + (opening ? Math.min(RETRY_MS * 2 ** failedOpens++, MAX_RETRY_MS) : RETRY_MS)
         throw error
       }
     },
