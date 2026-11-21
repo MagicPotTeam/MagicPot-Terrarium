@@ -149,20 +149,31 @@ export const applyInlineAttachmentReplacements = (
   return Object.keys(changes).length > 0 ? { ...session, ...changes } : session
 }
 
+/** How many characters of a data: URL are hashed at a time before other work may run. */
+const IDENTITY_SLICE_CHARS = 512 * 1024
+
+const nextTurn = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
 /**
  * The identity of a data: URL the guard's caches are keyed by, never the URL itself (they would
  * keep megabytes of base64 alive): its length and two independent 32-bit hashes of every
  * character. A sample of the characters is not enough: two images that differ only between the
- * samples would share an import, and one would be stored as the other.
+ * samples would share an import, and one would be stored as the other. Reading every character
+ * costs about 3-5 ms per MB, so it is done in slices with a turn of the event loop in between,
+ * and never on the save path (see ChatInlineAttachmentGuard.knownIdentity).
  */
-const identityOf = (url: string): string => {
+const identityOf = async (url: string): Promise<string> => {
   let fnv = 0x811c9dc5
   let murmur = 0x9747b28c
-  for (let index = 0; index < url.length; index += 1) {
-    const code = url.charCodeAt(index)
-    fnv = Math.imul(fnv ^ code, 0x01000193)
-    murmur = Math.imul(murmur ^ code, 0x5bd1e995)
-    murmur ^= murmur >>> 15
+  for (let start = 0; start < url.length; start += IDENTITY_SLICE_CHARS) {
+    if (start > 0) await nextTurn()
+    const end = Math.min(url.length, start + IDENTITY_SLICE_CHARS)
+    for (let index = start; index < end; index += 1) {
+      const code = url.charCodeAt(index)
+      fnv = Math.imul(fnv ^ code, 0x01000193)
+      murmur = Math.imul(murmur ^ code, 0x5bd1e995)
+      murmur ^= murmur >>> 15
+    }
   }
   return `${url.length}:${(fnv >>> 0).toString(36)}:${(murmur >>> 0).toString(36)}`
 }
@@ -207,26 +218,54 @@ export class ChatInlineAttachmentGuard {
   >()
   private readonly failures = new Map<string, number>()
   // The identity of a url already hashed, for the string it was hashed from (the same string the
-  // attachment holds, so nothing more is kept alive): saves see the same strings again and again.
+  // attachment holds, so nothing more is kept alive): saves see the same objects again and again.
   private readonly identities = new WeakMap<object, { url: string; identity: string }>()
+  // Hashes in progress, so one attachment object is read once.
+  private readonly hashing = new WeakMap<object, { url: string; identity: Promise<string> }>()
 
   constructor(
     private readonly importAttachment: InlineAttachmentImporter,
     private readonly now: () => number = () => Date.now()
   ) {}
 
-  private identity(attachment: ChatAttachment): string {
+  /**
+   * The identity of this attachment's url when it has been hashed already, else undefined. The
+   * save path (needsImport, externalizeKnown) uses only this: hashing a new image there would read
+   * all of it on the main thread while the user waits. Such an image counts as still to import,
+   * and the background import learns its identity (and reuses a finished import of the same image).
+   */
+  private knownIdentity(attachment: ChatAttachment): string | undefined {
     const known = this.identities.get(attachment)
-    if (known && known.url === attachment.url) return known.identity
-    const identity = identityOf(attachment.url)
-    this.identities.set(attachment, { url: attachment.url, identity })
+    return known && known.url === attachment.url ? known.identity : undefined
+  }
+
+  /** The identity of this attachment's url, hashed in slices the first time (off the save path). */
+  private identity(attachment: ChatAttachment): Promise<string> {
+    const known = this.knownIdentity(attachment)
+    if (known !== undefined) return Promise.resolve(known)
+    const url = attachment.url
+    const running = this.hashing.get(attachment)
+    if (running && running.url === url) return running.identity
+    const identity = identityOf(url).then((value) => {
+      this.identities.set(attachment, { url, identity: value })
+      if (this.hashing.get(attachment)?.identity === identity) this.hashing.delete(attachment)
+      return value
+    })
+    this.hashing.set(attachment, { url, identity })
     return identity
   }
 
-  private shouldTry(attachment: ChatAttachment): boolean {
-    if (this.failures.size === 0) return true
-    const retryAt = this.failures.get(this.identity(attachment))
+  /** Whether an image of this identity may be tried: it did not fail recently. */
+  private retryDue(identity: string): boolean {
+    const retryAt = this.failures.get(identity)
     return retryAt === undefined || retryAt <= this.now()
+  }
+
+  /** shouldTry on the save path: an image not hashed yet is tried (the background import knows). */
+  private shouldTryKnown(attachment: ChatAttachment): boolean {
+    if (this.failures.size === 0) return true
+    const identity = this.knownIdentity(attachment)
+    return identity === undefined || this.retryDue(identity)
   }
 
   private noteFailure(identity: string): void {
@@ -249,22 +288,25 @@ export class ChatInlineAttachmentGuard {
     forEachAttachmentList(session, (attachments) => {
       if (found) return
       found = attachments.some(
-        (attachment) => isOversizedInlineImageAttachment(attachment) && this.shouldTry(attachment)
+        (attachment) =>
+          isOversizedInlineImageAttachment(attachment) && this.shouldTryKnown(attachment)
       )
     })
     return found
   }
 
-  /** A finished import of this image that may still be reused. */
-  private cachedReplacement(attachment: ChatAttachment): InlineAttachmentReplacement | null {
-    const cached = this.recent.get(this.identity(attachment))
+  /** A finished import of the image of this identity that may still be reused. */
+  private cachedReplacement(identity: string): InlineAttachmentReplacement | null {
+    const cached = this.recent.get(identity)
     return cached && this.now() - cached.at <= RECENT_IMPORT_TTL_MS ? cached.replacement : null
   }
 
-  private importOne(attachment: ChatAttachment): Promise<InlineAttachmentReplacement | null> {
-    const cached = this.cachedReplacement(attachment)
+  private importOne(
+    attachment: ChatAttachment,
+    identity: string
+  ): Promise<InlineAttachmentReplacement | null> {
+    const cached = this.cachedReplacement(identity)
     if (cached) return Promise.resolve(cached)
-    const identity = this.identity(attachment)
     const existing = this.inFlight.get(identity)
     if (existing) return existing
     const flight = (async () => {
@@ -305,31 +347,34 @@ export class ChatInlineAttachmentGuard {
    * imported; otherwise (or when its import fails) `attachment` itself. Never rejects.
    */
   async importInlineImage(attachment: ChatAttachment): Promise<ChatAttachment> {
-    if (!isOversizedInlineImageAttachment(attachment) || !this.shouldTry(attachment)) {
-      return attachment
-    }
-    const replacement = await this.importOne(attachment)
+    if (!isOversizedInlineImageAttachment(attachment)) return attachment
+    const identity = await this.identity(attachment)
+    if (!this.retryDue(identity)) return attachment
+    const replacement = await this.importOne(attachment, identity)
     return replacement ? { ...attachment, ...replacement } : attachment
   }
 
   /**
    * The stored form of `session` without waiting: references in place of the oversized inline
    * images whose import has already finished. `pending` is true when others are still to be
-   * imported (they stay inline in this form). The same object when nothing was replaced.
+   * imported (they stay inline in this form), and for an image not hashed yet: this runs on the
+   * save path, which never reads a whole image. The same object when nothing was replaced.
    */
   externalizeKnown(session: ChatSession): ExternalizedSession & { pending: boolean } {
     const replacements = new Map<string, InlineAttachmentReplacement>()
     let pending = false
     forEachAttachmentList(session, (attachments) => {
       for (const attachment of attachments) {
-        if (
-          !isOversizedInlineImageAttachment(attachment) ||
-          replacements.has(attachment.url) ||
-          !this.shouldTry(attachment)
-        ) {
+        if (!isOversizedInlineImageAttachment(attachment) || replacements.has(attachment.url)) {
           continue
         }
-        const cached = this.cachedReplacement(attachment)
+        const identity = this.knownIdentity(attachment)
+        if (identity === undefined) {
+          pending = true
+          continue
+        }
+        if (!this.retryDue(identity)) continue
+        const cached = this.cachedReplacement(identity)
         if (cached) replacements.set(attachment.url, cached)
         else pending = true
       }
@@ -350,11 +395,7 @@ export class ChatInlineAttachmentGuard {
     const sources = new Map<string, ChatAttachment>()
     forEachAttachmentList(session, (attachments) => {
       for (const attachment of attachments) {
-        if (
-          isOversizedInlineImageAttachment(attachment) &&
-          !sources.has(attachment.url) &&
-          this.shouldTry(attachment)
-        ) {
+        if (isOversizedInlineImageAttachment(attachment) && !sources.has(attachment.url)) {
           sources.set(attachment.url, attachment)
         }
       }
@@ -362,7 +403,9 @@ export class ChatInlineAttachmentGuard {
     const replacements = new Map<string, InlineAttachmentReplacement>()
     // One at a time: each import sends one image to main.
     for (const [url, attachment] of sources) {
-      const replacement = await this.importOne(attachment)
+      const identity = await this.identity(attachment)
+      if (!this.retryDue(identity)) continue
+      const replacement = await this.importOne(attachment, identity)
       if (replacement) replacements.set(url, replacement)
     }
     return { session: applyInlineAttachmentReplacements(session, replacements), replacements }

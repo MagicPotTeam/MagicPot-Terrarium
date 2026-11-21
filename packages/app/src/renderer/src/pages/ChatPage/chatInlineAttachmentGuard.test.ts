@@ -437,15 +437,47 @@ describe('the guard outside the save chain', () => {
     expect(before.pending).toBe(true)
     expect(importer).not.toHaveBeenCalled()
 
-    await guard.importInlineImage(image(first))
+    const [firstImage, secondImage] = session.messages.map((message) => message.attachments![0])
+    await guard.importInlineImage(firstImage)
     const after = guard.externalizeKnown(session)
     expect(after.pending).toBe(true)
     expect(after.session.messages[0].attachments?.[0]?.media).toMatchObject({ kind: 'managed' })
     expect(after.session.messages[1].attachments?.[0]?.url).toBe(second)
 
-    await guard.importInlineImage(image(second))
+    await guard.importInlineImage(secondImage)
     expect(guard.externalizeKnown(session).pending).toBe(false)
     expect(importer).toHaveBeenCalledTimes(2)
+  })
+
+  it('never reads a new large image on the save path, and hashes it in slices outside it', async () => {
+    const { importer } = createImporter()
+    const guard = new ChatInlineAttachmentGuard(importer)
+    const fresh = conversation(inlinePng('fresh', 200_000))
+    // On the save path a new image object is not hashed (about 3-5 ms per MB, on the main thread):
+    // it counts as still to import. Before, every character was read here.
+    const charCodeAt = vi.spyOn(String.prototype, 'charCodeAt')
+    let reads: number
+    try {
+      expect(guard.needsImport(fresh)).toBe(true)
+      expect(guard.externalizeKnown(fresh)).toMatchObject({ session: fresh, pending: true })
+      reads = charCodeAt.mock.calls.length
+    } finally {
+      charCodeAt.mockRestore()
+    }
+    expect(reads).toBeLessThan(1_000)
+
+    // Outside it, a large image is hashed a slice at a time: other work runs before its import.
+    const large = conversation(inlinePng('large', 1_200_000))
+    let importsWhenOtherWorkRan = -1
+    setTimeout(() => (importsWhenOtherWorkRan = importer.mock.calls.length), 0)
+    const { session: stored } = await guard.externalize(large)
+    expect(importsWhenOtherWorkRan).toBe(0)
+    expect(stored.messages[0].attachments?.[0]?.url).toMatch(/^local-media:/)
+    // Hashed once: the next save of the same object writes the reference without waiting.
+    const again = guard.externalizeKnown(large)
+    expect(again.pending).toBe(false)
+    expect(again.session.messages[0].attachments?.[0]?.url).toMatch(/^local-media:/)
+    expect(importer).toHaveBeenCalledTimes(1)
   })
 
   it('imports once per conversation at a time, takes up requests made meanwhile, and keeps the scanner waiting', async () => {
@@ -513,7 +545,8 @@ describe('the guard caches', () => {
       // The failure of the first holds back neither the import nor the reuse of the second.
       const imported = await guard.importInlineImage(image(second))
       expect(imported.media).toMatchObject({ kind: 'managed' })
-      const again = guard.externalizeKnown({
+      // Other objects holding the same two images: matched by their whole content.
+      const again = await guard.externalize({
         id: 'twins',
         title: 'Twins',
         messages: [{ role: 'user', content: '', attachments: [image(first), image(second)] }]
