@@ -1,9 +1,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createImportSourceGate } from './llmProxy/managedMediaStore'
+import { createImportSourceGate, type ImportSourceGate } from './llmProxy/managedMediaStore'
 import { clearScopedLocalMediaPathsForTest } from './localMediaAccess'
-import { authorizeRendererLocalPath } from './rendererLocalPathAccess'
+import {
+  authorizeRendererLocalPath,
+  checkRendererLocalPath,
+  createLocalPathBreaker
+} from './rendererLocalPathAccess'
 
 // node:fs is the in-memory filesystem of the node test setup.
 const root = path.join(process.cwd(), '.magicpot-trash', 'renderer-local-path-access')
@@ -22,7 +26,13 @@ describe('authorizeRendererLocalPath', () => {
     for (const gate of [null, createImportSourceGate({ onSaturated: () => undefined })]) {
       const started = performance.now()
       await expect(
-        authorizeRendererLocalPath(file, [root], { gate, timeoutMs: 30, realpath: neverAnswers })
+        authorizeRendererLocalPath(file, [root], {
+          gate,
+          // Its own breaker: the folder keeps a call that never returns.
+          breaker: createLocalPathBreaker(),
+          timeoutMs: 30,
+          realpath: neverAnswers
+        })
       ).resolves.toBeNull()
       expect(performance.now() - started).toBeLessThan(5_000)
     }
@@ -48,5 +58,167 @@ describe('authorizeRendererLocalPath', () => {
     } finally {
       fs.rmSync(outside, { force: true })
     }
+  })
+})
+
+/** A gate that refuses every call at once, as one whose slots are all held by stalled calls. */
+const saturatedGate: ImportSourceGate = {
+  acquire: (_key, _start, refuse) => {
+    refuse()
+    return () => false
+  },
+  active: 3,
+  overdue: 3
+}
+
+describe('checkRendererLocalPath: why a path was refused', () => {
+  it('tells a missing file from one that is outside and from one that did not answer', async () => {
+    const inside = path.join(root, 'media', 'a.png')
+    const outside = path.join(process.cwd(), '.magicpot-trash', 'elsewhere-secret.txt')
+    fs.mkdirSync(path.dirname(inside), { recursive: true })
+    fs.writeFileSync(inside, 'a')
+    fs.writeFileSync(outside, 'secret')
+    const eio = async () => {
+      throw Object.assign(new Error('i/o error'), { code: 'EIO' })
+    }
+    try {
+      for (const gate of [null, undefined]) {
+        const breaker = createLocalPathBreaker()
+        const check = (filePath: string, options = {}) =>
+          checkRendererLocalPath(filePath, [root], { gate, breaker, ...options })
+        await expect(check(inside)).resolves.toEqual({ canonicalPath: fs.realpathSync(inside) })
+        await expect(check(path.join(root, 'media', 'gone.png'))).resolves.toEqual({
+          canonicalPath: null,
+          reason: 'missing'
+        })
+        await expect(check(path.join(inside, 'not-a-folder.png'))).resolves.toMatchObject({
+          reason: 'missing'
+        })
+        await expect(check(outside)).resolves.toMatchObject({ reason: 'refused' })
+        await expect(check('relative/a.png')).resolves.toMatchObject({ reason: 'refused' })
+        // The filesystem failed or gave no answer in time: the file may well be there.
+        await expect(check(inside, { realpath: eio })).resolves.toMatchObject({
+          reason: 'unavailable'
+        })
+        await expect(
+          check(path.join(root, 'stalls', 'b.png'), { realpath: neverAnswers, timeoutMs: 20 })
+        ).resolves.toMatchObject({ reason: 'unavailable' })
+      }
+      // Every slot of the gate is held by calls past their deadline: an existing file is
+      // unavailable, never missing.
+      await expect(
+        checkRendererLocalPath(inside, [root], { gate: saturatedGate })
+      ).resolves.toEqual({ canonicalPath: null, reason: 'unavailable' })
+    } finally {
+      fs.rmSync(outside, { force: true })
+    }
+  })
+})
+
+describe('createLocalPathBreaker', () => {
+  const deferred = () => {
+    let resolve!: (value: string) => void
+    const promise = new Promise<string>((done) => (resolve = done))
+    return { promise, resolve }
+  }
+  const settle = () => new Promise((done) => setTimeout(done, 0))
+
+  it('never refuses a burst of healthy local images', async () => {
+    const breaker = createLocalPathBreaker()
+    const files = Array.from({ length: 1500 }, (_, index) =>
+      path.join(root, 'board', `${index}.png`)
+    )
+    for (const file of files) {
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, 'x')
+    }
+    const results = await Promise.all(
+      files.map((file) => authorizeRendererLocalPath(file, [root], { gate: null, breaker }))
+    )
+    expect(results.filter((value) => value === null)).toEqual([])
+  })
+
+  it('refuses at once inside a folder that stopped answering, and only there', async () => {
+    const breaker = createLocalPathBreaker({ slowMs: 10 })
+    const stalled = deferred()
+    const dead = path.join(root, 'cloud', 'photos', '2024', 'a.png')
+    const first = breaker.run(dead, () => stalled.promise, 60_000)
+    await new Promise((done) => setTimeout(done, 30))
+
+    // No new call is made in the folder of the stalled one...
+    const operation = vi.fn(async () => 'value')
+    await expect(
+      breaker.run(path.join(root, 'cloud', 'photos', '2024', 'b.png'), operation, 60_000)
+    ).resolves.toBeNull()
+    expect(operation).not.toHaveBeenCalled()
+    // ...while the rest of the same root (the app's data, other pictures) keeps working.
+    await expect(
+      breaker.run(path.join(root, 'userData', 'm.png'), operation, 60_000)
+    ).resolves.toEqual({ value: 'value' })
+    await expect(
+      breaker.run(path.join(root, 'cloud', 'photos', 'b.png'), operation, 60_000)
+    ).resolves.toEqual({ value: 'value' })
+
+    // A second folder of the same mount stalls too: the closed folder grows to hold both.
+    const stalledToo = deferred()
+    const second = breaker.run(
+      path.join(root, 'cloud', 'docs', 'c.png'),
+      () => stalledToo.promise,
+      60_000
+    )
+    await new Promise((done) => setTimeout(done, 30))
+    operation.mockClear()
+    await expect(
+      breaker.run(path.join(root, 'cloud', 'notes', 'd.png'), operation, 60_000)
+    ).resolves.toBeNull()
+    await expect(
+      breaker.run(path.join(root, 'userData', 'n.png'), operation, 60_000)
+    ).resolves.toEqual({ value: 'value' })
+    expect(operation).toHaveBeenCalledTimes(1)
+
+    // Once the stalled calls return, the folder answers again.
+    stalled.resolve('late')
+    stalledToo.resolve('late')
+    await expect(first).resolves.toEqual({ value: 'late' })
+    await expect(second).resolves.toEqual({ value: 'late' })
+    await settle()
+    await expect(
+      breaker.run(path.join(root, 'cloud', 'photos', '2024', 'b.png'), operation, 60_000)
+    ).resolves.toEqual({ value: 'value' })
+  })
+
+  it('answers null at the deadline and keeps the folder closed until the call returns', async () => {
+    const breaker = createLocalPathBreaker({ slowMs: 60_000 })
+    const stalled = deferred()
+    const file = path.join(root, 'nas', 'a.png')
+    await expect(breaker.run(file, () => stalled.promise, 20)).resolves.toBeNull()
+    const operation = vi.fn(async () => 'value')
+    await expect(breaker.run(path.join(root, 'nas', 'b.png'), operation, 20)).resolves.toBeNull()
+    expect(operation).not.toHaveBeenCalled()
+    stalled.resolve('late')
+    await settle()
+    await expect(breaker.run(path.join(root, 'nas', 'b.png'), operation, 20)).resolves.toEqual({
+      value: 'value'
+    })
+  })
+
+  it('caps the calls in flight on one root, without a queue', async () => {
+    const breaker = createLocalPathBreaker({ maxInFlight: 2, slowMs: 60_000 })
+    const held = deferred()
+    const calls = [1, 2].map((index) =>
+      breaker.run(path.join(root, `${index}.png`), () => held.promise, 60_000)
+    )
+    const operation = vi.fn(async () => 'value')
+    await expect(breaker.run(path.join(root, '3.png'), operation, 60_000)).resolves.toBeNull()
+    expect(operation).not.toHaveBeenCalled()
+    // Another root has its own calls.
+    await expect(breaker.run('/Volumes/other/4.png', operation, 60_000)).resolves.toEqual({
+      value: 'value'
+    })
+    held.resolve('done')
+    await Promise.all(calls)
+    await expect(breaker.run(path.join(root, '3.png'), operation, 60_000)).resolves.toEqual({
+      value: 'value'
+    })
   })
 })

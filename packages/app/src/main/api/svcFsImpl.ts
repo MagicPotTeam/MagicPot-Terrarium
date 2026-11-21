@@ -33,8 +33,12 @@ import {
   ReadLoraTriggerWordsNativeResp,
   ReadTextFileReq,
   ReadTextFileResp,
+  ReadSkillResourceFileReq,
+  ReadSkillResourceFileResp,
   WriteTextFileReq,
-  WriteTextFileResp
+  WriteTextFileResp,
+  MAX_LISTED_FOLDER_ENTRIES,
+  formatLocalFileUnavailableMessage
 } from '@shared/api/svcFs'
 import fs, { type FileHandle } from 'fs/promises'
 import { createReadStream, type Stats } from 'fs'
@@ -47,7 +51,7 @@ import {
   type LocalMediaRoot
 } from '../localMediaAccess'
 import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
-import { authorizeRendererLocalPath } from '../rendererLocalPathAccess'
+import { authorizeRendererLocalPath, checkRendererLocalPath } from '../rendererLocalPathAccess'
 import { CHAT_IMAGE_ATTACHMENT_MAX_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
@@ -644,7 +648,13 @@ export type RendererConfiguredReadRoots = {
 
 const NO_CONFIGURED_READ_ROOTS: RendererConfiguredReadRoots = { projectDirs: [], loraDirs: [] }
 
-const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredReadRoots> => {
+let configuredReadRootsFailureLogged = false
+
+/**
+ * The configured folders from main's config. When they cannot be read, renderer reads there are
+ * refused (the canvas project folder and the LoRA lookup then find nothing): said once in the log.
+ */
+export const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredReadRoots> => {
   try {
     const [{ getConfig }, { getBuildEnv }, { ConfigUtils }] = await Promise.all([
       import('../config/config'),
@@ -660,28 +670,65 @@ const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredRe
       projectDirs: absolute(config.download_dir),
       loraDirs: absolute(new ConfigUtils(config, getBuildEnv(), path).getLoraDir())
     }
-  } catch {
+  } catch (error) {
+    if (!configuredReadRootsFailureLogged) {
+      configuredReadRootsFailureLogged = true
+      console.warn(
+        '[svcFs] Could not read the configured project and LoRA folders; renderer reads there are refused:',
+        error
+      )
+    }
     return NO_CONFIGURED_READ_ROOTS
   }
 }
 
-/**
- * What a renderer read is for. 'media': a local-media file (a canvas item, a chat attachment),
- * authorized exactly as the local-media protocol and readImageFromPath authorize it. The other
- * kinds also count the configured project folder, and inside the LoRA folder only the files
- * the trigger-word lookup reads (see LORA_FOLDER_READ_EXTENSIONS).
- */
-type RendererReadKind = 'media' | 'text' | 'slice' | 'directory'
-
-/** Inside the LoRA folder: the extensions each kind may read ('directory': any folder). */
-const LORA_FOLDER_READ_EXTENSIONS: Record<Exclude<RendererReadKind, 'media'>, string[] | null> = {
-  // <name>.txt, <name>.json, <name>.metadata.json, <name>.civitai.info
-  text: ['.txt', '.json', '.info'],
-  slice: ['.safetensors'],
-  directory: null
+export const resetConfiguredReadRootsFailureLogForTest = (): void => {
+  configuredReadRootsFailureLogged = false
 }
 
+/**
+ * What a renderer read is for, and so where it may read (see getRendererReadAreas):
+ * - 'media': a local-media file (a canvas item, a chat attachment), authorized exactly as the
+ *   local-media protocol and readImageFromPath authorize it;
+ * - 'text': a canvas project file, or a trigger-word sidecar in the LoRA folder;
+ * - 'slice': a safetensors header in the LoRA folder;
+ * - 'directory': a project folder, the LoRA folder or a granted folder (listings, the sidecar);
+ * - 'skill-resource': a file a skill names as a resource.
+ * A skill or a board file names these paths, so text, slices, listings and skill resources
+ * reach only what their callers read: never the app's config, grants or chats. 'media' keeps
+ * the local-media protocol's policy (the app's data folder, where managed media lives).
+ */
+type RendererReadKind = 'media' | 'text' | 'slice' | 'directory' | 'skill-resource'
+
+/**
+ * One place a kind may read: its roots, whether the user's grants count too, and which files
+ * there it may read (checked on the named and on the canonical path, so a link cannot widen it).
+ */
+type RendererReadArea = {
+  roots: LocalMediaRoot[]
+  grants: boolean
+  fits: (filePath: string) => boolean
+  allowNetworkRoots: boolean
+}
+
+const PROJECT_CANVAS_FILE_EXTENSION = '.mpcanvas'
+/** Inside the LoRA folder: <name>.txt, <name>.json, <name>.metadata.json, <name>.civitai.info. */
+const LORA_TEXT_EXTENSIONS = ['.txt', '.json', '.info']
+const LORA_SLICE_EXTENSIONS = ['.safetensors']
+/** The custom skill folder of the app's data (ConfigUtils.getCustomSkillDir). */
+const CUSTOM_SKILL_DIRNAME = 'customSkills'
+/** A skill definition: it holds the skill's API key. */
+const SKILL_DEFINITION_SUFFIX = '.skill.json'
+
+const anyFile = (): boolean => true
+const withExtension =
+  (extensions: readonly string[]) =>
+  (filePath: string): boolean =>
+    extensions.includes(path.extname(filePath).toLowerCase())
+
 class RendererReadRefusedError extends Error {}
+
+const NOT_AUTHORIZED_MESSAGE = 'Local file path is not authorized'
 
 /** How readImageFromPath reads a read-granted file (a mapped network drive); for tests. */
 export type FsSvcImplDependencies = {
@@ -697,54 +744,117 @@ export type FsSvcImplDependencies = {
 export class FsSvcImpl implements FsSvc {
   constructor(private readonly dependencies: FsSvcImplDependencies = {}) {}
 
+  private getCustomSkillDir = (): string => path.join(app.getPath('userData'), CUSTOM_SKILL_DIRNAME)
+
+  private getRendererReadAreas = async (kind: RendererReadKind): Promise<RendererReadArea[]> => {
+    if (kind === 'media') {
+      return [
+        { roots: this.getMediaReadRoots(), grants: true, fits: anyFile, allowNetworkRoots: false }
+      ]
+    }
+    if (kind === 'skill-resource') {
+      return [
+        {
+          roots: [this.getCustomSkillDir()],
+          grants: true,
+          fits: (filePath) =>
+            !path.basename(filePath).toLowerCase().endsWith(SKILL_DEFINITION_SUFFIX),
+          allowNetworkRoots: false
+        }
+      ]
+    }
+    const configured = await (
+      this.dependencies.getConfiguredReadRoots ?? readConfiguredReadRootsFromConfig
+    )()
+    const storageState = getCurrentUserDataDirectoryState()
+    const projectRoots = [
+      storageState.projectRoot,
+      storageState.autoSaveRoot,
+      ...configured.projectDirs
+    ]
+    // A storage or model folder the user configured on a share stays readable there.
+    const area = (
+      roots: LocalMediaRoot[],
+      fits: (filePath: string) => boolean,
+      grants = false
+    ): RendererReadArea => ({ roots, grants, fits, allowNetworkRoots: true })
+    switch (kind) {
+      case 'text':
+        return [
+          area(projectRoots, withExtension([PROJECT_CANVAS_FILE_EXTENSION])),
+          area(configured.loraDirs, withExtension(LORA_TEXT_EXTENSIONS))
+        ]
+      case 'slice':
+        return [area(configured.loraDirs, withExtension(LORA_SLICE_EXTENSIONS))]
+      case 'directory':
+        return [area([...projectRoots, ...configured.loraDirs], anyFile, true)]
+    }
+  }
+
+  /**
+   * A skill resource reached through a grant may not be in the app's data outside the custom
+   * skill folder (a grant of a folder that holds it would otherwise expose its config).
+   */
+  private isOutsideAppDataOrInSkills = async (canonicalPath: string): Promise<boolean> => {
+    const canonical = async (value: string): Promise<string> =>
+      path.resolve(await fs.realpath(value).catch(() => value))
+    const [userData, skills] = await Promise.all([
+      canonical(app.getPath('userData')),
+      canonical(this.getCustomSkillDir())
+    ])
+    const inside = (root: string): boolean => {
+      const relative = path.relative(root, canonicalPath)
+      return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+    }
+    return !inside(userData) || inside(skills)
+  }
+
   /**
    * The canonical path of a path the renderer named, or a RendererReadRefusedError: only what
-   * the user granted (picked or dropped files and folders) or what the app owns (see
-   * getMediaReadRoots), plus for non-media kinds the configured folders. Off main's event
-   * loop and under the renderer path gate; a Windows network spelling never reaches the
-   * filesystem unless it was granted or lies in a configured network folder. A refused path
-   * reads as "File not found" when it lies, by its text alone, where it could have been
-   * authorized, and as not authorized otherwise: whether a file outside exists is never told.
+   * the kind may read (see getRendererReadAreas). Off main's event loop and under the renderer
+   * path gate; a Windows network spelling never reaches the filesystem unless it was granted or
+   * lies in a configured network folder. The message of a refusal is chosen so that it never
+   * tells whether a file outside exists, and never calls a file missing that may be there:
+   * - outside every place the kind may read (by the path's text alone): not authorized;
+   * - inside one, when the filesystem did not answer in time (or every gate slot is held by
+   *   calls that did not): unavailable (formatLocalFileUnavailableMessage);
+   * - inside one, when the file does not exist or resolves outside: "File not found".
    */
   private authorizeRendererRead = async (
     fullPath: string,
     kind: RendererReadKind
   ): Promise<string> => {
-    const mediaRoots = this.getMediaReadRoots()
-    const configured =
-      kind === 'media'
-        ? NO_CONFIGURED_READ_ROOTS
-        : await (this.dependencies.getConfiguredReadRoots ?? readConfiguredReadRootsFromConfig)()
-    const roots = [...mediaRoots, ...configured.projectDirs]
-    const options = {
-      // A storage or model folder the user configured on a share stays readable there.
-      allowNetworkRoots: kind !== 'media',
-      ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
-    }
-    const canonical = await authorizeRendererLocalPath(fullPath, roots, options)
-    if (canonical) return canonical
-
-    const loraExtensions = kind === 'media' ? undefined : LORA_FOLDER_READ_EXTENSIONS[kind]
-    const fitsLoraFolder = (value: string): boolean =>
-      kind !== 'media' &&
-      configured.loraDirs.length > 0 &&
-      (loraExtensions === null ||
-        (loraExtensions ?? []).includes(path.extname(value).toLowerCase()))
-    if (fitsLoraFolder(fullPath)) {
-      const viaLoraFolder = await authorizeRendererLocalPath(fullPath, configured.loraDirs, options)
+    const areas = await this.getRendererReadAreas(kind)
+    let covered = false
+    let unavailable = false
+    for (const area of areas) {
+      if (!area.fits(fullPath)) continue
+      if (isLexicallyCoveredLocalMediaPath(fullPath, area.roots, { grants: area.grants })) {
+        covered = true
+      }
+      const decision = await checkRendererLocalPath(fullPath, area.roots, {
+        allowNetworkRoots: area.allowNetworkRoots,
+        grants: area.grants,
+        ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
+      })
+      const canonical = decision.canonicalPath
+      if (canonical === null) {
+        if (decision.reason === 'unavailable') unavailable = true
+        continue
+      }
       // The canonical file must fit too: a symlink inside the folder cannot widen the kind.
-      if (viaLoraFolder && fitsLoraFolder(viaLoraFolder)) return viaLoraFolder
+      if (!area.fits(canonical)) continue
+      if (kind === 'skill-resource' && !(await this.isOutsideAppDataOrInSkills(canonical))) {
+        continue
+      }
+      return canonical
     }
-
-    const covered =
-      isLexicallyCoveredLocalMediaPath(fullPath, roots) ||
-      (fitsLoraFolder(fullPath) && isLexicallyCoveredLocalMediaPath(fullPath, configured.loraDirs))
-    throw new RendererReadRefusedError(
-      covered ? `File not found: ${fullPath}` : 'Local file path is not authorized'
-    )
+    if (!covered) throw new RendererReadRefusedError(NOT_AUTHORIZED_MESSAGE)
+    if (unavailable) throw new RendererReadRefusedError(formatLocalFileUnavailableMessage(fullPath))
+    throw new RendererReadRefusedError(`File not found: ${fullPath}`)
   }
 
-  /** The canonical folder to list, or null (missing or not authorized: both list nothing). */
+  /** The canonical folder to list, or null (missing, unavailable or not authorized: nothing). */
   private authorizeRendererFolder = async (folderPath: string): Promise<string | null> => {
     try {
       return await this.authorizeRendererRead(folderPath, 'directory')
@@ -765,6 +875,7 @@ export class FsSvcImpl implements FsSvc {
     // Listed through the canonical folder; the paths keep the spelling the caller named.
     const files = await runBoundedFsOp(() => fs.readdir(canonicalFolder))
     const images = files
+      .slice(0, MAX_LISTED_FOLDER_ENTRIES)
       .filter((file) => {
         const ext = path.extname(file).toLowerCase()
         return IMAGE_EXTENSIONS.includes(ext)
@@ -796,6 +907,8 @@ export class FsSvcImpl implements FsSvc {
     // nor a directory), so the scan stays inside the authorized folder.
     const directoriesToScan = [{ dir: canonicalFolder, shown: folderPath }]
     const files: ListFilesInFolderResp['files'] = []
+    // Every entry seen counts, at every level: a huge tree costs main a bounded scan.
+    let entriesSeen = 0
 
     while (directoriesToScan.length > 0) {
       const current = directoriesToScan.shift()
@@ -805,6 +918,8 @@ export class FsSvcImpl implements FsSvc {
 
       const entries = await runBoundedFsOp(() => fs.readdir(current.dir, { withFileTypes: true }))
       for (const entry of entries) {
+        if (entriesSeen >= MAX_LISTED_FOLDER_ENTRIES) return { files, truncated: true }
+        entriesSeen += 1
         const fullPath = path.join(current.dir, entry.name)
         const shownPath = path.join(current.shown, entry.name)
 
@@ -983,9 +1098,18 @@ export class FsSvcImpl implements FsSvc {
     }
   }
 
-  readTextFile = async (req: ReadTextFileReq): Promise<ReadTextFileResp> => {
-    const { fullPath } = req
-    const canonicalPath = await this.authorizeRendererRead(fullPath, 'text')
+  readTextFile = async (req: ReadTextFileReq): Promise<ReadTextFileResp> =>
+    this.readRendererTextFile(req.fullPath, 'text')
+
+  readSkillResourceFile = async (
+    req: ReadSkillResourceFileReq
+  ): Promise<ReadSkillResourceFileResp> => this.readRendererTextFile(req.fullPath, 'skill-resource')
+
+  private readRendererTextFile = async (
+    fullPath: string,
+    kind: 'text' | 'skill-resource'
+  ): Promise<ReadTextFileResp> => {
+    const canonicalPath = await this.authorizeRendererRead(fullPath, kind)
     const buffer = await readFileWithinByteBudget(canonicalPath, MAX_TEXT_FILE_BYTES, {
       label: fullPath,
       tooLargeHint: '; use readFileSlice instead'

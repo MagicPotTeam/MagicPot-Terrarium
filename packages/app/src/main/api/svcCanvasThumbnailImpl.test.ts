@@ -17,12 +17,16 @@ import {
 
 const electronMock = vi.hoisted(() => ({
   userDataRoot: '',
+  isPackaged: false,
   createThumbnailFromPath: vi.fn(),
   createFromPath: vi.fn()
 }))
 
 vi.mock('electron', () => ({
   app: {
+    get isPackaged() {
+      return electronMock.isPackaged
+    },
     getPath: vi.fn((name: string) => {
       if (name === 'temp') return path.join(electronMock.userDataRoot, 'temp')
       if (name !== 'userData') {
@@ -135,6 +139,7 @@ describe('CanvasThumbnailSvcImpl', () => {
   })
 
   afterEach(() => {
+    electronMock.isPackaged = false
     clearScopedLocalMediaPathsForTest()
     fs.rmSync(testRoot, { recursive: true, force: true })
     vol.reset()
@@ -327,6 +332,27 @@ describe('CanvasThumbnailSvcImpl', () => {
       cacheKey: manifest.cacheKey
     })
     expect(read.manifest?.cacheKey).toBe(manifest.cacheKey)
+  })
+
+  it('takes no cache root from the working folder of a packaged app', async () => {
+    // A packaged app is started from anywhere (on macOS from /, so /tmp would count).
+    const cwdRoot = path.join(process.cwd(), 'tmp', `thumbnail-cache-${Math.random()}`)
+    try {
+      electronMock.isPackaged = true
+      await expect(service.getThumbnailCacheRoot({ cacheRootDir: cwdRoot })).rejects.toThrow(
+        /Unsafe canvas thumbnail cache root/
+      )
+      await expect(
+        service.readThumbnailManifest({ cacheKey: 'thumb-0123456789abcdef', cacheRootDir: cwdRoot })
+      ).rejects.toThrow(/Unsafe canvas thumbnail cache root/)
+      expect(fs.existsSync(cwdRoot)).toBe(false)
+      // A development build keeps the repository's test folders.
+      electronMock.isPackaged = false
+      const { cacheRoot } = await service.getThumbnailCacheRoot({ cacheRootDir: cwdRoot })
+      expect(cacheRoot).toBe(fs.realpathSync.native(cwdRoot))
+    } finally {
+      fs.rmSync(cwdRoot, { recursive: true, force: true })
+    }
   })
 
   it('allows an explicit magicpot temp cache root', async () => {
@@ -842,5 +868,42 @@ describe('CanvasThumbnailSvcImpl', () => {
     expect(response.width).toBe(128)
     expect(response.height).toBe(96)
     expect(Array.from(response.data)).toEqual([9, 8, 7])
+  })
+
+  it('hands the OS thumbnailer only the image types a board shows', async () => {
+    electronMock.createThumbnailFromPath.mockResolvedValue({
+      getSize: () => ({ width: 64, height: 64 }),
+      isEmpty: () => false,
+      toPNG: () => Buffer.from([1])
+    })
+    for (const filename of [
+      'shortcut.lnk',
+      'site.url',
+      'Pictures.library-ms',
+      'drawing.svg',
+      'notes.txt'
+    ]) {
+      const sourcePath = await createSourceFile(filename)
+      await expect(
+        service.createNativeThumbnail({ fullPath: sourcePath, maxSide: 64 })
+      ).rejects.toThrow(/only of image files/)
+    }
+    // A link named like an image that points at another type.
+    const target = await createSourceFile('target.lnk')
+    const link = path.join(testRoot, 'photo.png')
+    fs.symlinkSync(target, link)
+    expect(authorizeScopedLocalMediaPath(link)).toBe(true)
+    await expect(service.createNativeThumbnail({ fullPath: link, maxSide: 64 })).rejects.toThrow(
+      /only of image files/
+    )
+    expect(electronMock.createThumbnailFromPath).not.toHaveBeenCalled()
+
+    const photo = await createSourceFile('Photo.JPG')
+    await expect(
+      service.createNativeThumbnail({ fullPath: photo, maxSide: 64 })
+    ).resolves.toMatchObject({
+      width: 64,
+      mimeType: 'image/png'
+    })
   })
 })

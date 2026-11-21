@@ -4,12 +4,9 @@ import { getTestWindowPolicy } from './testWindowRuntime'
 import path from 'node:path'
 import { type TestUiPolicy } from './testUiPolicy'
 import { normalizeLocalFilePath, toFileUrl } from './utils/localFileUrl'
-import {
-  hasLocalMediaTraversal,
-  initializeLocalMediaAccess,
-  resolveAuthorizedLocalMediaPathAsync
-} from './localMediaAccess'
+import { hasLocalMediaTraversal, initializeLocalMediaAccess } from './localMediaAccess'
 import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
+import { checkRendererLocalPath } from './rendererLocalPathAccess'
 import {
   flushReportBundleRegistry,
   initializeReportBundleRegistry
@@ -185,13 +182,19 @@ async function handleLocalMediaRequest(request: Request): Promise<Response> {
 
     // The page names this path: realpath runs on the threadpool, never on main's event loop
     // (a file on a mapped drive whose share stopped answering must not block main). Not under
-    // the renderer path gate: a board loads every image through here.
-    const localPath = await resolveAuthorizedLocalMediaPathAsync(
+    // the renderer path gate (a board loads every image through here) but under the per-image
+    // breaker and the import-source deadline: a root that stopped answering gets no more of
+    // the threadpool, and its images answer 503 at once instead of waiting.
+    const decision = await checkRendererLocalPath(
       normalizeLocalFilePath(request.url),
-      getLocalMediaAllowedRoots()
+      getLocalMediaAllowedRoots(),
+      { gate: null }
     )
+    const localPath = decision.canonicalPath
     if (!localPath) {
-      return withLocalMediaCorsHeaders(new Response('Forbidden', { status: 403 }), request)
+      return decision.reason === 'unavailable'
+        ? withLocalMediaCorsHeaders(new Response('Unavailable', { status: 503 }), request)
+        : withLocalMediaCorsHeaders(new Response('Forbidden', { status: 403 }), request)
     }
 
     const fileUrl = toFileUrl(localPath)

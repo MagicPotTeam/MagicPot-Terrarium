@@ -369,7 +369,8 @@ type LocalMediaPathPrecheck = {
  */
 function precheckLocalMediaPath(
   filePath: string,
-  networkRoots: readonly string[] = []
+  networkRoots: readonly string[] = [],
+  grants = true
 ): LocalMediaPathPrecheck | null {
   const trimmed = String(filePath || '').trim()
   // Only Windows has network (UNC) paths. On POSIX `//dir/file` is the local file `/dir/file`,
@@ -386,7 +387,7 @@ function precheckLocalMediaPath(
   // Before any filesystem call: an unsolicited network path never makes main contact its host
   // (an NT namespace spelling never counts as scoped).
   if (process.platform === 'win32' && isWindowsNtNamespaceLocalMediaPath(trimmed)) return null
-  if (!isNetworkPath || isWindowsNetworkPathScoped(trimmed)) {
+  if (!isNetworkPath || (grants && isWindowsNetworkPathScoped(trimmed))) {
     return { trimmed, isNetworkPath, viaNetworkRoot: false }
   }
   const resolved = path.resolve(trimmed)
@@ -439,34 +440,71 @@ export type LocalMediaPathAuthorizationOptions = {
    * the local-media protocol never serves an unscoped network path.
    */
   allowNetworkRoots?: boolean
+  /**
+   * Whether the user's grants (picked or dropped files and folders) count besides the roots
+   * (default true). Off for a read that only ever names files under the roots.
+   */
+  grants?: boolean
 }
 
 /**
- * resolveAuthorizedLocalMediaPath off main's event loop: the same decision, but every realpath
- * (of the path and of each root) is fs.promises.realpath, on the threadpool. For a path the
- * renderer names: a synchronous realpath of a path on a share that stopped answering would
- * block main.
+ * Why a path was not authorized. 'missing': it does not exist (ENOENT or ENOTDIR). 'refused':
+ * refused before any filesystem call, or it resolves outside every root and grant (a stable
+ * answer). 'unavailable': the filesystem gave no answer (an error other than a missing path;
+ * callers that run this under a deadline also use it for no answer in time): the file may well
+ * be there, so nobody may treat it as absent.
  */
-export async function resolveAuthorizedLocalMediaPathAsync(
+export type LocalMediaPathRefusalReason = 'missing' | 'refused' | 'unavailable'
+
+export type LocalMediaPathAuthorization =
+  | { canonicalPath: string; reason?: undefined }
+  | { canonicalPath: null; reason: LocalMediaPathRefusalReason }
+
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/**
+ * resolveAuthorizedLocalMediaPath off main's event loop, with the reason of a refusal: the same
+ * decision, but every realpath (of the path and of each root) is fs.promises.realpath, on the
+ * threadpool. For a path the renderer names: a synchronous realpath of a path on a share that
+ * stopped answering would block main.
+ */
+export async function authorizeLocalMediaPathAsync(
   filePath: string,
   allowedRoots: readonly LocalMediaRoot[],
   {
     realpath = (value: string) => fs.promises.realpath(value),
-    allowNetworkRoots = false
+    allowNetworkRoots = false,
+    grants = true
   }: LocalMediaPathAuthorizationOptions = {}
-): Promise<string | null> {
+): Promise<LocalMediaPathAuthorization> {
+  const refused = (reason: LocalMediaPathRefusalReason): LocalMediaPathAuthorization => ({
+    canonicalPath: null,
+    reason
+  })
   const checked = precheckLocalMediaPath(
     filePath,
-    allowNetworkRoots ? allowedRoots.filter((root): root is string => typeof root === 'string') : []
+    allowNetworkRoots
+      ? allowedRoots.filter((root): root is string => typeof root === 'string')
+      : [],
+    grants
   )
-  if (!checked) return null
+  if (!checked) return refused('refused')
 
-  const canonical = await canonicalizeExistingPathAsync(checked.trimmed, realpath)
-  if (!canonical) return null
-  if (isScopedCanonicalLocalMediaPath(canonical)) return canonical
-  if (checked.isNetworkPath && !checked.viaNetworkRoot) return null
+  let canonical: string
+  try {
+    canonical = path.resolve(await realpath(checked.trimmed))
+  } catch (error) {
+    return refused(isMissingPathError(error) ? 'missing' : 'unavailable')
+  }
+  if (grants && isScopedCanonicalLocalMediaPath(canonical)) return { canonicalPath: canonical }
+  if (checked.isNetworkPath && !checked.viaNetworkRoot) return refused('refused')
 
   const resolved = path.resolve(checked.trimmed)
+  // A root that gave no answer may hold the path: then the path is not known to be outside.
+  let rootUnanswered = false
   for (const root of allowedRoots) {
     // A network root is canonicalized only for a request inside it by its text (that host is
     // contacted for the request anyway): any other request never makes main contact a share.
@@ -478,13 +516,29 @@ export async function resolveAuthorizedLocalMediaPathAsync(
     ) {
       continue
     }
-    const canonicalRoot =
-      typeof root === 'string'
-        ? await canonicalizeExistingPathAsync(root, realpath)
-        : root.pinnedCanonicalPath
-    if (canonicalRoot && isSameOrInside(canonicalRoot, canonical)) return canonical
+    let canonicalRoot: string
+    if (typeof root === 'string') {
+      try {
+        canonicalRoot = path.resolve(await realpath(root))
+      } catch (error) {
+        if (!isMissingPathError(error)) rootUnanswered = true
+        continue
+      }
+    } else {
+      canonicalRoot = root.pinnedCanonicalPath
+    }
+    if (isSameOrInside(canonicalRoot, canonical)) return { canonicalPath: canonical }
   }
-  return null
+  return refused(rootUnanswered ? 'unavailable' : 'refused')
+}
+
+/** authorizeLocalMediaPathAsync without the reason: the canonical path, or null. */
+export async function resolveAuthorizedLocalMediaPathAsync(
+  filePath: string,
+  allowedRoots: readonly LocalMediaRoot[],
+  options: LocalMediaPathAuthorizationOptions = {}
+): Promise<string | null> {
+  return (await authorizeLocalMediaPathAsync(filePath, allowedRoots, options)).canonicalPath
 }
 
 /**
@@ -494,16 +548,18 @@ export async function resolveAuthorizedLocalMediaPathAsync(
  */
 export function isLexicallyCoveredLocalMediaPath(
   filePath: string,
-  allowedRoots: readonly LocalMediaRoot[]
+  allowedRoots: readonly LocalMediaRoot[],
+  { grants = true }: { grants?: boolean } = {}
 ): boolean {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return false
   const resolved = path.resolve(trimmed)
   return (
-    scopedLocalMediaPaths.has(comparisonKey(resolved)) ||
-    Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
-      isSameOrInside(directory, resolved)
-    ) ||
+    (grants &&
+      (scopedLocalMediaPaths.has(comparisonKey(resolved)) ||
+        Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
+          isSameOrInside(directory, resolved)
+        ))) ||
     allowedRoots.some((root) =>
       isSameOrInside(
         typeof root === 'string' ? path.resolve(root) : root.pinnedCanonicalPath,

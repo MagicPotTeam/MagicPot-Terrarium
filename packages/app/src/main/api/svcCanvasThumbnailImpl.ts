@@ -42,6 +42,20 @@ const DEFAULT_SIDECAR_MAX_DECODED_PIXELS = 64 * 1024 * 1024
 const NATIVE_REGION_MAX_SOURCE_BYTES = 512 * 1024 * 1024
 /** The OS thumbnailer decodes the source in main: the same byte budget as a native region. */
 const NATIVE_THUMBNAIL_MAX_SOURCE_BYTES = NATIVE_REGION_MAX_SOURCE_BYTES
+/**
+ * The OS thumbnailer only ever gets the image types a board shows (not SVG: it can reference
+ * other files). Other types have shell handlers that resolve targets or icons (.lnk, .url,
+ * .library-ms), possibly on another host.
+ */
+const NATIVE_THUMBNAIL_SOURCE_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+  '.ico'
+])
 const NATIVE_REGION_MAX_OUTPUT_PIXELS = 4 * 1024 * 1024
 const NATIVE_REGION_MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 const REPO_TEST_CACHE_ROOT_DIRNAMES = ['.magicpot-trash', '.tmp', 'tmp', 'temp', 'test-results']
@@ -135,12 +149,18 @@ async function findNearestAncestorDir(startPath: string, dirname: string): Promi
   }
 }
 
-/** The bases of an explicit cache root as configured (app and test paths, never the request). */
+/**
+ * The bases of an explicit cache root as configured (app and test paths, never the request).
+ * The repository's test folders only in a development build: a packaged app's working folder
+ * is wherever it was started from (`/` on macOS, so `/tmp`, shared by every user, would count).
+ */
 function getExplicitCacheRootBaseSpellings(defaultCacheRoot: string): string[] {
   const roots = [
     defaultCacheRoot,
     path.dirname(defaultCacheRoot),
-    ...REPO_TEST_CACHE_ROOT_DIRNAMES.map((dirname) => path.join(process.cwd(), dirname))
+    ...(app.isPackaged
+      ? []
+      : REPO_TEST_CACHE_ROOT_DIRNAMES.map((dirname) => path.join(process.cwd(), dirname)))
   ]
   const envTestRoot = process.env.MAGICPOT_TEST_TRASH_ROOT?.trim()
   if (envTestRoot) {
@@ -783,9 +803,18 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
   ): Promise<CanvasThumbnailNativeResp> => {
     const maxSide = Math.max(1, Math.min(8192, Math.floor(req.maxSide)))
     const requestedPath = path.resolve(req.fullPath)
+    const isImageType = (value: string): boolean =>
+      NATIVE_THUMBNAIL_SOURCE_EXTENSIONS.has(path.extname(value).toLowerCase())
+    if (!isImageType(requestedPath)) {
+      throw new Error('Native thumbnails are made only of image files.')
+    }
     const metadata = await this.getSourceFileMetadata({ fullPath: req.fullPath })
     if (!metadata.exists) {
       throw new Error(`Cannot create native thumbnail for missing file: ${requestedPath}`)
+    }
+    // The file the thumbnailer opens: a link named like an image cannot hand it another type.
+    if (!isImageType(metadata.canonicalPath)) {
+      throw new Error('Native thumbnails are made only of image files.')
     }
     if (metadata.sizeBytes > NATIVE_THUMBNAIL_MAX_SOURCE_BYTES) {
       throw new Error('Native thumbnail source exceeds the byte budget.')

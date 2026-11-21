@@ -29,7 +29,12 @@ export type ListFilesInFolderResp = {
     fullPath: string
     lastModifiedMs: number
   }[]
+  /** The scan stopped at MAX_LISTED_FOLDER_ENTRIES entries: the list is not complete. */
+  truncated?: boolean
 }
+
+/** A listing looks at no more entries (files and folders, across every level) than this. */
+export const MAX_LISTED_FOLDER_ENTRIES = 100_000
 
 export type PruneAutoSaveProjectsReq = {
   currentProjectDirName: string
@@ -81,6 +86,35 @@ export type ReadTextFileResp = {
   content: string
   filename: string
 }
+
+/** A file a skill names as one of its resources (see FsSvc.readSkillResourceFile). */
+export type ReadSkillResourceFileReq = {
+  fullPath: string
+}
+
+export type ReadSkillResourceFileResp = ReadTextFileResp
+
+/**
+ * The mark of a read of a path the renderer named whose answer main does not know now: the
+ * filesystem did not answer in time or failed, or every slot was held by calls that did not.
+ * Such a file may well exist, so its error never says "File not found".
+ */
+export const LOCAL_FILE_UNAVAILABLE_ERROR = 'LOCAL_FILE_UNAVAILABLE'
+
+export const formatLocalFileUnavailableMessage = (fullPath: string): string =>
+  `${LOCAL_FILE_UNAVAILABLE_ERROR}: the local file did not answer and may still exist: ${fullPath}`
+
+export const isLocalFileUnavailableError = (error: unknown): boolean =>
+  error instanceof Error && error.message.includes(LOCAL_FILE_UNAVAILABLE_ERROR)
+
+/**
+ * A read refused because the file is not there: "File not found", and never an unavailable
+ * one, whatever the path in its message spells.
+ */
+export const isLocalFileNotFoundError = (error: unknown): boolean =>
+  error instanceof Error &&
+  !isLocalFileUnavailableError(error) &&
+  /file not found/i.test(error.message)
 
 export type ReadFileFromPathReq = {
   fullPath: string
@@ -443,6 +477,11 @@ export type FsSvc = {
   saveQAppInputImage(req: SaveQAppInputImageReq): Promise<SaveQAppInputImageResp>
   readImageFromPath(req: ReadImageFromPathReq): Promise<ReadImageFromPathResp>
   readTextFile(req: ReadTextFileReq): Promise<ReadTextFileResp>
+  /**
+   * A skill resource: only under the custom skill folder of the app's data, or a file the user
+   * granted; never the app's other data (its config, grants, chats) nor a skill definition.
+   */
+  readSkillResourceFile(req: ReadSkillResourceFileReq): Promise<ReadSkillResourceFileResp>
   readFileFromPath(req: ReadFileFromPathReq): Promise<ReadFileFromPathResp>
   readFileSlice(req: ReadFileSliceReq): Promise<ReadFileSliceResp>
   writeTextFile(req: WriteTextFileReq): Promise<WriteTextFileResp>
@@ -481,6 +520,10 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
   readTextFile: {
     type: 'unary',
     request: validatePathReq<ReadTextFileReq>('readTextFile')
+  },
+  readSkillResourceFile: {
+    type: 'unary',
+    request: validatePathReq<ReadSkillResourceFileReq>('readSkillResourceFile')
   },
   readFileFromPath: {
     type: 'unary',
