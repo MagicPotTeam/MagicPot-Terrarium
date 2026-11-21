@@ -7,6 +7,15 @@ const LOCAL_MEDIA_GRANTS_VERSION = 1
 const LOCAL_MEDIA_GRANTS_FLUSH_DELAY_MS = 250
 const scopedLocalMediaPaths = new Map<string, string>()
 const scopedLocalMediaDirectories = new Map<string, string>()
+/**
+ * Windows only. A network grant whose canonical form is spelled differently from the path the
+ * user picked or dropped (a DFS namespace path resolves to its target server, a folder on a
+ * share may be a link): resolved spelling key -> [resolved spelling, canonical grant]. The
+ * refusal of network paths before any filesystem call compares spellings, and requests keep
+ * the spelling the user dropped (a canvas item keeps it), so the spelling is remembered too.
+ */
+const scopedNetworkFileSpellings = new Map<string, [string, string]>()
+const scopedNetworkDirectorySpellings = new Map<string, [string, string]>()
 let localMediaGrantsPath: string | null = null
 let localMediaGrantsDirty = false
 let localMediaGrantsFlushTimer: ReturnType<typeof setTimeout> | null = null
@@ -15,6 +24,9 @@ type PersistedLocalMediaGrants = {
   version: typeof LOCAL_MEDIA_GRANTS_VERSION
   files: string[]
   directories: string[]
+  /** [spelling, canonical] pairs of scopedNetworkFileSpellings / scopedNetworkDirectorySpellings. */
+  networkFileSpellings?: [string, string][]
+  networkDirectorySpellings?: [string, string][]
 }
 
 function comparisonKey(filePath: string): string {
@@ -56,7 +68,13 @@ function persistScopedLocalMediaGrants(): void {
   const payload: PersistedLocalMediaGrants = {
     version: LOCAL_MEDIA_GRANTS_VERSION,
     files: Array.from(scopedLocalMediaPaths.values()),
-    directories: Array.from(scopedLocalMediaDirectories.values())
+    directories: Array.from(scopedLocalMediaDirectories.values()),
+    ...(scopedNetworkFileSpellings.size
+      ? { networkFileSpellings: Array.from(scopedNetworkFileSpellings.values()) }
+      : {}),
+    ...(scopedNetworkDirectorySpellings.size
+      ? { networkDirectorySpellings: Array.from(scopedNetworkDirectorySpellings.values()) }
+      : {})
   }
   const tempPath = `${localMediaGrantsPath}.${process.pid}.tmp`
   try {
@@ -108,6 +126,26 @@ function loadPersistedPaths(
   }
 }
 
+/**
+ * Keeps a persisted spelling only while its canonical grant was loaded too; no filesystem call
+ * (the spelling is a network path).
+ */
+function loadPersistedNetworkSpellings(
+  values: unknown,
+  store: Map<string, [string, string]>,
+  grants: Map<string, string>,
+  limit: number
+): void {
+  if (process.platform !== 'win32' || !Array.isArray(values)) return
+  for (const value of values.slice(-limit)) {
+    if (!Array.isArray(value) || value.length !== 2) continue
+    const [spelling, canonical] = value as unknown[]
+    if (typeof spelling !== 'string' || typeof canonical !== 'string') continue
+    if (!grants.has(comparisonKey(canonical))) continue
+    rememberNetworkSpelling(store, spelling, canonical, limit)
+  }
+}
+
 /** Loads durable grants after Electron's userData path is finalized. */
 export function initializeLocalMediaAccess(grantsPath: string): void {
   if (localMediaGrantsFlushTimer) {
@@ -118,6 +156,8 @@ export function initializeLocalMediaAccess(grantsPath: string): void {
   localMediaGrantsDirty = false
   scopedLocalMediaPaths.clear()
   scopedLocalMediaDirectories.clear()
+  scopedNetworkFileSpellings.clear()
+  scopedNetworkDirectorySpellings.clear()
 
   try {
     const parsed = JSON.parse(
@@ -135,6 +175,18 @@ export function initializeLocalMediaAccess(grantsPath: string): void {
         scopedLocalMediaDirectories,
         MAX_SCOPED_LOCAL_MEDIA_DIRECTORIES,
         isExistingDirectory
+      )
+      loadPersistedNetworkSpellings(
+        parsed.networkFileSpellings,
+        scopedNetworkFileSpellings,
+        scopedLocalMediaPaths,
+        MAX_SCOPED_LOCAL_MEDIA_PATHS
+      )
+      loadPersistedNetworkSpellings(
+        parsed.networkDirectorySpellings,
+        scopedNetworkDirectorySpellings,
+        scopedLocalMediaDirectories,
+        MAX_SCOPED_LOCAL_MEDIA_DIRECTORIES
       )
     }
   } catch (error) {
@@ -162,6 +214,30 @@ function rememberBoundedPath(
   }
 }
 
+/**
+ * Remembers the spelling of a Windows network grant when its canonical form differs (see
+ * scopedNetworkFileSpellings). Pure string work.
+ */
+function rememberNetworkSpelling(
+  store: Map<string, [string, string]>,
+  spelling: string,
+  canonical: string,
+  limit: number
+): void {
+  if (process.platform !== 'win32' || spelling.includes('\0')) return
+  if (!isWindowsNetworkLocalMediaPath(spelling)) return
+  const resolved = path.resolve(spelling)
+  const key = comparisonKey(resolved)
+  if (key === comparisonKey(canonical)) return
+  store.delete(key)
+  store.set(key, [resolved, canonical])
+  while (store.size > limit) {
+    const oldest = store.keys().next().value
+    if (!oldest) break
+    store.delete(oldest)
+  }
+}
+
 /** Authorizes one file obtained from an OS file picker or Electron File object. */
 export function authorizeScopedLocalMediaPath(filePath: string): boolean {
   const trimmed = String(filePath || '').trim()
@@ -172,6 +248,12 @@ export function authorizeScopedLocalMediaPath(filePath: string): boolean {
 
   const key = comparisonKey(canonical)
   rememberBoundedPath(scopedLocalMediaPaths, key, canonical, MAX_SCOPED_LOCAL_MEDIA_PATHS)
+  rememberNetworkSpelling(
+    scopedNetworkFileSpellings,
+    trimmed,
+    canonical,
+    MAX_SCOPED_LOCAL_MEDIA_PATHS
+  )
   scheduleScopedLocalMediaGrantsPersistence()
   return true
 }
@@ -188,6 +270,12 @@ export function authorizeScopedLocalMediaDirectory(directoryPath: string): boole
   rememberBoundedPath(
     scopedLocalMediaDirectories,
     key,
+    canonical,
+    MAX_SCOPED_LOCAL_MEDIA_DIRECTORIES
+  )
+  rememberNetworkSpelling(
+    scopedNetworkDirectorySpellings,
+    trimmed,
     canonical,
     MAX_SCOPED_LOCAL_MEDIA_DIRECTORIES
   )
@@ -223,12 +311,26 @@ export function isWindowsNetworkLocalMediaPath(value: string): boolean {
 /**
  * A network path the user granted (an exact picked file or a picked directory), decided on the
  * resolved spelling alone: no filesystem call. Only such a path is canonicalized afterwards.
+ * Both the canonical spelling of a grant and the spelling it was made with count (they differ
+ * for a DFS namespace path); a remembered spelling counts only while its grant is alive.
  */
 function isWindowsNetworkPathScoped(filePath: string): boolean {
   const resolved = path.resolve(filePath)
-  if (scopedLocalMediaPaths.has(comparisonKey(resolved))) return true
-  return Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
-    isSameOrInside(directory, resolved)
+  const key = comparisonKey(resolved)
+  if (scopedLocalMediaPaths.has(key)) return true
+  const spelled = scopedNetworkFileSpellings.get(key)
+  if (spelled && scopedLocalMediaPaths.has(comparisonKey(spelled[1]))) return true
+  if (
+    Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
+      isSameOrInside(directory, resolved)
+    )
+  ) {
+    return true
+  }
+  return Array.from(scopedNetworkDirectorySpellings.values()).some(
+    ([spelling, canonical]) =>
+      scopedLocalMediaDirectories.has(comparisonKey(canonical)) &&
+      isSameOrInside(spelling, resolved)
   )
 }
 
@@ -566,6 +668,8 @@ export function clearScopedLocalMediaPathsForTest(): void {
   }
   scopedLocalMediaPaths.clear()
   scopedLocalMediaDirectories.clear()
+  scopedNetworkFileSpellings.clear()
+  scopedNetworkDirectorySpellings.clear()
   localMediaImportGrants.clear()
   localMediaImportBatchesInUse.clear()
   localMediaGrantsPath = null
