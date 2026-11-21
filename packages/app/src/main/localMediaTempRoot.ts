@@ -82,9 +82,14 @@ export type LocalMediaTempRootVerifierDependencies = PrivateTempRootDependencies
   warn?: (message: string) => void
   /** Monotonic milliseconds, for the periodic identity check. */
   now?: () => number
+  /** Wall-clock milliseconds: the monotonic clock stops while the system sleeps. */
+  wallNow?: () => number
 }
 
-/** A remembered folder is checked again (one lstat) when its last check is this old. */
+/**
+ * A remembered folder is checked again (one lstat) when its last check is this old, on the
+ * monotonic clock or on the wall clock (either way: a clock set back counts too).
+ */
 export const LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS = 60_000
 
 /**
@@ -94,14 +99,16 @@ export const LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS = 60_000
  * the directory later leads every path under it outside that path, so it widens nothing. At
  * most once a minute a read checks that the folder is still the same one (device, inode,
  * owner, private mode, no symlink); if it changed (removed by a temp cleaner and created again
- * by someone else) it is refused and verified afresh at the next use. Writes verify again
- * first (reverify), and so does any use that failed. A refusal is logged once, with its
- * reason and without the path.
+ * by someone else) it is refused and verified afresh at the next use. The minute runs on both
+ * clocks: after a long sleep, when temp cleaners run on resume, the first read checks again.
+ * Writes verify again first (reverify), and so does any use that failed. A refusal is logged
+ * once, with its reason and without the path.
  */
 export function createLocalMediaTempRootVerifier({
   realpathSync = (target) => fs.realpathSync.native(target),
   warn = (message) => console.warn(message),
   now = () => performance.now(),
+  wallNow = () => Date.now(),
   ...dependencies
 }: LocalMediaTempRootVerifierDependencies = {}): {
   get(root: string): string | null
@@ -115,7 +122,13 @@ export function createLocalMediaTempRootVerifier({
         ? () => process.getuid!()
         : null
       : dependencies.getuid
-  type Accepted = { canonical: string; dev?: number; ino?: number; checkedAt: number }
+  type Accepted = {
+    canonical: string
+    dev?: number
+    ino?: number
+    checkedAt: number
+    checkedWallAt: number
+  }
   const accepted = new Map<string, Accepted>()
   let refusalLogged = false
   const refuse = (root: string, reason: string): null => {
@@ -136,7 +149,8 @@ export function createLocalMediaTempRootVerifier({
           canonical,
           dev: identity.dev,
           ino: identity.ino,
-          checkedAt: now()
+          checkedAt: now(),
+          checkedWallAt: wallNow()
         })
         refusalLogged = false
         return canonical
@@ -162,15 +176,17 @@ export function createLocalMediaTempRootVerifier({
       (!getuid || (stat.uid === getuid() && (stat.mode & 0o077) === 0))
     if (!same) return refuse(root, 'changed')
     entry.checkedAt = now()
+    entry.checkedWallAt = wallNow()
     return entry.canonical
   }
+  const isFresh = (entry: Accepted): boolean =>
+    now() - entry.checkedAt < LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS &&
+    Math.abs(wallNow() - entry.checkedWallAt) < LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS
   return {
     get: (root) => {
       const entry = accepted.get(root)
       if (!entry) return verify(root)
-      return now() - entry.checkedAt < LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS
-        ? entry.canonical
-        : recheck(root, entry)
+      return isFresh(entry) ? entry.canonical : recheck(root, entry)
     },
     reverify: verify,
     forget: () => accepted.clear()
