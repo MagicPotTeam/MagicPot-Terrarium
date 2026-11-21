@@ -7,7 +7,7 @@ import { normalizeLocalFilePath, toFileUrl } from './utils/localFileUrl'
 import {
   hasLocalMediaTraversal,
   initializeLocalMediaAccess,
-  resolveAuthorizedLocalMediaPath
+  resolveAuthorizedLocalMediaPathAsync
 } from './localMediaAccess'
 import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 import {
@@ -183,7 +183,10 @@ async function handleLocalMediaRequest(request: Request): Promise<Response> {
       return withLocalMediaCorsHeaders(new Response('Forbidden', { status: 403 }), request)
     }
 
-    const localPath = resolveAuthorizedLocalMediaPath(
+    // The page names this path: realpath runs on the threadpool, never on main's event loop
+    // (a file on a mapped drive whose share stopped answering must not block main). Not under
+    // the renderer path gate: a board loads every image through here.
+    const localPath = await resolveAuthorizedLocalMediaPathAsync(
       normalizeLocalFilePath(request.url),
       getLocalMediaAllowedRoots()
     )

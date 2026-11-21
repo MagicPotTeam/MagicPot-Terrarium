@@ -50,7 +50,11 @@ vi.mock('./localMediaAccess', async (importOriginal) => {
   return {
     ...actual,
     initializeLocalMediaAccess: initializeLocalMediaAccessMock,
-    resolveAuthorizedLocalMediaPath: resolveAuthorizedLocalMediaPathMock
+    // The protocol authorizes off main's event loop: only the async policy may be used.
+    resolveAuthorizedLocalMediaPath: () => {
+      throw new Error('the local-media protocol must not use the synchronous policy')
+    },
+    resolveAuthorizedLocalMediaPathAsync: resolveAuthorizedLocalMediaPathMock
   }
 })
 
