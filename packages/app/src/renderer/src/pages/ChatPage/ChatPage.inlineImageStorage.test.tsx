@@ -422,6 +422,33 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
   })
 })
 
+describe('ChatPage draft backup (FIX-PLAN item 4, part 3)', () => {
+  it('keeps a long text draft in the backup when the window unloads', async () => {
+    await seed({ id: 'long-draft', title: 'Long draft', messages: [] })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'long-draft')
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('long-draft'))
+    // A pasted log longer than the draft backup's inline image cap.
+    const log = 'error: something failed; '.repeat(15_000)
+    await act(async () => {
+      const input = screen.getByTestId('inline-storage-input')
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      setter?.call(input, log)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    })
+    localStorage.removeItem(`magicpot-chat-draft:${SCOPE}:long-draft`)
+    // The synchronous safety net: written before any asynchronous work of the flush.
+    window.dispatchEvent(new Event('beforeunload'))
+    const raw = localStorage.getItem(`magicpot-chat-draft:${SCOPE}:long-draft`)
+    expect(raw).toBeTruthy()
+    expect((JSON.parse(raw!) as { draft?: { inputValue?: string } }).draft?.inputValue).toBe(log)
+  })
+})
+
 const imagesInRequest = (callIndex: number): ChatAttachment[] =>
   (
     ((fixture.ipcChat.mock.calls[callIndex][0] as { messages?: ChatMessage[] }).messages ||

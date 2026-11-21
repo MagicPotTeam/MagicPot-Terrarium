@@ -6,14 +6,16 @@ vi.mock('../../utils/windowUtils', () => ({ api: () => ({}) }))
 
 import {
   CHAT_DRAFT_BACKUP_MAX_CHARS,
+  CHAT_DRAFT_BACKUP_MAX_INLINE_ATTACHMENT_CHARS,
   readSessionDraftBackup,
   writeSessionDraftBackup,
   writeSessionQueuedSendsBackup
 } from './chatStorage'
 
-// FIX-PLAN item 4, part 3: the localStorage draft backup has a size cap for the whole record, the
-// queue included. Over the cap nothing is built or written and the older backup stays; the session
-// record keeps the whole draft. A draft with managed images stays far below the cap.
+// FIX-PLAN item 4, part 3: the localStorage draft backup has a cap for the inline images of the
+// whole record (the queue included), and a much larger one for its whole length. Over a cap
+// nothing is built or written and the older backup stays; the session record keeps the whole
+// draft. A draft with managed images stays far below the caps; a long text draft is kept.
 
 const SCOPE = 'project-a.pane-1'
 const KEY = `magicpot-chat-draft:${SCOPE}:session-1`
@@ -110,8 +112,8 @@ describe('the draft backup cap', () => {
           SCOPE
         )
       )
-      expect(Math.max(0, ...lengths)).toBeLessThan(CHAT_DRAFT_BACKUP_MAX_CHARS)
-      // A long text draft just over the cap is not written either.
+      expect(Math.max(0, ...lengths)).toBeLessThan(CHAT_DRAFT_BACKUP_MAX_INLINE_ATTACHMENT_CHARS)
+      // A text draft over the whole record's cap is not written either.
       writeSessionDraftBackup(
         'session-1',
         30,
@@ -125,8 +127,26 @@ describe('the draft backup cap', () => {
     expect(readSessionDraftBackup('session-1', SCOPE)?.draft?.inputValue).toBe('older')
   })
 
-  it('counts the queue in the cap, and still writes an emptied queue as a removal marker', () => {
-    writeSessionDraftBackup('session-1', 10, draft([], 'x'.repeat(40_000)), SCOPE)
+  it('keeps a long text draft, such as a pasted log, as the synchronous safety net', () => {
+    writeSessionDraftBackup('session-1', 10, draft([managedImage(1)], 'older'), SCOPE)
+    // Far over the inline image cap, far below the record's cap: text is not an inline image.
+    const log = 'log line\n'.repeat(100_000)
+    expect(log.length).toBeGreaterThan(CHAT_DRAFT_BACKUP_MAX_INLINE_ATTACHMENT_CHARS * 3)
+    writeSessionDraftBackup('session-1', 20, draft([managedImage(1)], log, 20), SCOPE)
+    const backup = readSessionDraftBackup('session-1', SCOPE)
+    expect(backup?.draft?.inputValue).toBe(log)
+    expect(backup?.draft?.pendingAttachments).toHaveLength(1)
+    expect(backup?.updatedAt).toBe(20)
+  })
+
+  it('counts the queue in the inline image cap, and still writes an emptied queue as a removal marker', () => {
+    // The composer holds an inline image the store cannot hold (kept inline by design).
+    writeSessionDraftBackup(
+      'session-1',
+      10,
+      draft([inlineImage(100_000)], 'x'.repeat(40_000)),
+      SCOPE
+    )
     const queued = (id: string): ChatDraftQueuedSend => ({
       id,
       content: `queued ${id}`,
@@ -137,28 +157,37 @@ describe('the draft backup cap', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
       expect(
-        writeSessionQueuedSendsBackup(
-          'session-1',
-          [queued('a'), queued('b'), queued('c')],
-          100,
-          SCOPE
-        )
+        writeSessionQueuedSendsBackup('session-1', [queued('a'), queued('b')], 100, SCOPE)
       ).toBe(true)
       const withQueue = localStorage.getItem(KEY)!
-      expect(withQueue.length).toBeLessThanOrEqual(CHAT_DRAFT_BACKUP_MAX_CHARS)
-      // One more item takes the whole record over the cap: refused, the older queue kept.
+      // One more item takes the record's inline images over the cap: refused, the older queue kept.
       expect(
         writeSessionQueuedSendsBackup(
           'session-1',
-          [queued('a'), queued('b'), queued('c'), queued('d')],
+          [queued('a'), queued('b'), queued('c')],
           200,
           SCOPE
         )
       ).toBe(false)
       expect(localStorage.getItem(KEY)).toBe(withQueue)
-      // The composer write keeps to the cap with the queue it carries.
-      writeSessionDraftBackup('session-1', 300, draft([], 'y'.repeat(90_000), 300), SCOPE)
+      // The composer write keeps to the inline cap with the queue it carries; its text does not
+      // count toward it.
+      writeSessionDraftBackup(
+        'session-1',
+        300,
+        draft([inlineImage(100_000), inlineImage(50_000)], 'y', 300),
+        SCOPE
+      )
       expect(readSessionDraftBackup('session-1', SCOPE)?.draft?.inputValue).toBe('x'.repeat(40_000))
+      writeSessionDraftBackup(
+        'session-1',
+        310,
+        draft([inlineImage(100_000)], 'y'.repeat(400_000), 310),
+        SCOPE
+      )
+      expect(readSessionDraftBackup('session-1', SCOPE)?.draft?.inputValue).toBe(
+        'y'.repeat(400_000)
+      )
       // Accepting the items empties the queue: the removal marker is written.
       expect(writeSessionQueuedSendsBackup('session-1', [], 400, SCOPE)).toBe(true)
     } finally {
@@ -167,6 +196,6 @@ describe('the draft backup cap', () => {
     const record = readSessionDraftBackup('session-1', SCOPE)
     expect(record?.queuedSends).toEqual([])
     expect(record?.queuedSendsUpdatedAt).toBe(400)
-    expect(record?.draft?.inputValue).toBe('x'.repeat(40_000))
+    expect(record?.draft?.inputValue).toBe('y'.repeat(400_000))
   })
 })

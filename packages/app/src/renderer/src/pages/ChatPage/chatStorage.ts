@@ -834,12 +834,30 @@ const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => 
 }
 
 /**
- * A draft backup record longer than this (in JSON characters) is not written to localStorage
- * (FIX-PLAN item 4). The backup is the synchronous safety net next to the session record, which
- * keeps the whole draft; localStorage holds about 5 M characters for the whole app, and a write
- * above its quota fails after the whole string was built.
+ * A draft backup whose inline attachments (base64 data: URLs) are longer than this together is not
+ * written to localStorage (FIX-PLAN item 4): images belong in managed media, and the session
+ * record keeps the whole draft. Text does not count here: the backup is the synchronous safety net
+ * of the composer (written on beforeunload, pagehide and blur), and a long pasted text must keep
+ * it.
  */
-export const CHAT_DRAFT_BACKUP_MAX_CHARS = 256 * 1024
+export const CHAT_DRAFT_BACKUP_MAX_INLINE_ATTACHMENT_CHARS = 256 * 1024
+
+/**
+ * A draft backup record longer than this (in JSON characters) is not written at all. localStorage
+ * holds about 5 M characters for the whole app, and a write above its quota fails only after the
+ * whole string was built; this leaves room for the other drafts and the app's other keys.
+ */
+export const CHAT_DRAFT_BACKUP_MAX_CHARS = 1536 * 1024
+
+const inlineAttachmentsChars = (attachments: readonly ChatAttachment[] | undefined): number =>
+  (attachments ?? []).reduce(
+    (total, attachment) =>
+      total +
+      (typeof attachment?.url === 'string' && attachment.url.startsWith('data:')
+        ? attachment.url.length
+        : 0),
+    0
+  )
 
 const attachmentsChars = (attachments: readonly ChatAttachment[] | undefined): number =>
   (attachments ?? []).reduce(
@@ -848,26 +866,39 @@ const attachmentsChars = (attachments: readonly ChatAttachment[] | undefined): n
     0
   )
 
-/** A lower bound of a backup record's JSON length, from its strings: no JSON is built for it. */
-const estimateDraftBackupChars = (record: ChatSessionDraftBackupRecord): number => {
+/**
+ * Lower bounds of a backup record's inline attachment characters and of its JSON length, from its
+ * strings: no JSON is built for them.
+ */
+const estimateDraftBackupChars = (
+  record: ChatSessionDraftBackupRecord
+): { inline: number; total: number } => {
   const draft = record.draft
+  let inline = draft ? inlineAttachmentsChars(draft.pendingAttachments) : 0
   let total = draft
     ? draft.inputValue.length +
       draft.pendingHiddenContext.length +
       attachmentsChars(draft.pendingAttachments)
     : 0
   for (const item of record.queuedSends ?? []) {
+    inline += inlineAttachmentsChars(item.attachments)
     total +=
       item.content.length +
       (item.originalComposerHiddenContext?.length ?? 0) +
       attachmentsChars(item.attachments)
   }
-  return total
+  return { inline, total }
 }
 
-/** The record as JSON, or null when it is over CHAT_DRAFT_BACKUP_MAX_CHARS. */
+/** The record as JSON, or null when it is over one of the draft backup caps. */
 const serializeDraftBackupWithinCap = (record: ChatSessionDraftBackupRecord): string | null => {
-  if (estimateDraftBackupChars(record) > CHAT_DRAFT_BACKUP_MAX_CHARS) return null
+  const estimate = estimateDraftBackupChars(record)
+  if (
+    estimate.inline > CHAT_DRAFT_BACKUP_MAX_INLINE_ATTACHMENT_CHARS ||
+    estimate.total > CHAT_DRAFT_BACKUP_MAX_CHARS
+  ) {
+    return null
+  }
   const json = JSON.stringify(record)
   return json.length > CHAT_DRAFT_BACKUP_MAX_CHARS ? null : json
 }
