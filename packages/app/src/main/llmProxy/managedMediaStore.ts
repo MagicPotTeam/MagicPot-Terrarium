@@ -128,8 +128,10 @@ export function isPathInsideRoot(root: string, candidate: string): boolean {
  * behind other calls never counts. A file with a call past its deadline does not respond: its
  * next calls are refused at once. A root whose slots are all held by such calls is refused at
  * once too, unless it answered since the first of them stalled (a drive with slow cloud
- * placeholders): then its other files get one slot more while the app has one. When every
- * slot of the app is held by calls past their deadline, every call is refused.
+ * placeholders) and the app has a slot to spare: then its other files get one slot more, but
+ * never the last slot that no stalled call holds, so another drive can always run (with the
+ * default limits there is no such slot to spare). When every slot of the app is held by calls
+ * past their deadline, every call is refused.
  */
 export type ImportSourceGuard = {
   /**
@@ -263,7 +265,11 @@ export function createImportSourceGate({
   // other files, only while it answers: a call there that started after the first of them
   // returned within its deadline. A drive whose cloud placeholders are still downloading
   // answers for its other files; a dead mount does not, so it never gets another thread.
+  // Only while it leaves the app a slot that no stalled call holds, even if the spare call
+  // stalls too: one root never takes every slot, so the other drives keep working. With the
+  // default limits (two per root, three in all) that slot is the spare one, so no root gets it.
   const spare = (key: string): number => {
+    if (late.size + 1 >= total) return 0
     const stalled = lateOn(key)
     if (stalled.length < perRoot) return 0
     const firstStall = Math.min(...stalled.map((call) => call.order))
