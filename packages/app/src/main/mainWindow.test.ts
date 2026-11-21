@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { BrowserWindow } from 'electron'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import fs from 'node:fs'
 import { authorizeScopedLocalMediaPath } from './localMediaAccess'
 import { resolveTestArtifactPath } from './testUiPolicy'
@@ -20,8 +20,22 @@ import {
   unregisterMagicAgentTrustedRouteBinding
 } from './magicAgentRuntime/trustedRouteBinding'
 
-const { bindings, catalogInstall, catalogDisposers, storageInstall, storageDisposers, registered, ipcHandlers, tempRoot } = vi.hoisted(() => ({
-  bindings: new Map<number, unknown>(), catalogInstall: vi.fn(), catalogDisposers: new Map<object, ReturnType<typeof vi.fn>>(), storageInstall: vi.fn(), storageDisposers: new Map<object, ReturnType<typeof vi.fn>>(), registered: { window: null as unknown },
+const {
+  bindings,
+  catalogInstall,
+  catalogDisposers,
+  storageInstall,
+  storageDisposers,
+  registered,
+  ipcHandlers,
+  tempRoot
+} = vi.hoisted(() => ({
+  bindings: new Map<number, unknown>(),
+  catalogInstall: vi.fn(),
+  catalogDisposers: new Map<object, ReturnType<typeof vi.fn>>(),
+  storageInstall: vi.fn(),
+  storageDisposers: new Map<object, ReturnType<typeof vi.fn>>(),
+  registered: { window: null as unknown },
   ipcHandlers: new Map<string, (...args: unknown[]) => unknown>(),
   tempRoot: { reverify: vi.fn((_root: string): string | null => null), forget: vi.fn() }
 }))
@@ -29,8 +43,15 @@ const { bindings, catalogInstall, catalogDisposers, storageInstall, storageDispo
 vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/mock-user-data'), isPackaged: false },
   BrowserWindow: vi.fn(),
-  ipcMain: { handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => ipcHandlers.set(channel, handler)) },
-  nativeImage: { createFromPath: vi.fn(() => ({ isEmpty: () => false })), createFromDataURL: vi.fn() },
+  ipcMain: {
+    handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) =>
+      ipcHandlers.set(channel, handler)
+    )
+  },
+  nativeImage: {
+    createFromPath: vi.fn(() => ({ isEmpty: () => false })),
+    createFromDataURL: vi.fn()
+  },
   screen: {},
   shell: {}
 }))
@@ -44,11 +65,20 @@ vi.mock('./testWindowRuntime', () => ({
 }))
 vi.mock('./rendererDiagnostics', () => ({ attachRendererDiagnostics: vi.fn() }))
 vi.mock('./winControls', () => {
-  const controller = { registerWindow: vi.fn((window: unknown) => { registered.window = window }), getMainWindow: vi.fn(() => registered.window as BrowserWindow | null) }
+  const controller = {
+    registerWindow: vi.fn((window: unknown) => {
+      registered.window = window
+    }),
+    getMainWindow: vi.fn(() => registered.window as BrowserWindow | null)
+  }
   return { winController: controller, getAuthoritativeMainWindow: () => controller.getMainWindow() }
 })
-vi.mock('./storageMetadata/startupStorageReadBinding', () => ({ installStartupStorageReadBinding: storageInstall }))
-vi.mock('./magicAgentRuntime/installedCatalogReadBinding', () => ({ installInstalledCatalogReadBinding: catalogInstall }))
+vi.mock('./storageMetadata/startupStorageReadBinding', () => ({
+  installStartupStorageReadBinding: storageInstall
+}))
+vi.mock('./magicAgentRuntime/installedCatalogReadBinding', () => ({
+  installInstalledCatalogReadBinding: catalogInstall
+}))
 vi.mock('./windowState', () => ({
   attachWindowStatePersistence: vi.fn(),
   readWindowState: () => ({
@@ -59,7 +89,9 @@ vi.mock('./windowState', () => ({
 vi.mock('./utils/externalUrl', () => ({ normalizeAllowedExternalUrl: vi.fn() }))
 vi.mock('./utils/rendererNavigation', () => ({ isTrustedRendererNavigation: vi.fn() }))
 vi.mock('./localMediaAccess', () => ({ authorizeScopedLocalMediaPath: vi.fn() }))
-vi.mock('./localMediaAllowedRoots', () => ({ getLocalMediaTempRootPath: () => '/shared-tmp/magicpot-local-media' }))
+vi.mock('./localMediaAllowedRoots', () => ({
+  getLocalMediaTempRootPath: () => '/shared-tmp/magicpot-local-media'
+}))
 vi.mock('./localMediaTempRoot', () => ({
   reverifyLocalMediaTempRoot: (root: string) => tempRoot.reverify(root),
   forgetLocalMediaTempRootVerification: () => tempRoot.forget()
@@ -98,9 +130,22 @@ class FakeWindow extends EventEmitter {
 describe('createMainWindow teardown', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    bindings.clear(); catalogDisposers.clear(); storageDisposers.clear(); registered.window = null
-    catalogInstall.mockReset(); catalogInstall.mockImplementation((window: object) => { const dispose = vi.fn(); catalogDisposers.set(window, dispose); return dispose })
-    storageInstall.mockReset(); storageInstall.mockImplementation((window: object) => { const dispose = vi.fn(); storageDisposers.set(window, dispose); return dispose })
+    bindings.clear()
+    catalogDisposers.clear()
+    storageDisposers.clear()
+    registered.window = null
+    catalogInstall.mockReset()
+    catalogInstall.mockImplementation((window: object) => {
+      const dispose = vi.fn()
+      catalogDisposers.set(window, dispose)
+      return dispose
+    })
+    storageInstall.mockReset()
+    storageInstall.mockImplementation((window: object) => {
+      const dispose = vi.fn()
+      storageDisposers.set(window, dispose)
+      return dispose
+    })
     vi.mocked(BrowserWindow).mockImplementation(function () {
       return new FakeWindow() as unknown as BrowserWindow
     })
@@ -142,7 +187,10 @@ describe('createMainWindow teardown', () => {
   )
   it('raises the listener limit of its WebContents before anything subscribes to it', async () => {
     const limitsAtInstall: number[] = []
-    storageInstall.mockImplementation((window: FakeWindow) => { limitsAtInstall.push(window.webContents.getMaxListeners()); return vi.fn() })
+    storageInstall.mockImplementation((window: FakeWindow) => {
+      limitsAtInstall.push(window.webContents.getMaxListeners())
+      return vi.fn()
+    })
     const window = createMainWindow() as unknown as FakeWindow
     expect(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).toBeGreaterThan(10)
     expect(window.webContents.getMaxListeners()).toBe(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
@@ -160,7 +208,8 @@ describe('createMainWindow teardown', () => {
     try {
       // The fixed allowance includes what createMainWindow already added.
       const already = window.webContents.listenerCount('render-process-gone')
-      for (let index = already; index < byDesign; index += 1) window.webContents.on('render-process-gone', () => undefined)
+      for (let index = already; index < byDesign; index += 1)
+        window.webContents.on('render-process-gone', () => undefined)
       // Node emits the warning on a later tick.
       await new Promise((resolve) => setImmediate(resolve))
     } finally {
@@ -175,7 +224,9 @@ describe('createMainWindow teardown', () => {
     } finally {
       process.off('warning', onWarning)
     }
-    expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toHaveLength(1)
+    expect(
+      warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')
+    ).toHaveLength(1)
   })
 
   it('holds 150 running requests at once on one listener of each event, without a warning', async () => {
@@ -219,7 +270,10 @@ describe('createMainWindow teardown', () => {
     // node:fs is an in-memory volume in this suite: read the real file.
     const { readFileSync } = await vi.importActual<typeof import('node:fs')>('node:fs')
     const themeSource = readFileSync(join(__dirname, '../renderer/src/theme.ts'), 'utf8')
-    const darkBackground = /dark:\s*\{\s*palette:\s*\{[\s\S]*?background:\s*\{\s*default:\s*'([^']+)'/.exec(themeSource)?.[1]
+    const darkBackground =
+      /dark:\s*\{\s*palette:\s*\{[\s\S]*?background:\s*\{\s*default:\s*'([^']+)'/.exec(
+        themeSource
+      )?.[1]
     expect(darkBackground).toBe(MAIN_WINDOW_BACKGROUND_COLOR)
   })
   it('installs the exact independent binding before onCreated navigation, registration and first built-in load', () => {
@@ -232,83 +286,181 @@ describe('createMainWindow teardown', () => {
     const window = createMainWindow(callback) as unknown as FakeWindow
     expect(catalogInstall.mock.calls[0]?.[1]).toBe(window.loadURL.mock.calls[1]?.[0])
     const senderId = window.webContents.id
-    expect(registerMagicAgentTrustedRouteBinding).toHaveBeenCalledWith(senderId, undefined, { trustedUrl: catalogInstall.mock.calls[0]?.[1], trustedWebContents: window.webContents })
-    expect(catalogInstall.mock.invocationCallOrder[0]).toBeLessThan(callback.mock.invocationCallOrder[0]!)
-    expect(callback.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(winController.registerWindow).mock.invocationCallOrder[0]!)
-    expect(catalogInstall.mock.invocationCallOrder[0]).toBeLessThan(window.loadURL.mock.invocationCallOrder[0]!)
+    expect(registerMagicAgentTrustedRouteBinding).toHaveBeenCalledWith(senderId, undefined, {
+      trustedUrl: catalogInstall.mock.calls[0]?.[1],
+      trustedWebContents: window.webContents
+    })
+    expect(catalogInstall.mock.invocationCallOrder[0]).toBeLessThan(
+      callback.mock.invocationCallOrder[0]!
+    )
+    expect(callback.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(winController.registerWindow).mock.invocationCallOrder[0]!
+    )
+    expect(catalogInstall.mock.invocationCallOrder[0]).toBeLessThan(
+      window.loadURL.mock.invocationCallOrder[0]!
+    )
   })
   it('passes a live authoritative controller getter, not a captured result or callback-provided substitute', () => {
     const first = createMainWindow() as unknown as FakeWindow
     const getter = catalogInstall.mock.calls[0]?.[2]
-    expect(getter).toBeTypeOf('function'); expect(getter()).toBe(first)
+    expect(getter).toBeTypeOf('function')
+    expect(getter()).toBe(first)
     const second = createMainWindow() as unknown as FakeWindow
-    expect(getter()).toBe(second); registered.window = null; expect(getter()).toBeNull()
-    first.destroyed = true; first.contents.destroyed = true
+    expect(getter()).toBe(second)
+    registered.window = null
+    expect(getter()).toBeNull()
+    first.destroyed = true
+    first.contents.destroyed = true
     expect(() => first.emit('closed')).not.toThrow()
-    expect(catalogDisposers.get(first)).toHaveBeenCalledOnce(); expect(catalogDisposers.get(second)).not.toHaveBeenCalled()
+    expect(catalogDisposers.get(first)).toHaveBeenCalledOnce()
+    expect(catalogDisposers.get(second)).not.toHaveBeenCalled()
   })
-  it.each(['callback', 'register', 'load'] as const)('disposes the exact installed binding on synchronous %s failure and rethrows the original error', kind => {
-    const error = new Error('original setup failure'), window = new FakeWindow()
-    vi.mocked(BrowserWindow).mockImplementationOnce(function () { return window as unknown as BrowserWindow })
-    if (kind === 'register') vi.mocked(winController.registerWindow).mockImplementationOnce(() => { throw error })
-    if (kind === 'load') window.loadURL.mockImplementationOnce(() => { throw error })
-    expect(() => createMainWindow(kind === 'callback' ? () => { throw error } : undefined)).toThrow(error)
-    expect(catalogInstall).toHaveBeenCalledOnce(); expect(catalogDisposers.get(window)).toHaveBeenCalledOnce()
-  })
+  it.each(['callback', 'register', 'load'] as const)(
+    'disposes the exact installed binding on synchronous %s failure and rethrows the original error',
+    (kind) => {
+      const error = new Error('original setup failure'),
+        window = new FakeWindow()
+      vi.mocked(BrowserWindow).mockImplementationOnce(function () {
+        return window as unknown as BrowserWindow
+      })
+      if (kind === 'register')
+        vi.mocked(winController.registerWindow).mockImplementationOnce(() => {
+          throw error
+        })
+      if (kind === 'load')
+        window.loadURL.mockImplementationOnce(() => {
+          throw error
+        })
+      expect(() =>
+        createMainWindow(
+          kind === 'callback'
+            ? () => {
+                throw error
+              }
+            : undefined
+        )
+      ).toThrow(error)
+      expect(catalogInstall).toHaveBeenCalledOnce()
+      expect(catalogDisposers.get(window)).toHaveBeenCalledOnce()
+    }
+  )
   it('installs storage independently BEFORE onCreated with the shared getter FUNCTION identity and no eager getter call', () => {
     const callback = vi.fn((window: BrowserWindow) => {
       expect(installStartupStorageReadBinding).toHaveBeenCalledOnce()
-      expect(storageInstall.mock.calls[0]?.[0]).toBe(window); expect(storageInstall.mock.calls[0]?.[1]).toBe(catalogInstall.mock.calls[0]?.[1])
+      expect(storageInstall.mock.calls[0]?.[0]).toBe(window)
+      expect(storageInstall.mock.calls[0]?.[1]).toBe(catalogInstall.mock.calls[0]?.[1])
       expect(storageInstall.mock.calls[0]?.[2]).toBe(getAuthoritativeMainWindow)
-      expect(winController.getMainWindow).not.toHaveBeenCalled(); expect(winController.registerWindow).not.toHaveBeenCalled()
+      expect(winController.getMainWindow).not.toHaveBeenCalled()
+      expect(winController.registerWindow).not.toHaveBeenCalled()
       expect(installInstalledCatalogReadBinding).toHaveBeenCalledOnce()
       window.loadURL('file:///callback-initiated-navigation.html')
     })
     const window = createMainWindow(callback) as unknown as FakeWindow
     expect(storageInstall.mock.calls[0]?.[1]).toBe(window.loadURL.mock.calls[1]?.[0])
-    expect(storageInstall.mock.invocationCallOrder[0]).toBeLessThan(callback.mock.invocationCallOrder[0]!)
-    expect(storageInstall.mock.invocationCallOrder[0]).toBeLessThan(window.loadURL.mock.invocationCallOrder[0]!)
+    expect(storageInstall.mock.invocationCallOrder[0]).toBeLessThan(
+      callback.mock.invocationCallOrder[0]!
+    )
+    expect(storageInstall.mock.invocationCallOrder[0]).toBeLessThan(
+      window.loadURL.mock.invocationCallOrder[0]!
+    )
     const getter = storageInstall.mock.calls[0]?.[2]
-    expect(getter).toBe(getAuthoritativeMainWindow); expect(getter()).toBe(window)
-    const next = createMainWindow() as unknown as FakeWindow; expect(getter()).toBe(next)
-    registered.window = null; expect(getter()).toBeNull()
+    expect(getter).toBe(getAuthoritativeMainWindow)
+    expect(getter()).toBe(window)
+    const next = createMainWindow() as unknown as FakeWindow
+    expect(getter()).toBe(next)
+    registered.window = null
+    expect(getter()).toBeNull()
     expect(catalogInstall.mock.calls[0]?.[2]).not.toBe(getter) // Existing catalog seam is not parameterized/replaced.
   })
-  it.each(['callback', 'register', 'load'] as const)('disposes BOTH exact independent owners after %s failure and keeps the original error', kind => {
-    const error = new Error('original dual-owner setup failure'), window = new FakeWindow()
-    vi.mocked(BrowserWindow).mockImplementationOnce(function () { return window as unknown as BrowserWindow })
-    if (kind === 'register') vi.mocked(winController.registerWindow).mockImplementationOnce(() => { throw error })
-    if (kind === 'load') window.loadURL.mockImplementationOnce(() => { throw error })
-    expect(() => createMainWindow(kind === 'callback' ? () => { throw error } : undefined)).toThrow(error)
-    expect(storageInstall).toHaveBeenCalledOnce(); expect(storageDisposers.get(window)).toHaveBeenCalledOnce(); expect(catalogDisposers.get(window)).toHaveBeenCalledOnce()
-  })
+  it.each(['callback', 'register', 'load'] as const)(
+    'disposes BOTH exact independent owners after %s failure and keeps the original error',
+    (kind) => {
+      const error = new Error('original dual-owner setup failure'),
+        window = new FakeWindow()
+      vi.mocked(BrowserWindow).mockImplementationOnce(function () {
+        return window as unknown as BrowserWindow
+      })
+      if (kind === 'register')
+        vi.mocked(winController.registerWindow).mockImplementationOnce(() => {
+          throw error
+        })
+      if (kind === 'load')
+        window.loadURL.mockImplementationOnce(() => {
+          throw error
+        })
+      expect(() =>
+        createMainWindow(
+          kind === 'callback'
+            ? () => {
+                throw error
+              }
+            : undefined
+        )
+      ).toThrow(error)
+      expect(storageInstall).toHaveBeenCalledOnce()
+      expect(storageDisposers.get(window)).toHaveBeenCalledOnce()
+      expect(catalogDisposers.get(window)).toHaveBeenCalledOnce()
+    }
+  )
   it('does not leak the earlier catalog owner if storage installation itself throws', () => {
-    const error = new Error('storage install failure'), window = new FakeWindow()
-    vi.mocked(BrowserWindow).mockImplementationOnce(function () { return window as unknown as BrowserWindow })
-    storageInstall.mockImplementationOnce(() => { throw error })
+    const error = new Error('storage install failure'),
+      window = new FakeWindow()
+    vi.mocked(BrowserWindow).mockImplementationOnce(function () {
+      return window as unknown as BrowserWindow
+    })
+    storageInstall.mockImplementationOnce(() => {
+      throw error
+    })
     expect(() => createMainWindow()).toThrow(error)
     expect(catalogDisposers.get(window)).toHaveBeenCalledOnce()
   })
-  it.each(['storage', 'catalog'] as const)('closed cleanup still disposes the other owner and route when %s cleanup throws', kind => {
-    const window = createMainWindow() as unknown as FakeWindow, senderId = window.webContents.id
-    const failed = (kind === 'storage' ? storageDisposers : catalogDisposers).get(window)!
-    expect(failed).toBeTypeOf('function'); failed.mockImplementation(() => { throw new Error('private cleanup failure') })
-    // A teardown exception may propagate, but must never skip the second exact disposer or route.
-    try { window.emit('closed') } catch { /* Teardown chain, not error formatting contract. */ }
-    expect(storageDisposers.get(window)).toHaveBeenCalledOnce(); expect(catalogDisposers.get(window)).toHaveBeenCalledOnce()
-    expect(unregisterMagicAgentTrustedRouteBinding).toHaveBeenCalledExactlyOnceWith(senderId)
-  })
+  it.each(['storage', 'catalog'] as const)(
+    'closed cleanup still disposes the other owner and route when %s cleanup throws',
+    (kind) => {
+      const window = createMainWindow() as unknown as FakeWindow,
+        senderId = window.webContents.id
+      const failed = (kind === 'storage' ? storageDisposers : catalogDisposers).get(window)!
+      expect(failed).toBeTypeOf('function')
+      failed.mockImplementation(() => {
+        throw new Error('private cleanup failure')
+      })
+      // A teardown exception may propagate, but must never skip the second exact disposer or route.
+      try {
+        window.emit('closed')
+      } catch {
+        /* Teardown chain, not error formatting contract. */
+      }
+      expect(storageDisposers.get(window)).toHaveBeenCalledOnce()
+      expect(catalogDisposers.get(window)).toHaveBeenCalledOnce()
+      expect(unregisterMagicAgentTrustedRouteBinding).toHaveBeenCalledExactlyOnceWith(senderId)
+    }
+  )
   it('closed cleanup uses captured disposers and cannot revoke another window after contents are dead', () => {
-    const first = createMainWindow() as unknown as FakeWindow, second = createMainWindow() as unknown as FakeWindow
-    first.destroyed = true; first.contents.destroyed = true
+    const first = createMainWindow() as unknown as FakeWindow,
+      second = createMainWindow() as unknown as FakeWindow
+    first.destroyed = true
+    first.contents.destroyed = true
     expect(() => first.emit('closed')).not.toThrow()
-    expect(storageDisposers.get(first)).toHaveBeenCalledOnce(); expect(catalogDisposers.get(first)).toHaveBeenCalledOnce()
-    expect(storageDisposers.get(second)).not.toHaveBeenCalled(); expect(catalogDisposers.get(second)).not.toHaveBeenCalled()
+    expect(storageDisposers.get(first)).toHaveBeenCalledOnce()
+    expect(catalogDisposers.get(first)).toHaveBeenCalledOnce()
+    expect(storageDisposers.get(second)).not.toHaveBeenCalled()
+    expect(catalogDisposers.get(second)).not.toHaveBeenCalled()
   })
   it('does not let cleanup failure replace the original callback failure or read dead webContents during cleanup', () => {
-    const original = new Error('original callback failure'), cleanup = vi.fn(() => { throw new Error('cleanup failure') })
-    catalogInstall.mockImplementationOnce((window: object) => { catalogDisposers.set(window, cleanup); return cleanup })
-    expect(() => createMainWindow(window => { (window as unknown as FakeWindow).destroyed = true; throw original })).toThrow(original)
+    const original = new Error('original callback failure'),
+      cleanup = vi.fn(() => {
+        throw new Error('cleanup failure')
+      })
+    catalogInstall.mockImplementationOnce((window: object) => {
+      catalogDisposers.set(window, cleanup)
+      return cleanup
+    })
+    expect(() =>
+      createMainWindow((window) => {
+        ;(window as unknown as FakeWindow).destroyed = true
+        throw original
+      })
+    ).toThrow(original)
     expect(cleanup).toHaveBeenCalledOnce()
   })
 })
@@ -318,14 +470,19 @@ describe('canvas drag-out handler', () => {
   const dragOut = (startDrag = vi.fn()) => {
     createMainWindow()
     const handler = ipcHandlers.get('canvas:start-system-drag')!
-    return { startDrag, result: handler({ sender: { startDrag } }, payload) as Promise<{ filePath: string }> }
+    return {
+      startDrag,
+      result: handler({ sender: { startDrag } }, payload) as Promise<{ filePath: string }>
+    }
   }
 
   beforeEach(() => {
     vi.mocked(BrowserWindow).mockImplementation(function () {
       return new FakeWindow() as unknown as BrowserWindow
     })
-    vi.mocked(resolveTestArtifactPath).mockImplementation(({ tempPath, segments }) => join(tempPath, ...segments))
+    vi.mocked(resolveTestArtifactPath).mockImplementation(({ tempPath, segments }) =>
+      join(tempPath, ...segments)
+    )
     tempRoot.reverify.mockReset()
     tempRoot.forget.mockReset()
   })
@@ -344,7 +501,8 @@ describe('canvas drag-out handler', () => {
     tempRoot.reverify.mockReturnValue('/verified-tmp/magicpot-local-media')
     const { startDrag, result } = dragOut()
     const { filePath } = await result
-    expect(filePath.startsWith('/verified-tmp/magicpot-local-media/drag/')).toBe(true)
+    // Compare in the platform's own spelling (Windows joins with backslashes).
+    expect(filePath.startsWith(join('/verified-tmp/magicpot-local-media', 'drag') + sep)).toBe(true)
     expect(fs.readFileSync(filePath)).toEqual(Buffer.from([1, 2, 3]))
     expect(startDrag).toHaveBeenCalledOnce()
     expect(tempRoot.forget).not.toHaveBeenCalled()
