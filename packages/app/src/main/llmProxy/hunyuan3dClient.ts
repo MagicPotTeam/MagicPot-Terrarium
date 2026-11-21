@@ -1,7 +1,7 @@
-import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import * as tencentcloud from 'tencentcloud-sdk-nodejs-ai3d'
 import { ChatAttachment, ChatMessage } from '@shared/api/svcLLMProxy'
+import { readLocalAttachmentSource } from './localAttachmentSource'
 import {
   getFileNameHintFromContentDisposition,
   getFileNameHintFromUrl
@@ -62,6 +62,8 @@ const PART_MODEL = '1.5'
 const SIX_MEBIBYTES = 6 * 1024 * 1024
 const EIGHT_MEBIBYTES = 8 * 1024 * 1024
 const TEN_MEBIBYTES = 10 * 1024 * 1024
+/** A local reference image is never read past this; each mode then applies its own limit. */
+const LOCAL_IMAGE_ATTACHMENT_MAX_BYTES = 2 * EIGHT_MEBIBYTES
 const MAIN_IMAGE_ALLOWED_FORMATS = new Set(['JPEG', 'PNG', 'WEBP'])
 const TEXTURE_IMAGE_ALLOWED_FORMATS = new Set(['JPEG', 'PNG'])
 const PROFILE_IMAGE_ALLOWED_FORMATS = new Set(['JPEG', 'PNG'])
@@ -573,10 +575,14 @@ const loadImageAttachment = async (attachment: ChatAttachment): Promise<LoadedIm
     attachment.url.startsWith('file://') ||
     /^[A-Za-z]:\\/.test(attachment.url)
   ) {
-    const filePath = normalizeLocalPath(attachment.url)
-    buffer = await fs.readFile(filePath)
+    // Only a file the local-media protocol serves: an attachment can name any path.
+    const source = await readLocalAttachmentSource(attachment.url, {
+      maxBytes: LOCAL_IMAGE_ATTACHMENT_MAX_BYTES,
+      label: '[Hunyuan3D]'
+    })
+    buffer = source.buffer
     base64 = buffer.toString('base64')
-    mimeType = mimeType || inferImageFormatFromName(filePath).toLowerCase()
+    mimeType = mimeType || inferImageFormatFromName(source.filePath).toLowerCase()
   } else {
     const resp = await fetch(attachment.url)
     if (!resp.ok) {
