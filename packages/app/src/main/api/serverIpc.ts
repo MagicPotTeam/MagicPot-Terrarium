@@ -97,6 +97,7 @@ export const createServer = (
           () => authorizeLocalMediaImportSourcePathAsync(sourcePath, getLocalMediaAllowedRoots()),
           {
             key: importSourceRootKey(sourcePath),
+            file: sourcePath,
             timeoutMs: DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs
           }
         ),

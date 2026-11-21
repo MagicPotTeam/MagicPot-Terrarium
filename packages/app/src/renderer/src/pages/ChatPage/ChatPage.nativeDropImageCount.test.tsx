@@ -736,10 +736,23 @@ describe('native drop image count boundary', () => {
             .filter((name) => /^[0-9]\.png$/.test(name || ''))
         ).toEqual(expect.arrayContaining(['1.png', '3.png']))
       )
+      // Settled: nothing more arrives later.
+      await new Promise((resolve) => setTimeout(resolve, 50))
       const names = (
         JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
       ).map((attachment) => attachment.fileName)
       expect(names).not.toContain('2.png')
+      // The rest of the folder, each file once and in folder order, after the attachment the
+      // composer already had; nothing in place of the refused file.
+      expect(names).toEqual(['existing.png', '0.png', '1.png', '3.png'])
+      // Each image asked main for its grant once (the refused one too), and only the files
+      // granted were imported, each once.
+      expect(granted.mock.calls.map(([file]) => file.name)).toEqual(['1.png', '2.png', '3.png'])
+      expect(
+        f.importFile.mock.calls.map(
+          ([request]) => (request as { originalFileName: string }).originalFileName
+        )
+      ).toEqual(['0.png', '1.png', '3.png'])
       expect(f.notify).toHaveBeenCalledOnce()
       expect(f.notify).not.toHaveBeenCalledWith('Failed to process the dropped folder.')
       // Nothing is read in place of the refused file.

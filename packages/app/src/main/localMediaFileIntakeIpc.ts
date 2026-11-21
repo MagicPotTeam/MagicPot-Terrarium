@@ -91,23 +91,33 @@ export async function grantLocalMediaImportFile(
   try {
     // Off the event loop and under the import-source deadline and gate.
     const granted = await runImportSourceOperation(
-      async (): Promise<LocalMediaImportGrant | LocalMediaImportGrantRefusal | null> => {
+      async (): Promise<LocalMediaImportGrant | { readPath: string; sizeBytes: number } | null> => {
         const canonical = await realpath(filePath)
         // Checked on the realpath result itself, in any path syntax: a mapped drive's UNC form.
         if (isNetworkOrDevicePath(canonical)) {
           const stats = await stat(canonical)
-          if (!stats.isFile()) return null
-          recordLocalMediaImportGrant(path.resolve(canonical), now(), 'read', { batch })
-          return { refused: 'network', sizeBytes: stats.size }
+          return stats.isFile()
+            ? { readPath: path.resolve(canonical), sizeBytes: stats.size }
+            : null
         }
         const resolved = path.resolve(canonical)
         if (!isImportablePath(resolved)) return null
         const stats = await stat(resolved)
         return stats.isFile() ? { path: resolved, sizeBytes: stats.size } : null
       },
-      { key: importSourceRootKey(filePath), timeoutMs }
+      { key: importSourceRootKey(filePath), file: filePath, timeoutMs }
     )
-    if (!granted || !('path' in granted)) return granted
+    if (!granted) return null
+    // Each grant is recorded only here, once the answer came in time: a late one never is.
+    if ('readPath' in granted) {
+      // Found later by the path the user dropped, which the page names when it reads it.
+      recordLocalMediaImportGrant(granted.readPath, now(), 'read', {
+        batch,
+        requestedPath: filePath,
+        sizeBytes: granted.sizeBytes
+      })
+      return { refused: 'network', sizeBytes: granted.sizeBytes }
+    }
     recordLocalMediaImportGrant(granted.path, now(), 'import', { batch })
     return granted
   } catch (error) {

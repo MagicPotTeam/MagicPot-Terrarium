@@ -1,5 +1,8 @@
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
-import { MAX_CHAT_IMAGE_PREPARATION_BATCH_SOURCE_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
+import {
+  CHAT_IMAGE_ATTACHMENT_MAX_BYTES,
+  MAX_CHAT_IMAGE_PREPARATION_BATCH_SOURCE_BYTES
+} from '@shared/llm/chatAttachmentTransportLimits'
 import { normalizeMediaReference, type MediaReference } from '@shared/mediaReference'
 
 export type ResolveChatAttachmentSourceOptions = {
@@ -67,7 +70,7 @@ export const getChatAttachmentTypeForFile = (
 export const getChatAttachmentMaxSizeMB = (type: ChatAttachment['type']): number => {
   if (type === 'video') return 500
   if (type === 'model3d') return 200
-  if (type === 'image') return 5
+  if (type === 'image') return CHAT_IMAGE_ATTACHMENT_MAX_BYTES / (1024 * 1024)
   return 10
 }
 

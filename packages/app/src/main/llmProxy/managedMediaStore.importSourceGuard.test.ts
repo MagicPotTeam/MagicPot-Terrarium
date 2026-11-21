@@ -443,6 +443,95 @@ describe('import source deadlines (a stalled or slow source never blocks main)',
     await vi.waitFor(() => expect(gate.active).toBe(0))
   })
 
+  it('refuses at once only the file whose call is past its deadline, not the rest of its drive', async () => {
+    const gate = createImportSourceGate({ onSaturated: () => undefined })
+    const drive = importSourceRootKey('C:\\Users\\me\\OneDrive\\a.jpg')
+    let downloaded!: () => void
+    const slow = runImportSourceOperation(
+      () => new Promise<string>((resolve) => (downloaded = () => resolve('downloaded'))),
+      { key: drive, file: '/c/OneDrive/a.jpg', timeoutMs: 30, gate }
+    ).catch((error: unknown) => error)
+    await expect(slow).resolves.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+    // The user tries the same photo again: refused at once, no second thread waits on it.
+    const retry = vi.fn(async () => 'ran')
+    await expect(
+      runImportSourceOperation(retry, {
+        key: drive,
+        file: '/c/OneDrive/a.jpg',
+        timeoutMs: 1_000,
+        gate
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+    expect(retry).not.toHaveBeenCalled()
+    expect(gate.active).toBe(1)
+    // Another file there still runs.
+    await expect(
+      runImportSourceOperation(async () => 'ok', {
+        key: drive,
+        file: '/c/Pictures/b.jpg',
+        timeoutMs: 1_000,
+        gate
+      })
+    ).resolves.toBe('ok')
+    downloaded()
+    await vi.waitFor(() => expect(gate.active).toBe(0))
+    // Once its call returned, the file is served again.
+    await expect(
+      runImportSourceOperation(retry, {
+        key: drive,
+        file: '/c/OneDrive/a.jpg',
+        timeoutMs: 1_000,
+        gate
+      })
+    ).resolves.toBe('ran')
+  })
+
+  it('keeps serving a drive whose two slow files are past their deadline while it answers for the others', async () => {
+    const gate = createImportSourceGate({ onSaturated: () => undefined })
+    const drive = 'c:'
+    const releases: Array<() => void> = []
+    const downloading = () => new Promise<string>((resolve) => releases.push(() => resolve('late')))
+    const onDrive = (file: string, operation: () => Promise<string>, timeoutMs = 1_000) =>
+      runImportSourceOperation(operation, { key: drive, file, timeoutMs, gate })
+    // Two online-only photos imported one after another: each one's metadata answers, its
+    // read waits for the download past the deadline.
+    for (const photo of ['/c/OneDrive/one.jpg', '/c/OneDrive/two.jpg']) {
+      await expect(onDrive(photo, async () => 'stat')).resolves.toBe('stat')
+      await expect(onDrive(photo, downloading, 30)).rejects.toMatchObject({
+        code: 'MANAGED_MEDIA_IMPORT_TIMEOUT'
+      })
+    }
+    expect(gate.overdue).toBe(2)
+    // A local photo on the same drive is imported, promptly.
+    const startedAt = performance.now()
+    const local = vi.fn(async () => 'local')
+    await expect(onDrive('/c/Pictures/local.jpg', local)).resolves.toBe('local')
+    expect(local).toHaveBeenCalledOnce()
+    expect(performance.now() - startedAt).toBeLessThan(500)
+    // Threads stay bounded: one slot more for the drive, and never more than the app's three.
+    let finishLocal!: () => void
+    const held = onDrive(
+      '/c/Pictures/held.jpg',
+      () => new Promise<string>((resolve) => (finishLocal = () => resolve('held')))
+    )
+    await vi.waitFor(() => expect(gate.active).toBe(IMPORT_SOURCE_MAX_CALLS))
+    const queued = vi.fn(async () => 'queued')
+    const elsewhere = vi.fn(async () => 'elsewhere')
+    const waiting = [
+      onDrive('/c/Pictures/next.jpg', queued),
+      runImportSourceOperation(elsewhere, { key: '/d', timeoutMs: 1_000, gate })
+    ]
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(queued).not.toHaveBeenCalled()
+    expect(elsewhere).not.toHaveBeenCalled()
+    expect(gate.active).toBe(IMPORT_SOURCE_MAX_CALLS)
+    finishLocal()
+    await expect(held).resolves.toBe('held')
+    await expect(Promise.all(waiting)).resolves.toEqual(['queued', 'elsewhere'])
+    releases.forEach((release) => release())
+    await vi.waitFor(() => expect(gate.active).toBe(0))
+  })
+
   it('counts a call cut by its copy cap as overdue once it stays stuck: nothing waits forever', async () => {
     const gate = createImportSourceGate({ onSaturated: () => undefined })
     const releases: Array<() => void> = []
@@ -866,6 +955,71 @@ describe('a slow but working source is never cut, a stalled one is', () => {
     })
     await expect(importFrom(healthy)).resolves.toMatchObject({ reference: { kind: 'managed' } })
     finishDownload()
+    await stagingIsEmpty()
+  })
+
+  it('grants and imports a healthy file next to two slow ones, and refuses a retry of a slow one at once', async () => {
+    const slow = ['cloud-one.png', 'cloud-two.png'].map((name) => path.join(root, name))
+    const healthy = path.join(root, 'local.png')
+    for (const file of [...slow, healthy]) await fs.writeFile(file, PNG)
+    let finishDownload!: () => void
+    const download = new Promise<void>((resolve) => (finishDownload = resolve))
+    // Each placeholder's first read waits for its download, longer than the deadline.
+    const slowFs = {
+      ...fs,
+      open: (async (...args: Parameters<typeof fs.open>) => {
+        const handle = await fs.open(...args)
+        if (!slow.includes(String(args[0]))) return handle
+        return new Proxy(handle, {
+          get(target, property) {
+            if (property === 'read')
+              return async (...readArgs: Parameters<Handle['read']>) => {
+                await download
+                return (target.read as Handle['read'])(...readArgs)
+              }
+            const value = Reflect.get(target, property) as unknown
+            return typeof value === 'function' ? value.bind(target) : value
+          }
+        })
+      }) as typeof fs.open
+    } as typeof fs
+    const guard = {
+      operationTimeoutMs: 80,
+      copyBaseTimeoutMs: 60_000,
+      copyMinBytesPerSecond: 64 * 1024
+    }
+    const importFrom = (sourcePath: string) =>
+      importManagedMediaFile(
+        {
+          chatMediaRoot: media,
+          sourcePath,
+          mimeType: 'image/png',
+          originalFileName: path.basename(sourcePath),
+          provenance: { source: 'test' },
+          sourceGuard: guard
+        },
+        { authorizedRoot: media, fs: slowFs }
+      )
+    try {
+      // Picked together, imported one after another: both placeholders time out on their read.
+      for (const file of slow)
+        await expect(importFrom(file)).rejects.toMatchObject({
+          code: 'MANAGED_MEDIA_IMPORT_TIMEOUT'
+        })
+      // The local photo in the same folder is still granted and imported.
+      await expect(
+        grantLocalMediaImportFile(healthy, 'image/png', { timeoutMs: 1_000 })
+      ).resolves.toEqual({ path: healthy, sizeBytes: PNG.length })
+      await expect(importFrom(healthy)).resolves.toMatchObject({ reference: { kind: 'managed' } })
+      // Trying a placeholder again while its read still hangs: refused at once, no call made.
+      const realpath = vi.fn((value: string) => fs.realpath(value))
+      await expect(
+        grantLocalMediaImportFile(slow[0], 'image/png', { realpath, timeoutMs: 1_000 })
+      ).resolves.toEqual({ refused: 'timeout' })
+      expect(realpath).not.toHaveBeenCalled()
+    } finally {
+      finishDownload()
+    }
     await stagingIsEmpty()
   })
 

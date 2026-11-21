@@ -47,6 +47,14 @@ import {
   type LocalMediaRoot
 } from '../localMediaAccess'
 import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
+import { CHAT_IMAGE_ATTACHMENT_MAX_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
+import {
+  DEFAULT_IMPORT_SOURCE_GUARD,
+  importSourceRootKey,
+  readImportSourceFile,
+  type ImportSourceGate,
+  type ImportSourceGuard
+} from '../llmProxy/managedMediaStore'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 
@@ -574,7 +582,16 @@ const reserveCanvasMirrorSpace = async (
   return step
 }
 
+/** How readImageFromPath reads a read-granted file (a mapped network drive); for tests. */
+export type FsSvcImplDependencies = {
+  importSourceGuard?: ImportSourceGuard
+  importSourceGate?: ImportSourceGate
+  importSourceFs?: typeof fs
+}
+
 export class FsSvcImpl implements FsSvc {
+  constructor(private readonly dependencies: FsSvcImplDependencies = {}) {}
+
   listImagesInFolder = async (req: ListImagesInFolderReq): Promise<ListImagesInFolderResp> => {
     const { folderPath } = req
 
@@ -723,15 +740,6 @@ export class FsSvcImpl implements FsSvc {
   }
 
   readImageFromPath = async (req: ReadImageFromPathReq): Promise<ReadImageFromPathResp> => {
-    const storageState = getCurrentUserDataDirectoryState()
-    // The temp media folder only once verified as main's own private directory.
-    const authorizedPath = resolveAuthorizedLocalMediaPath(req.fullPath, [
-      app.getPath('userData'),
-      ...getVerifiedLocalMediaTempRoots(),
-      storageState.projectRoot,
-      storageState.autoSaveRoot
-    ])
-
     if (
       req.maxBytes !== undefined &&
       (!Number.isSafeInteger(req.maxBytes) ||
@@ -743,36 +751,68 @@ export class FsSvcImpl implements FsSvc {
     const maxBytes = Math.min(MAX_FULL_FILE_BYTES, req.maxBytes ?? MAX_FULL_FILE_BYTES)
 
     // A file the user dropped from a mapped network drive is read once under its one-use
-    // read grant (spent only by a valid request).
-    const readGrant = authorizedPath ? null : consumeLocalMediaReadGrant(req.fullPath)
-    const fullPath = authorizedPath ?? readGrant?.canonicalPath
+    // read grant (spent only by a valid request). The grant is found by the dropped path's
+    // text and names the canonical path main resolved when it granted the read, so nothing
+    // here touches the share on main's event loop; the read itself runs under the import-source
+    // gate, each call with its deadline, like an import's. It is an image for the composer:
+    // never more than its image limit, nor than the size main measured when it granted it.
+    const readGrant = consumeLocalMediaReadGrant(req.fullPath)
+    if (readGrant) {
+      try {
+        const buffer = await readImportSourceFile(readGrant.canonicalPath, {
+          maxBytes: Math.min(
+            maxBytes,
+            readGrant.sizeBytes ?? maxBytes,
+            CHAT_IMAGE_ATTACHMENT_MAX_BYTES
+          ),
+          guard: this.dependencies.importSourceGuard ?? DEFAULT_IMPORT_SOURCE_GUARD,
+          key: importSourceRootKey(readGrant.requestedPath),
+          file: readGrant.requestedPath,
+          ...(this.dependencies.importSourceGate
+            ? { gate: this.dependencies.importSourceGate }
+            : {}),
+          ...(this.dependencies.importSourceFs ? { fs: this.dependencies.importSourceFs } : {})
+        })
+        return {
+          image: new Uint8Array(buffer),
+          filename: path.basename(readGrant.canonicalPath)
+        }
+      } finally {
+        // The next file of the same drop may now be read.
+        readGrant.finished()
+      }
+    }
+
+    const storageState = getCurrentUserDataDirectoryState()
+    // The temp media folder only once verified as main's own private directory.
+    const fullPath = resolveAuthorizedLocalMediaPath(req.fullPath, [
+      app.getPath('userData'),
+      ...getVerifiedLocalMediaTempRoots(),
+      storageState.projectRoot,
+      storageState.autoSaveRoot
+    ])
     if (!fullPath) {
       throw new Error('Local image path is not authorized')
     }
 
-    try {
-      if (!(await pathExists(fullPath))) {
-        throw new Error(`File not found: ${fullPath}`)
-      }
+    if (!(await pathExists(fullPath))) {
+      throw new Error(`File not found: ${fullPath}`)
+    }
 
-      let buffer: Buffer
-      if (req.maxBytes !== undefined) {
-        buffer = await readImageFileWithinByteBudget(fullPath, maxBytes)
-      } else {
-        await assertReadableFileWithinLimit(fullPath, maxBytes)
-        buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
-      }
-      // A file may grow after stat; never return an oversized IPC payload.
-      requireBoundedPayload(buffer, maxBytes, 'Image')
-      const filename = path.basename(fullPath)
+    let buffer: Buffer
+    if (req.maxBytes !== undefined) {
+      buffer = await readImageFileWithinByteBudget(fullPath, maxBytes)
+    } else {
+      await assertReadableFileWithinLimit(fullPath, maxBytes)
+      buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
+    }
+    // A file may grow after stat; never return an oversized IPC payload.
+    requireBoundedPayload(buffer, maxBytes, 'Image')
+    const filename = path.basename(fullPath)
 
-      return {
-        image: new Uint8Array(buffer),
-        filename
-      }
-    } finally {
-      // The next file of the same drop may now be read.
-      readGrant?.finished()
+    return {
+      image: new Uint8Array(buffer),
+      filename
     }
   }
 

@@ -212,12 +212,23 @@ export function hasLocalMediaTraversal(url: string): boolean {
 
 /**
  * A Windows network (UNC) spelling: two leading separators of either kind (`\\server`,
- * `//server`, `/\server`, `\/server`; device paths such as `\\?\` included). Checked on the
- * raw string: on Windows any filesystem call on such a path contacts the host (SMB, with the
- * user's NTLM credentials), and a host that does not answer blocks the caller.
+ * `//server`, `/\server`, `\/server`; device paths such as `\\?\` included), or the NT
+ * object-namespace prefix (see isWindowsNtNamespaceLocalMediaPath). Checked on the raw string:
+ * on Windows any filesystem call on such a path contacts the host (SMB, with the user's NTLM
+ * credentials), and a host that does not answer blocks the caller.
  */
 export function isWindowsNetworkLocalMediaPath(value: string): boolean {
-  return /^[\\/]{2}/.test(value)
+  return /^[\\/]{2}/.test(value) || isWindowsNtNamespaceLocalMediaPath(value)
+}
+
+/**
+ * The NT object-namespace prefix ('\' + '??' + '\', separators of either kind): Windows file
+ * APIs hand such a path to the object manager as it is, so '\??\UNC\host\share' contacts the
+ * host as a UNC path does. No grant is ever for such a spelling, so it is refused whatever is
+ * scoped (its resolved form, C:\??\..., would otherwise sit inside a picked C:\).
+ */
+function isWindowsNtNamespaceLocalMediaPath(value: string): boolean {
+  return /^[\\/][?]{2}[\\/]/.test(value)
 }
 
 /**
@@ -256,7 +267,9 @@ export function resolveAuthorizedLocalMediaPath(
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) {
     return null
   }
-  // Before any filesystem call: an unsolicited network path never makes main contact its host.
+  // Before any filesystem call: an unsolicited network path never makes main contact its host
+  // (an NT namespace spelling never counts as scoped).
+  if (process.platform === 'win32' && isWindowsNtNamespaceLocalMediaPath(trimmed)) return null
   if (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) return null
 
   const canonical = canonicalizeExistingPath(trimmed)
@@ -306,8 +319,15 @@ type LocalMediaImportGrantEntry = {
   batch?: string
   batchDeadline?: number
   batchWallDeadline?: number
+  /** A read grant: the canonical path main resolved when it granted the read, and reads. */
+  readPath?: string
+  /** A read grant: the file's size main measured then (the read takes no more). */
+  sizeBytes?: number
 }
-/** Canonical-path key -> each grant for that path, oldest first. */
+/**
+ * Path key -> each grant for that path, oldest first: the canonical path of an import grant,
+ * the path the user dropped or picked for a read grant.
+ */
 const localMediaImportGrants = new Map<string, LocalMediaImportGrantEntry[]>()
 /** Drops with an import running now -> how many. */
 const localMediaImportBatchesInUse = new Map<string, number>()
@@ -345,15 +365,24 @@ function pruneLocalMediaImportGrants(now: number, wallNow: number): number {
 /**
  * Records one grant for a canonical path (the caller has canonicalised it and checked that
  * main would import, or read, it). The oldest grants go first when the bound is reached.
- * `batch` names the drop it belongs to.
+ * `batch` names the drop it belongs to. A read grant is found by `requestedPath`, the path the
+ * user dropped or picked (default: the canonical path), as the page names it when it spends
+ * the grant: no filesystem call is needed to find it. `sizeBytes` is the size main measured.
  */
 export function recordLocalMediaImportGrant(
   canonicalPath: string,
   now = localMediaImportGrantClock(),
   kind: LocalMediaImportGrantKind = 'import',
-  { wallNow = localMediaImportGrantWallClock(), batch }: { wallNow?: number; batch?: string } = {}
+  {
+    wallNow = localMediaImportGrantWallClock(),
+    batch,
+    requestedPath,
+    sizeBytes
+  }: { wallNow?: number; batch?: string; requestedPath?: string; sizeBytes?: number } = {}
 ): void {
-  const key = comparisonKey(canonicalPath)
+  const key = comparisonKey(
+    kind === 'read' && requestedPath !== undefined ? path.resolve(requestedPath) : canonicalPath
+  )
   let total = pruneLocalMediaImportGrants(now, wallNow)
   const entries = localMediaImportGrants.get(key) ?? []
   localMediaImportGrants.delete(key)
@@ -369,6 +398,9 @@ export function recordLocalMediaImportGrant(
             batchDeadline: now + LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS,
             batchWallDeadline: wallNow + LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS
           }
+        : {}),
+      ...(kind === 'read'
+        ? { readPath: canonicalPath, ...(sizeBytes !== undefined ? { sizeBytes } : {}) }
         : {})
     }
   ])
@@ -410,14 +442,27 @@ export function spendLocalMediaImportGrant(
   now = localMediaImportGrantClock(),
   wallNow = localMediaImportGrantWallClock()
 ): LocalMediaImportGrantUse | null {
+  return spendLocalMediaGrantEntry(canonicalPath, kind, now, wallNow)?.use ?? null
+}
+
+function spendLocalMediaGrantEntry(
+  keyPath: string,
+  kind: LocalMediaImportGrantKind,
+  now: number,
+  wallNow: number
+): { spent: LocalMediaImportGrantEntry; use: LocalMediaImportGrantUse } | null {
   pruneLocalMediaImportGrants(now, wallNow)
-  const key = comparisonKey(canonicalPath)
+  const key = comparisonKey(keyPath)
   const entries = localMediaImportGrants.get(key)
   const index = entries?.findIndex((entry) => entry.kind === kind) ?? -1
   if (!entries || index < 0) return null
   const [spent] = entries.splice(index, 1)
   if (!entries.length) localMediaImportGrants.delete(key)
-  const batch = spent.batch
+  return { spent, use: batchGrantUse(spent.batch) }
+}
+
+/** The use of a spent grant: its drop's other grants wait while it runs (see above). */
+function batchGrantUse(batch: string | undefined): LocalMediaImportGrantUse {
   if (batch === undefined) return { finished: () => undefined }
   localMediaImportBatchesInUse.set(batch, (localMediaImportBatchesInUse.get(batch) ?? 0) + 1)
   let done = false
@@ -458,22 +503,38 @@ export function consumeLocalMediaImportGrant(
 }
 
 /**
- * The canonical path of `filePath` when a one-use read grant covers it, spending that grant:
- * readImageFromPath may then hand the renderer its bytes once (a file the user dropped from
- * a mapped network drive, within the caller's byte limit). A UNC or device path named by the
- * renderer is refused before any filesystem access.
+ * Spends the one-use read grant of `filePath`, the path the user dropped or picked (a file on
+ * a mapped network drive): readImageFromPath may then hand the renderer its bytes once,
+ * reading `canonicalPath`, which main resolved when it granted the read, and no more than the
+ * `sizeBytes` it measured then. Found by the path's text alone, so nothing touches the
+ * filesystem here (on main's event loop): a share that stopped answering cannot block it. A
+ * UNC or device path named by the renderer is refused.
  */
 export function consumeLocalMediaReadGrant(
   filePath: string,
-  now = localMediaImportGrantClock()
-): (LocalMediaImportGrantUse & { canonicalPath: string }) | null {
+  now = localMediaImportGrantClock(),
+  wallNow = localMediaImportGrantWallClock()
+):
+  | (LocalMediaImportGrantUse & {
+      canonicalPath: string
+      requestedPath: string
+      sizeBytes?: number
+    })
+  | null {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
-  if (trimmed.startsWith('\\\\') || trimmed.startsWith('//')) return null
-  const canonical = canonicalizeExistingPath(trimmed)
-  if (!canonical) return null
-  const use = spendLocalMediaImportGrant(canonical, 'read', now)
-  return use ? { canonicalPath: canonical, finished: use.finished } : null
+  // A read grant is only ever for a plain local path the user dropped or picked.
+  if (isWindowsNetworkLocalMediaPath(trimmed)) return null
+  const requestedPath = path.resolve(trimmed)
+  const granted = spendLocalMediaGrantEntry(requestedPath, 'read', now, wallNow)
+  if (!granted) return null
+  const { readPath, sizeBytes } = granted.spent
+  return {
+    canonicalPath: readPath ?? requestedPath,
+    requestedPath,
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    finished: granted.use.finished
+  }
 }
 
 async function canonicalizeExistingPathAsync(
@@ -518,7 +579,11 @@ export async function authorizeLocalMediaImportSourcePathAsync(
       ? isWindowsNetworkLocalMediaPath(trimmed)
       : trimmed.startsWith('\\\\') || trimmed.startsWith('//')
   // Before any filesystem call on Windows: see resolveAuthorizedLocalMediaPath.
-  if (process.platform === 'win32' && isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) {
+  if (
+    process.platform === 'win32' &&
+    (isWindowsNtNamespaceLocalMediaPath(trimmed) ||
+      (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)))
+  ) {
     return null
   }
   const canonical = await canonicalizeExistingPathAsync(trimmed, realpath)
