@@ -2187,16 +2187,22 @@ describe('real ChatPage member model on the real composer selector', () => {
     fireEvent.click(button)
     return screen.findByRole('menu')
   }
+  // A member's menu is one radio group (the lead's menu is a plain one).
   const rowNames = (menu: HTMLElement): string[] =>
     within(menu)
-      .getAllByRole('menuitem')
+      .getAllByRole('menuitemradio')
       .map((item) => item.textContent ?? '?')
-  // The row of the model in use (MUI's selected state: the tint, and the focus on open).
-  const markedRows = (menu: HTMLElement): string[] =>
-    within(menu)
-      .getAllByRole('menuitem')
-      .filter((item) => item.classList.contains('Mui-selected'))
-      .map((item) => item.textContent ?? '?')
+  // The row of the model in use: checked for a screen reader, and MUI's selected state on screen
+  // (the tint, and the focus on open). The two always agree.
+  const markedRows = (menu: HTMLElement): string[] => {
+    const rows = within(menu).getAllByRole('menuitemradio')
+    const checked = within(menu).queryAllByRole('menuitemradio', { checked: true })
+    expect(rows.filter((item) => item.classList.contains('Mui-selected'))).toEqual(checked)
+    expect(rows.filter((item) => item.getAttribute('aria-checked') === 'false')).toEqual(
+      rows.filter((item) => !checked.includes(item))
+    )
+    return checked.map((item) => item.textContent ?? '?')
+  }
   const closeMenu = async () => {
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
@@ -2233,7 +2239,39 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(within(pillHost).getByTestId('agent-header-team-actions')).toBeInTheDocument()
     expect(within(pillHost).queryByRole('button', { name: /fixture-model/ })).toBeNull()
     const menu = await openMenu(selector)
-    expect(rowNames(menu)).toEqual(['fixture-model', 'fixture-model-b'])
+    expect(
+      within(menu)
+        .getAllByRole('menuitem')
+        .map((item) => item.textContent)
+    ).toEqual(['fixture-model', 'fixture-model-b'])
+    expect(pillHost.contains(menu)).toBe(false)
+    expect(overlayHost.childElementCount).toBe(0)
+    await closeMenu()
+    await page.finish()
+  }, 30000)
+
+  it('gives a member its re-pick and inherit row in the composer, and shows no header pill', async () => {
+    // ChatPage keeps modelInHeader off: the header pill (ChatPrimarySelection headerPill) has no
+    // re-pick for a member whose model is gone and no inherit row. Turning it on fails here.
+    const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+    const page = await mountTeam({
+      profiles: [A, C],
+      beforePage: (idb) => {
+        const row = structuredClone(rawRow(idb, 'designer')!)
+        row.memberModelChoice = { version: 1, profileId: B.id }
+        idb.seedRows(SESSION_STORE, [{ key: storageKey('designer'), value: row }])
+      }
+    })
+    const unavailable = await openConversation(page, 'designer', 'Member model unavailable')
+    expect(unavailable).toBeEnabled()
+    expect(screen.queryByTestId('chat-model-pill')).toBeNull()
+    expect(within(pillHost).getByTestId('agent-header-team-actions')).toBeInTheDocument()
+    const menu = await openMenu(unavailable)
+    expect(rowNames(menu)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-c'
+    ])
     expect(pillHost.contains(menu)).toBe(false)
     expect(overlayHost.childElementCount).toBe(0)
     await closeMenu()
@@ -2252,7 +2290,7 @@ describe('real ChatPage member model on the real composer selector', () => {
       'fixture-model-b'
     ])
     expect(markedRows(menu)).toEqual([inheritRow('fixture-model')])
-    fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-b' }))
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'fixture-model-b' }))
     await waitFor(async () =>
       expect((await page.stored('designer'))?.memberModelChoice).toEqual({
         version: 1,
@@ -2299,7 +2337,7 @@ describe('real ChatPage member model on the real composer selector', () => {
   it('keeps a member pick across a restart: the picked member uses it, the lead and the other member do not', async () => {
     const first = await mountTeam()
     const menu = await openMenu(await openConversation(first, 'designer', INHERITED))
-    fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-b' }))
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'fixture-model-b' }))
     await waitFor(async () =>
       expect((await first.stored('designer'))?.memberModelChoice).toEqual({
         version: 1,
@@ -2361,7 +2399,7 @@ describe('real ChatPage member model on the real composer selector', () => {
     await page.finish()
   }, 30000)
 
-  it('keeps a member marker of a newer build closed: no pick, no request, the record unchanged', async () => {
+  it('keeps a member marker of a newer build closed: no pick, no request; the marker and every other field stay unchanged, only the guarded draft save adds the kept text', async () => {
     let seeded: Record<string, unknown> | undefined
     const page = await mountTeam({
       beforePage: (idb) => {
@@ -2425,7 +2463,7 @@ describe('real ChatPage member model on the real composer selector', () => {
       'fixture-model-c'
     ])
     expect(markedRows(menu)).toEqual([])
-    fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-c' }))
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'fixture-model-c' }))
     await waitFor(async () =>
       expect((await page.stored('designer'))?.memberModelChoice).toEqual({
         version: 1,
@@ -2447,11 +2485,114 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(channelDeniedAttempts()).toEqual([])
   }, 30000)
 
+  it.each([
+    ['held as the restart restored it', false],
+    ['paused after a resume was refused', true]
+  ])(
+    'lets a member whose model is gone after a restart pick again while its queued text waits (%s), and sends that text with the new model',
+    async (_case, refuseFirst) => {
+      const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+      const UNAVAILABLE = 'Member model unavailable'
+      const QUEUED = 'queued designer fixture'
+      const model: FakeModel = ({ request, lastUserText }) =>
+        lastUserText.includes('hold designer busy')
+          ? // Never answers: only Stop ends this request.
+            new Promise<ModelStep>(() => undefined)
+          : { text: `${request.conversationId} reply fixture` }
+      const queueItem = (): HTMLElement =>
+        within(screen.getByRole('region', { name: 'chat.queue_region' })).getByTestId(
+          'chat-queue-item'
+        )
+      const resumeQueued = async () => {
+        fireEvent.click(within(queueItem()).getByRole('button', { name: 'chat.queue_edit' }))
+        fireEvent.click(await within(queueItem()).findByRole('button', { name: 'chat.queue_save' }))
+      }
+
+      // The designer runs on its own model; the person queues more text for it, then stops it.
+      const first = await mountTeam({ model })
+      const menu = await openMenu(await openConversation(first, 'designer', INHERITED))
+      fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'fixture-model-b' }))
+      await within(slot()).findByRole('button', { name: SELECTED })
+      first.send('hold designer busy')
+      await waitFor(() => expect(requestProfiles(first, 'designer')).toEqual([B.id]))
+      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: QUEUED } })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
+      await waitFor(() => expect(queueItem()).toHaveTextContent(QUEUED))
+      fireEvent.click(await screen.findByRole('button', { name: 'chat.stop_generating' }))
+      await waitFor(() => expect(first.main.cancelledRuns).toEqual(['designer']))
+      await waitFor(async () =>
+        expect(
+          (await first.stored('designer'))?.draft?.queuedSends?.map((item) => item.content)
+        ).toEqual([QUEUED])
+      )
+      await first.finish()
+
+      // A restart without that model: the queued text comes back held, the member's model is gone.
+      const second = await mountTeam({ model, profiles: [A, C], storage: first.idb })
+      await openConversation(second, 'designer', UNAVAILABLE)
+      await waitFor(() => expect(queueItem()).toHaveAttribute('data-status', 'held'))
+      expect(queueItem()).toHaveTextContent(QUEUED)
+      if (refuseFirst) {
+        // Resuming it now is refused (no usable model); it stays, paused.
+        await resumeQueued()
+        await waitFor(() => expect(h.notify).toHaveBeenCalledWith('Team lead unavailable.'))
+        await waitFor(() => expect(queueItem()).toHaveAttribute('data-status', 'paused'))
+      }
+      await quietPuts(second)
+      expect(requestProfiles(second, 'designer')).toEqual([])
+
+      // The pick goes through while the paused text waits for the person.
+      const repick = await openMenu(within(slot()).getByRole('button', { name: UNAVAILABLE }))
+      fireEvent.click(within(repick).getByRole('menuitemradio', { name: 'fixture-model-c' }))
+      await waitFor(async () =>
+        expect((await second.stored('designer'))?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: C.id
+        })
+      )
+      await within(slot()).findByRole('button', { name: SELECTED })
+      expect(queueItem()).toHaveTextContent(QUEUED)
+      expect(requestProfiles(second, 'designer')).toEqual([])
+
+      // Resumed by the person, the text goes out once, on the model just picked.
+      await resumeQueued()
+      await waitFor(() => expect(requestProfiles(second, 'designer')).toEqual([C.id]))
+      expect(
+        textOf(
+          second.main.chatRequests
+            .find((request) => request.conversationId === 'designer')
+            ?.messages.at(-1)?.content
+        )
+      ).toContain(QUEUED)
+      await waitFor(async () =>
+        expect(
+          (await second.stored('designer'))?.messages.map((message) => [
+            message.role,
+            message.content
+          ])
+        ).toEqual(
+          expect.arrayContaining([
+            ['user', QUEUED],
+            ['assistant', 'designer reply fixture']
+          ])
+        )
+      )
+      await waitFor(() =>
+        expect(screen.queryByRole('region', { name: 'chat.queue_region' })).toBeNull()
+      )
+      await second.quiesce()
+      expect(requestProfiles(second, 'designer')).toEqual([C.id])
+      expect(h.notify.mock.calls).toEqual(refuseFirst ? [['Team lead unavailable.']] : [])
+      expect(channelDeniedAttempts()).toEqual([])
+    },
+    60000
+  )
+
   it('lets a member inherit the lead again: it follows the lead model, across a restart too', async () => {
     const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
     const pick = async (page: ChannelPage, name: string, row: string, label: string) => {
       const menu = await openMenu(await openConversation(page, name, INHERITED))
-      fireEvent.click(within(menu).getByRole('menuitem', { name: row }))
+      fireEvent.click(within(menu).getByRole('menuitemradio', { name: row }))
       await within(slot()).findByRole('button', { name: label })
     }
     const first = await mountTeam({ profiles: [A, B, C] })
@@ -2460,7 +2601,7 @@ describe('real ChatPage member model on the real composer selector', () => {
     // The designer follows the lead again.
     const menu = await openMenu(await openConversation(first, 'designer', SELECTED))
     expect(markedRows(menu)).toEqual(['fixture-model-b'])
-    const inherit = within(menu).getAllByRole('menuitem')[0]
+    const inherit = within(menu).getAllByRole('menuitemradio')[0]
     expect(inherit).toHaveTextContent(inheritRow('fixture-model'))
     fireEvent.click(inherit)
     await within(slot()).findByRole('button', { name: INHERITED })

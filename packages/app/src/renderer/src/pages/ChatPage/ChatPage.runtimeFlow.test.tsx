@@ -459,6 +459,10 @@ vi.mock('./chatStorage', async (importOriginal) => {
           !actual.normalizedSessionsEqual(member, input.expectedMember, input.scope)
         )
           throw new Error('Team changed')
+        // As the real call: a clear of a member with no choice writes nothing and hands the
+        // stored records back as they are.
+        if (input.profileId === null && !Object.hasOwn(member, 'memberModelChoice'))
+          return { lead: cloneValue(lead), member: cloneValue(member) }
         // As the real call: a clear removes the property (never `memberModelChoice: undefined`).
         const { memberModelChoice: _replaced, ...current } = member
         const updated: ChatSession = {
@@ -7545,6 +7549,128 @@ describe('ChatPage runtime workflow integration', () => {
         release()
         page.unmount()
       }
+    })
+
+    describe('answers busy to inheriting and writes nothing', () => {
+      const writer = chosen('inherit-writer', 'writer', 'vision-model')
+      const clickInherit = () => {
+        hoisted.notifyWarningMock.mockClear()
+        fireEvent.click(screen.getByTestId('inherit-member-lead'))
+      }
+      const expectRefused = () => {
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledExactlyOnceWith(
+          'chat.member_model_save_busy'
+        )
+        expect(setTeamMemberModelChoiceInDB).not.toHaveBeenCalled()
+        expect(stored(writer.id)?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'vision-model'
+        })
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+          'selected:Vision Model'
+        )
+      }
+      const externalRun = (loading: boolean) =>
+        act(() => {
+          window.dispatchEvent(
+            new CustomEvent('chat:set-external-loading', {
+              detail: { scope: 'runtime-flow', sessionId: writer.id, loading }
+            })
+          )
+        })
+      const send = (text: string) => {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: text }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      }
+
+      it('while the member is sending', async () => {
+        let release!: () => void
+        const gate = {
+          gate: new Promise<void>((resolve) => {
+            release = resolve
+          }),
+          entered: false
+        }
+        hoisted.teamBeforeDispatchGate.value = gate
+        const page = await openMember([lead, writer], writer.id)
+        try {
+          send('writer task in flight')
+          await waitFor(() => expect(gate.entered).toBe(true))
+          clickInherit()
+          expectRefused()
+        } finally {
+          hoisted.teamBeforeDispatchGate.value = null
+          release()
+          page.unmount()
+        }
+      })
+
+      it('while a Canvas Target run holds the member, and clears once it ended', async () => {
+        const page = await openMember([lead, writer], writer.id)
+        try {
+          await externalRun(true)
+          clickInherit()
+          expectRefused()
+          await externalRun(false)
+          clickInherit()
+          await waitFor(() =>
+            expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+              'inherited:GPT-4o'
+            )
+          )
+          expect(Object.hasOwn(stored(writer.id)!, 'memberModelChoice')).toBe(false)
+          expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+        } finally {
+          await externalRun(false)
+          page.unmount()
+        }
+      })
+
+      it('while a queued item of the member can still go out by itself, and while it is in flight', async () => {
+        const page = await openMember([lead, writer], writer.id)
+        try {
+          // Queued behind a Canvas Target run, then held only by the open editor: when the run
+          // ends the member is idle, and the item goes out as soon as the edit ends.
+          await externalRun(true)
+          send('queued for the writer')
+          const item = await screen.findByTestId('chat-queue-item')
+          expect(item).toHaveTextContent('queued for the writer')
+          expect(item).toHaveAttribute('data-status', 'queued')
+          fireEvent.click(within(item).getByRole('button', { name: 'chat.queue_edit' }))
+          await screen.findByTestId('chat-queue-editor')
+          await externalRun(false)
+          expect(screen.getByTestId('chat-queue-item')).toHaveAttribute('data-status', 'queued')
+          clickInherit()
+          expectRefused()
+          expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+          expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+          // The edit ends: the item is leased and being prepared, and inheriting is still refused.
+          fireEvent.click(screen.getByRole('button', { name: 'chat.queue_discard' }))
+          expect(screen.getByTestId('chat-queue-item')).toHaveAttribute('data-status', 'preparing')
+          clickInherit()
+          expectRefused()
+          await waitFor(() => expect(screen.queryByTestId('chat-queue-item')).toBeNull())
+        } finally {
+          await externalRun(false)
+          page.unmount()
+        }
+      })
+    })
+
+    it('has a storage stand-in that, as the real call, writes nothing for a clear of a member with no choice', async () => {
+      const { memberModelChoice: _choice, ...writer } = chosen('inherit-writer', 'writer', 'x')
+      hoisted.storedSessions.value = structuredClone([lead, writer])
+      const before = hoisted.storedSessions.value
+      const result = await setTeamMemberModelChoiceInDB({
+        scope: 'runtime-flow',
+        expectedLead: lead,
+        expectedMember: writer,
+        profileId: null
+      })
+      expect(hoisted.storedSessions.value).toBe(before)
+      expect(result).toEqual({ lead, member: writer })
     })
 
     it.each(['hidden', 'unmounted'] as const)(

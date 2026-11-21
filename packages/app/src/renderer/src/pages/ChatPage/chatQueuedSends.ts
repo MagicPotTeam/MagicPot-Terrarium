@@ -100,6 +100,18 @@ export const nextDrainableSend = <T extends QueuedSendState>(
   return next && !next.paused && !next.inFlight ? next : undefined
 }
 
+/**
+ * True while the queue may still send something without the person: an item is being prepared
+ * (in flight or leased), or a drain could start one now (neither held nor paused, with no paused
+ * item before it). Everything else waits for the person's own action (Edit or Remove, or their own
+ * send for a Stop hold), and the send that action leads to runs every send-time check again.
+ */
+export const queueSendsWithoutUserAction = (
+  queue: readonly QueuedSendState[] | undefined
+): boolean =>
+  Boolean(queue?.some((item) => item.inFlight || item.leaseId !== undefined)) ||
+  nextDrainableSend(queue) !== undefined
+
 /** The queue with the given item leased under a fresh token. */
 export const leaseQueuedSend = <T extends QueuedSendState>(
   queue: readonly T[],

@@ -25,11 +25,17 @@ const base = {
   availableProfiles: profiles,
   selectedSkillLabel: ''
 }
-const rows = () => screen.getAllByRole('menuitem')
-const marked = () =>
-  rows()
-    .filter((row) => row.classList.contains('Mui-selected'))
-    .map((row) => row.textContent)
+// The rows are one radio group: the row in use is checked for a screen reader and tinted (MUI's
+// selected state) on screen, and the two always agree.
+const rows = () => screen.getAllByRole('menuitemradio')
+const marked = () => {
+  for (const row of rows()) expect(['true', 'false']).toContain(row.getAttribute('aria-checked'))
+  const checked = rows().filter((row) => row.getAttribute('aria-checked') === 'true')
+  expect(rows().filter((row) => row.classList.contains('Mui-selected'))).toEqual(checked)
+  expect(screen.queryAllByRole('menuitemradio', { checked: true })).toEqual(checked)
+  expect(screen.queryAllByRole('menuitem')).toEqual([])
+  return checked.map((row) => row.textContent)
+}
 
 describe('ChatPrimarySelection member model in the composer', () => {
   it('lets a member whose model can no longer be used pick one of the offered models', () => {
@@ -54,7 +60,7 @@ describe('ChatPrimarySelection member model in the composer', () => {
     // Nothing is in use, so nothing is marked and nothing is picked for the person.
     expect(marked()).toEqual([])
     expect(member).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Other model' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Other model' }))
     expect(member).toHaveBeenCalledExactlyOnceWith('other')
     expect(ordinary).not.toHaveBeenCalled()
   })
@@ -127,10 +133,12 @@ describe('ChatPrimarySelection member model in the composer', () => {
     )
     fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
     expect(marked()).toEqual(['Other model'])
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Other model' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Other model' }))
     expect(member).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
-    fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Lead model' }))
+    fireEvent.click(
+      within(screen.getByRole('menu')).getByRole('menuitemradio', { name: 'Lead model' })
+    )
     expect(member).toHaveBeenCalledExactlyOnceWith('lead')
   })
 
@@ -151,7 +159,7 @@ describe('ChatPrimarySelection member model in the composer', () => {
     )
     fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_inherited' }))
     expect(marked()).toEqual(['Lead model'])
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Lead model' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Lead model' }))
     expect(member).toHaveBeenCalledExactlyOnceWith('lead')
   })
 
@@ -195,7 +203,7 @@ describe('ChatPrimarySelection member model in the composer', () => {
       expect(member).not.toHaveBeenCalled()
       // The lead's own model row still stores an explicit choice.
       fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_inherited' }))
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Lead model' }))
+      fireEvent.click(screen.getByRole('menuitemradio', { name: 'Lead model' }))
       expect(member).toHaveBeenCalledExactlyOnceWith('lead')
     })
 
@@ -248,13 +256,15 @@ describe('ChatPrimarySelection member model in the composer', () => {
         />
       )
       fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
-      const other = screen.getByRole('menuitem', { name: 'Other model' })
+      const other = screen.getByRole('menuitemradio', { name: 'Other model' })
       expect(other).toHaveFocus()
       fireEvent.keyDown(other, { key: 'ArrowDown' })
       expect(inheritRow()).toHaveFocus()
       fireEvent.keyDown(inheritRow(), { key: 'ArrowDown' })
-      expect(screen.getByRole('menuitem', { name: 'Lead model' })).toHaveFocus()
-      fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Lead model' }), { key: 'ArrowUp' })
+      expect(screen.getByRole('menuitemradio', { name: 'Lead model' })).toHaveFocus()
+      fireEvent.keyDown(screen.getByRole('menuitemradio', { name: 'Lead model' }), {
+        key: 'ArrowUp'
+      })
       expect(inheritRow()).toHaveFocus()
     })
 
@@ -281,10 +291,10 @@ describe('ChatPrimarySelection member model in the composer', () => {
       )
       fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
       expect(rows()).toHaveLength(6)
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Lookalike one' }))
+      fireEvent.click(screen.getByRole('menuitemradio', { name: 'Lookalike one' }))
       expect(member).toHaveBeenCalledExactlyOnceWith('inherit-lead')
       fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Lookalike two' }))
+      fireEvent.click(screen.getByRole('menuitemradio', { name: 'Lookalike two' }))
       expect(member).toHaveBeenLastCalledWith('profile:inherit-lead')
       expect(inherit).not.toHaveBeenCalled()
       fireEvent.click(screen.getByRole('button', { name: 'chat.member_model_selected' }))
