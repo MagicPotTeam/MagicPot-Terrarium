@@ -107,12 +107,14 @@ const enqueue = (
     ...patch
   })
 const unarchived = (eventStore: MagicAgentEventStore) => eventStore.countResources({ kind: KIND })
-const drain = (store: TriggerOccurrenceStore, now: number) => {
+// Polls that claim nothing, so only their archiving acts. Returns how many records they archived.
+const drain = (eventStore: MagicAgentEventStore, store: TriggerOccurrenceStore, now: number) => {
   let total = 0
   for (;;) {
-    const archived = store.archiveTerminal(now)
-    total += archived
-    if (archived < TRIGGER_OCCURRENCE_ARCHIVE_BATCH) return total
+    const before = unarchived(eventStore)
+    const { backlog } = store.poll({ now, owner: 'archiver', leaseMs: 1, eligible: () => false })
+    total += before - unarchived(eventStore)
+    if (!backlog) return total
   }
 }
 // Rows the store decoded through listResources, the only bulk read it makes.
@@ -192,7 +194,7 @@ describe('TriggerOccurrenceStore archiving', () => {
       seedTerminal(eventStore, 20, { from: 400, status: 'failed', prefix: 'failed' })
       enqueue(store, 'live', 1_000)
       expect(unarchived(eventStore)).toBe(272)
-      const archived = drain(store, 2_000)
+      const archived = drain(eventStore, store, 2_000)
       const left = unarchived(eventStore)
       expect(archived).toBe(272 - left)
       expect(left).toBeGreaterThanOrEqual(TRIGGER_OCCURRENCE_ARCHIVE_DOWN_TO)
@@ -216,7 +218,7 @@ describe('TriggerOccurrenceStore archiving', () => {
       expect(store.list().every((item) => !item.deleted)).toBe(true)
       expect(store.list()).toHaveLength(left)
       // Below the high-water mark nothing more is archived.
-      expect(store.archiveTerminal(3_000)).toBe(0)
+      expect(drain(eventStore, store, 3_000)).toBe(0)
     } finally {
       eventStore.close()
     }
@@ -229,7 +231,7 @@ describe('TriggerOccurrenceStore archiving', () => {
     store.claimNext(10, 'worker', 100)
     const completed = store.complete('done', 'worker', 11)
     seedTerminal(eventStore, 300, { from: 20 })
-    drain(store, 12)
+    drain(eventStore, store, 12)
     const archived = store.get('done')
     expect(archived).toMatchObject({ deleted: true, revision: completed.revision + 1 })
     expect(archived?.state).toEqual(completed.state)
@@ -255,6 +257,27 @@ describe('TriggerOccurrenceStore archiving', () => {
     }
   })
 
+  it('writes a minimal archive event; the row and the receipt keep the final state', () => {
+    const { eventStore, store } = open()
+    try {
+      enqueue(store, 'done', 10)
+      store.claimNext(10, 'worker', 100)
+      const completed = store.complete('done', 'worker', 11)
+      seedTerminal(eventStore, 300, { from: 20 })
+      drain(eventStore, store, 12)
+      const events = eventStore.readStream(`${KIND}:done`)
+      expect(events.map((item) => item.type).at(-1)).toBe('occurrence.archived')
+      // No reader needs the state twice more per archived record: it is in the row and receipt.
+      expect(events.at(-1)?.payload).toEqual({ status: 'completed' })
+      expect(store.get('done')?.state).toEqual(completed.state)
+      expect(eventStore.listResourceMutations(KIND, 'done', 10).at(-1)?.resource.state).toEqual(
+        completed.state
+      )
+    } finally {
+      eventStore.close()
+    }
+  })
+
   it('leaves an older build no way to duplicate an archived occurrence', () => {
     const { eventStore, store } = open()
     try {
@@ -262,7 +285,7 @@ describe('TriggerOccurrenceStore archiving', () => {
       store.claimNext(10, 'worker', 100)
       store.complete('done', 'worker', 11)
       seedTerminal(eventStore, 300, { from: 20 })
-      drain(store, 12)
+      drain(eventStore, store, 12)
       // An older build reads without archived records and so re-sends the original create.
       expect(eventStore.getResource(KIND, 'done')).toBeUndefined()
       const [created] = eventStore.listResourceMutations(KIND, 'done', 1)
@@ -293,10 +316,11 @@ describe('TriggerOccurrenceStore archiving', () => {
       const batch = vi.spyOn(eventStore, 'mutateResourcesBatch').mockImplementationOnce(() => {
         throw new ResourceRevisionConflictError(KIND, 'old-0')
       })
-      expect(store.archiveTerminal(5)).toBe(0)
+      // A lost race is not a failure to report: the batch rolled back, the next poll retries.
+      expect(store.poll({ now: 5, owner: 'archiver', leaseMs: 1 })).toEqual({ backlog: false })
       expect(unarchived(eventStore)).toBe(200)
       batch.mockRestore()
-      expect(drain(store, 5)).toBe(TRIGGER_OCCURRENCE_ARCHIVE_BATCH)
+      expect(drain(eventStore, store, 5)).toBe(TRIGGER_OCCURRENCE_ARCHIVE_BATCH)
       expect(store.get('old-0')).toMatchObject({ deleted: true, updatedAt: 10_000 })
       expect(store.get('old-0')?.state.status).toBe('completed')
     } finally {
@@ -321,20 +345,27 @@ describe('TriggerOccurrenceScheduler with a long history', () => {
     return { scheduler, executed }
   }
 
-  it('drains a backlog once, then reads a bounded number of records per poll', async () => {
+  it('claims a fresh occurrence in every poll while a backlog drains, each poll bounded', async () => {
     const { eventStore, store } = open()
     try {
+      // An upgraded store: thousands of terminal records, all older than the stale horizon.
       seedTerminal(eventStore, 3_000)
-      enqueue(store, 'fresh', 5_000)
-      const clock = { now: 5_000 }
+      const clock = { now: 1_000_000 }
       const { scheduler, executed } = schedulerFor(store, clock)
       const reads = countRowsRead(eventStore)
-      await expect(scheduler.runOnce()).resolves.toBe(true)
-      expect(executed).toEqual(['fresh'])
-      expect(store.get('fresh')?.state.status).toBe('completed')
-      // The drain reads each archived record about once, not the history once per chunk.
-      expect(reads.rows).toBeLessThanOrEqual(3_000 + 2 * TRIGGER_OCCURRENCE_ARCHIVE_ABOVE)
-      expect(unarchived(eventStore)).toBeLessThanOrEqual(TRIGGER_OCCURRENCE_ARCHIVE_ABOVE)
+      let polls = 0
+      while (unarchived(eventStore) > TRIGGER_OCCURRENCE_ARCHIVE_ABOVE && polls < 60) {
+        clock.now += 1_000
+        enqueue(store, `fresh-${polls}`, clock.now)
+        reads.rows = 0
+        await expect(scheduler.runOnce()).resolves.toBe(true)
+        // A page of the backlog plus the recent records; the drain never waits for the claim.
+        expect(reads.rows).toBeLessThanOrEqual(500 + polls + 1)
+        polls += 1
+      }
+      expect(executed).toEqual(Array.from({ length: polls }, (_, index) => `fresh-${index}`))
+      // One archive batch a poll: the backlog is gone in about 3000 / 100 polls.
+      expect(polls).toBeLessThanOrEqual(Math.ceil(3_000 / TRIGGER_OCCURRENCE_ARCHIVE_BATCH) + 2)
       for (let poll = 0; poll < 3; poll += 1) {
         clock.now += 1_000
         enqueue(store, `next-${poll}`, clock.now)
@@ -342,11 +373,11 @@ describe('TriggerOccurrenceScheduler with a long history', () => {
         await expect(scheduler.runOnce()).resolves.toBe(true)
         expect(reads.rows).toBeLessThanOrEqual(TRIGGER_OCCURRENCE_ARCHIVE_ABOVE + 1)
       }
-      expect(executed).toEqual(['fresh', 'next-0', 'next-1', 'next-2'])
+      expect(executed.slice(-3)).toEqual(['next-0', 'next-1', 'next-2'])
     } finally {
       eventStore.close()
     }
-  })
+  }, 30_000)
 
   it('keeps the live index bounded under a steady stream and runs each occurrence once', async () => {
     const { eventStore, store } = open()
@@ -370,7 +401,22 @@ describe('TriggerOccurrenceScheduler with a long history', () => {
     }
   })
 
-  it('stops a backlog drain at stop() without claiming', async () => {
+  it('claims in a direct runOnce() after stop(), whatever the backlog', async () => {
+    const { eventStore, store } = open()
+    try {
+      seedTerminal(eventStore, 400)
+      enqueue(store, 'due', 5_000)
+      const { scheduler, executed } = schedulerFor(store, { now: 5_000 })
+      await scheduler.stop()
+      await expect(scheduler.runOnce()).resolves.toBe(true)
+      expect(executed).toEqual(['due'])
+      expect(store.get('due')?.state.status).toBe('completed')
+    } finally {
+      eventStore.close()
+    }
+  })
+
+  it('lets stop() wait for the poll in flight, which claims during a drain', async () => {
     const { eventStore, store } = open()
     try {
       seedTerminal(eventStore, 1_000)
@@ -378,11 +424,11 @@ describe('TriggerOccurrenceScheduler with a long history', () => {
       const { scheduler, executed } = schedulerFor(store, { now: 5_000 })
       const run = scheduler.runOnce()
       const stopped = scheduler.stop()
-      await expect(run).resolves.toBe(false)
+      await expect(run).resolves.toBe(true)
       await stopped
-      expect(executed).toEqual([])
+      expect(executed).toEqual(['fresh'])
+      expect(store.get('fresh')?.state.status).toBe('completed')
       expect(unarchived(eventStore)).toBe(1_001 - TRIGGER_OCCURRENCE_ARCHIVE_BATCH)
-      expect(store.get('fresh')?.state.status).toBe('pending')
     } finally {
       eventStore.close()
     }
@@ -392,10 +438,12 @@ describe('TriggerOccurrenceScheduler with a long history', () => {
     const { eventStore, store } = open()
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
+      seedTerminal(eventStore, 200)
       enqueue(store, 'fresh', 5_000)
       const failure = new Error('/home/user/private/events.db: record text')
       failure.name = 'SqliteError'
-      vi.spyOn(store, 'archiveTerminal').mockImplementation(() => {
+      // The first batch of the poll is its archive transaction; the claim after it still runs.
+      vi.spyOn(eventStore, 'mutateResourcesBatch').mockImplementationOnce(() => {
         throw failure
       })
       const clock = { now: 5_000 }

@@ -5,7 +5,6 @@ import {
 } from '../../../shared/magicAgentPlatform2/policy'
 import type { MagicAgentEventStore, StoredResource } from '../persistence'
 import {
-  MAX_RESOURCE_MUTATION_BATCH_SIZE,
   ResourceNotFoundError,
   ResourceRevisionConflictError,
   type ResourceCursor
@@ -36,14 +35,27 @@ export const TRIGGER_OCCURRENCE_TERMINAL_STATUSES: ReadonlySet<TriggerOccurrence
   'unknown'
 ])
 /**
- * Live-index retention. Once more than ARCHIVE_ABOVE records are unarchived, a call archives the
- * oldest terminal ones, at most ARCHIVE_BATCH, aiming at ARCHIVE_DOWN_TO. After a drain at most
- * ARCHIVE_ABOVE remain, plus any non-terminal records beyond that. The gap between the two marks
- * batches archive writes instead of one extra write per completion.
+ * Live-index retention. Once more than ARCHIVE_ABOVE records are unarchived, a poll archives the
+ * oldest terminal ones, aiming at ARCHIVE_DOWN_TO. After a drain at most ARCHIVE_ABOVE remain,
+ * plus any non-terminal records beyond that. The gap between the two marks batches archive
+ * writes instead of one extra write per completion.
  */
 export const TRIGGER_OCCURRENCE_ARCHIVE_ABOVE = 128
 export const TRIGGER_OCCURRENCE_ARCHIVE_DOWN_TO = 64
+/**
+ * Most writes of one poll's archive and dead-letter transaction: an archive is one write, a
+ * dead-letter two (the final state, then its archive).
+ */
 export const TRIGGER_OCCURRENCE_ARCHIVE_BATCH = 100
+/**
+ * A pending occurrence due this long and never claimed is stale. A due occurrence is normally
+ * claimed within a poll, so a stale one was stranded (an older build claimed only within its
+ * oldest 1000 records), belongs to a disabled or deleted trigger, or waited out a sleep. As for a
+ * cron catch-up, only the newest maxCatchUpRuns stale occurrences of a trigger still run; older
+ * ones are dead-lettered (final in every build) and archived without running.
+ */
+export const TRIGGER_OCCURRENCE_STALE_AFTER_MS = 10 * 60_000
+/** Rows of the old part of the live index one poll reads; see TriggerOccurrenceStore.poll. */
 const SCAN_PAGE_SIZE = 500
 export type TriggerOccurrenceClaim = Readonly<{
   owner: string
@@ -125,15 +137,70 @@ const outcomeUnknown = (state: TriggerOccurrenceState, now: number): TriggerOccu
 })
 
 const ARCHIVED_EVENT = 'occurrence.archived'
+const DEAD_LETTERED_EVENT = 'occurrence.dead-lettered'
+const STALE_ERROR = Object.freeze({
+  name: 'TriggerOccurrenceStale',
+  message: 'Trigger occurrence went stale before it was claimed.'
+})
+/**
+ * The event store refuses a write stamped before the record's last update, so a clock that stepped
+ * back (or a record stamped by a clock ahead of this one) would make every claim and settlement of
+ * it fail, and a settled dispatch would stay claimed and run again after its lease. Writes are
+ * stamped no earlier than the record; leases, retries and markers still use the caller's clock.
+ */
+const writeTime = (now: number, current: StoredResource<TriggerOccurrenceState>) =>
+  Math.max(now, current.updatedAt)
 const isTerminal = (state: TriggerOccurrenceState) =>
   TRIGGER_OCCURRENCE_TERMINAL_STATUSES.has(state.status)
-const claimOrder = (
-  a: StoredResource<TriggerOccurrenceState>,
-  b: StoredResource<TriggerOccurrenceState>
-) =>
-  a.state.scheduledAt - b.state.scheduledAt ||
-  a.state.requestedAt - b.state.requestedAt ||
-  a.id.localeCompare(b.id)
+type Occurrence = StoredResource<TriggerOccurrenceState>
+type OrderKey = Readonly<{ id: string; scheduledAt: number; requestedAt: number }>
+const orderKey = (item: Occurrence): OrderKey => ({
+  id: item.id,
+  scheduledAt: item.state.scheduledAt,
+  requestedAt: item.state.requestedAt
+})
+// Claim order, oldest first; the newest of a trigger's stale records are the last in it.
+const keyOrder = (a: OrderKey, b: OrderKey) =>
+  a.scheduledAt - b.scheduledAt || a.requestedAt - b.requestedAt || a.id.localeCompare(b.id)
+const claimOrder = (a: Occurrence, b: Occurrence) => keyOrder(orderKey(a), orderKey(b))
+// Never claimed, and both due and last written before `staleBefore`.
+const isStale = (item: Occurrence, staleBefore: number) =>
+  item.state.status === 'pending' &&
+  item.state.attempt === 0 &&
+  item.state.permit === undefined &&
+  item.updatedAt < staleBefore &&
+  item.state.scheduledAt < staleBefore
+const cursorOf = (item: Occurrence): ResourceCursor => ({
+  updatedAt: item.updatedAt,
+  resourceKind: item.kind,
+  resourceId: item.id
+})
+// '!' sorts before every resource kind, so this cursor starts at the first record written at `at`.
+const firstAt = (at: number): ResourceCursor => ({
+  updatedAt: at,
+  resourceKind: '!',
+  resourceId: '!'
+})
+
+export type TriggerOccurrencePollInput = Readonly<{
+  now: number
+  owner: string
+  leaseMs: number
+  maxAttempts?: number
+  /** Whether an occurrence may be claimed now (its trigger exists and is enabled). */
+  eligible?: (state: TriggerOccurrenceState) => boolean
+  /** Whether this store may sweep or dead-letter the record (it may always claim it). */
+  mutable?: (state: TriggerOccurrenceState) => boolean
+  /** The trigger's maxCatchUpRuns: how many of its stale occurrences still run. Default 1. */
+  catchUpRuns?: (triggerId: string) => number
+}>
+export type TriggerOccurrencePollResult = Readonly<{
+  claimed?: StoredResource<TriggerOccurrenceState>
+  /** This poll archived or dead-lettered records and more are left: poll again soon. */
+  backlog: boolean
+  /** Archiving or dead-lettering failed and rolled back; the claim still ran. */
+  maintenanceError?: unknown
+}>
 
 const semantic = (input: {
   occurrenceId: string
@@ -166,70 +233,126 @@ export class TriggerOccurrenceStore {
       limit: 1000
     }) as readonly StoredResource<TriggerOccurrenceState>[]
   }
+  // The pass: a walk over the old part of the live index (records not written for the stale
+  // horizon), a page per poll, and the newest stale records per trigger it has met so far. It is
+  // per store instance; a new instance starts a new pass, which is always safe.
+  private pass: { after?: ResourceCursor; kept: Map<string, OrderKey[]> } = { kept: new Map() }
+  // From the last finished pass: the stale records that may still run, and for each trigger that
+  // filled its quota the oldest of them. A stale record older than that has at least `quota`
+  // newer ones, so it is dead-lettered.
+  private keptStale: ReadonlySet<string> = new Set()
+  private staleFloor: ReadonlyMap<string, Readonly<{ key: OrderKey; quota: number }>> = new Map()
+  private page(after: ResourceCursor | undefined): readonly Occurrence[] {
+    return this.eventStore.listResources({
+      kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
+      limit: SCAN_PAGE_SIZE,
+      ...(after === undefined ? {} : { after })
+    }) as readonly Occurrence[]
+  }
   /**
-   * Every unarchived record, oldest update first, one page in memory at a time. A record only
-   * moves forward in this order (updatedAt never decreases), so none is skipped while paging.
+   * Every unarchived record after `after`, oldest update first, one page in memory at a time. A
+   * record only moves forward in this order (updatedAt never decreases), so none is skipped.
    */
-  private *scanUnarchived(pageSize: number): Generator<StoredResource<TriggerOccurrenceState>> {
-    let after: ResourceCursor | undefined
+  private *scanUnarchived(after: ResourceCursor): Generator<Occurrence> {
     for (;;) {
-      const page = this.eventStore.listResources({
-        kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
-        limit: pageSize,
-        ...(after === undefined ? {} : { after })
-      }) as readonly StoredResource<TriggerOccurrenceState>[]
+      const page = this.page(after)
       yield* page
       const last = page.at(-1)
-      if (page.length < pageSize || last === undefined) return
-      after = { updatedAt: last.updatedAt, resourceKind: last.kind, resourceId: last.id }
+      if (page.length < SCAN_PAGE_SIZE || last === undefined) return
+      after = cursorOf(last)
     }
   }
   /**
-   * Moves the oldest terminal records out of the live index (a soft delete that keeps the final
-   * state, the receipts and the events), so claimNext reads non-terminal records plus a bounded
-   * recent tail instead of the whole history. Bounded work per call: one count, the pages up to
-   * `limit` terminal records, one transaction. Returns how many were archived; `limit` means more
-   * may remain. Claiming never depends on this, it only bounds the cost of claiming.
+   * What one poll reads: a page of the old part (records last written before `staleBefore`) from
+   * where the pass stands, then the whole recent part. In steady state the old part fits in the
+   * page, so a poll reads the live index once. After an upgrade the old part holds the backlog:
+   * the pass walks it a page per poll, while every poll still reads every recent record.
    */
-  archiveTerminal(now: number, limit = TRIGGER_OCCURRENCE_ARCHIVE_BATCH): number {
-    finite(now, 'now')
-    if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RESOURCE_MUTATION_BATCH_SIZE)
-      throw new Error(`limit must be an integer from 1 to ${MAX_RESOURCE_MUTATION_BATCH_SIZE}.`)
-    const unarchived = this.eventStore.countResources({
-      kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND
-    })
-    if (unarchived <= TRIGGER_OCCURRENCE_ARCHIVE_ABOVE) return 0
-    const wanted = Math.min(unarchived - TRIGGER_OCCURRENCE_ARCHIVE_DOWN_TO, limit)
-    const archive: StoredResource<TriggerOccurrenceState>[] = []
-    for (const item of this.scanUnarchived(wanted)) {
-      if (!isTerminal(item.state)) continue
-      archive.push(item)
-      if (archive.length >= wanted) break
-    }
-    if (archive.length === 0) return 0
-    try {
-      this.eventStore.mutateResourcesBatch(
-        archive.map((item) => {
-          // Resource timestamps never decrease; a clock step back must not stall archiving.
-          const at = Math.max(now, item.updatedAt)
-          return {
-            operation: 'delete' as const,
-            kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
-            id: item.id,
-            expectedRevision: item.revision,
-            idempotencyKey: `${item.id}:${ARCHIVED_EVENT}:${item.state.attempt}:${at}`,
-            createdAt: at,
-            event: event(item.id, ARCHIVED_EVENT, at, item.state, item.revision + 1)
-          }
-        })
+  private readPoll(staleBefore: number) {
+    const page = this.page(this.pass.after)
+    let split = page.findIndex((item) => item.updatedAt >= staleBefore)
+    if (split < 0) split = page.length
+    const old = page.slice(0, split)
+    const recent = page.slice(split)
+    const last = page.at(-1)
+    if (last !== undefined && page.length === SCAN_PAGE_SIZE)
+      for (const item of this.scanUnarchived(
+        split < page.length ? cursorOf(last) : firstAt(staleBefore)
+      ))
+        recent.push(item)
+    return { old, recent, passEnds: split < page.length || page.length < SCAN_PAGE_SIZE }
+  }
+  // Moves the pass on after its writes committed; at its end, publishes what it kept.
+  private advancePass(
+    last: Occurrence | undefined,
+    done: boolean,
+    kept: readonly Occurrence[],
+    quota: (triggerId: string) => number
+  ) {
+    for (const item of kept) {
+      const triggerId = item.state.triggerId
+      const newest = (this.pass.kept.get(triggerId) ?? []).filter((key) => key.id !== item.id)
+      newest.push(orderKey(item))
+      this.pass.kept.set(
+        triggerId,
+        newest.sort((a, b) => keyOrder(b, a)).slice(0, quota(triggerId))
       )
-    } catch (error) {
-      // Another store archived one of them first; the whole batch rolled back. Retry next time.
-      if (error instanceof ResourceRevisionConflictError || error instanceof ResourceNotFoundError)
-        return 0
-      throw error
     }
-    return archive.length
+    if (!done) {
+      if (last !== undefined) this.pass.after = cursorOf(last)
+      return
+    }
+    const ids = new Set<string>()
+    const floor = new Map<string, Readonly<{ key: OrderKey; quota: number }>>()
+    for (const [triggerId, keys] of this.pass.kept) {
+      for (const key of keys) ids.add(key.id)
+      const oldest = keys.at(-1)
+      if (oldest !== undefined && keys.length >= quota(triggerId))
+        floor.set(triggerId, { key: oldest, quota: keys.length })
+    }
+    this.keptStale = ids
+    this.staleFloor = floor
+    this.pass = { kept: new Map() }
+  }
+  // Soft delete that keeps the final state, the receipts and the events. The row and the
+  // receipt already hold that state, and nothing reads occurrence events, so the archive event
+  // names only the final status instead of a third copy of the state.
+  private archiveMutation(item: Occurrence, revision: number, now: number) {
+    const at = writeTime(now, item)
+    return {
+      operation: 'delete' as const,
+      kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
+      id: item.id,
+      expectedRevision: revision,
+      idempotencyKey: `${item.id}:${ARCHIVED_EVENT}:${item.state.attempt}:${at}`,
+      createdAt: at,
+      event: event(item.id, ARCHIVED_EVENT, at, { status: item.state.status }, revision + 1)
+    }
+  }
+  // A stale record ends as dead-letter, which every build treats as final, and is archived in
+  // the same transaction so it never comes back into the live index.
+  private deadLetterStale(item: Occurrence, now: number) {
+    const at = writeTime(now, item)
+    const state: TriggerOccurrenceState = {
+      ...withoutExecutionState(item.state),
+      status: 'dead-letter',
+      lastError: STALE_ERROR,
+      updatedAt: at
+    }
+    const deadLettered = { ...item, state, updatedAt: at }
+    return [
+      {
+        operation: 'update' as const,
+        kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
+        id: item.id,
+        expectedRevision: item.revision,
+        idempotencyKey: `${item.id}:${DEAD_LETTERED_EVENT}:${state.attempt}:${now}`,
+        state,
+        createdAt: at,
+        event: event(item.id, DEAD_LETTERED_EVENT, at, state, item.revision + 1)
+      },
+      this.archiveMutation(deadLettered, item.revision + 1, now)
+    ]
   }
   enqueue(input: {
     occurrenceId: string
@@ -292,6 +415,7 @@ export class TriggerOccurrenceStore {
   enqueueManual(input: Omit<Parameters<TriggerOccurrenceStore['enqueue']>[0], 'source'>) {
     return this.enqueue({ ...input, source: 'manual' })
   }
+  /** One poll's claim; a failed archive or dead-letter batch is left to the next call. */
   claimNext(
     now: number,
     owner: string,
@@ -300,41 +424,164 @@ export class TriggerOccurrenceStore {
     eligible?: (state: TriggerOccurrenceState) => boolean,
     mutable?: (state: TriggerOccurrenceState) => boolean
   ): StoredResource<TriggerOccurrenceState> | undefined {
+    return this.poll({
+      now,
+      owner,
+      leaseMs,
+      maxAttempts,
+      ...(eligible === undefined ? {} : { eligible }),
+      ...(mutable === undefined ? {} : { mutable })
+    }).claimed
+  }
+  /**
+   * One scheduler poll: archive and dead-letter a bounded batch, sweep, then claim the first due
+   * occurrence in schedule order. Its work is bounded: a count, one page of the old part of the
+   * live index plus its recent part (see readPoll), one transaction of at most ARCHIVE_BATCH
+   * writes, two sweeps and the claim.
+   * - Terminal records beyond the retained tail are archived, oldest first.
+   * - Stale records are dead-lettered and archived, except the newest `catchUpRuns` of each
+   *   trigger. Those still run, but only once a poll has read the whole old part or a pass over
+   *   it has ended, so that they are known to be the newest; none runs while a long backlog drains.
+   * - While a pass spans polls, an old record is claimable only in the poll that reads it; recent
+   *   records are read by every poll, so a fresh occurrence is claimed at once.
+   * - A failed batch rolls back whole and is reported; the claim still runs.
+   */
+  poll(input: TriggerOccurrencePollInput): TriggerOccurrencePollResult {
+    const { now, owner, leaseMs, maxAttempts = 3, eligible, mutable } = input
     finite(now, 'now')
     required(owner, 'owner')
     finite(leaseMs, 'leaseMs')
     if (leaseMs <= 0) throw new Error('leaseMs must be positive.')
     if (!Number.isInteger(maxAttempts) || maxAttempts <= 0)
       throw new Error('maxAttempts must be a positive integer.')
-    // One pass over every unarchived record, one page in memory. The sweep targets are never
-    // candidates (marked, or out of attempts), so the pre-sweep candidate is the post-sweep one.
-    let expiredMarked: StoredResource<TriggerOccurrenceState> | undefined
-    let expiredMax: StoredResource<TriggerOccurrenceState> | undefined
-    let candidate: StoredResource<TriggerOccurrenceState> | undefined
-    for (const item of this.scanUnarchived(SCAN_PAGE_SIZE)) {
-      const state = item.state
-      if (
-        state.status === 'claimed' &&
-        (state.claim?.expiresAt ?? Infinity) <= now &&
-        (mutable === undefined || mutable(state))
-      ) {
-        // Settle one expired marked claim per call; never-claimable does not depend on this.
-        if (state.permit !== undefined) expiredMarked ??= item
-        else if (state.attempt >= maxAttempts) expiredMax ??= item
+    const quotas = new Map<string, number>()
+    const quota = (triggerId: string) => {
+      let value = quotas.get(triggerId)
+      if (value === undefined) {
+        const runs = input.catchUpRuns?.(triggerId)
+        value = runs !== undefined && Number.isInteger(runs) && runs > 0 ? runs : 1
+        quotas.set(triggerId, value)
       }
-      if (
-        state.permit === undefined &&
-        ((state.status === 'pending' && state.scheduledAt <= now) ||
-          (state.status === 'failed' &&
-            state.scheduledAt <= now &&
-            (state.nextRetryAt ?? Infinity) <= now) ||
-          (state.status === 'claimed' && (state.claim?.expiresAt ?? Infinity) <= now)) &&
-        state.attempt < maxAttempts &&
-        (eligible === undefined || eligible(state)) &&
-        (candidate === undefined || claimOrder(item, candidate) < 0)
-      )
-        candidate = item
+      return value
     }
+    const staleBefore = now - TRIGGER_OCCURRENCE_STALE_AFTER_MS
+    const live = this.eventStore.countResources({
+      kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND
+    })
+    // A poll that reads the old part from its start to its end sees every stale record, so its
+    // own count of the newest per trigger is exact, whatever it manages to write.
+    const fromStart = this.pass.after === undefined
+    const { old, recent, passEnds } = this.readPoll(staleBefore)
+    const seesAllStale = fromStart && passEnds
+    const stale = (item: Occurrence) =>
+      isStale(item, staleBefore) && (mutable === undefined || mutable(item.state))
+    // A stale record goes once its trigger has at least `quota` newer stale ones, in this page or
+    // as the last finished pass found. That never removes one of the newest `quota`.
+    const doomed = new Set<string>()
+    const byTrigger = new Map<string, Occurrence[]>()
+    for (const item of old) {
+      if (!stale(item)) continue
+      const triggerId = item.state.triggerId
+      const floor = this.staleFloor.get(triggerId)
+      if (
+        floor !== undefined &&
+        floor.quota >= quota(triggerId) &&
+        keyOrder(orderKey(item), floor.key) < 0
+      )
+        doomed.add(item.id)
+      else {
+        const items = byTrigger.get(triggerId)
+        if (items) items.push(item)
+        else byTrigger.set(triggerId, [item])
+      }
+    }
+    for (const [triggerId, items] of byTrigger)
+      for (const item of items.sort((a, b) => claimOrder(b, a)).slice(quota(triggerId)))
+        doomed.add(item.id)
+    let room =
+      live > TRIGGER_OCCURRENCE_ARCHIVE_ABOVE ? live - TRIGGER_OCCURRENCE_ARCHIVE_DOWN_TO : 0
+    const deadLetter: Occurrence[] = []
+    const archive: Occurrence[] = []
+    const kept: Occurrence[] = []
+    let full = false
+    const take = (item: Occurrence, into: Occurrence[]) => {
+      const writes = 2 * deadLetter.length + archive.length + (into === deadLetter ? 2 : 1)
+      full = writes > TRIGGER_OCCURRENCE_ARCHIVE_BATCH
+      if (!full) into.push(item)
+      return !full
+    }
+    // The pass stops at the batch limit; the next poll reads on from the last record handled.
+    let processed = 0
+    for (const item of old) {
+      if (doomed.has(item.id)) {
+        if (!take(item, deadLetter)) break
+      } else if (isTerminal(item.state) && room > 0) {
+        if (!take(item, archive)) break
+        room -= 1
+      } else if (stale(item)) kept.push(item)
+      processed += 1
+    }
+    const passDone = passEnds && !full
+    // Recent terminal records are newer than every old one: archived only once the pass is done.
+    if (passDone)
+      for (const item of recent) {
+        if (room === 0) break
+        if (!isTerminal(item.state)) continue
+        if (!take(item, archive)) break
+        room -= 1
+      }
+    const writes = [
+      ...deadLetter.flatMap((item) => this.deadLetterStale(item, now)),
+      ...archive.map((item) => this.archiveMutation(item, item.revision, now))
+    ]
+    let committed = true
+    let maintenanceError: unknown
+    if (writes.length > 0)
+      try {
+        this.eventStore.mutateResourcesBatch(writes)
+      } catch (error) {
+        committed = false
+        // A record changed under this poll (another store or process): the batch rolled back
+        // whole and the next poll reads again. Anything else is reported.
+        if (!(
+          error instanceof ResourceRevisionConflictError || error instanceof ResourceNotFoundError
+        ))
+          maintenanceError = error
+      }
+    if (committed) this.advancePass(old[processed - 1], passDone, kept, quota)
+    // One pass over the records read: the sweep targets are never candidates (marked, or out of
+    // attempts), so the pre-sweep candidate is the post-sweep one.
+    const removed = new Set(archive.map((item) => item.id))
+    let expiredMarked: Occurrence | undefined
+    let expiredMax: Occurrence | undefined
+    let candidate: Occurrence | undefined
+    for (const rows of [old, recent])
+      for (const item of rows) {
+        if (doomed.has(item.id) || removed.has(item.id)) continue
+        const state = item.state
+        if (
+          state.status === 'claimed' &&
+          (state.claim?.expiresAt ?? Infinity) <= now &&
+          (mutable === undefined || mutable(state))
+        ) {
+          // Settle one expired marked claim per call; never-claimable does not depend on this.
+          if (state.permit !== undefined) expiredMarked ??= item
+          else if (state.attempt >= maxAttempts) expiredMax ??= item
+        }
+        if (stale(item) && !seesAllStale && !this.keptStale.has(item.id)) continue
+        if (
+          state.permit === undefined &&
+          ((state.status === 'pending' && state.scheduledAt <= now) ||
+            (state.status === 'failed' &&
+              state.scheduledAt <= now &&
+              (state.nextRetryAt ?? Infinity) <= now) ||
+            (state.status === 'claimed' && (state.claim?.expiresAt ?? Infinity) <= now)) &&
+          state.attempt < maxAttempts &&
+          (eligible === undefined || eligible(state)) &&
+          (candidate === undefined || claimOrder(item, candidate) < 0)
+        )
+          candidate = item
+      }
     if (expiredMarked)
       this.update(
         expiredMarked,
@@ -347,27 +594,34 @@ export class TriggerOccurrenceStore {
         expiredMax,
         { ...withoutExecutionState(expiredMax.state), status: 'dead-letter', updatedAt: now },
         now,
-        'occurrence.dead-lettered'
+        DEAD_LETTERED_EVENT
       )
     }
-    if (!candidate) return undefined
+    const report = {
+      backlog: committed && writes.length > 0 && (full || !passDone),
+      ...(maintenanceError === undefined ? {} : { maintenanceError })
+    }
+    if (!candidate) return report
+    // The lease runs on this clock; the write is stamped no earlier than the record (see update).
+    const at = writeTime(now, candidate)
     const state: TriggerOccurrenceState = {
       ...withoutExecutionState(candidate.state),
       status: 'claimed',
       attempt: candidate.state.attempt + 1,
       claim: { owner, claimedAt: now, expiresAt: now + leaseMs },
-      updatedAt: now
+      updatedAt: at
     }
-    return this.eventStore.mutateResource({
+    const claimed = this.eventStore.mutateResource({
       operation: 'update',
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
       id: candidate.id,
       expectedRevision: candidate.revision,
       idempotencyKey: `${candidate.id}:claim:${owner}:${now}`,
       state,
-      createdAt: now,
-      event: event(candidate.id, 'occurrence.claimed', now, state, candidate.revision + 1)
-    }).resource as StoredResource<TriggerOccurrenceState>
+      createdAt: at,
+      event: event(candidate.id, 'occurrence.claimed', at, state, candidate.revision + 1)
+    }).resource as Occurrence
+    return { ...report, claimed }
   }
   /**
    * Writes the permit marker for the current attempt before the permit is consumed. Needs the
@@ -442,7 +696,7 @@ export class TriggerOccurrenceStore {
       current,
       state,
       now,
-      status === 'dead-letter' ? 'occurrence.dead-lettered' : 'occurrence.failed'
+      status === 'dead-letter' ? DEAD_LETTERED_EVENT : 'occurrence.failed'
     )
   }
   private requireClaim(id: string, owner: string, now: number) {
@@ -480,10 +734,12 @@ export class TriggerOccurrenceStore {
   }
   private update(
     current: StoredResource<TriggerOccurrenceState>,
-    state: TriggerOccurrenceState,
+    next: TriggerOccurrenceState,
     now: number,
     type: string
   ) {
+    const at = writeTime(now, current)
+    const state: TriggerOccurrenceState = { ...next, updatedAt: at }
     return this.eventStore.mutateResource({
       operation: 'update',
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
@@ -491,8 +747,8 @@ export class TriggerOccurrenceStore {
       expectedRevision: current.revision,
       idempotencyKey: `${current.id}:${type}:${state.attempt}:${now}`,
       state,
-      createdAt: now,
-      event: event(current.id, type, now, state, current.revision + 1)
+      createdAt: at,
+      event: event(current.id, type, at, state, current.revision + 1)
     }).resource as StoredResource<TriggerOccurrenceState>
   }
 }
