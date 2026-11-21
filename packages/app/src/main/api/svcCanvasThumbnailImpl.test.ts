@@ -17,12 +17,16 @@ import {
 
 const electronMock = vi.hoisted(() => ({
   userDataRoot: '',
+  isPackaged: false,
   createThumbnailFromPath: vi.fn(),
   createFromPath: vi.fn()
 }))
 
 vi.mock('electron', () => ({
   app: {
+    get isPackaged() {
+      return electronMock.isPackaged
+    },
     getPath: vi.fn((name: string) => {
       if (name === 'temp') return path.join(electronMock.userDataRoot, 'temp')
       if (name !== 'userData') {
@@ -135,6 +139,7 @@ describe('CanvasThumbnailSvcImpl', () => {
   })
 
   afterEach(() => {
+    electronMock.isPackaged = false
     clearScopedLocalMediaPathsForTest()
     fs.rmSync(testRoot, { recursive: true, force: true })
     vol.reset()
@@ -327,6 +332,27 @@ describe('CanvasThumbnailSvcImpl', () => {
       cacheKey: manifest.cacheKey
     })
     expect(read.manifest?.cacheKey).toBe(manifest.cacheKey)
+  })
+
+  it('takes no cache root from the working folder of a packaged app', async () => {
+    // A packaged app is started from anywhere (on macOS from /, so /tmp would count).
+    const cwdRoot = path.join(process.cwd(), 'tmp', `thumbnail-cache-${Math.random()}`)
+    try {
+      electronMock.isPackaged = true
+      await expect(service.getThumbnailCacheRoot({ cacheRootDir: cwdRoot })).rejects.toThrow(
+        /Unsafe canvas thumbnail cache root/
+      )
+      await expect(
+        service.readThumbnailManifest({ cacheKey: 'thumb-0123456789abcdef', cacheRootDir: cwdRoot })
+      ).rejects.toThrow(/Unsafe canvas thumbnail cache root/)
+      expect(fs.existsSync(cwdRoot)).toBe(false)
+      // A development build keeps the repository's test folders.
+      electronMock.isPackaged = false
+      const { cacheRoot } = await service.getThumbnailCacheRoot({ cacheRootDir: cwdRoot })
+      expect(cacheRoot).toBe(fs.realpathSync.native(cwdRoot))
+    } finally {
+      fs.rmSync(cwdRoot, { recursive: true, force: true })
+    }
   })
 
   it('allows an explicit magicpot temp cache root', async () => {

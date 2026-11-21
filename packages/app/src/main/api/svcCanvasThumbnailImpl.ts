@@ -135,12 +135,18 @@ async function findNearestAncestorDir(startPath: string, dirname: string): Promi
   }
 }
 
-/** The bases of an explicit cache root as configured (app and test paths, never the request). */
+/**
+ * The bases of an explicit cache root as configured (app and test paths, never the request).
+ * The repository's test folders only in a development build: a packaged app's working folder
+ * is wherever it was started from (`/` on macOS, so `/tmp`, shared by every user, would count).
+ */
 function getExplicitCacheRootBaseSpellings(defaultCacheRoot: string): string[] {
   const roots = [
     defaultCacheRoot,
     path.dirname(defaultCacheRoot),
-    ...REPO_TEST_CACHE_ROOT_DIRNAMES.map((dirname) => path.join(process.cwd(), dirname))
+    ...(app.isPackaged
+      ? []
+      : REPO_TEST_CACHE_ROOT_DIRNAMES.map((dirname) => path.join(process.cwd(), dirname)))
   ]
   const envTestRoot = process.env.MAGICPOT_TEST_TRASH_ROOT?.trim()
   if (envTestRoot) {
