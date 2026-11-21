@@ -652,10 +652,14 @@ export class ThreadAuthorityStore {
    * 'thread-unknown' | 'thread-stale' | 'thread-revoked' (from the identity),
    * 'subject-has-active-grant' (a grant of this generation with the same subject whose stored
    * status is active and which is not past its expiry), 'capacity' (the generation holds
-   * MAX_RUN_GRANTS_PER_GENERATION grants), 'approval-refused' (the verifier, called once after
-   * every other check with a frozen copy of the values stored, did not return true or threw).
+   * MAX_RUN_GRANTS_PER_GENERATION grants), 'approval-refused' (a grant of this generation with the
+   * same subject carries the same approval proofId, so a paused grant is never resumed with its old
+   * approval; or the verifier, called once after every other check with a frozen copy of the
+   * values stored, did not return true or threw). The verifier must bind the proof to the thread
+   * id and generation it is shown: the store sees only the grants of the current generation.
    * Success is one batch: the identity lists the grant id (closed by the revision read), the grant
-   * and its state (active, nothing used) are created.
+   * and its state (active, nothing used) are created, and a grant of the same subject whose stored
+   * status is active but which is past its expiry (the issue relied on that) is recorded 'expired'.
    */
   issueGrant(request: RunGrantRequest): IssueGrantResult {
     const now = this.now()
@@ -669,18 +673,21 @@ export class ThreadAuthorityStore {
     )
       return { ok: false, reason: 'thread-stale' }
     if (identity.state.status !== 'live') return { ok: false, reason: 'thread-revoked' }
-    const listed = this.loadListedGrants(identity)
-    if (
-      listed.some(
-        (loaded) =>
-          sameSubject(loaded.grant.subject, value.subject) &&
-          loaded.state.status === 'active' &&
-          now < loaded.grant.expiresAt
-      )
+    const sameSubjectGrants = this.loadListedGrants(identity).filter((loaded) =>
+      sameSubject(loaded.grant.subject, value.subject)
     )
+    // Stored active; past this check, every one of them is past its expiry.
+    const lapsed = sameSubjectGrants.filter((loaded) => loaded.state.status === 'active')
+    if (lapsed.some((loaded) => now < loaded.grant.expiresAt))
       return { ok: false, reason: 'subject-has-active-grant' }
     if (identity.state.grants.length >= MAX_RUN_GRANTS_PER_GENERATION)
       return { ok: false, reason: 'capacity' }
+    // Pausing is revoking and there is no resume: the approval of an earlier grant of this subject
+    // in this generation (paused, ended or lapsed) never issues another one, whatever the verifier.
+    if (
+      sameSubjectGrants.some((loaded) => loaded.grant.approval.proofId === value.approval.proofId)
+    )
+      return { ok: false, reason: 'approval-refused' }
     const shown: RunGrantApprovalRequest = freezeDeep({
       target: copyTarget(identity.state.target),
       threadId: value.threadId,
@@ -709,6 +716,14 @@ export class ThreadAuthorityStore {
           row: identity.row,
           state: { ...identity.state, grants: [...identity.state.grants, grantId] }
         },
+        // The new grant exists because these lapsed: record it, so that a clock set back
+        // can never make two grants of one subject usable at once.
+        ...lapsed.map((loaded) => ({
+          kind: RUN_GRANT_STATE_KIND,
+          id: loaded.grant.grantId,
+          row: loaded.stateRow,
+          state: { ...loaded.state, status: 'expired', endedAt: now }
+        })),
         { kind: RUN_GRANT_KIND, id: grantId, state: grant },
         { kind: RUN_GRANT_STATE_KIND, id: grantId, state }
       ],
@@ -775,10 +790,12 @@ export class ThreadAuthorityStore {
    * hard limit exactly succeeds; the next charge on that axis exhausts the grant.
    *
    * A call that throws has an unknown outcome: the caller must count the amount as spent. A
-   * repeat with the same charge id is answered as a replay if the first call committed and the
-   * grant is still active; a replay pays for the work of that first call only, never for new
-   * work. A charge id older than the last RUN_GRANT_CHARGE_HISTORY is charged again: this errs
-   * towards spending, never towards extra budget.
+   * repeat with the same charge id is answered as a replay if the first call committed and every
+   * earlier check still passes (stored active, thread live, clock inside the window). The amounts
+   * of a repeat are not compared: a replay pays for the work of that first call only, never for
+   * new work, so every new piece of work needs a new charge id. A charge id older than the last
+   * RUN_GRANT_CHARGE_HISTORY is charged again: this errs towards spending, never towards extra
+   * budget.
    */
   chargeGrant(
     grantId: string,
