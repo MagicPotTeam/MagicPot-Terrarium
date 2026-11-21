@@ -429,6 +429,7 @@ import {
   queuedSendBlockingNewer,
   queuedSendDrainHead,
   queuedSendWaitsBehindPause,
+  queueSendsWithoutUserAction,
   releaseStopHolds as releaseQueuedStopHolds,
   settleQueueOnStop,
   withoutLease
@@ -7074,7 +7075,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !loadingSessionIdsRef.current.has(member.id) &&
         !sendingSessionIdsRef.current.has(member.id) &&
         !externalLoadingSessionIdsRef.current.has(member.id) &&
-        !queuedSessionSendsRef.current.get(member.id)?.length &&
+        // Only a queued item that can still go out by itself blocks the pick. A paused or held one
+        // (a refused send, a restart) waits for the person, and the send their action leads to
+        // runs every check again with the model picked here; blocking on it left no way out.
+        !queueSendsWithoutUserAction(queuedSessionSendsRef.current.get(member.id)) &&
         !teamEndPendingRef.current.has(leadKey) &&
         !teamEndedMainRef.current.has(leadKey) &&
         (teamEndEpochsRef.current.get(leadKey) ?? 0) === endEpoch &&

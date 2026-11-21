@@ -2447,6 +2447,109 @@ describe('real ChatPage member model on the real composer selector', () => {
     expect(channelDeniedAttempts()).toEqual([])
   }, 30000)
 
+  it.each([
+    ['held as the restart restored it', false],
+    ['paused after a resume was refused', true]
+  ])(
+    'lets a member whose model is gone after a restart pick again while its queued text waits (%s), and sends that text with the new model',
+    async (_case, refuseFirst) => {
+      const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+      const UNAVAILABLE = 'Member model unavailable'
+      const QUEUED = 'queued designer fixture'
+      const model: FakeModel = ({ request, lastUserText }) =>
+        lastUserText.includes('hold designer busy')
+          ? // Never answers: only Stop ends this request.
+            new Promise<ModelStep>(() => undefined)
+          : { text: `${request.conversationId} reply fixture` }
+      const queueItem = (): HTMLElement =>
+        within(screen.getByRole('region', { name: 'chat.queue_region' })).getByTestId(
+          'chat-queue-item'
+        )
+      const resumeQueued = async () => {
+        fireEvent.click(within(queueItem()).getByRole('button', { name: 'chat.queue_edit' }))
+        fireEvent.click(await within(queueItem()).findByRole('button', { name: 'chat.queue_save' }))
+      }
+
+      // The designer runs on its own model; the person queues more text for it, then stops it.
+      const first = await mountTeam({ model })
+      const menu = await openMenu(await openConversation(first, 'designer', INHERITED))
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-b' }))
+      await within(slot()).findByRole('button', { name: SELECTED })
+      first.send('hold designer busy')
+      await waitFor(() => expect(requestProfiles(first, 'designer')).toEqual([B.id]))
+      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: QUEUED } })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
+      await waitFor(() => expect(queueItem()).toHaveTextContent(QUEUED))
+      fireEvent.click(await screen.findByRole('button', { name: 'chat.stop_generating' }))
+      await waitFor(() => expect(first.main.cancelledRuns).toEqual(['designer']))
+      await waitFor(async () =>
+        expect(
+          (await first.stored('designer'))?.draft?.queuedSends?.map((item) => item.content)
+        ).toEqual([QUEUED])
+      )
+      await first.finish()
+
+      // A restart without that model: the queued text comes back held, the member's model is gone.
+      const second = await mountTeam({ model, profiles: [A, C], storage: first.idb })
+      await openConversation(second, 'designer', UNAVAILABLE)
+      await waitFor(() => expect(queueItem()).toHaveAttribute('data-status', 'held'))
+      expect(queueItem()).toHaveTextContent(QUEUED)
+      if (refuseFirst) {
+        // Resuming it now is refused (no usable model); it stays, paused.
+        await resumeQueued()
+        await waitFor(() => expect(h.notify).toHaveBeenCalledWith('Team lead unavailable.'))
+        await waitFor(() => expect(queueItem()).toHaveAttribute('data-status', 'paused'))
+      }
+      await quietPuts(second)
+      expect(requestProfiles(second, 'designer')).toEqual([])
+
+      // The pick goes through while the paused text waits for the person.
+      const repick = await openMenu(within(slot()).getByRole('button', { name: UNAVAILABLE }))
+      fireEvent.click(within(repick).getByRole('menuitem', { name: 'fixture-model-c' }))
+      await waitFor(async () =>
+        expect((await second.stored('designer'))?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: C.id
+        })
+      )
+      await within(slot()).findByRole('button', { name: SELECTED })
+      expect(queueItem()).toHaveTextContent(QUEUED)
+      expect(requestProfiles(second, 'designer')).toEqual([])
+
+      // Resumed by the person, the text goes out once, on the model just picked.
+      await resumeQueued()
+      await waitFor(() => expect(requestProfiles(second, 'designer')).toEqual([C.id]))
+      expect(
+        textOf(
+          second.main.chatRequests
+            .find((request) => request.conversationId === 'designer')
+            ?.messages.at(-1)?.content
+        )
+      ).toContain(QUEUED)
+      await waitFor(async () =>
+        expect(
+          (await second.stored('designer'))?.messages.map((message) => [
+            message.role,
+            message.content
+          ])
+        ).toEqual(
+          expect.arrayContaining([
+            ['user', QUEUED],
+            ['assistant', 'designer reply fixture']
+          ])
+        )
+      )
+      await waitFor(() =>
+        expect(screen.queryByRole('region', { name: 'chat.queue_region' })).toBeNull()
+      )
+      await second.quiesce()
+      expect(requestProfiles(second, 'designer')).toEqual([C.id])
+      expect(h.notify.mock.calls).toEqual(refuseFirst ? [['Team lead unavailable.']] : [])
+      expect(channelDeniedAttempts()).toEqual([])
+    },
+    60000
+  )
+
   it('lets a member inherit the lead again: it follows the lead model, across a restart too', async () => {
     const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
     const pick = async (page: ChannelPage, name: string, row: string, label: string) => {
