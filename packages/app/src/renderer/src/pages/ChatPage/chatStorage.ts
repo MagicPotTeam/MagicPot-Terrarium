@@ -289,10 +289,11 @@ const sessionMutationQueues = new Map<string, Promise<void>>()
 const legacyMigrationFlights = new Map<string, Promise<ChatSession>>()
 
 function attachmentNeedsLegacyMigration(attachment: ChatAttachment): boolean {
+  // The url test first: it is the cheap one, and most attachments are not inline.
   return (
     attachment.type === 'image' &&
-    !normalizeMediaReference(attachment.media) &&
-    /^data:image\/[a-z0-9!#$&^_.+-]+;base64,/i.test(attachment.url)
+    /^data:image\/[a-z0-9!#$&^_.+-]+;base64,/i.test(attachment.url) &&
+    !normalizeMediaReference(attachment.media)
   )
 }
 
@@ -306,19 +307,31 @@ async function reclaimLegacyImports(
   )
 }
 
-async function migrateLegacyAttachmentsInSession(
-  original: ChatSession,
-  scope: string,
-  retryRemaining = 1,
-  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][] = []
-): Promise<ChatSession> {
-  const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc } | undefined)
-    ?.svcManagedMedia
-  if (!service?.migrateLegacyDataUrl) return original
+/** What one image of a migrated record was replaced with, by its old data: URL. */
+export type LegacyAttachmentReplacement = Pick<ChatAttachment, 'url' | 'media'>
 
-  let changed = false
+type LegacyAttachmentMigrationPlan = {
+  /** The record with every legacy inline image replaced; null when there was nothing to do. */
+  replacement: ChatSession | null
+  replacements: Map<string, LegacyAttachmentReplacement>
+}
+
+/**
+ * Imports every legacy inline image of `original` into managed media (one at a time) and builds
+ * the record that references them. Nothing is written here. Any import failure rejects; the
+ * imports already made are listed in `pendingReclaims`.
+ */
+async function planLegacyAttachmentMigration(
+  original: ChatSession,
+  service: ManagedMediaSvc,
+  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][]
+): Promise<LegacyAttachmentMigrationPlan> {
+  const replacements = new Map<string, LegacyAttachmentReplacement>()
   const migrate = async (attachment: ChatAttachment): Promise<ChatAttachment> => {
     if (!attachmentNeedsLegacyMigration(attachment)) return attachment
+    // The same image held twice (a message and its compacted copy) is imported once.
+    const known = replacements.get(attachment.url)
+    if (known) return { ...attachment, ...known }
     const migrated = await service.migrateLegacyDataUrl({
       dataUrl: attachment.url,
       metadata: {
@@ -332,13 +345,13 @@ async function migrateLegacyAttachmentsInSession(
       storage: CHAT_ATTACHMENT_STORAGE
     })
     pendingReclaims.push(migrated.checkpoint)
-    changed = true
-    return { ...attachment, url: migrated.localMediaUrl, media: migrated.reference }
+    const replacement = { url: migrated.localMediaUrl, media: migrated.reference }
+    replacements.set(attachment.url, replacement)
+    return { ...attachment, ...replacement }
   }
-
-  try {
+  const migrateMessages = async (source: ChatMessage[]): Promise<ChatMessage[]> => {
     const messages: ChatMessage[] = []
-    for (const message of original.messages) {
+    for (const message of source) {
       if (!message.attachments) {
         messages.push(message)
         continue
@@ -347,51 +360,59 @@ async function migrateLegacyAttachmentsInSession(
       for (const attachment of message.attachments) attachments.push(await migrate(attachment))
       messages.push({ ...message, attachments })
     }
-    const compactedMessages: ChatMessage[] = []
-    for (const message of original.compactedMessages || []) {
-      if (!message.attachments) {
-        compactedMessages.push(message)
-        continue
+    return messages
+  }
+
+  const messages = await migrateMessages(original.messages)
+  const compactedMessages = await migrateMessages(original.compactedMessages || [])
+  const replayImageMessages = await migrateMessages(
+    original.contextCompression?.replayImageMessages || []
+  )
+  const draft = original.draft
+    ? {
+        ...original.draft,
+        pendingAttachments: [] as ChatAttachment[]
       }
-      const attachments: ChatAttachment[] = []
-      for (const attachment of message.attachments) attachments.push(await migrate(attachment))
-      compactedMessages.push({ ...message, attachments })
+    : undefined
+  if (draft) {
+    for (const attachment of original.draft!.pendingAttachments) {
+      draft.pendingAttachments.push(await migrate(attachment))
     }
-    const replayImageMessages: ChatMessage[] = []
-    for (const message of original.contextCompression?.replayImageMessages || []) {
-      if (!message.attachments) {
-        replayImageMessages.push(message)
-        continue
+  }
+  if (replacements.size === 0) return { replacement: null, replacements }
+  const contextCompression = original.contextCompression
+    ? {
+        ...original.contextCompression,
+        ...(replayImageMessages.length > 0 ? { replayImageMessages } : {})
       }
-      const attachments: ChatAttachment[] = []
-      for (const attachment of message.attachments) attachments.push(await migrate(attachment))
-      replayImageMessages.push({ ...message, attachments })
-    }
-    const draft = original.draft
-      ? {
-          ...original.draft,
-          pendingAttachments: [] as ChatAttachment[]
-        }
-      : undefined
-    if (draft) {
-      for (const attachment of original.draft!.pendingAttachments) {
-        draft.pendingAttachments.push(await migrate(attachment))
-      }
-    }
-    if (!changed) return original
-    const contextCompression = original.contextCompression
-      ? {
-          ...original.contextCompression,
-          ...(replayImageMessages.length > 0 ? { replayImageMessages } : {})
-        }
-      : undefined
-    const replacement = {
+    : undefined
+  return {
+    replacement: {
       ...original,
       messages,
       ...(original.compactedMessages ? { compactedMessages } : {}),
       ...(draft ? { draft } : {}),
       ...(contextCompression ? { contextCompression } : {})
-    }
+    },
+    replacements
+  }
+}
+
+const managedMediaService = (): ManagedMediaSvc | undefined =>
+  (api() as unknown as { svcManagedMedia?: ManagedMediaSvc } | undefined)?.svcManagedMedia
+
+async function migrateLegacyAttachmentsInSession(
+  original: ChatSession,
+  scope: string,
+  retryRemaining = 1,
+  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][] = []
+): Promise<ChatSession> {
+  const service = managedMediaService()
+  if (!service?.migrateLegacyDataUrl) return original
+
+  try {
+    const { replacement } = await planLegacyAttachmentMigration(original, service, pendingReclaims)
+    if (!replacement) return original
     const persisted = await compareAndUpdateSessionInDB(original.id, scope, {
       expectedSession: original,
       update: () => replacement
@@ -423,6 +444,94 @@ function migrateLegacyAttachmentsSingleFlight(
     if (legacyMigrationFlights.get(key) === flight) legacyMigrationFlights.delete(key)
   })
   legacyMigrationFlights.set(key, flight)
+  return flight
+}
+
+/** Whether a conversation still holds a legacy inline image (a base64 data: URL, no reference). */
+export function sessionNeedsLegacyAttachmentMigration(session: ChatSession): boolean {
+  const holds = (attachments?: readonly ChatAttachment[]): boolean =>
+    Array.isArray(attachments) &&
+    attachments.some(
+      (attachment) =>
+        Boolean(attachment) &&
+        typeof attachment.url === 'string' &&
+        attachmentNeedsLegacyMigration(attachment)
+    )
+  const messagesHold = (messages?: readonly ChatMessage[]): boolean =>
+    Array.isArray(messages) && messages.some((message) => holds(message?.attachments))
+  return (
+    messagesHold(session.messages) ||
+    messagesHold(session.compactedMessages) ||
+    messagesHold(session.contextCompression?.replayImageMessages) ||
+    holds(session.draft?.pendingAttachments)
+  )
+}
+
+export type StoredSessionImageMigrationResult =
+  /** Nothing to migrate, or no managed media service. */
+  | { status: 'unchanged' }
+  /** Written: `session` is the stored record now; `replacements` maps each old data: URL. */
+  | {
+      status: 'migrated'
+      session: ChatSession
+      replacements: ReadonlyMap<string, LegacyAttachmentReplacement>
+    }
+  /** Not written: the stored record is not `expected`, or `shouldUpdate` said no. Untouched. */
+  | { status: 'not-written' }
+  /** Another migration of this conversation is running in this window. */
+  | { status: 'busy' }
+  /** An import or the write failed. The stored record is untouched. */
+  | { status: 'failed' }
+
+const storedImageMigrationFlights = new Map<string, Promise<StoredSessionImageMigrationResult>>()
+
+/**
+ * The open page's migration of one stored conversation's legacy inline images (FIX-PLAN item 4,
+ * part 2): the same imports as migrateLegacyAttachmentsSingleFlight, written by one
+ * compare-and-update against `expected` (the record the caller's save baseline expects), never
+ * retried against a different record. `shouldUpdate` runs inside the write's transaction. On any
+ * failure the stored record is untouched and the imports are handed back for reclaim.
+ */
+export function migrateStoredSessionImages(
+  expected: ChatSession,
+  scope: string,
+  options: { shouldUpdate?: () => boolean } = {}
+): Promise<StoredSessionImageMigrationResult> {
+  const targetScope = normalizeScope(scope)
+  const key = createSessionStorageKey(expected.id, targetScope)
+  if (legacyMigrationFlights.has(key) || storedImageMigrationFlights.has(key)) {
+    return Promise.resolve({ status: 'busy' })
+  }
+  const flight = (async (): Promise<StoredSessionImageMigrationResult> => {
+    const service = managedMediaService()
+    if (!service?.migrateLegacyDataUrl || !sessionNeedsLegacyAttachmentMigration(expected)) {
+      return { status: 'unchanged' }
+    }
+    const pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][] = []
+    try {
+      const { replacement, replacements } = await planLegacyAttachmentMigration(
+        expected,
+        service,
+        pendingReclaims
+      )
+      if (!replacement) return { status: 'unchanged' }
+      const persisted = await compareAndUpdateSessionInDB(expected.id, targetScope, {
+        expectedSession: expected,
+        ...(options.shouldUpdate ? { shouldUpdate: () => options.shouldUpdate!() } : {}),
+        update: () => replacement
+      })
+      if (persisted) return { status: 'migrated', session: persisted, replacements }
+      await reclaimLegacyImports(service, pendingReclaims)
+      return { status: 'not-written' }
+    } catch (error) {
+      await reclaimLegacyImports(service, pendingReclaims)
+      console.warn('[ChatStorage] Kept a conversation with inline images; migration failed:', error)
+      return { status: 'failed' }
+    }
+  })().finally(() => {
+    if (storedImageMigrationFlights.get(key) === flight) storedImageMigrationFlights.delete(key)
+  })
+  storedImageMigrationFlights.set(key, flight)
   return flight
 }
 
@@ -599,6 +708,45 @@ const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => 
   }
 }
 
+/**
+ * A draft backup record longer than this (in JSON characters) is not written to localStorage
+ * (FIX-PLAN item 4). The backup is the synchronous safety net next to the session record, which
+ * keeps the whole draft; localStorage holds about 5 M characters for the whole app, and a write
+ * above its quota fails after the whole string was built.
+ */
+export const CHAT_DRAFT_BACKUP_MAX_CHARS = 256 * 1024
+
+const attachmentsChars = (attachments: readonly ChatAttachment[] | undefined): number =>
+  (attachments ?? []).reduce(
+    (total, attachment) =>
+      total + (typeof attachment?.url === 'string' ? attachment.url.length : 0),
+    0
+  )
+
+/** A lower bound of a backup record's JSON length, from its strings: no JSON is built for it. */
+const estimateDraftBackupChars = (record: ChatSessionDraftBackupRecord): number => {
+  const draft = record.draft
+  let total = draft
+    ? draft.inputValue.length +
+      draft.pendingHiddenContext.length +
+      attachmentsChars(draft.pendingAttachments)
+    : 0
+  for (const item of record.queuedSends ?? []) {
+    total +=
+      item.content.length +
+      (item.originalComposerHiddenContext?.length ?? 0) +
+      attachmentsChars(item.attachments)
+  }
+  return total
+}
+
+/** The record as JSON, or null when it is over CHAT_DRAFT_BACKUP_MAX_CHARS. */
+const serializeDraftBackupWithinCap = (record: ChatSessionDraftBackupRecord): string | null => {
+  if (estimateDraftBackupChars(record) > CHAT_DRAFT_BACKUP_MAX_CHARS) return null
+  const json = JSON.stringify(record)
+  return json.length > CHAT_DRAFT_BACKUP_MAX_CHARS ? null : json
+}
+
 const getDraftBackupStorageKey = (sessionId: string, scope?: string): string =>
   `${DRAFT_BACKUP_STORAGE_KEY_PREFIX}:${normalizeScope(scope)}:${sessionId}`
 
@@ -739,7 +887,11 @@ export function writeSessionDraftBackup(
       return
     }
 
-    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), JSON.stringify(nextRecord))
+    // Over the cap the older backup stays as it is: the session record keeps the whole draft, and
+    // the newer draft must not be replaced by part of it.
+    const json = serializeDraftBackupWithinCap(nextRecord)
+    if (json === null) return
+    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), json)
   } catch (error) {
     console.warn('[ChatStorage] Failed to write session draft backup:', error)
   }
@@ -768,7 +920,11 @@ export function writeSessionQueuedSendsBackup(
       queuedSendsUpdatedAt
     })
     if (!nextRecord) return false
-    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), JSON.stringify(nextRecord))
+    const json = serializeDraftBackupWithinCap(nextRecord)
+    // Over the cap the queue is handled as a failed write: the session record carries it, and an
+    // emptied queue still takes the older one out of the backup.
+    if (json === null) throw new Error('The queued sends backup is over its size cap')
+    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), json)
     return true
   } catch (error) {
     console.warn('[ChatStorage] Failed to write the queued sends backup:', error)

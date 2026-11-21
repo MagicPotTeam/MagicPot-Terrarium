@@ -16654,7 +16654,8 @@ describe('ChatPage runtime workflow integration', () => {
         } as Response)
         await Promise.resolve()
       })
-      await waitFor(() => expect(hoisted.fileToDataUrlMock).toHaveBeenCalled())
+      // The draft's blob: image is imported into managed media (FIX-PLAN item 4), not inlined.
+      await waitFor(() => expect(hoisted.importManagedBytesMock).toHaveBeenCalled())
       await dispatchSwitchSession('remove-draft-b')
       await dispatchSwitchSession('remove-draft-a')
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('remove-draft-a'))
@@ -16730,7 +16731,8 @@ describe('ChatPage runtime workflow integration', () => {
         } as Response)
         await Promise.resolve()
       })
-      await waitFor(() => expect(hoisted.fileToDataUrlMock).toHaveBeenCalled())
+      // The draft's blob: image is imported into managed media (FIX-PLAN item 4), not inlined.
+      await waitFor(() => expect(hoisted.importManagedBytesMock).toHaveBeenCalled())
       expect(hoisted.storedSessions.value.some((session) => session.id === 'delete-draft-a')).toBe(
         false
       )

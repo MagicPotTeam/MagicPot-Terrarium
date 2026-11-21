@@ -93,13 +93,7 @@ import { shouldUseOpenAIImageGeneration } from '@shared/llm/openaiResponses'
 import type { AgentRouteLike } from '@shared/agent'
 import type { ProjectTraceEventStatus } from '@shared/projectTrace'
 import { startScopedChatPageRun } from '@shared/chatPageRunLifecycle'
-import {
-  selectFile,
-  fileToBlobUrl,
-  fileToDataUrl,
-  checkFileSize,
-  formatFileSize
-} from '@renderer/utils/fileUtils'
+import { selectFile, fileToBlobUrl, checkFileSize, formatFileSize } from '@renderer/utils/fileUtils'
 import {
   getChatScopeRevision,
   loadAllSessions,
@@ -115,7 +109,9 @@ import {
   migrateFromLocalStorage,
   readSessionDraftBackup,
   hasSessionDeleteTombstone,
+  migrateStoredSessionImages,
   readSessionDeleteTombstones,
+  sessionNeedsLegacyAttachmentMigration,
   debouncedSaveSessions,
   setSessionDeleteTombstone,
   writeSessionDraftBackup,
@@ -124,6 +120,18 @@ import {
   type ChatSessionDraft
 } from './chatStorage'
 import { attemptedSessionOf, ChatSessionSaveBaseline } from './chatSaveBaseline'
+import {
+  createStoredImageMigrationProgress,
+  startStoredImageMigration,
+  STORED_IMAGE_MIGRATION_TIMING,
+  type StoredImageMigrationOutcome
+} from './chatStoredImageMigration'
+import {
+  applyInlineAttachmentReplacements,
+  ChatInlineAttachmentGuard,
+  type InlineAttachmentReplacement
+} from './chatInlineAttachmentGuard'
+import { importQueuedImages, serializeDraftAttachments } from './chatDraftAttachments'
 import {
   isBenignSaveSupersede,
   isPermanentSaveConflict,
@@ -638,6 +646,13 @@ type ChatContextCompactSkipReason =
 const HY3D_SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const CHAT_INPUT_STATE_COMMIT_DELAY_MS = 80
 const CHAT_DRAFT_PERSIST_DELAY_MS = 200
+/**
+ * Longest a save waits for one oversized inline image to be imported before it writes the image as
+ * it is: the save chain of that conversation is held while it waits.
+ */
+const STORED_INLINE_IMAGE_IMPORT_TIMEOUT_MS = 30_000
+/** The stored image migration does not start while the composer changed this recently. */
+const STORED_IMAGE_MIGRATION_TYPING_PAUSE_MS = 2_000
 const STORAGE_KEY_REASONING_EFFORT = 'chat.reasoningEffort'
 const CHAT_REASONING_EFFORT_SYNC_EVENT = 'chat:reasoning-effort-sync'
 const AUTO_CONTEXT_COMPRESSION_TRIGGER_PERCENT = 80
@@ -726,43 +741,6 @@ const getFriendlyHy3dRuntimeError = (error: unknown): string => {
     return '当前运行中的主进程还是旧版本，Hy3D 本地上传能力尚未加载。请完全退出应用后重新启动一次。'
   }
   return message || 'Hy3D 模型链接处理失败'
-}
-
-const serializeDraftAttachment = async (
-  attachment: ChatAttachment
-): Promise<ChatAttachment | null> => {
-  if (!attachment.url.startsWith('blob:')) {
-    return cloneChatAttachment(attachment)
-  }
-
-  try {
-    const response = await fetch(attachment.url)
-    if (!response.ok) throw new Error('Draft attachment could not be read')
-    const blob = await response.blob()
-    const file = new File([blob], attachment.fileName || 'attachment', {
-      type: attachment.mimeType || blob.type || 'application/octet-stream'
-    })
-    const dataUrl = await fileToDataUrl(file)
-    return {
-      ...attachment,
-      url: dataUrl,
-      mimeType: attachment.mimeType || blob.type || undefined
-    }
-  } catch (error) {
-    console.warn('[ChatPage] Failed to serialize draft attachment:', error)
-    return null
-  }
-}
-
-const serializeDraftAttachments = async (
-  attachments: ChatAttachment[]
-): Promise<ChatAttachment[]> => {
-  const serialized: ChatAttachment[] = []
-  for (const attachment of attachments) {
-    const result = await serializeDraftAttachment(attachment)
-    if (result) serialized.push(result)
-  }
-  return serialized
 }
 
 const resolvePreferredSessionDraft = (
@@ -1464,6 +1442,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
     options: Parameters<typeof debouncedSaveSessions>[3]
   } | null>(null)
   const chatSaveBaselineRef = useRef<ChatSessionSaveBaseline>(new ChatSessionSaveBaseline())
+  // FIX-PLAN item 4: a save never writes an oversized inline image as it is (see setStoredForm below).
+  const inlineAttachmentGuardRef = useRef<ChatInlineAttachmentGuard | null>(null)
+  inlineAttachmentGuardRef.current ??= new ChatInlineAttachmentGuard((attachment) =>
+    withIncomingChatImageImportTimeout(
+      importIncomingChatImageAttachment(attachment, { service: api().svcManagedMedia }),
+      STORED_INLINE_IMAGE_IMPORT_TIMEOUT_MS
+    )
+  )
+  const inlineAttachmentReplacementsRef = useRef(
+    new WeakMap<ChatSession, ReadonlyMap<string, InlineAttachmentReplacement>>()
+  )
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
   const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
@@ -1534,6 +1523,38 @@ const ChatPage: React.FC<ChatPageProps> = ({
     sessionsRef.current = next
     setSessionsState(next)
   }, [])
+  useLayoutEffect(() => {
+    chatSaveBaselineRef.current.setStoredForm({
+      prepare: (_scope, session) => {
+        const guard = inlineAttachmentGuardRef.current
+        if (!guard?.needsImport(session)) return session
+        return guard.externalize(session).then(({ session: stored, replacements }) => {
+          if (stored !== session) inlineAttachmentReplacementsRef.current.set(stored, replacements)
+          return stored
+        })
+      },
+      // The written form replaces the live object it was prepared from. A live object that moved
+      // on meanwhile (a streamed reply, a draft) gets the same references; it is saved as usual.
+      adopt: (scope, session, stored) => {
+        if (storageScopeRef.current !== scope) return stored
+        const live = sessionsRef.current.find((candidate) => candidate.id === session.id)
+        if (!live) return stored
+        const replacements = inlineAttachmentReplacementsRef.current.get(stored)
+        const next =
+          live === session
+            ? stored
+            : replacements
+              ? applyInlineAttachmentReplacements(live, replacements)
+              : live
+        if (next !== live) {
+          setSessions((previous) =>
+            previous.map((candidate) => (candidate === live ? next : candidate))
+          )
+        }
+        return stored
+      }
+    })
+  }, [setSessions])
   const getSessionStorageKey = useCallback(
     (scope: string, sessionId: string): string => `${scope}\u0000${sessionId}`,
     []
@@ -1660,8 +1681,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [getSessionStorageKey, noteSessionWriteAcknowledged]
   )
+  /**
+   * Saves `session` and returns the object that stands for the write: `session` itself, or the
+   * stored form the page adopted in its place (oversized inline images imported to managed media).
+   */
   const persistSessionWithBaseline = useCallback(
-    async (session: ChatSession, scope: string): Promise<void> => {
+    async (session: ChatSession, scope: string): Promise<ChatSession> => {
       const saved = await chatSaveBaselineRef.current.persistLatest(
         scope,
         session.id,
@@ -1674,6 +1699,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         () => noteSessionWriteAcknowledged(scope)
       )
       if (!saved) throw new Error('Session changed before it could be saved')
+      return saved
     },
     [noteSessionWriteAcknowledged]
   )
@@ -3565,8 +3591,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         // Mark dirty (also freezes the baseline) before the guarded save so a failed draft write
         // stays visible and is never dropped by a later storage refresh.
         setDirtySessionSnapshot(storageScope, updatedSession)
+        let savedSession: ChatSession
         try {
-          await persistSessionWithBaseline(updatedSession, storageScope)
+          savedSession = await persistSessionWithBaseline(updatedSession, storageScope)
         } catch (error) {
           const stillCurrent = sessionsRef.current.find((candidate) => candidate.id === sessionId)
           if (stillCurrent !== updatedSession) {
@@ -3577,7 +3604,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         }
         // Once the serialized draft has entered session state, dirty-session reconciliation owns it.
         clearCompletedTransientDraft()
-        clearDirtySessionSnapshotIfCurrent(storageScope, updatedSession)
+        clearDirtySessionSnapshotIfCurrent(storageScope, savedSession)
         setSessionLoadError(null)
       } catch (error) {
         clearCompletedTransientDraft()
@@ -3752,6 +3779,111 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useEffect(() => {
     if (sessionsLoaded) queuedSendDraftSyncRef.current({ updateSessions: true })
   }, [queuedSessionSends, sessions, sessionsLoaded, storageScope])
+
+  // FIX-PLAN item 4, part 2: the inline images this pane's stored conversations still hold are
+  // moved to managed media in idle time, one conversation at a time, through the save baseline.
+  // Only conversations of this pane's own scope, only while the pane is shown and loaded.
+  const storedImageMigrationProgressRef = useRef(
+    new Map<string, ReturnType<typeof createStoredImageMigrationProgress>>()
+  )
+  const migrateStoredSessionImagesOfScope = useCallback(
+    async (scope: string, sessionId: string): Promise<StoredImageMigrationOutcome> => {
+      const epoch = sessionLoadEpochRef.current
+      const key = getSessionStorageKey(scope, sessionId)
+      const loaded = sessionsRef.current.find((session) => session.id === sessionId)
+      if (!loaded || storageScopeRef.current !== scope) return 'gone'
+      // Only a conversation this page holds exactly as stored: no unsaved change, no save or
+      // reply running for it, not deleted.
+      const untouched = (): boolean =>
+        isMountedRef.current &&
+        storageScopeRef.current === scope &&
+        sessionLoadEpochRef.current === epoch &&
+        sessionsRef.current.find((session) => session.id === sessionId) === loaded &&
+        persistedSessionsRef.current.get(sessionId) === loaded &&
+        !dirtySessionSnapshotsRef.current.has(key) &&
+        !loadingSessionIdsRef.current.has(sessionId) &&
+        !sendingSessionIdsRef.current.has(sessionId) &&
+        !deletedSessionKeysRef.current.has(key) &&
+        !hasSessionDeleteTombstone(sessionId, scope)
+      if (!untouched() || chatSaveBaselineRef.current.isPending(scope, sessionId)) return 'busy'
+      let outcome: StoredImageMigrationOutcome = 'not-written'
+      await chatSaveBaselineRef.current.rewriteStored(
+        scope,
+        sessionId,
+        () => persistedSessionsRef.current.get(sessionId) ?? null,
+        async (expected) => {
+          if (!untouched()) {
+            outcome = 'busy'
+            return null
+          }
+          const result = await migrateStoredSessionImages(expected, scope, {
+            shouldUpdate: untouched
+          })
+          if (result.status !== 'migrated') {
+            outcome = result.status === 'unchanged' ? 'unchanged' : result.status
+            return null
+          }
+          outcome = 'migrated'
+          // The record changed under any storage read still in progress: that read must not
+          // bring the inline form back.
+          noteSessionWriteAcknowledged(scope)
+          if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+            return result.session
+          }
+          persistedSessionsRef.current.set(sessionId, result.session)
+          const live = sessionsRef.current.find((session) => session.id === sessionId)
+          // A change made while the record was being written gets the same references and is
+          // saved as usual (against the migrated record, which becomes the baseline).
+          const next =
+            live === loaded
+              ? result.session
+              : live
+                ? applyInlineAttachmentReplacements(live, result.replacements)
+                : live
+          if (live && next && next !== live) {
+            setSessions((previous) =>
+              previous.map((session) => (session === live ? next : session))
+            )
+          }
+          return result.session
+        }
+      )
+      return outcome
+    },
+    [getSessionStorageKey, noteSessionWriteAcknowledged, setSessions]
+  )
+  useEffect(() => {
+    if (!sessionsLoaded || !active) return
+    const scope = storageScope
+    const progressByScope = storedImageMigrationProgressRef.current
+    let progress = progressByScope.get(scope)
+    if (!progress) {
+      progress = createStoredImageMigrationProgress()
+      progressByScope.set(scope, progress)
+    }
+    const scheduler = startStoredImageMigration({
+      progress,
+      timing: STORED_IMAGE_MIGRATION_TIMING,
+      pendingSessionIds: () => {
+        if (storageScopeRef.current !== scope) return []
+        const current = currentSessionIdRef.current
+        const ids = sessionsRef.current
+          .filter((session) => sessionNeedsLegacyAttachmentMigration(session))
+          .map((session) => session.id)
+        // The conversation on screen first.
+        return current && ids.includes(current)
+          ? [current, ...ids.filter((id) => id !== current)]
+          : ids
+      },
+      isPaused: () =>
+        loadingSessionIdsRef.current.size > 0 ||
+        sendingSessionIdsRef.current.size > 0 ||
+        Date.now() - composerDraftMutationRef.current.updatedAt <
+          STORED_IMAGE_MIGRATION_TYPING_PAUSE_MS,
+      migrate: (sessionId) => migrateStoredSessionImagesOfScope(scope, sessionId)
+    })
+    return () => scheduler.stop()
+  }, [active, migrateStoredSessionImagesOfScope, sessionsLoaded, storageScope])
 
   useEffect(() => {
     if (!sessionsLoaded || !currentSessionId) {
@@ -9626,6 +9758,51 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ]
   )
 
+  // FIX-PLAN item 4: a queued image is stored in a form that survives a reload. A blob: image (it
+  // dies with this renderer) and an oversized inline image are imported into managed media once
+  // the item is queued, so the stored queue keeps a reference instead of an unavailable tile.
+  // Only items the stored queue keeps (the person's own); other items resolve their images when
+  // they are sent, as before.
+  const makeQueuedSendImagesDurable = useCallback(
+    async (sessionId: string, itemId: number): Promise<void> => {
+      const item = queuedSessionSendsRef.current
+        .get(sessionId)
+        ?.find((queued) => queued.id === itemId)
+      if (!item?.persistId || !isUserQueuedSend(item)) return
+      const attachments = item.overrides?.attachments
+      if (!attachments?.length) return
+      const guard = inlineAttachmentGuardRef.current
+      const durable = await importQueuedImages(attachments, (attachment) =>
+        guard ? guard.importInlineImage(attachment) : Promise.resolve(attachment)
+      )
+      if (durable === attachments) return
+      const queues = queuedSessionSendsRef.current
+      const queue = queues.get(sessionId) ?? []
+      const index = queue.findIndex((queued) => queued.id === itemId)
+      const current = index >= 0 ? queue[index] : undefined
+      // Only the same item, with the same attachments, not taken for sending or edited meanwhile.
+      if (
+        !current?.overrides ||
+        current.inFlight ||
+        current.overrides.attachments !== attachments
+      ) {
+        return
+      }
+      const overrides = current.overrides
+      const nextQueues = new Map(queues)
+      nextQueues.set(
+        sessionId,
+        queue.map((queued, position) =>
+          position === index
+            ? { ...queued, overrides: { ...overrides, attachments: [...durable] } }
+            : queued
+        )
+      )
+      updateQueuedSessionSends(nextQueues)
+    },
+    [updateQueuedSessionSends]
+  )
+
   const sendMessage = useCallback(
     async (overrides?: SendMessageOverrides): Promise<void> => {
       const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
@@ -9698,10 +9875,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
           return
         }
         if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
+        const queuedId = ++queuedSessionSendIdRef.current
         const queue = [
           ...(queuedSessionSendsRef.current.get(targetSessionId) ?? []),
           {
-            id: ++queuedSessionSendIdRef.current,
+            id: queuedId,
             overrides: queuedOverrides,
             queueKey,
             fromComposer,
@@ -9715,6 +9893,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const nextQueues = new Map(queuedSessionSendsRef.current)
         nextQueues.set(targetSessionId, queue)
         updateQueuedSessionSends(nextQueues)
+        void makeQueuedSendImagesDurable(targetSessionId, queuedId)
         if (fromComposer) {
           inputValueRef.current = ''
           setInputValue('')
@@ -9751,6 +9930,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [
       executeSendMessage,
       isSessionBusy,
+      makeQueuedSendImagesDurable,
       storageScope,
       notifyError,
       notifyWarning,
@@ -13555,17 +13735,17 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   setSessions((previous) =>
                     previous.map((session) => (session === liveLead ? updated : session))
                   )
-                  await persistSessionWithBaseline(updated, storageScope)
+                  const savedLead = await persistSessionWithBaseline(updated, storageScope)
                   const currentAcknowledgement =
                     isMountedRef.current &&
                     teamVisibilityRef.current.active &&
                     storageScopeRef.current === storageScope &&
                     sessionsRef.current.find((session) => session.id === messageLeadId) ===
-                      updated &&
-                    chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, updated)
+                      savedLead &&
+                    chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, savedLead)
                   if (
                     !currentAcknowledgement ||
-                    !clearDirtySessionSnapshotIfCurrent(storageScope, updated)
+                    !clearDirtySessionSnapshotIfCurrent(storageScope, savedLead)
                   ) {
                     throw new Error('Team receipt save was not confirmed; message was not queued.')
                   }
@@ -13745,18 +13925,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   previous.map((session) => (session === current ? updated : session))
                 )
                 try {
-                  await persistSessionWithBaseline(updated, storageScope)
+                  const saved = await persistSessionWithBaseline(updated, storageScope)
                   const currentAcknowledgement =
                     isMountedRef.current &&
                     teamVisibilityRef.current.active &&
                     teamVisibilityRef.current.epoch === visibilityEpoch &&
                     storageScopeRef.current === storageScope &&
                     sessionLoadEpochRef.current === scopeEpoch &&
-                    sessionsRef.current.find((session) => session.id === updated.id) === updated &&
-                    chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, updated)
+                    sessionsRef.current.find((session) => session.id === updated.id) === saved &&
+                    chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, saved)
                   return (
                     currentAcknowledgement &&
-                    clearDirtySessionSnapshotIfCurrent(storageScope, updated)
+                    clearDirtySessionSnapshotIfCurrent(storageScope, saved)
                   )
                 } catch {
                   if (

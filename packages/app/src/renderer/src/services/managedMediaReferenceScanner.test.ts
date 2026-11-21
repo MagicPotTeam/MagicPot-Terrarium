@@ -61,6 +61,48 @@ describe('managed media reference scanner', () => {
     })
   })
 
+  it('counts the images of queued sends, in a session draft and in its backup, as live', async () => {
+    // FIX-PLAN item 4: drafts and queued items now keep managed references instead of inline
+    // copies, so cleanup must see them wherever the draft is kept.
+    const queuedInRecord = '1'.repeat(64)
+    const queuedInBackup = '2'.repeat(64)
+    const composerInBackup = '3'.repeat(64)
+    const storage = new Map([
+      [
+        'magicpot-chat-draft:project.pane:session-1',
+        JSON.stringify({
+          updatedAt: 2,
+          draft: { inputValue: '', pendingAttachments: [{ media: ref(composerInBackup) }] },
+          queuedSends: [
+            { id: 'q', content: 'later', attachments: [{ media: ref(queuedInBackup) }] }
+          ],
+          queuedSendsUpdatedAt: 2
+        })
+      ]
+    ])
+    const result = await scanManagedMediaReferenceIds(
+      sources({
+        visitChatRecords: async (visit) =>
+          visit({
+            storageScope: 'project.pane',
+            draft: {
+              queuedSends: [
+                { id: 'q', content: 'later', attachments: [{ media: ref(queuedInRecord) }] }
+              ]
+            }
+          }),
+        localStorage: {
+          get length() {
+            return storage.size
+          },
+          key: (index) => [...storage.keys()][index] ?? null,
+          getItem: (key) => storage.get(key) ?? null
+        }
+      })
+    )
+    expect(result.ok && result.ids).toEqual([queuedInRecord, queuedInBackup, composerInBackup])
+  })
+
   it('tracks compacted-only references so retention is not mistaken for unreferenced media', async () => {
     const id = 'a'.repeat(64)
     expect(
