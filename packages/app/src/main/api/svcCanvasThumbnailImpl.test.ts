@@ -869,4 +869,41 @@ describe('CanvasThumbnailSvcImpl', () => {
     expect(response.height).toBe(96)
     expect(Array.from(response.data)).toEqual([9, 8, 7])
   })
+
+  it('hands the OS thumbnailer only the image types a board shows', async () => {
+    electronMock.createThumbnailFromPath.mockResolvedValue({
+      getSize: () => ({ width: 64, height: 64 }),
+      isEmpty: () => false,
+      toPNG: () => Buffer.from([1])
+    })
+    for (const filename of [
+      'shortcut.lnk',
+      'site.url',
+      'Pictures.library-ms',
+      'drawing.svg',
+      'notes.txt'
+    ]) {
+      const sourcePath = await createSourceFile(filename)
+      await expect(
+        service.createNativeThumbnail({ fullPath: sourcePath, maxSide: 64 })
+      ).rejects.toThrow(/only of image files/)
+    }
+    // A link named like an image that points at another type.
+    const target = await createSourceFile('target.lnk')
+    const link = path.join(testRoot, 'photo.png')
+    fs.symlinkSync(target, link)
+    expect(authorizeScopedLocalMediaPath(link)).toBe(true)
+    await expect(service.createNativeThumbnail({ fullPath: link, maxSide: 64 })).rejects.toThrow(
+      /only of image files/
+    )
+    expect(electronMock.createThumbnailFromPath).not.toHaveBeenCalled()
+
+    const photo = await createSourceFile('Photo.JPG')
+    await expect(
+      service.createNativeThumbnail({ fullPath: photo, maxSide: 64 })
+    ).resolves.toMatchObject({
+      width: 64,
+      mimeType: 'image/png'
+    })
+  })
 })
