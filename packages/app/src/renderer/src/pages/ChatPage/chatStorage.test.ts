@@ -329,8 +329,11 @@ describe('chatStorage', () => {
 
     const thirdParty = { ...afterEdit!, title: 'third party edit' }
     await storage.saveSessionToDB(thirdParty, scope, { expectedSession: afterEdit })
-    await expect(storage.saveSessionToDB({ ...afterEdit!, title: 'stale edit' }, scope, { expectedSession: afterEdit }))
-      .rejects.toBeInstanceOf(storage.ChatSessionSaveConflictError)
+    await expect(
+      storage.saveSessionToDB({ ...afterEdit!, title: 'stale edit' }, scope, {
+        expectedSession: afterEdit
+      })
+    ).rejects.toBeInstanceOf(storage.ChatSessionSaveConflictError)
     const final = await storage.loadSessionFromDB(original.id, scope)
     expect(final?.title).toBe('third party edit')
     expect(final?.teamSettings).toEqual(teamSettings)
@@ -395,16 +398,18 @@ describe('chatStorage', () => {
       id: 'receipt-list-recovery-lead',
       title: 'Lead',
       messages: [],
-      teamMessageReceipts: [{
-        version: 1,
-        id: 'message-list-1',
-        recipientId: 'member-1',
-        teamKey: 'team-key',
-        text: 'hello from list',
-        state: 'queued',
-        createdAt: 1,
-        updatedAt: 1
-      }]
+      teamMessageReceipts: [
+        {
+          version: 1,
+          id: 'message-list-1',
+          recipientId: 'member-1',
+          teamKey: 'team-key',
+          text: 'hello from list',
+          state: 'queued',
+          createdAt: 1,
+          updatedAt: 1
+        }
+      ]
     }
 
     await storage.saveSessionToDB(lead, scope, { expectedSession: null })
@@ -421,28 +426,45 @@ describe('chatStorage', () => {
 
   it.each([
     { name: 'present undefined marker', after: { memberModelSelection: undefined } },
-    { name: 'future version marker', after: { memberModelSelection: { version: 7, profileId: 'fixture' } } }
+    {
+      name: 'future version marker',
+      after: { memberModelSelection: { version: 7, profileId: 'fixture' } }
+    }
   ])('rejects a stale CAS instead of erasing a $name', async ({ after }) => {
     const fakeIndexedDb = createFakeIndexedDb()
     fakeIndexedDb.state.failGetAllOnce = false
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
     const scope = 'fixture-undefined-marker'
-    const base = { id: 'fixture-marker-lead', title: 'Lead', messages: [], teamSettings: { maxMembers: 4, defaultModel: null, autoCleanup: false } }
+    const base = {
+      id: 'fixture-marker-lead',
+      title: 'Lead',
+      messages: [],
+      teamSettings: { maxMembers: 4, defaultModel: null, autoCleanup: false }
+    }
     await storage.saveSessionToDB(base, scope, { expectedSession: null })
     const old = await storage.loadSessionFromDB(base.id, scope)
     expect(old).not.toBeNull()
-    const thirdParty = { ...old!, teamSettings: { ...old!.teamSettings!, ...after } } as unknown as import('./chatStorage').ChatSession
+    const thirdParty = {
+      ...old!,
+      teamSettings: { ...old!.teamSettings!, ...after }
+    } as unknown as import('./chatStorage').ChatSession
     // The current client intentionally forbids marker transitions. Simulate an independent
     // historical/other-version writer, without using the API whose guard is under test.
     const dbRequest = fakeIndexedDb.api.open('fixture', 2)
-    const db = await new Promise<FakeIDBDatabase>(resolve => { dbRequest.onsuccess = () => resolve(dbRequest.result!) })
-    db.transaction('sessions-v2', 'readwrite').objectStore('sessions-v2').put({ ...thirdParty, storageKey: `${scope}\u0000${base.id}` })
+    const db = await new Promise<FakeIDBDatabase>((resolve) => {
+      dbRequest.onsuccess = () => resolve(dbRequest.result!)
+    })
+    db.transaction('sessions-v2', 'readwrite')
+      .objectStore('sessions-v2')
+      .put({ ...thirdParty, storageKey: `${scope}\u0000${base.id}` })
     const saved = await storage.loadSessionFromDB(base.id, scope)
     expect(Object.hasOwn(saved!.teamSettings!, 'memberModelSelection')).toBe(true)
     expect(storage.normalizedSessionsEqual(saved!, old!, scope)).toBe(false)
     const unrelatedEdit = { ...old!, teamSettings: { ...old!.teamSettings!, maxMembers: 5 } }
-    await expect(storage.saveSessionToDB(unrelatedEdit, scope, { expectedSession: old })).rejects.toBeInstanceOf(storage.ChatSessionSaveConflictError)
+    await expect(
+      storage.saveSessionToDB(unrelatedEdit, scope, { expectedSession: old })
+    ).rejects.toBeInstanceOf(storage.ChatSessionSaveConflictError)
     const final = await storage.loadSessionFromDB(base.id, scope)
     expect(Object.hasOwn(final!.teamSettings!, 'memberModelSelection')).toBe(true)
     expect(final!.teamSettings?.maxMembers).toBe(4)
@@ -456,14 +478,21 @@ describe('chatStorage', () => {
     const storage = await import('./chatStorage')
     const scope = 'fixture-marker-updater'
     const lead: import('./chatStorage').ChatSession = {
-      id: 'marker-updater-lead', title: 'Lead', messages: [],
-      teamSettings: { maxMembers: 4, defaultModel: null, autoCleanup: false, memberModelSelection: { version: 1, profileId: 'fixture' } }
+      id: 'marker-updater-lead',
+      title: 'Lead',
+      messages: [],
+      teamSettings: {
+        maxMembers: 4,
+        defaultModel: null,
+        autoCleanup: false,
+        memberModelSelection: { version: 1, profileId: 'fixture' }
+      }
     }
     await storage.saveSessionToDB(lead, scope, { expectedSession: null })
     const snapshot = await storage.loadSessionFromDB(lead.id, scope)
     const result = await storage.compareAndUpdateSessionInDB(lead.id, scope, {
       expectedSession: snapshot!,
-      update: current => {
+      update: (current) => {
         delete current.teamSettings!.memberModelSelection
         return current
       }
@@ -479,16 +508,27 @@ describe('chatStorage', () => {
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
     const scope = 'fixture-marker-opaque'
-    const marker: { version: 1; profileId: string; future: { guarded?: undefined } } = { version: 1, profileId: 'fixture', future: { guarded: undefined } }
+    const marker: { version: 1; profileId: string; future: { guarded?: undefined } } = {
+      version: 1,
+      profileId: 'fixture',
+      future: { guarded: undefined }
+    }
     const lead: import('./chatStorage').ChatSession = {
-      id: 'marker-opaque-lead', title: 'Lead', messages: [],
-      teamSettings: { maxMembers: 4, defaultModel: null, autoCleanup: false, memberModelSelection: marker }
+      id: 'marker-opaque-lead',
+      title: 'Lead',
+      messages: [],
+      teamSettings: {
+        maxMembers: 4,
+        defaultModel: null,
+        autoCleanup: false,
+        memberModelSelection: marker
+      }
     }
     await storage.saveSessionToDB(lead, scope, { expectedSession: null })
     const snapshot = (await storage.loadSessionFromDB(lead.id, scope))!
     const rejected = await storage.compareAndUpdateSessionInDB(lead.id, scope, {
       expectedSession: snapshot,
-      update: current => {
+      update: (current) => {
         const value = current.teamSettings!.memberModelSelection as typeof marker
         delete value.future.guarded
         return current
@@ -496,13 +536,23 @@ describe('chatStorage', () => {
     })
     expect(rejected).toBeNull()
     const afterReject = (await storage.loadSessionFromDB(lead.id, scope))!
-    expect(Object.hasOwn((afterReject.teamSettings!.memberModelSelection as typeof marker).future, 'guarded')).toBe(true)
+    expect(
+      Object.hasOwn(
+        (afterReject.teamSettings!.memberModelSelection as typeof marker).future,
+        'guarded'
+      )
+    ).toBe(true)
     const accepted = await storage.compareAndUpdateSessionInDB(lead.id, scope, {
       expectedSession: afterReject,
-      update: current => ({ ...current, title: 'Updated' })
+      update: (current) => ({ ...current, title: 'Updated' })
     })
     expect(accepted?.title).toBe('Updated')
-    expect(Object.hasOwn((accepted!.teamSettings!.memberModelSelection as typeof marker).future, 'guarded')).toBe(true)
+    expect(
+      Object.hasOwn(
+        (accepted!.teamSettings!.memberModelSelection as typeof marker).future,
+        'guarded'
+      )
+    ).toBe(true)
   })
 
   it('rejects a stale snapshot that drops an undefined nested future marker field', async () => {
@@ -511,18 +561,30 @@ describe('chatStorage', () => {
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
     const scope = 'fixture-marker-stale-nested'
-    const marker: { version: 1; profileId: string; future: { guarded?: undefined } } = { version: 1, profileId: 'fixture', future: { guarded: undefined } }
+    const marker: { version: 1; profileId: string; future: { guarded?: undefined } } = {
+      version: 1,
+      profileId: 'fixture',
+      future: { guarded: undefined }
+    }
     const lead: import('./chatStorage').ChatSession = {
-      id: 'marker-stale-nested', title: 'Lead', messages: [],
-      teamSettings: { maxMembers: 4, defaultModel: null, autoCleanup: false,
-        memberModelSelection: marker }
+      id: 'marker-stale-nested',
+      title: 'Lead',
+      messages: [],
+      teamSettings: {
+        maxMembers: 4,
+        defaultModel: null,
+        autoCleanup: false,
+        memberModelSelection: marker
+      }
     }
     await storage.saveSessionToDB(lead, scope, { expectedSession: null })
     const saved = (await storage.loadSessionFromDB(lead.id, scope))!
     const stale = structuredClone(saved)
     delete (stale.teamSettings!.memberModelSelection as typeof marker).future.guarded
     expect(storage.normalizedSessionsEqual(saved, stale, scope)).toBe(false)
-    await expect(storage.saveSessionToDB({ ...stale, title: 'stale edit' }, scope, { expectedSession: stale })).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+    await expect(
+      storage.saveSessionToDB({ ...stale, title: 'stale edit' }, scope, { expectedSession: stale })
+    ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
     const after = (await storage.loadSessionFromDB(lead.id, scope))!
     const persistedMarker = after.teamSettings!.memberModelSelection as typeof marker
     expect(after.title).toBe('Lead')
@@ -536,49 +598,134 @@ describe('chatStorage', () => {
     const storage = await import('./chatStorage')
     const scope = 'fixture-marker-removal'
     const lead: import('./chatStorage').ChatSession = {
-      id: 'marker-removal', title: 'Lead', messages: [],
-      teamSettings: { maxMembers: 4, defaultModel: null, autoCleanup: false,
-        memberModelSelection: { version: 1, profileId: 'fixture' } }
+      id: 'marker-removal',
+      title: 'Lead',
+      messages: [],
+      teamSettings: {
+        maxMembers: 4,
+        defaultModel: null,
+        autoCleanup: false,
+        memberModelSelection: { version: 1, profileId: 'fixture' }
+      }
     }
     await storage.saveSessionToDB(lead, scope, { expectedSession: null })
     const saved = (await storage.loadSessionFromDB(lead.id, scope))!
     const removing = structuredClone(saved)
     delete removing.teamSettings!.memberModelSelection
-    await expect(storage.saveSessionToDB(removing, scope, { expectedSession: saved })).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
-    await expect(storage.saveSessionToDB(removing, scope)).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
-    expect((await storage.loadSessionFromDB(lead.id, scope))?.teamSettings?.memberModelSelection).toEqual({ version: 1, profileId: 'fixture' })
+    await expect(
+      storage.saveSessionToDB(removing, scope, { expectedSession: saved })
+    ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+    await expect(storage.saveSessionToDB(removing, scope)).rejects.toMatchObject({
+      code: 'CHAT_SESSION_SAVE_CONFLICT'
+    })
+    expect(
+      (await storage.loadSessionFromDB(lead.id, scope))?.teamSettings?.memberModelSelection
+    ).toEqual({ version: 1, profileId: 'fixture' })
   })
 
   it('persists only explicit member choice and rejects ordinary writes and stale snapshots', async () => {
-    const fakeIndexedDb = createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce = false; vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
     const lead = { id: 'lead', title: 'Lead', messages: [], profileId: 'leader' }
-    const member = { id: 'member', title: 'Member', messages: [], teamLeadId: 'lead', teamMemberName: 'writer', profileId: 'leader', sessionUrl: 'old', sessionProfileId: 'leader', sessionRouteFingerprint: 'old' }
+    const member = {
+      id: 'member',
+      title: 'Member',
+      messages: [],
+      teamLeadId: 'lead',
+      teamMemberName: 'writer',
+      profileId: 'leader',
+      sessionUrl: 'old',
+      sessionProfileId: 'leader',
+      sessionRouteFingerprint: 'old'
+    }
     await storage.saveSessionToDB(lead, 'scope')
-    const admitted = (await storage.createTeamMemberInDB({ scope: 'scope', expectedLead: lead, member })).member
-    const selected = await storage.setTeamMemberModelChoiceInDB({ scope: 'scope', expectedLead: lead, expectedMember: admitted, profileId: 'explicit' })
+    const admitted = (
+      await storage.createTeamMemberInDB({ scope: 'scope', expectedLead: lead, member })
+    ).member
+    const selected = await storage.setTeamMemberModelChoiceInDB({
+      scope: 'scope',
+      expectedLead: lead,
+      expectedMember: admitted,
+      profileId: 'explicit'
+    })
     expect(selected.member.memberModelChoice).toEqual({ version: 1, profileId: 'explicit' })
     expect(selected.member.sessionUrl).toBeUndefined()
     expect(selected.member.sessionProfileId).toBeUndefined()
     expect(selected.member.sessionRouteFingerprint).toBeUndefined()
     expect((await storage.loadSessionFromDB('member', 'scope'))?.profileId).toBe('leader')
-    await expect(storage.saveSessionToDB(admitted, 'scope')).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
-    await expect(storage.saveSessionToDB({ ...selected.member, memberModelChoice: { version: 1, profileId: 'other' } }, 'scope', { expectedSession: selected.member })).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
-    await expect(storage.compareAndUpdateSessionInDB('member', 'scope', { expectedSession: selected.member, update: s => ({ ...s, memberModelChoice: undefined }) })).resolves.toBeNull()
-    await expect(storage.setTeamMemberModelChoiceInDB({ scope: 'scope', expectedLead: lead, expectedMember: admitted, profileId: 'other' })).rejects.toThrow()
-    await expect(storage.saveSessionToDB({ ...member, id: 'forged', memberModelChoice: { version: 1, profileId: 'x' } }, 'scope')).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+    await expect(storage.saveSessionToDB(admitted, 'scope')).rejects.toMatchObject({
+      code: 'CHAT_SESSION_SAVE_CONFLICT'
+    })
+    await expect(
+      storage.saveSessionToDB(
+        { ...selected.member, memberModelChoice: { version: 1, profileId: 'other' } },
+        'scope',
+        { expectedSession: selected.member }
+      )
+    ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+    await expect(
+      storage.compareAndUpdateSessionInDB('member', 'scope', {
+        expectedSession: selected.member,
+        update: (s) => ({ ...s, memberModelChoice: undefined })
+      })
+    ).resolves.toBeNull()
+    await expect(
+      storage.setTeamMemberModelChoiceInDB({
+        scope: 'scope',
+        expectedLead: lead,
+        expectedMember: admitted,
+        profileId: 'other'
+      })
+    ).rejects.toThrow()
+    await expect(
+      storage.saveSessionToDB(
+        { ...member, id: 'forged', memberModelChoice: { version: 1, profileId: 'x' } },
+        'scope'
+      )
+    ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
     const ended = await storage.endTeamInDB({ scope: 'scope', expectedLead: lead })
-    await expect(storage.setTeamMemberModelChoiceInDB({ scope: 'scope', expectedLead: ended.lead, expectedMember: ended.members[0], profileId: 'other' })).rejects.toThrow()
+    await expect(
+      storage.setTeamMemberModelChoiceInDB({
+        scope: 'scope',
+        expectedLead: ended.lead,
+        expectedMember: ended.members[0],
+        profileId: 'other'
+      })
+    ).rejects.toThrow()
   })
 
   it('fences repeated selection, changed lead generation, identity and third-party marker writes', async () => {
-    const fakeIndexedDb = createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce = false; vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
     const lead = { id: 'lead', title: 'Lead', messages: [], teamGeneration: 2 }
-    const member = { id: 'member', title: 'Member', messages: [], teamLeadId: 'lead', teamMemberName: 'writer' }
+    const member = {
+      id: 'member',
+      title: 'Member',
+      messages: [],
+      teamLeadId: 'lead',
+      teamMemberName: 'writer'
+    }
     await storage.saveSessionToDB(lead, 'scope')
-    const admitted = (await storage.createTeamMemberInDB({ scope: 'scope', expectedLead: lead, member })).member
-    const select = (expectedLead: typeof lead, expectedMember: typeof admitted, profileId: string, shouldUpdate?: () => boolean) => storage.setTeamMemberModelChoiceInDB({ scope: 'scope', expectedLead, expectedMember, profileId, shouldUpdate })
+    const admitted = (
+      await storage.createTeamMemberInDB({ scope: 'scope', expectedLead: lead, member })
+    ).member
+    const select = (
+      expectedLead: typeof lead,
+      expectedMember: typeof admitted,
+      profileId: string,
+      shouldUpdate?: () => boolean
+    ) =>
+      storage.setTeamMemberModelChoiceInDB({
+        scope: 'scope',
+        expectedLead,
+        expectedMember,
+        profileId,
+        shouldUpdate
+      })
     const original = await storage.loadSessionFromDB('member', 'scope')
     await expect(select({ ...lead, teamGeneration: 1 }, admitted, 'wrong')).rejects.toThrow()
     await expect(select(lead, { ...admitted, teamLeadId: 'other' }, 'wrong')).rejects.toThrow()
@@ -586,61 +733,170 @@ describe('chatStorage', () => {
     expect(await storage.loadSessionFromDB('member', 'scope')).toEqual(original)
     const chosen = (await select(lead, admitted, 'chosen')).member
     await expect(select(lead, admitted, 'duplicate')).rejects.toThrow()
-    await expect(storage.saveSessionToDB({ ...chosen, memberModelChoice: { version: 1, profileId: 'external' } }, 'scope')).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
-    await expect(storage.compareAndUpdateSessionInDB('member', 'scope', { expectedSession: chosen, update: current => ({ ...current, memberModelChoice: { version: 1, profileId: 'external' } }) })).resolves.toBeNull()
-    expect((await storage.loadSessionFromDB('member', 'scope'))?.memberModelChoice).toEqual({ version: 1, profileId: 'chosen' })
+    await expect(
+      storage.saveSessionToDB(
+        { ...chosen, memberModelChoice: { version: 1, profileId: 'external' } },
+        'scope'
+      )
+    ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+    await expect(
+      storage.compareAndUpdateSessionInDB('member', 'scope', {
+        expectedSession: chosen,
+        update: (current) => ({
+          ...current,
+          memberModelChoice: { version: 1, profileId: 'external' }
+        })
+      })
+    ).resolves.toBeNull()
+    expect((await storage.loadSessionFromDB('member', 'scope'))?.memberModelChoice).toEqual({
+      version: 1,
+      profileId: 'chosen'
+    })
   })
 
   it('commits a team generation and enforces stored name, capacity, scope and stale-lead checks', async () => {
-    const fakeIndexedDb = createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce = false; vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
-    const lead = {id:'lead',title:'Lead',messages:[],profileId:'base',teamSettings:{maxMembers:1,defaultModel:null,autoCleanup:true}}
-    const member = {id:'member',title:'Writer',messages:[],teamLeadId:'lead',teamMemberName:'writer'}
-    await storage.saveSessionToDB(lead,'team-scope')
-    await storage.saveSessionToDB({...member,id:'other-scope'},'other-scope')
-    const admitted = await storage.createTeamMemberInDB({scope:'team-scope',expectedLead:lead,member})
+    const lead = {
+      id: 'lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base',
+      teamSettings: { maxMembers: 1, defaultModel: null, autoCleanup: true }
+    }
+    const member = {
+      id: 'member',
+      title: 'Writer',
+      messages: [],
+      teamLeadId: 'lead',
+      teamMemberName: 'writer'
+    }
+    await storage.saveSessionToDB(lead, 'team-scope')
+    await storage.saveSessionToDB({ ...member, id: 'other-scope' }, 'other-scope')
+    const admitted = await storage.createTeamMemberInDB({
+      scope: 'team-scope',
+      expectedLead: lead,
+      member
+    })
     expect(admitted.member.teamMemberGeneration).toBe(0)
-    await expect(storage.createTeamMemberInDB({scope:'team-scope',expectedLead:lead,member:{...member,id:'member-2',teamMemberName:'other'}})).rejects.toThrow('full')
-    const ended = await storage.endTeamInDB({scope:'team-scope',expectedLead:lead})
-    expect(ended.lead).toMatchObject({teamGeneration:1,teamEnded:true})
-    expect(ended.members).toEqual([expect.objectContaining({id:'member',archived:true})])
-    expect(await storage.loadSessionFromDB('member','team-scope')).toMatchObject({archived:true})
-    expect(await storage.loadSessionFromDB('other-scope','other-scope')).not.toHaveProperty('archived',true)
-    await expect(storage.createTeamMemberInDB({scope:'team-scope',expectedLead:lead,member:{...member,id:'stale'}})).rejects.toThrow('changed')
-    await expect(storage.createTeamMemberInDB({scope:'team-scope',expectedLead:ended.lead,member:{...member,id:'fresh'}})).rejects.toThrow('changed')
-    expect(await storage.loadSessionFromDB('lead','team-scope')).toMatchObject({teamEnded:true})
+    await expect(
+      storage.createTeamMemberInDB({
+        scope: 'team-scope',
+        expectedLead: lead,
+        member: { ...member, id: 'member-2', teamMemberName: 'other' }
+      })
+    ).rejects.toThrow('full')
+    const ended = await storage.endTeamInDB({ scope: 'team-scope', expectedLead: lead })
+    expect(ended.lead).toMatchObject({ teamGeneration: 1, teamEnded: true })
+    expect(ended.members).toEqual([expect.objectContaining({ id: 'member', archived: true })])
+    expect(await storage.loadSessionFromDB('member', 'team-scope')).toMatchObject({
+      archived: true
+    })
+    expect(await storage.loadSessionFromDB('other-scope', 'other-scope')).not.toHaveProperty(
+      'archived',
+      true
+    )
+    await expect(
+      storage.createTeamMemberInDB({
+        scope: 'team-scope',
+        expectedLead: lead,
+        member: { ...member, id: 'stale' }
+      })
+    ).rejects.toThrow('changed')
+    await expect(
+      storage.createTeamMemberInDB({
+        scope: 'team-scope',
+        expectedLead: ended.lead,
+        member: { ...member, id: 'fresh' }
+      })
+    ).rejects.toThrow('changed')
+    expect(await storage.loadSessionFromDB('lead', 'team-scope')).toMatchObject({ teamEnded: true })
   })
 
   it('keeps retained members but advances their lifecycle revision when cleanup is disabled', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const lead={id:'lead',title:'Lead',messages:[],teamSettings:{maxMembers:6,defaultModel:null,autoCleanup:false}}
-    const member={id:'member',title:'Member',messages:[],teamLeadId:'lead',teamMemberName:'writer'}
-    await storage.saveSessionToDB(lead,'scope')
-    await storage.createTeamMemberInDB({scope:'scope',expectedLead:lead,member})
-    const ended=await storage.endTeamInDB({scope:'scope',expectedLead:lead})
-    expect(ended.lead).toMatchObject({teamGeneration:1,teamLifecycleRevision:1})
-    expect(ended.members[0]).toMatchObject({teamMemberGeneration:0,teamLifecycleRevision:1})
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const lead = {
+      id: 'lead',
+      title: 'Lead',
+      messages: [],
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    const member = {
+      id: 'member',
+      title: 'Member',
+      messages: [],
+      teamLeadId: 'lead',
+      teamMemberName: 'writer'
+    }
+    await storage.saveSessionToDB(lead, 'scope')
+    await storage.createTeamMemberInDB({ scope: 'scope', expectedLead: lead, member })
+    const ended = await storage.endTeamInDB({ scope: 'scope', expectedLead: lead })
+    expect(ended.lead).toMatchObject({ teamGeneration: 1, teamLifecycleRevision: 1 })
+    expect(ended.members[0]).toMatchObject({ teamMemberGeneration: 0, teamLifecycleRevision: 1 })
     expect(ended.members[0].archived).not.toBe(true)
-    await expect(storage.saveSessionToDB({...member,teamMemberGeneration:0},'scope',{expectedSession:{...member,teamMemberGeneration:0}})).rejects.toThrow('changed')
+    await expect(
+      storage.saveSessionToDB({ ...member, teamMemberGeneration: 0 }, 'scope', {
+        expectedSession: { ...member, teamMemberGeneration: 0 }
+      })
+    ).rejects.toThrow('changed')
   })
 
-  it.each([false,true])('rejects stale lifecycle payloads after End (autoCleanup=%s)', async (autoCleanup) => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const lead={id:'lead',title:'Lead',messages:[],teamSettings:{maxMembers:6,defaultModel:null,autoCleanup}}
-    const member={id:'member',title:'Member',messages:[],teamLeadId:'lead',teamMemberName:'writer'}
-    await storage.saveSessionToDB(lead,'scope')
-    const admitted=(await storage.createTeamMemberInDB({scope:'scope',expectedLead:lead,member})).member
-    const ended=await storage.endTeamInDB({scope:'scope',expectedLead:lead})
-    await expect(storage.saveSessionToDB({...lead,title:'late timer'},'scope',{expectedSession:ended.lead})).rejects.toThrow('changed')
-    await expect(storage.saveSessionToDB({...admitted,title:'late timer'},'scope')).rejects.toThrow('changed')
-    expect(await storage.loadSessionFromDB('lead','scope')).toMatchObject({teamGeneration:1,teamLifecycleRevision:1})
-    expect(await storage.loadSessionFromDB('member','scope')).toMatchObject({teamLifecycleRevision:1, ...(autoCleanup?{archived:true}:{})})
-    const bypass=await storage.compareAndUpdateSessionInDB('lead','scope',{expectedSession:ended.lead,update:current=>({...current,teamGeneration:0})})
-    expect(bypass).toBeNull()
-    await expect(storage.saveAllSessions([lead,member],'scope')).rejects.toThrow('Bulk replacement')
-  })
+  it.each([false, true])(
+    'rejects stale lifecycle payloads after End (autoCleanup=%s)',
+    async (autoCleanup) => {
+      const fakeIndexedDb = createFakeIndexedDb()
+      fakeIndexedDb.state.failGetAllOnce = false
+      vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+      const storage = await import('./chatStorage')
+      const lead = {
+        id: 'lead',
+        title: 'Lead',
+        messages: [],
+        teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup }
+      }
+      const member = {
+        id: 'member',
+        title: 'Member',
+        messages: [],
+        teamLeadId: 'lead',
+        teamMemberName: 'writer'
+      }
+      await storage.saveSessionToDB(lead, 'scope')
+      const admitted = (
+        await storage.createTeamMemberInDB({ scope: 'scope', expectedLead: lead, member })
+      ).member
+      const ended = await storage.endTeamInDB({ scope: 'scope', expectedLead: lead })
+      await expect(
+        storage.saveSessionToDB({ ...lead, title: 'late timer' }, 'scope', {
+          expectedSession: ended.lead
+        })
+      ).rejects.toThrow('changed')
+      await expect(
+        storage.saveSessionToDB({ ...admitted, title: 'late timer' }, 'scope')
+      ).rejects.toThrow('changed')
+      expect(await storage.loadSessionFromDB('lead', 'scope')).toMatchObject({
+        teamGeneration: 1,
+        teamLifecycleRevision: 1
+      })
+      expect(await storage.loadSessionFromDB('member', 'scope')).toMatchObject({
+        teamLifecycleRevision: 1,
+        ...(autoCleanup ? { archived: true } : {})
+      })
+      const bypass = await storage.compareAndUpdateSessionInDB('lead', 'scope', {
+        expectedSession: ended.lead,
+        update: (current) => ({ ...current, teamGeneration: 0 })
+      })
+      expect(bypass).toBeNull()
+      await expect(storage.saveAllSessions([lead, member], 'scope')).rejects.toThrow(
+        'Bulk replacement'
+      )
+    }
+  )
 
   it('retries only a CAS-matched superseded live snapshot and acknowledges the actual latest object', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
@@ -655,10 +911,17 @@ describe('chatStorage', () => {
     writer.freeze('scope', base.id, base)
     let live = first
     let reads = 0
-    const saved = await writer.persistLatest('scope', base.id, () => {
-      if (++reads === 2) live = latest
-      return live
-    }, () => base, undefined, true)
+    const saved = await writer.persistLatest(
+      'scope',
+      base.id,
+      () => {
+        if (++reads === 2) live = latest
+        return live
+      },
+      () => base,
+      undefined,
+      true
+    )
     expect(saved).toBe(latest)
     expect(writer.isAcknowledgementCurrent('scope', latest)).toBe(true)
     expect(writer.isAcknowledgementCurrent('scope', first)).toBe(false)
@@ -670,17 +933,33 @@ describe('chatStorage', () => {
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
     const { ChatSessionSaveBaseline } = await import('./chatSaveBaseline')
-    const base = { id: 'prepared-lead', title: 'lead', messages: [] as { role: 'user'; content: string }[] }
+    const base = {
+      id: 'prepared-lead',
+      title: 'lead',
+      messages: [] as { role: 'user'; content: string }[]
+    }
     await storage.saveSessionToDB(base, 'scope')
     const writer = new ChatSessionSaveBaseline()
     writer.freeze('scope', base.id, base)
     let live = base
     let reads = 0
-    const prepare = vi.fn(() => { live = { ...live, title: 'task done' }; return live })
-    const result = await writer.persistLatest('scope', base.id, () => {
-      if (++reads === 1) live = { ...live, messages: [{ role: 'user', content: 'new lead message' }] }
+    const prepare = vi.fn(() => {
+      live = { ...live, title: 'task done' }
       return live
-    }, () => base, undefined, true, prepare)
+    })
+    const result = await writer.persistLatest(
+      'scope',
+      base.id,
+      () => {
+        if (++reads === 1)
+          live = { ...live, messages: [{ role: 'user', content: 'new lead message' }] }
+        return live
+      },
+      () => base,
+      undefined,
+      true,
+      prepare
+    )
     expect(prepare).toHaveBeenCalledOnce()
     expect(result).toBe(live)
     expect(await storage.loadSessionFromDB(base.id, 'scope')).toMatchObject(live)
@@ -696,195 +975,381 @@ describe('chatStorage', () => {
     const writer = new ChatSessionSaveBaseline()
     writer.freeze('scope', base.id, base)
     let count = 0
-    await expect(writer.persistLatest('scope', base.id, () => ({ ...base, title: `v${++count}` }), () => base, undefined, true))
-      .rejects.toBeInstanceOf(storage.ChatSessionSaveSupersededError)
+    await expect(
+      writer.persistLatest(
+        'scope',
+        base.id,
+        () => ({ ...base, title: `v${++count}` }),
+        () => base,
+        undefined,
+        true
+      )
+    ).rejects.toBeInstanceOf(storage.ChatSessionSaveSupersededError)
     expect(count).toBe(6)
     expect((await storage.loadSessionFromDB(base.id, 'scope'))?.title).toBe('base')
   })
 
   it('runs the real debounce callback through a fenced baseline after End', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const {ChatSessionSaveBaseline}=await import('./chatSaveBaseline')
-    const lead={id:'lead',title:'Lead',messages:[],teamSettings:{maxMembers:6,defaultModel:null,autoCleanup:false}}
-    await storage.saveSessionToDB(lead,'scope')
-    const writer=new ChatSessionSaveBaseline()
-    writer.freeze('scope','lead',lead)
-    let finish!: (error:unknown)=>void
-    const outcome=new Promise<unknown>(resolve=>{finish=resolve})
-    const staleEdit={...lead,title:'stale delayed edit'}
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const { ChatSessionSaveBaseline } = await import('./chatSaveBaseline')
+    const lead = {
+      id: 'lead',
+      title: 'Lead',
+      messages: [],
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    await storage.saveSessionToDB(lead, 'scope')
+    const writer = new ChatSessionSaveBaseline()
+    writer.freeze('scope', 'lead', lead)
+    let finish!: (error: unknown) => void
+    const outcome = new Promise<unknown>((resolve) => {
+      finish = resolve
+    })
+    const staleEdit = { ...lead, title: 'stale delayed edit' }
     // A second module instance represents another renderer's independent debounce queue.
-    storage.debouncedSaveSessions([staleEdit],250,'scope',{
-      owner:writer,
-      saveLatest:(id,scope)=>writer.persistLatest(scope,id,()=>staleEdit,()=>lead),
-      onError:error=>finish(error), onSuccess:()=>finish(null), onDiscard:()=>finish('discarded')
+    storage.debouncedSaveSessions([staleEdit], 250, 'scope', {
+      owner: writer,
+      saveLatest: (id, scope) =>
+        writer.persistLatest(
+          scope,
+          id,
+          () => staleEdit,
+          () => lead
+        ),
+      onError: (error) => finish(error),
+      onSuccess: () => finish(null),
+      onDiscard: () => finish('discarded')
     })
     vi.resetModules()
-    const otherWindow=await import('./chatStorage')
-    const ended=await otherWindow.endTeamInDB({scope:'scope',expectedLead:lead})
-    writer.fenceAndAdvance('scope','lead',ended.lead)
+    const otherWindow = await import('./chatStorage')
+    const ended = await otherWindow.endTeamInDB({ scope: 'scope', expectedLead: lead })
+    writer.fenceAndAdvance('scope', 'lead', ended.lead)
     expect(await outcome).toBeInstanceOf(Error)
-    expect(await storage.loadSessionFromDB('lead','scope')).toMatchObject({title:'Lead',teamGeneration:1,teamLifecycleRevision:1})
+    expect(await storage.loadSessionFromDB('lead', 'scope')).toMatchObject({
+      title: 'Lead',
+      teamGeneration: 1,
+      teamLifecycleRevision: 1
+    })
   })
 
   it('persists a descendant registered while its own predecessor is still in flight', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const {ChatSessionSaveBaseline}=await import('./chatSaveBaseline')
-    const writer=new ChatSessionSaveBaseline()
-    const original={id:'own-chain',title:'original',messages:[]}
-    const first={...original,messages:[{role:'user' as const,content:'first'}]}
-    const latest={...first,messages:[...first.messages,{role:'assistant' as const,content:'latest'}]}
-    await storage.saveSessionToDB(original,'scope')
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const { ChatSessionSaveBaseline } = await import('./chatSaveBaseline')
+    const writer = new ChatSessionSaveBaseline()
+    const original = { id: 'own-chain', title: 'original', messages: [] }
+    const first = { ...original, messages: [{ role: 'user' as const, content: 'first' }] }
+    const latest = {
+      ...first,
+      messages: [...first.messages, { role: 'assistant' as const, content: 'latest' }]
+    }
+    await storage.saveSessionToDB(original, 'scope')
     // Re-expressed on the production writer (owner decision 6): the live object moves on while its
     // own predecessor is in flight; retrySuperseded=true, as production passes after K1.
     let current: import('./chatStorage').ChatSession = first
-    const pending=writer.persistLatest('scope',first.id,()=>current,()=>original,undefined,true)
-    await Promise.resolve(); await Promise.resolve()
-    current=latest
-    const queued=writer.persistLatest('scope',latest.id,()=>current,()=>original,undefined,true)
+    const pending = writer.persistLatest(
+      'scope',
+      first.id,
+      () => current,
+      () => original,
+      undefined,
+      true
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+    current = latest
+    const queued = writer.persistLatest(
+      'scope',
+      latest.id,
+      () => current,
+      () => original,
+      undefined,
+      true
+    )
     await expect(pending).resolves.toBeTruthy()
     await expect(queued).resolves.toBe(latest)
-    expect(await storage.loadSessionFromDB('own-chain','scope')).toMatchObject({messages:latest.messages})
+    expect(await storage.loadSessionFromDB('own-chain', 'scope')).toMatchObject({
+      messages: latest.messages
+    })
   })
 
   it('rejects a guarded save when a delete tombstone prevents any commit', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const original={id:'guarded-deleted',title:'original',messages:[]}
-    await storage.saveSessionToDB(original,'scope')
-    storage.setSessionDeleteTombstone(original.id,'scope')
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const original = { id: 'guarded-deleted', title: 'original', messages: [] }
+    await storage.saveSessionToDB(original, 'scope')
+    storage.setSessionDeleteTombstone(original.id, 'scope')
     try {
-      await expect(storage.saveSessionToDB({...original,title:'unsaved'},'scope',{expectedSession:original})).rejects.toThrow()
-      expect(await storage.loadSessionFromDB(original.id,'scope')).toMatchObject({title:'original'})
-    } finally { storage.setSessionDeleteTombstone(original.id,'scope',false) }
+      await expect(
+        storage.saveSessionToDB({ ...original, title: 'unsaved' }, 'scope', {
+          expectedSession: original
+        })
+      ).rejects.toThrow()
+      expect(await storage.loadSessionFromDB(original.id, 'scope')).toMatchObject({
+        title: 'original'
+      })
+    } finally {
+      storage.setSessionDeleteTombstone(original.id, 'scope', false)
+    }
   })
 
   it('resolves debounced state at execution time and does not restore the registered old object', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const {ChatSessionSaveBaseline}=await import('./chatSaveBaseline')
-    const writer=new ChatSessionSaveBaseline()
-    const original={id:'latest-debounce',title:'original',messages:[]}
-    const stale={...original,title:'old timer'}
-    const latest={...original,title:'new immediate',messages:[{role:'assistant' as const,content:'reply'}]}
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const { ChatSessionSaveBaseline } = await import('./chatSaveBaseline')
+    const writer = new ChatSessionSaveBaseline()
+    const original = { id: 'latest-debounce', title: 'original', messages: [] }
+    const stale = { ...original, title: 'old timer' }
+    const latest = {
+      ...original,
+      title: 'new immediate',
+      messages: [{ role: 'assistant' as const, content: 'reply' }]
+    }
     let current: import('./chatStorage').ChatSession = stale
-    await storage.saveSessionToDB(original,'scope')
-    writer.freeze('scope',original.id,original)
-    let finish!:(value:unknown)=>void
-    const outcome=new Promise<unknown>(resolve=>{finish=resolve})
-    storage.debouncedSaveSessions([stale],40,'scope',{
-      owner:writer,
-      saveLatest:(id,scope)=>writer.persistLatest(scope,id,()=>current,()=>original),
-      onSuccess:saved=>finish(saved),onError:error=>finish(error)
+    await storage.saveSessionToDB(original, 'scope')
+    writer.freeze('scope', original.id, original)
+    let finish!: (value: unknown) => void
+    const outcome = new Promise<unknown>((resolve) => {
+      finish = resolve
     })
-    current=latest
-    await writer.persistLatest('scope',original.id,()=>current,()=>original)
+    storage.debouncedSaveSessions([stale], 40, 'scope', {
+      owner: writer,
+      saveLatest: (id, scope) =>
+        writer.persistLatest(
+          scope,
+          id,
+          () => current,
+          () => original
+        ),
+      onSuccess: (saved) => finish(saved),
+      onError: (error) => finish(error)
+    })
+    current = latest
+    await writer.persistLatest(
+      'scope',
+      original.id,
+      () => current,
+      () => original
+    )
     expect(await outcome).toEqual([latest])
-    expect(await storage.loadSessionFromDB(original.id,'scope')).toMatchObject({title:'new immediate',messages:latest.messages})
+    expect(await storage.loadSessionFromDB(original.id, 'scope')).toMatchObject({
+      title: 'new immediate',
+      messages: latest.messages
+    })
   })
 
   it('serializes non-append updates and resolves the current state after the previous write', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const {ChatSessionSaveBaseline}=await import('./chatSaveBaseline')
-    const writer=new ChatSessionSaveBaseline()
-    const original={id:'latest-queue',title:'original',messages:[]}
-    const placeholder={...original,messages:[{role:'assistant' as const,content:''}]}
-    const finished={...original,title:'renamed',messages:[{role:'assistant' as const,content:'finished'}]}
-    await storage.saveSessionToDB(original,'scope')
-    writer.freeze('scope',original.id,original)
-    let current=placeholder
-    let started!:()=>void
-    const begun=new Promise<void>(resolve=>{started=resolve})
-    const first=writer.persistLatest('scope',original.id,()=>{started();return current},()=>original)
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const { ChatSessionSaveBaseline } = await import('./chatSaveBaseline')
+    const writer = new ChatSessionSaveBaseline()
+    const original = { id: 'latest-queue', title: 'original', messages: [] }
+    const placeholder = { ...original, messages: [{ role: 'assistant' as const, content: '' }] }
+    const finished = {
+      ...original,
+      title: 'renamed',
+      messages: [{ role: 'assistant' as const, content: 'finished' }]
+    }
+    await storage.saveSessionToDB(original, 'scope')
+    writer.freeze('scope', original.id, original)
+    let current = placeholder
+    let started!: () => void
+    const begun = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const first = writer.persistLatest(
+      'scope',
+      original.id,
+      () => {
+        started()
+        return current
+      },
+      () => original
+    )
     await begun
-    current=finished
-    const second=writer.persistLatest('scope',original.id,()=>current,()=>original)
-    const [firstOutcome,secondOutcome]=await Promise.allSettled([first,second])
+    current = finished
+    const second = writer.persistLatest(
+      'scope',
+      original.id,
+      () => current,
+      () => original
+    )
+    const [firstOutcome, secondOutcome] = await Promise.allSettled([first, second])
     expect(firstOutcome.status).toBe('rejected')
     expect(secondOutcome.status).toBe('fulfilled')
-    expect(await storage.loadSessionFromDB(original.id,'scope')).toMatchObject({title:'renamed',messages:finished.messages})
+    expect(await storage.loadSessionFromDB(original.id, 'scope')).toMatchObject({
+      title: 'renamed',
+      messages: finished.messages
+    })
   })
 
   it('reports each debounced batch item independently when one writer rejects', async () => {
-    const storage=await import('./chatStorage')
-    const succeeded={id:'batch-ok',title:'ok',messages:[]}
-    const conflicted={id:'batch-conflict',title:'conflict',messages:[]}
-    const onSuccess=vi.fn()
-    const onError=vi.fn()
-    const log=vi.spyOn(console,'error').mockImplementation(()=>{})
+    const storage = await import('./chatStorage')
+    const succeeded = { id: 'batch-ok', title: 'ok', messages: [] }
+    const conflicted = { id: 'batch-conflict', title: 'conflict', messages: [] }
+    const onSuccess = vi.fn()
+    const onError = vi.fn()
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      storage.debouncedSaveSessions([succeeded,conflicted],1,'batch-scope',{
-        owner:{},
-        saveOne:async session=>{if(session.id===conflicted.id)throw new Error('conflict')},
-        onSuccess,onError
+      storage.debouncedSaveSessions([succeeded, conflicted], 1, 'batch-scope', {
+        owner: {},
+        saveOne: async (session) => {
+          if (session.id === conflicted.id) throw new Error('conflict')
+        },
+        onSuccess,
+        onError
       })
-      await vi.waitFor(()=>{
+      await vi.waitFor(() => {
         expect(onSuccess).toHaveBeenCalledWith([succeeded])
-        expect(onError).toHaveBeenCalledWith(expect.any(Error),[conflicted])
+        expect(onError).toHaveBeenCalledWith(expect.any(Error), [conflicted])
       })
       expect(onSuccess).toHaveBeenCalledTimes(1)
       expect(onError).toHaveBeenCalledTimes(1)
-    } finally {log.mockRestore()}
+    } finally {
+      log.mockRestore()
+    }
   })
 
   it('isolates coalesced writers in the same scope and preserves each owner callback', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const ownerA={}, ownerB={}
-    const callsA: string[]=[], callsB: string[]=[]
-    const doneA=new Promise<void>((resolve,reject)=>storage.debouncedSaveSessions(
-      [{id:'session-a',title:'A',messages:[]}],1,'scope',
-      {owner:ownerA,saveOne:async session=>{callsA.push(session.id)},onSuccess:()=>resolve(),onError:reject}))
-    const doneB=new Promise<void>((resolve,reject)=>storage.debouncedSaveSessions(
-      [{id:'session-b',title:'B',messages:[]}],1,'scope',
-      {owner:ownerB,saveOne:async session=>{callsB.push(session.id)},onSuccess:()=>resolve(),onError:reject}))
-    await Promise.all([doneA,doneB])
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const ownerA = {},
+      ownerB = {}
+    const callsA: string[] = [],
+      callsB: string[] = []
+    const doneA = new Promise<void>((resolve, reject) =>
+      storage.debouncedSaveSessions([{ id: 'session-a', title: 'A', messages: [] }], 1, 'scope', {
+        owner: ownerA,
+        saveOne: async (session) => {
+          callsA.push(session.id)
+        },
+        onSuccess: () => resolve(),
+        onError: reject
+      })
+    )
+    const doneB = new Promise<void>((resolve, reject) =>
+      storage.debouncedSaveSessions([{ id: 'session-b', title: 'B', messages: [] }], 1, 'scope', {
+        owner: ownerB,
+        saveOne: async (session) => {
+          callsB.push(session.id)
+        },
+        onSuccess: () => resolve(),
+        onError: reject
+      })
+    )
+    await Promise.all([doneA, doneB])
     expect(callsA).toEqual(['session-a'])
     expect(callsB).toEqual(['session-b'])
   })
 
   it('rejects a stale pane write instead of borrowing another pane baseline', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const {ChatSessionSaveBaseline}=await import('./chatSaveBaseline')
-    const writerA=new ChatSessionSaveBaseline(), writerB=new ChatSessionSaveBaseline()
-    const first={id:'shared',title:'old',messages:[]}
-    const newer={...first,title:'newer saved history'}
-    await storage.saveSessionToDB(newer,'scope')
-    writerA.freeze('scope',first.id,first)
-    writerB.freeze('scope',newer.id,newer)
-    const other={id:'other',title:'other',messages:[]}
-    await storage.saveSessionToDB(other,'scope')
-    const outcomes: unknown[]=[]
-    const staleEdit={...first,title:'stale edit'}, otherEdit={...other,title:'other edit'}
-    const doneA=new Promise<void>(resolve=>storage.debouncedSaveSessions([staleEdit],1,'scope',{
-      owner:writerA,saveLatest:(id,scope)=>writerA.persistLatest(scope,id,()=>staleEdit,()=>first),
-      onSuccess:()=>{outcomes.push('unexpected success');resolve()},onError:error=>{outcomes.push(error);resolve()}
-    }))
-    const doneB=new Promise<void>(resolve=>storage.debouncedSaveSessions([otherEdit],1,'scope',{
-      owner:writerB,saveLatest:(id,scope)=>writerB.persistLatest(scope,id,()=>otherEdit,()=>other),
-      onSuccess:()=>{outcomes.push('other success');resolve()},onError:error=>{outcomes.push(error);resolve()}
-    }))
-    await Promise.all([doneA,doneB])
-    expect(outcomes.filter(value=>value instanceof Error)).toHaveLength(1)
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const { ChatSessionSaveBaseline } = await import('./chatSaveBaseline')
+    const writerA = new ChatSessionSaveBaseline(),
+      writerB = new ChatSessionSaveBaseline()
+    const first = { id: 'shared', title: 'old', messages: [] }
+    const newer = { ...first, title: 'newer saved history' }
+    await storage.saveSessionToDB(newer, 'scope')
+    writerA.freeze('scope', first.id, first)
+    writerB.freeze('scope', newer.id, newer)
+    const other = { id: 'other', title: 'other', messages: [] }
+    await storage.saveSessionToDB(other, 'scope')
+    const outcomes: unknown[] = []
+    const staleEdit = { ...first, title: 'stale edit' },
+      otherEdit = { ...other, title: 'other edit' }
+    const doneA = new Promise<void>((resolve) =>
+      storage.debouncedSaveSessions([staleEdit], 1, 'scope', {
+        owner: writerA,
+        saveLatest: (id, scope) =>
+          writerA.persistLatest(
+            scope,
+            id,
+            () => staleEdit,
+            () => first
+          ),
+        onSuccess: () => {
+          outcomes.push('unexpected success')
+          resolve()
+        },
+        onError: (error) => {
+          outcomes.push(error)
+          resolve()
+        }
+      })
+    )
+    const doneB = new Promise<void>((resolve) =>
+      storage.debouncedSaveSessions([otherEdit], 1, 'scope', {
+        owner: writerB,
+        saveLatest: (id, scope) =>
+          writerB.persistLatest(
+            scope,
+            id,
+            () => otherEdit,
+            () => other
+          ),
+        onSuccess: () => {
+          outcomes.push('other success')
+          resolve()
+        },
+        onError: (error) => {
+          outcomes.push(error)
+          resolve()
+        }
+      })
+    )
+    await Promise.all([doneA, doneB])
+    expect(outcomes.filter((value) => value instanceof Error)).toHaveLength(1)
     expect(outcomes).toContain('other success')
-    expect(await storage.loadSessionFromDB('shared','scope')).toMatchObject({title:'newer saved history'})
+    expect(await storage.loadSessionFromDB('shared', 'scope')).toMatchObject({
+      title: 'newer saved history'
+    })
   })
 
   it('does not allow compare-and-update to mutate a lifecycle or ID in place', async () => {
-    const fakeIndexedDb=createFakeIndexedDb(); fakeIndexedDb.state.failGetAllOnce=false; vi.stubGlobal('indexedDB',fakeIndexedDb.api)
-    const storage=await import('./chatStorage')
-    const lead={id:'lead',title:'Lead',messages:[],teamSettings:{maxMembers:6,defaultModel:null,autoCleanup:false}}
-    await storage.saveSessionToDB(lead,'scope')
-    const ended=await storage.endTeamInDB({scope:'scope',expectedLead:lead})
-    const result=await storage.compareAndUpdateSessionInDB('lead','scope',{
-      expectedSession:ended.lead,update:current=>{current.teamGeneration=0;current.teamLifecycleRevision=0;current.id='forged';return current}
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const lead = {
+      id: 'lead',
+      title: 'Lead',
+      messages: [],
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    await storage.saveSessionToDB(lead, 'scope')
+    const ended = await storage.endTeamInDB({ scope: 'scope', expectedLead: lead })
+    const result = await storage.compareAndUpdateSessionInDB('lead', 'scope', {
+      expectedSession: ended.lead,
+      update: (current) => {
+        current.teamGeneration = 0
+        current.teamLifecycleRevision = 0
+        current.id = 'forged'
+        return current
+      }
     })
     expect(result).toBeNull()
-    expect(await storage.loadSessionFromDB('lead','scope')).toMatchObject({id:'lead',teamGeneration:1,teamLifecycleRevision:1})
-    expect(await storage.loadSessionFromDB('forged','scope')).toBeNull()
+    expect(await storage.loadSessionFromDB('lead', 'scope')).toMatchObject({
+      id: 'lead',
+      teamGeneration: 1,
+      teamLifecycleRevision: 1
+    })
+    expect(await storage.loadSessionFromDB('forged', 'scope')).toBeNull()
   })
 
   it('isolates predicate mutations from the stored session and updater', async () => {
@@ -892,22 +1357,37 @@ describe('chatStorage', () => {
     fakeIndexedDb.state.failGetAllOnce = false
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
-    const lead = { id: 'lead', title: 'Lead', messages: [{role: 'user' as const, content: 'original'}], teamSettings: {maxMembers: 6, defaultModel: null, autoCleanup: false} }
+    const lead = {
+      id: 'lead',
+      title: 'Lead',
+      messages: [{ role: 'user' as const, content: 'original' }],
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
     await storage.saveSessionToDB(lead, 'scope')
-    const ended = await storage.endTeamInDB({scope: 'scope', expectedLead: lead})
+    const ended = await storage.endTeamInDB({ scope: 'scope', expectedLead: lead })
     const result = await storage.compareAndUpdateSessionInDB('lead', 'scope', {
       expectedSession: ended.lead,
-      shouldUpdate: current => {
+      shouldUpdate: (current) => {
         current.teamGeneration = 0
         current.teamLifecycleRevision = 0
         current.id = 'forged'
         current.messages[0].content = 'forged history'
         return true
       },
-      update: current => current
+      update: (current) => current
     })
-    expect(result).toMatchObject({id: 'lead', teamGeneration: 1, teamLifecycleRevision: 1, messages: [{content: 'original'}]})
-    expect(await storage.loadSessionFromDB('lead', 'scope')).toMatchObject({id: 'lead', teamGeneration: 1, teamLifecycleRevision: 1, messages: [{content: 'original'}]})
+    expect(result).toMatchObject({
+      id: 'lead',
+      teamGeneration: 1,
+      teamLifecycleRevision: 1,
+      messages: [{ content: 'original' }]
+    })
+    expect(await storage.loadSessionFromDB('lead', 'scope')).toMatchObject({
+      id: 'lead',
+      teamGeneration: 1,
+      teamLifecycleRevision: 1,
+      messages: [{ content: 'original' }]
+    })
     expect(await storage.loadSessionFromDB('forged', 'scope')).toBeNull()
   })
 
@@ -949,16 +1429,50 @@ describe('chatStorage', () => {
   })
 
   it('retains tool results through scoped IndexedDB save/reopen and searches only the requested loaded session', async () => {
-    const fakeIndexedDb = createFakeIndexedDb(); vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const fakeIndexedDb = createFakeIndexedDb()
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
     const { searchAgentSessionArchive } = await import('./agentArchiveSearch')
-    const receipt = { runId: 'r', toolCallId: 'c', toolName: 'files.read', status: 'completed' as const, args: { hidden: 'ARGS_SECRET' }, content: 'saved blue receipt', metadata: { hidden: 'META_SECRET' } }
-    await storage.saveSessionToDB({ id: 'same-id', title: 'First', messages: [{ role: 'assistant', content: '', toolHistory: [receipt] }] }, 'scope-a')
-    await storage.saveSessionToDB({ id: 'same-id', title: 'Second', messages: [{ role: 'assistant', content: '', toolHistory: [{ ...receipt, content: 'other blue receipt' }] }] }, 'scope-b')
+    const receipt = {
+      runId: 'r',
+      toolCallId: 'c',
+      toolName: 'files.read',
+      status: 'completed' as const,
+      args: { hidden: 'ARGS_SECRET' },
+      content: 'saved blue receipt',
+      metadata: { hidden: 'META_SECRET' }
+    }
+    await storage.saveSessionToDB(
+      {
+        id: 'same-id',
+        title: 'First',
+        messages: [{ role: 'assistant', content: '', toolHistory: [receipt] }]
+      },
+      'scope-a'
+    )
+    await storage.saveSessionToDB(
+      {
+        id: 'same-id',
+        title: 'Second',
+        messages: [
+          {
+            role: 'assistant',
+            content: '',
+            toolHistory: [{ ...receipt, content: 'other blue receipt' }]
+          }
+        ]
+      },
+      'scope-b'
+    )
     const session = await storage.loadSessionFromDB('same-id', 'scope-a')
     expect(session?.messages[0].toolHistory).toEqual([receipt])
-    const output = await searchAgentSessionArchive(session!.messages, { query: 'blue', source: 'tools' })
-    expect(output.matches).toEqual([expect.objectContaining({ excerpt: 'saved blue receipt', toolName: 'files.read' })])
+    const output = await searchAgentSessionArchive(session!.messages, {
+      query: 'blue',
+      source: 'tools'
+    })
+    expect(output.matches).toEqual([
+      expect.objectContaining({ excerpt: 'saved blue receipt', toolName: 'files.read' })
+    ])
     expect(JSON.stringify(output)).not.toMatch(/other blue|ARGS_SECRET|META_SECRET/)
     expect(fakeIndexedDb.state.getAllCount).toBe(0)
   })
@@ -1022,12 +1536,14 @@ describe('chatStorage', () => {
     )
     const baselinePutCount = fakeIndexedDb.state.putCount
 
-    await new Promise<void>((resolve, reject) => storage.debouncedSaveSessions(
-      [{ id: 'session-a', title: 'A updated', messages: [] }],
-      1,
-      'workspace-a',
-      { onSuccess: () => resolve(), onError: reject }
-    ))
+    await new Promise<void>((resolve, reject) =>
+      storage.debouncedSaveSessions(
+        [{ id: 'session-a', title: 'A updated', messages: [] }],
+        1,
+        'workspace-a',
+        { onSuccess: () => resolve(), onError: reject }
+      )
+    )
 
     expect(fakeIndexedDb.state.getAllCount).toBe(0)
     expect(fakeIndexedDb.state.clearCount).toBe(0)
@@ -1247,16 +1763,50 @@ describe('chatStorage', () => {
     fakeIndexedDb.state.failGetAllOnce = false
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
-    const reference = { version: 1 as const, kind: 'managed' as const, sha256: 'e'.repeat(64), relativePath: `originals/ee/${'e'.repeat(64)}.png`, sizeBytes: 4, mimeType: 'image/png', originalFileName: 'retained.png' }
-    managedMediaApiMock.migrateLegacyDataUrl.mockResolvedValue({ reference, localMediaUrl: 'local-media:///originals/retained.png', checkpoint: { version: 1, reclaim: { reference } } })
-    const legacy = { role: 'user' as const, content: 'Original compacted text', attachments: [{ type: 'image' as const, url: 'data:image/png;base64,AAAA', fileName: 'retained.png' }] }
-    await storage.saveSessionToDB({ id: 'retained-image', title: 'Owned', compactedMessages: [legacy], messages: [] }, 'workspace-retained')
+    const reference = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      sha256: 'e'.repeat(64),
+      relativePath: `originals/ee/${'e'.repeat(64)}.png`,
+      sizeBytes: 4,
+      mimeType: 'image/png',
+      originalFileName: 'retained.png'
+    }
+    managedMediaApiMock.migrateLegacyDataUrl.mockResolvedValue({
+      reference,
+      localMediaUrl: 'local-media:///originals/retained.png',
+      checkpoint: { version: 1, reclaim: { reference } }
+    })
+    const legacy = {
+      role: 'user' as const,
+      content: 'Original compacted text',
+      attachments: [
+        { type: 'image' as const, url: 'data:image/png;base64,AAAA', fileName: 'retained.png' }
+      ]
+    }
+    await storage.saveSessionToDB(
+      { id: 'retained-image', title: 'Owned', compactedMessages: [legacy], messages: [] },
+      'workspace-retained'
+    )
     const loaded = await storage.loadSessionFromDB('retained-image', 'workspace-retained')
     expect(managedMediaApiMock.migrateLegacyDataUrl).toHaveBeenCalledOnce()
-    expect(loaded?.compactedMessages).toEqual([{ ...legacy, attachments: [{ ...legacy.attachments[0], url: 'local-media:///originals/retained.png', media: reference }] }])
+    expect(loaded?.compactedMessages).toEqual([
+      {
+        ...legacy,
+        attachments: [
+          {
+            ...legacy.attachments[0],
+            url: 'local-media:///originals/retained.png',
+            media: reference
+          }
+        ]
+      }
+    ])
     expect(loaded?.messages).toEqual([])
     expect(managedMediaApiMock.reclaimLegacyMigration).not.toHaveBeenCalled()
-    await expect(storage.loadSessionFromDB('retained-image', 'workspace-retained')).resolves.toEqual(loaded)
+    await expect(
+      storage.loadSessionFromDB('retained-image', 'workspace-retained')
+    ).resolves.toEqual(loaded)
     expect(managedMediaApiMock.migrateLegacyDataUrl).toHaveBeenCalledOnce()
   })
 
@@ -1587,11 +2137,16 @@ describe('chatStorage', () => {
       await storage.saveSessionToDB(v0, 'workspace-a')
       await storage.saveSessionToDB(external, 'workspace-a')
       const shouldUpdate = vi.fn(() => false)
-      await expect(storage.saveSessionToDB(session('external-and-local', 'local edit'), 'workspace-a', {
-        expectedSession: v0, shouldUpdate
-      })).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+      await expect(
+        storage.saveSessionToDB(session('external-and-local', 'local edit'), 'workspace-a', {
+          expectedSession: v0,
+          shouldUpdate
+        })
+      ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
       expect(shouldUpdate).not.toHaveBeenCalled()
-      await expect(storage.loadSessionFromDB('external-and-local', 'workspace-a')).resolves.toMatchObject(external)
+      await expect(
+        storage.loadSessionFromDB('external-and-local', 'workspace-a')
+      ).resolves.toMatchObject(external)
     })
 
     it('applies the guarded save when the stored record still equals the expected snapshot', async () => {
@@ -1656,9 +2211,11 @@ describe('chatStorage', () => {
       storage.setSessionDeleteTombstone('deleted-guard', 'workspace-a')
       await storage.deleteSessionFromDB('deleted-guard', 'workspace-a')
 
-      await expect(storage.saveSessionToDB(session('deleted-guard', 'stale replay'), 'workspace-a', {
-        expectedSession: v0
-      })).rejects.toBeInstanceOf(storage.ChatSessionSaveConflictError)
+      await expect(
+        storage.saveSessionToDB(session('deleted-guard', 'stale replay'), 'workspace-a', {
+          expectedSession: v0
+        })
+      ).rejects.toBeInstanceOf(storage.ChatSessionSaveConflictError)
       await expect(storage.loadSessionFromDB('deleted-guard', 'workspace-a')).resolves.toBeNull()
     })
 
@@ -1821,10 +2378,17 @@ describe('chatStorage queued sends kept with the draft', () => {
       { inputValue: 'typing', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 100 },
       'workspace-a'
     )
-    expect(storage.writeSessionQueuedSendsBackup('s1', [queued('q1'), queued('q2')], 200, 'workspace-a')).toBe(true)
+    expect(
+      storage.writeSessionQueuedSendsBackup('s1', [queued('q1'), queued('q2')], 200, 'workspace-a')
+    ).toBe(true)
     expect(storage.readSessionDraftBackup('s1', 'workspace-a')).toEqual({
       updatedAt: 100,
-      draft: { inputValue: 'typing', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 100 },
+      draft: {
+        inputValue: 'typing',
+        pendingAttachments: [],
+        pendingHiddenContext: '',
+        updatedAt: 100
+      },
       queuedSends: [queued('q1'), queued('q2')],
       queuedSendsUpdatedAt: 200
     })
@@ -1838,7 +2402,9 @@ describe('chatStorage queued sends kept with the draft', () => {
     })
 
     // An older queue write never replaces a newer one; an empty list is kept as a removal marker.
-    expect(storage.writeSessionQueuedSendsBackup('s1', [queued('stale')], 150, 'workspace-a')).toBe(false)
+    expect(storage.writeSessionQueuedSendsBackup('s1', [queued('stale')], 150, 'workspace-a')).toBe(
+      false
+    )
     expect(storage.writeSessionQueuedSendsBackup('s1', [], 400, 'workspace-a')).toBe(true)
     expect(storage.readSessionDraftBackup('s1', 'workspace-a')).toEqual({
       updatedAt: 300,
@@ -1865,15 +2431,24 @@ describe('chatStorage queued sends kept with the draft', () => {
             queuedAt: 1,
             attachments: [
               { type: 'image', url: 'blob:file:///dead', fileName: 'dead.png' },
-              { type: 'image', url: `data:image/png;base64,${'A'.repeat(70 * 1024)}`, fileName: 'large.png' },
+              {
+                type: 'image',
+                url: `data:image/png;base64,${'A'.repeat(70 * 1024)}`,
+                fileName: 'large.png'
+              },
               { type: 'image', url: 'local-media:///C:/images/kept.png', fileName: 'kept.png' }
             ]
           }
         ]
       })
     )
-    const attachments = storage.readSessionDraftBackup('s1', 'workspace-a')?.queuedSends?.[0].attachments
-    expect(attachments?.map((attachment) => attachment.fileName)).toEqual(['dead.png', 'large.png', 'kept.png'])
+    const attachments = storage.readSessionDraftBackup('s1', 'workspace-a')?.queuedSends?.[0]
+      .attachments
+    expect(attachments?.map((attachment) => attachment.fileName)).toEqual([
+      'dead.png',
+      'large.png',
+      'kept.png'
+    ])
     expect(attachments?.map(isUnavailableQueuedAttachment)).toEqual([true, true, false])
     expect(JSON.stringify(attachments)).not.toContain('AAAA')
   })
@@ -1908,7 +2483,14 @@ describe('chatStorage queued sends kept with the draft', () => {
     vi.stubGlobal('indexedDB', fakeIndexedDb.api)
     const storage = await import('./chatStorage')
     type S = import('./chatStorage').ChatSession
-    const marker = { inputValue: '', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 0, queuedSends: [], queuedSendsUpdatedAt: 12 }
+    const marker = {
+      inputValue: '',
+      pendingAttachments: [],
+      pendingHiddenContext: '',
+      updatedAt: 0,
+      queuedSends: [],
+      queuedSendsUpdatedAt: 12
+    }
     const session = { id: 'emptied', title: 'emptied', messages: [], draft: marker } as unknown as S
     await storage.saveSessionToDB(session, 'workspace-a', { expectedSession: null })
     const loaded = await storage.loadSessionFromDB('emptied', 'workspace-a')
@@ -1918,15 +2500,27 @@ describe('chatStorage queued sends kept with the draft', () => {
   it('takes a stale queue out of the backup when the write that empties it fails', async () => {
     const storage = await import('./chatStorage')
     const key = 'magicpot-chat-draft:workspace-a:s1'
-    const composerDraft = { inputValue: 'typing', pendingAttachments: [], pendingHiddenContext: '', updatedAt: 100 }
+    const composerDraft = {
+      inputValue: 'typing',
+      pendingAttachments: [],
+      pendingHiddenContext: '',
+      updatedAt: 100
+    }
     storage.writeSessionDraftBackup('s1', 100, composerDraft, 'workspace-a')
-    expect(storage.writeSessionQueuedSendsBackup('s1', [queued('accepted')], 200, 'workspace-a')).toBe(true)
+    expect(
+      storage.writeSessionQueuedSendsBackup('s1', [queued('accepted')], 200, 'workspace-a')
+    ).toBe(true)
     const setItem = Storage.prototype.setItem
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
       // Storage full: replacing the existing record fails, a smaller record fits once it is removed.
-      const full = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, name: string, value: string) {
-        if (name === key && this.getItem(name) !== null) throw new DOMException('full', 'QuotaExceededError')
+      const full = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+        this: Storage,
+        name: string,
+        value: string
+      ) {
+        if (name === key && this.getItem(name) !== null)
+          throw new DOMException('full', 'QuotaExceededError')
         return setItem.call(this, name, value)
       })
       expect(storage.writeSessionQueuedSendsBackup('s1', [], 300, 'workspace-a')).toBe(false)
@@ -1939,15 +2533,30 @@ describe('chatStorage queued sends kept with the draft', () => {
       })
 
       // A failed write of a non-empty queue keeps the older copy: it still holds user text.
-      expect(storage.writeSessionQueuedSendsBackup('s1', [queued('kept')], 400, 'workspace-a')).toBe(true)
+      expect(
+        storage.writeSessionQueuedSendsBackup('s1', [queued('kept')], 400, 'workspace-a')
+      ).toBe(true)
       // Only the bytes freed by the removal itself fit again.
       const previous = localStorage.getItem(key)
-      const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, name: string, value: string) {
+      const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+        this: Storage,
+        name: string,
+        value: string
+      ) {
         if (name === key && value !== previous) throw new DOMException('full', 'QuotaExceededError')
         return setItem.call(this, name, value)
       })
-      expect(storage.writeSessionQueuedSendsBackup('s1', [queued('kept'), queued('new')], 500, 'workspace-a')).toBe(false)
-      expect(storage.readSessionDraftBackup('s1', 'workspace-a')?.queuedSends).toEqual([queued('kept')])
+      expect(
+        storage.writeSessionQueuedSendsBackup(
+          's1',
+          [queued('kept'), queued('new')],
+          500,
+          'workspace-a'
+        )
+      ).toBe(false)
+      expect(storage.readSessionDraftBackup('s1', 'workspace-a')?.queuedSends).toEqual([
+        queued('kept')
+      ])
 
       // Nothing can be written: the old record is put back so the composer draft is not lost (the
       // session record's newer removal marker outranks its queue).
@@ -1956,7 +2565,11 @@ describe('chatStorage queued sends kept with the draft', () => {
       // Without a composer draft to keep, the stale queue leaves the backup.
       blocked.mockRestore()
       storage.writeSessionDraftBackup('s1', 700, undefined, 'workspace-a')
-      const failing = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, name: string, value: string) {
+      const failing = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+        this: Storage,
+        name: string,
+        value: string
+      ) {
         if (name === key) throw new DOMException('full', 'QuotaExceededError')
         return setItem.call(this, name, value)
       })
