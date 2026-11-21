@@ -1915,13 +1915,17 @@ interface TeamMutationInput {
   shouldUpdate?: () => boolean
 }
 
-/** Explicit user-initiated choice only. No profile availability check or execution authority. */
-export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { expectedMember: ChatSession; profileId: string }): Promise<{ lead: ChatSession; member: ChatSession }> {
+/**
+ * Explicit user-initiated choice only. No profile availability check or execution authority.
+ * `profileId: null` clears the member's choice (it inherits the lead's model again) under the
+ * same checks; a marker this build cannot read is never cleared or replaced.
+ */
+export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { expectedMember: ChatSession; profileId: string | null }): Promise<{ lead: ChatSession; member: ChatSession }> {
   const expectedLead = structuredClone(input.expectedLead)
   const expectedMember = structuredClone(input.expectedMember)
   const targetScope = normalizeScope(input.scope)
-  const choice = { version: 1 as const, profileId: input.profileId }
-  readMemberModelChoice({ ...expectedMember, memberModelChoice: choice })
+  const choice = input.profileId === null ? null : { version: 1 as const, profileId: input.profileId }
+  if (choice) readMemberModelChoice({ ...expectedMember, memberModelChoice: choice })
   if (!expectedLead.id || !expectedMember.id || expectedLead.id === expectedMember.id) throw new Error('Invalid team member')
   return queueSessionMutation(expectedMember.id, targetScope, async () => {
     const db = await openDB()
@@ -1930,6 +1934,7 @@ export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { 
       const tx = db.transaction(STORE_NAME, 'readwrite')
       const store = tx.objectStore(STORE_NAME)
       let result: { lead: ChatSession; member: ChatSession } | undefined
+      let wrote = false
       let failure: Error | undefined
       const abort = (error: Error) => { failure = error; try { tx.abort() } catch { reject(error) } }
       const onRecords = (records: StoredChatSession[]) => {
@@ -1942,14 +1947,23 @@ export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { 
               !Number.isSafeInteger(member.teamMemberGeneration ?? 0) || (member.teamMemberGeneration ?? 0) !== (lead.teamGeneration ?? 0) ||
               hasSessionDeleteTombstone(lead.id, targetScope) || hasSessionDeleteTombstone(member.id, targetScope) || input.shouldUpdate?.() === false) throw new Error('Team changed')
           if (resolveMemberModelSelection(lead)) throw new Error('Legacy team model selection unavailable')
-          readMemberModelChoice(member)
-          const updated = { ...normalizeSession(member, targetScope), memberModelChoice: choice, sessionUrl: undefined, sessionProfileId: undefined, sessionRouteFingerprint: undefined }
+          const storedChoice = readMemberModelChoice(member)
+          const { memberModelChoice: _replaced, ...current } = normalizeSession(member, targetScope)
+          if (!choice && storedChoice === null) {
+            // Nothing to clear: the stored records stay exactly as they are.
+            result = { lead: normalizeSession(lead, targetScope), member: normalizeSession(member, targetScope) }
+            return
+          }
+          // A clear leaves no own property at all: an own `memberModelChoice: undefined` would be
+          // an unreadable marker. Everything else is the stored record, read in this transaction.
+          const updated: ChatSession = { ...current, ...(choice ? { memberModelChoice: choice } : {}), sessionUrl: undefined, sessionProfileId: undefined, sessionRouteFingerprint: undefined }
           store.put(createStoredSession(updated, targetScope))
+          wrote = true
           result = { lead: normalizeSession(lead, targetScope), member: updated }
         } catch (error) { abort(createStorageError(error, 'Member model choice failed')) }
       }
       requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Member model choice failed')))
-      tx.oncomplete = () => { noteScopeWritten(targetScope); if (result) resolve(result); else reject(new Error('Member model choice failed')) }
+      tx.oncomplete = () => { if (wrote) noteScopeWritten(targetScope); if (result) resolve(result); else reject(new Error('Member model choice failed')) }
       tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Member model choice failed'))
       tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Member model choice aborted'))
     })

@@ -439,7 +439,7 @@ vi.mock('./chatStorage', async (importOriginal) => {
         scope: string
         expectedLead: ChatSession
         expectedMember: ChatSession
-        profileId: string
+        profileId: string | null
         shouldUpdate?: () => boolean
       }) => {
         const records =
@@ -459,9 +459,13 @@ vi.mock('./chatStorage', async (importOriginal) => {
           !actual.normalizedSessionsEqual(member, input.expectedMember, input.scope)
         )
           throw new Error('Team changed')
-        const updated = {
-          ...member,
-          memberModelChoice: { version: 1 as const, profileId: input.profileId },
+        // As the real call: a clear removes the property (never `memberModelChoice: undefined`).
+        const { memberModelChoice: _replaced, ...current } = member
+        const updated: ChatSession = {
+          ...current,
+          ...(input.profileId === null
+            ? {}
+            : { memberModelChoice: { version: 1 as const, profileId: input.profileId } }),
           sessionUrl: undefined,
           sessionProfileId: undefined,
           sessionRouteFingerprint: undefined
