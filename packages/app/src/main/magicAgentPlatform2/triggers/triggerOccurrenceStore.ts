@@ -438,8 +438,8 @@ export class TriggerOccurrenceStore {
    * writes, two sweeps and the claim.
    * - Terminal records beyond the retained tail are archived, oldest first.
    * - Stale records are dead-lettered and archived, except the newest `catchUpRuns` of each
-   *   trigger. Those still run, but only once a whole pass over the old part has confirmed that
-   *   they are the newest, so none runs while a backlog drains.
+   *   trigger. Those still run, but only once a poll has read the whole old part or a pass over
+   *   it has ended, so that they are known to be the newest; none runs while a long backlog drains.
    * - While a pass spans polls, an old record is claimable only in the poll that reads it; recent
    *   records are read by every poll, so a fresh occurrence is claimed at once.
    * - A failed batch rolls back whole and is reported; the claim still runs.
@@ -466,7 +466,11 @@ export class TriggerOccurrenceStore {
     const live = this.eventStore.countResources({
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND
     })
+    // A poll that reads the old part from its start to its end sees every stale record, so its
+    // own count of the newest per trigger is exact, whatever it manages to write.
+    const fromStart = this.pass.after === undefined
     const { old, recent, passEnds } = this.readPoll(staleBefore)
+    const seesAllStale = fromStart && passEnds
     const stale = (item: Occurrence) =>
       isStale(item, staleBefore) && (mutable === undefined || mutable(item.state))
     // A stale record goes once its trigger has at least `quota` newer stale ones, in this page or
@@ -562,7 +566,7 @@ export class TriggerOccurrenceStore {
           if (state.permit !== undefined) expiredMarked ??= item
           else if (state.attempt >= maxAttempts) expiredMax ??= item
         }
-        if (stale(item) && !this.keptStale.has(item.id)) continue
+        if (stale(item) && !seesAllStale && !this.keptStale.has(item.id)) continue
         if (
           state.permit === undefined &&
           ((state.status === 'pending' && state.scheduledAt <= now) ||

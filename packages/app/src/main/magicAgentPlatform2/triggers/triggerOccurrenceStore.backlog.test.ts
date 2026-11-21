@@ -320,6 +320,23 @@ describe('TriggerOccurrenceStore stale occurrences', () => {
     }
   })
 
+  it('runs the newest stale occurrence in the first poll when one page holds the old records', async () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    try {
+      // 400 terminal records: more than one archive batch, so the first poll stops archiving early.
+      seed(eventStore, 400, { from: 1, step: 1, status: 'completed', prefix: 'done' })
+      const { store, clock, executed, scheduler } = harness(eventStore, { 'trigger-1': {} })
+      fresh(store, 1_000_000)
+      clock.now = 2_000_000
+      await scheduler.stop()
+      await expect(scheduler.runOnce()).resolves.toBe(true)
+      expect(executed).toEqual(['cron:1000000:trigger-1'])
+      expect(live(eventStore)).toBe(401 - 100)
+    } finally {
+      eventStore.close()
+    }
+  })
+
   it('still runs the newest stale occurrence when a pass needs many polls', () => {
     const eventStore = new MagicAgentEventStore(':memory:')
     const store = new TriggerOccurrenceStore(eventStore)
