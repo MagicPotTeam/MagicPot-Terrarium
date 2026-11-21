@@ -174,8 +174,8 @@ export class ProductionTriggerExecutor<TResult = unknown> {
 
   /**
    * Only TriggerOccurrenceScheduler may reach this (through ProductionTriggerRuntime's execute
-   * callback), once, for the claim it took in that poll: `occurrence` is the state claimNext
-   * returned, and the scheduler settles the claim afterwards. Nothing else fences a second run of
+   * callback), once, for the claim it took in that poll: `occurrence` is the state its poll
+   * claimed, and the scheduler settles the claim afterwards. Nothing else fences a second run of
    * one claimed attempt: the permit marker is idempotent for the same attempt and the permit
    * consumption replays success for the same request, so a second call before the claim is
    * settled dispatches again. `runningOccurrences` only refuses an overlapping call on this
