@@ -212,18 +212,20 @@ export function hasLocalMediaTraversal(url: string): boolean {
 
 /**
  * A Windows network (UNC) spelling: two leading separators of either kind (`\\server`,
- * `//server`, `/\server`, `\/server`; device paths such as `\\?\` included). Checked on the
- * raw string: on Windows any filesystem call on such a path contacts the host (SMB, with the
- * user's NTLM credentials), and a host that does not answer blocks the caller.
+ * `//server`, `/\server`, `\/server`; device paths such as `\\?\` included), or the NT
+ * object-namespace prefix (see isWindowsNtNamespaceLocalMediaPath). Checked on the raw string:
+ * on Windows any filesystem call on such a path contacts the host (SMB, with the user's NTLM
+ * credentials), and a host that does not answer blocks the caller.
  */
 export function isWindowsNetworkLocalMediaPath(value: string): boolean {
-  return /^[\\/]{2}/.test(value)
+  return /^[\\/]{2}/.test(value) || isWindowsNtNamespaceLocalMediaPath(value)
 }
 
 /**
  * The NT object-namespace prefix ('\' + '??' + '\', separators of either kind): Windows file
  * APIs hand such a path to the object manager as it is, so '\??\UNC\host\share' contacts the
- * host as a UNC path does, and no user grant is ever for such a spelling.
+ * host as a UNC path does. No grant is ever for such a spelling, so it is refused whatever is
+ * scoped (its resolved form, C:\??\..., would otherwise sit inside a picked C:\).
  */
 function isWindowsNtNamespaceLocalMediaPath(value: string): boolean {
   return /^[\\/][?]{2}[\\/]/.test(value)
@@ -265,8 +267,8 @@ export function resolveAuthorizedLocalMediaPath(
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) {
     return null
   }
-  // Before any filesystem call: an unsolicited network path never makes main contact its host.
-  // No grant is ever for an NT namespace spelling, and its realpath alone would reach a host.
+  // Before any filesystem call: an unsolicited network path never makes main contact its host
+  // (an NT namespace spelling never counts as scoped).
   if (process.platform === 'win32' && isWindowsNtNamespaceLocalMediaPath(trimmed)) return null
   if (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) return null
 
@@ -522,8 +524,7 @@ export function consumeLocalMediaReadGrant(
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
   // A read grant is only ever for a plain local path the user dropped or picked.
-  if (isWindowsNetworkLocalMediaPath(trimmed) || isWindowsNtNamespaceLocalMediaPath(trimmed))
-    return null
+  if (isWindowsNetworkLocalMediaPath(trimmed)) return null
   const requestedPath = path.resolve(trimmed)
   const granted = spendLocalMediaGrantEntry(requestedPath, 'read', now, wallNow)
   if (!granted) return null

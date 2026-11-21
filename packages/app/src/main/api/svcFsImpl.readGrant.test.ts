@@ -33,7 +33,12 @@ import {
   countLocalMediaImportGrantsForTest,
   recordLocalMediaImportGrant
 } from '../localMediaAccess'
-import { grantLocalMediaImportFile } from '../localMediaFileIntakeIpc'
+import { ipcMain } from 'electron'
+import {
+  grantLocalMediaImportFile,
+  registerLocalMediaFileIntakeIpc,
+  resetLocalMediaFileIntakeIpcForTest
+} from '../localMediaFileIntakeIpc'
 import { createImportSourceGate, type ImportSourceGuard } from '../llmProxy/managedMediaStore'
 import { forgetLocalMediaTempRootVerification } from '../localMediaTempRoot'
 
@@ -240,7 +245,7 @@ describe('readImageFromPath of a read-granted file (a mapped network drive)', ()
   })
 })
 
-describe('readImageFromPath of a network path the page names (Windows)', () => {
+describe('a network path the page names, at each reader (Windows)', () => {
   beforeEach(() => {
     roots.base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mp-read-unc-')))
     forgetLocalMediaTempRootVerification()
@@ -273,20 +278,45 @@ describe('readImageFromPath of a network path the page names (Windows)', () => {
       vi.spyOn(fsPromises, 'open'),
       vi.spyOn(fsPromises, 'access')
     ]
+    // The trusted main window's renderer, as local-media:resolve-scoped-path checks it.
+    const webContents = { isDestroyed: () => false }
+    const mainWindow = {
+      isDestroyed: () => false,
+      webContents
+    } as unknown as Electron.BrowserWindow
+    resetLocalMediaFileIntakeIpcForTest()
+    registerLocalMediaFileIntakeIpc(() => mainWindow)
+    const resolveScopedPath = vi
+      .mocked(ipcMain.handle)
+      .mock.calls.find(([channel]) => channel === 'local-media:resolve-scoped-path')?.[1] as (
+      event: unknown,
+      filePath: string
+    ) => string
+    const service = new FsSvcImpl()
     // Each would make Windows contact the host (SMB, with the user's NTLM credentials).
     // (The path module these tests run with reads each of these spellings as absolute.)
     for (const networkPath of [
       '//attacker/share/x.png',
       '/\\attacker\\share\\x.png',
       '/??/UNC/attacker/share/x.png',
+      '/??/GLOBALROOT/Device/Mup/attacker/share/x.png',
       '/??/C:/Users/me/x.png'
     ]) {
       await asWindows(async () => {
         await expect(
-          new FsSvcImpl().readImageFromPath({ fullPath: networkPath, maxBytes: IMAGE_LIMIT })
+          service.readImageFromPath({ fullPath: networkPath, maxBytes: IMAGE_LIMIT })
         ).rejects.toThrow('not authorized')
+        await expect(
+          service.copyCanvasMirrorAsset({
+            projectDirName: 'project',
+            assetFileName: `b-${'a'.repeat(40)}.png`,
+            sourcePath: networkPath
+          })
+        ).rejects.toThrow('not authorized')
+        expect(resolveScopedPath({ sender: webContents }, networkPath)).toBe('')
       })
     }
+    resetLocalMediaFileIntakeIpcForTest()
     // The verified temp folder may be looked at; the page's path never is.
     for (const spy of calls) {
       const touched = spy.mock.calls.filter(([target]) => /attacker|[?]{2}/.test(String(target)))

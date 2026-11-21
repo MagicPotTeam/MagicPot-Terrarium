@@ -206,7 +206,11 @@ describe('local media access policy', () => {
       '//server/share/image.png',
       '/\\server\\share\\image.png',
       '\\/server/share/image.png',
-      '\\\\?\\UNC\\server\\share\\image.png'
+      '\\\\?\\UNC\\server\\share\\image.png',
+      // The NT object-namespace prefix reaches the host too.
+      '\\??\\UNC\\server\\share\\image.png',
+      '/??/UNC/server/share/image.png',
+      '\\??\\GLOBALROOT\\Device\\Mup\\server\\share\\image.png'
     ]) {
       expect(isWindowsNetworkLocalMediaPath(networkPath)).toBe(true)
     }
