@@ -123,6 +123,8 @@ function stored(file: string, id: string): Record<string, unknown> | undefined {
 }
 afterEach(() => {
   vi.restoreAllMocks()
+  // Back to the real check, with no one-time answer left over from a test that stopped early.
+  vi.mocked(activeInstanceLeasePids).mockReset()
   h.senders.clear()
   for (const q of queues.splice(0)) q.dispose()
   for (const db of databases.splice(0)) db.close()
@@ -370,8 +372,11 @@ describe('durable team message queue', () => {
 
   it('waits longer after each failed open of the file, and checks for another holder every 30 s', () => {
     sender(1)
-    let now = Date.now()
-    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let now = Math.floor(performance.now())
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    // The middle of the spread: each wait is exactly its nominal length.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const attempts = vi.mocked(activeInstanceLeasePids)
     // Each attempt starts with the check for another holder: one call per attempt.
     const pollsAt = (poll: () => void, waits: number[]): void => {
@@ -396,14 +401,120 @@ describe('durable team message queue', () => {
       [30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000]
     )
     expect(readFileSync(broken.file, 'utf8')).toBe('not a database')
-    // Another live process holds the file: only the cheap check, every 30 s.
+    // Another live process holds the file (it refreshes its lock): only the cheap check, every 30 s.
     const held = queue()
     mkdirSync(instanceLeaseDirectory(held.file), { recursive: true })
     const lease = join(instanceLeaseDirectory(held.file), `${process.ppid}-${randomUUID()}.lease`)
     writeFileSync(lease, '{}')
     mkdirSync(`${lease}.lock`)
     writeFileSync(held.file, '')
-    pollsAt(() => expect(list(held.q, 1)).toEqual([]), [30_000, 30_000, 30_000, 30_000])
+    let refreshes = 0
+    const refresh = () => {
+      const at = new Date(Date.now() - (refreshes += 1) * 1_000)
+      utimesSync(`${lease}.lock`, at, at)
+    }
+    pollsAt(() => {
+      refresh()
+      expect(list(held.q, 1)).toEqual([])
+    }, [30_000, 30_000, 30_000, 30_000])
+  })
+
+  it('spreads each wait, keeps it at 30 s while another process holds the file, and never lengthens it when the clock is set back', () => {
+    sender(1)
+    let now = Math.floor(performance.now())
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const first = queue()
+    first.q.enqueue(intent, options())
+    first.q.dispose()
+    const { q } = queue(first.file)
+    const attempts = vi.mocked(activeInstanceLeasePids)
+    // Two processes opened the file together: the check before the open saw no other holder, the
+    // one after it (after the audit of the whole file) sees the other process.
+    const collide = () => attempts.mockReturnValueOnce([]).mockReturnValueOnce([process.ppid])
+    attempts.mockClear()
+    collide()
+    expect(list(q, 1)).toEqual([])
+    expect(attempts).toHaveBeenCalledTimes(2)
+    // Not a failure of the file: the wait does not double. The other process still holds it.
+    for (const round of [1, 2, 3]) {
+      now += 30_000 - 1
+      expect(list(q, 1)).toEqual([])
+      expect(attempts).toHaveBeenCalledTimes(2 * round)
+      now += 1
+      collide()
+      expect(list(q, 1)).toEqual([])
+      expect(attempts).toHaveBeenCalledTimes(2 * round + 2)
+    }
+    // Spread between 15 s and 45 s: the two processes do not come back in step.
+    random.mockReturnValue(0)
+    now += 30_000
+    collide()
+    expect(list(q, 1)).toEqual([])
+    expect(attempts).toHaveBeenCalledTimes(10)
+    now += 15_000
+    random.mockReturnValue(0.999)
+    collide()
+    expect(list(q, 1)).toEqual([])
+    expect(attempts).toHaveBeenCalledTimes(12)
+    now += 44_000
+    expect(list(q, 1)).toEqual([])
+    expect(attempts).toHaveBeenCalledTimes(12)
+    // The wall clock set back by a day changes nothing: the wait runs on the monotonic clock.
+    const wall = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => wall - 24 * 60 * 60_000)
+    now += 1_000
+    expect(list(q, 1)).toHaveLength(1)
+    expect(attempts).toHaveBeenCalledTimes(14)
+  })
+
+  it('logs each distinct failure once, also when the check for another holder fails', () => {
+    sender(1)
+    let now = Math.floor(performance.now())
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { q, file } = queue()
+    mkdirSync(join(file, '..'), { recursive: true })
+    writeFileSync(file, '')
+    const attempts = vi.mocked(activeInstanceLeasePids)
+    attempts.mockClear()
+    // The lease directory cannot be read (EACCES from readdir or lstat): the check itself fails.
+    const denied = Object.assign(
+      new Error(`EACCES: permission denied, scandir '${instanceLeaseDirectory(file)}'`),
+      { code: 'EACCES' }
+    )
+    const failCheck = () =>
+      attempts.mockImplementationOnce(() => {
+        throw denied
+      })
+    failCheck()
+    expect(list(q, 1)).toEqual([])
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0].join(' ')).toContain('EACCES: permission denied')
+    // The same failure at each later check, every 30 s: logged once only.
+    for (let check = 0; check < 3; check += 1) {
+      now += 30_000
+      failCheck()
+      expect(list(q, 1)).toEqual([])
+    }
+    expect(attempts).toHaveBeenCalledTimes(4)
+    expect(warn).toHaveBeenCalledOnce()
+    // Another failure is logged, once.
+    for (let check = 0; check < 2; check += 1) {
+      now += 30_000
+      attempts.mockReturnValueOnce([process.ppid])
+      expect(list(q, 1)).toEqual([])
+    }
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(warn.mock.calls[1].join(' ')).toContain('Team queue unavailable.')
+    // The first failure again, after the other one: logged again.
+    now += 30_000
+    failCheck()
+    expect(list(q, 1)).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(3)
+    expect(attempts).toHaveBeenCalledTimes(7)
   })
 
   it('serves nothing while another live process holds the file', () => {
