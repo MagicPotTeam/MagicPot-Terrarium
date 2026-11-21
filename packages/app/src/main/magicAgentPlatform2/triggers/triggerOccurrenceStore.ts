@@ -314,7 +314,9 @@ export class TriggerOccurrenceStore {
     this.staleFloor = floor
     this.pass = { kept: new Map() }
   }
-  // Soft delete that keeps the final state, the receipts and the events.
+  // Soft delete that keeps the final state, the receipts and the events. The row and the
+  // receipt already hold that state, and nothing reads occurrence events, so the archive event
+  // names only the final status instead of a third copy of the state.
   private archiveMutation(item: Occurrence, revision: number, now: number) {
     const at = writeTime(now, item)
     return {
@@ -324,7 +326,7 @@ export class TriggerOccurrenceStore {
       expectedRevision: revision,
       idempotencyKey: `${item.id}:${ARCHIVED_EVENT}:${item.state.attempt}:${at}`,
       createdAt: at,
-      event: event(item.id, ARCHIVED_EVENT, at, item.state, revision + 1)
+      event: event(item.id, ARCHIVED_EVENT, at, { status: item.state.status }, revision + 1)
     }
   }
   // A stale record ends as dead-letter, which every build treats as final, and is archived in

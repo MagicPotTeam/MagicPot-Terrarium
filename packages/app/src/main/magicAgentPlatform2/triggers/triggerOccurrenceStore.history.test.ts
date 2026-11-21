@@ -257,6 +257,27 @@ describe('TriggerOccurrenceStore archiving', () => {
     }
   })
 
+  it('writes a minimal archive event; the row and the receipt keep the final state', () => {
+    const { eventStore, store } = open()
+    try {
+      enqueue(store, 'done', 10)
+      store.claimNext(10, 'worker', 100)
+      const completed = store.complete('done', 'worker', 11)
+      seedTerminal(eventStore, 300, { from: 20 })
+      drain(eventStore, store, 12)
+      const events = eventStore.readStream(`${KIND}:done`)
+      expect(events.map((item) => item.type).at(-1)).toBe('occurrence.archived')
+      // No reader needs the state twice more per archived record: it is in the row and receipt.
+      expect(events.at(-1)?.payload).toEqual({ status: 'completed' })
+      expect(store.get('done')?.state).toEqual(completed.state)
+      expect(eventStore.listResourceMutations(KIND, 'done', 10).at(-1)?.resource.state).toEqual(
+        completed.state
+      )
+    } finally {
+      eventStore.close()
+    }
+  })
+
   it('leaves an older build no way to duplicate an archived occurrence', () => {
     const { eventStore, store } = open()
     try {
