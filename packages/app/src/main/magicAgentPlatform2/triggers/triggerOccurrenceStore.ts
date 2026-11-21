@@ -4,6 +4,7 @@ import {
   type PolicyJsonRecord
 } from '../../../shared/magicAgentPlatform2/policy'
 import type { MagicAgentEventStore, StoredResource } from '../persistence'
+import type { ResourceCursor } from '../persistence/eventStore'
 
 export const MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND = 'trigger-occurrence'
 export const TRIGGER_OCCURRENCE_SCHEMA_VERSION = 1 as const
@@ -20,6 +21,7 @@ export type TriggerOccurrenceSource =
 /** 'unknown' is terminal: the execution permit step began, so the outcome cannot be retried safely. */
 export type TriggerOccurrenceStatus =
   'pending' | 'claimed' | 'completed' | 'failed' | 'dead-letter' | 'unknown'
+const SCAN_PAGE_SIZE = 500
 export type TriggerOccurrenceClaim = Readonly<{
   owner: string
   claimedAt: number
@@ -99,6 +101,14 @@ const outcomeUnknown = (state: TriggerOccurrenceState, now: number): TriggerOccu
   updatedAt: now
 })
 
+const claimOrder = (
+  a: StoredResource<TriggerOccurrenceState>,
+  b: StoredResource<TriggerOccurrenceState>
+) =>
+  a.state.scheduledAt - b.state.scheduledAt ||
+  a.state.requestedAt - b.state.requestedAt ||
+  a.id.localeCompare(b.id)
+
 const semantic = (input: {
   occurrenceId: string
   triggerId: string
@@ -113,14 +123,32 @@ export class TriggerOccurrenceStore {
   constructor(private readonly eventStore: MagicAgentEventStore) {}
   get(id: string): StoredResource<TriggerOccurrenceState> | undefined {
     return this.eventStore.getResource(MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND, id) as
-      | StoredResource<TriggerOccurrenceState>
-      | undefined
+      StoredResource<TriggerOccurrenceState> | undefined
   }
+  /** Diagnostic snapshot of the oldest 1000 records; claiming, sweeping and dedup never use it. */
   list(): readonly StoredResource<TriggerOccurrenceState>[] {
     return this.eventStore.listResources({
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
       limit: 1000
     }) as readonly StoredResource<TriggerOccurrenceState>[]
+  }
+  /**
+   * Every non-deleted record, oldest update first, one page in memory at a time. A record only
+   * moves forward in this order (updatedAt never decreases), so none is skipped while paging.
+   */
+  private *scanUnarchived(pageSize: number): Generator<StoredResource<TriggerOccurrenceState>> {
+    let after: ResourceCursor | undefined
+    for (;;) {
+      const page = this.eventStore.listResources({
+        kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
+        limit: pageSize,
+        ...(after === undefined ? {} : { after })
+      }) as readonly StoredResource<TriggerOccurrenceState>[]
+      yield* page
+      const last = page.at(-1)
+      if (page.length < pageSize || last === undefined) return
+      after = { updatedAt: last.updatedAt, resourceKind: last.kind, resourceId: last.id }
+    }
   }
   enqueue(input: {
     occurrenceId: string
@@ -137,9 +165,13 @@ export class TriggerOccurrenceStore {
     finite(input.scheduledAt, 'scheduledAt')
     finite(input.requestedAt, 'requestedAt')
     const digest = semantic(input)
-    const sameKey = this.list().find(
-      (item) => item.state.idempotencyKey === input.idempotencyKey && item.id !== input.occurrenceId
-    )
+    // Exact receipt lookup: unlike a list() scan it has no window.
+    const receipt = this.eventStore.getResourceMutation(input.idempotencyKey)
+    const sameKey =
+      receipt?.resource.kind === MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND &&
+      receipt.resource.id !== input.occurrenceId
+        ? this.get(receipt.resource.id)
+        : undefined
     if (sameKey) {
       if (sameKey.state.semanticDigest !== digest)
         throw new TriggerOccurrenceConflictError('Occurrence idempotency key conflict.')
@@ -193,14 +225,35 @@ export class TriggerOccurrenceStore {
     if (leaseMs <= 0) throw new Error('leaseMs must be positive.')
     if (!Number.isInteger(maxAttempts) || maxAttempts <= 0)
       throw new Error('maxAttempts must be a positive integer.')
-    const expired = this.list().filter(
-      (item) =>
-        item.state.status === 'claimed' &&
-        (item.state.claim?.expiresAt ?? Infinity) <= now &&
-        (mutable === undefined || mutable(item.state))
-    )
-    // Settle one expired marked claim per call; never-claimable does not depend on this.
-    const expiredMarked = expired.find((item) => item.state.permit !== undefined)
+    // One pass over every stored record, one page in memory. The sweep targets are never
+    // candidates (marked, or out of attempts), so the pre-sweep candidate is the post-sweep one.
+    let expiredMarked: StoredResource<TriggerOccurrenceState> | undefined
+    let expiredMax: StoredResource<TriggerOccurrenceState> | undefined
+    let candidate: StoredResource<TriggerOccurrenceState> | undefined
+    for (const item of this.scanUnarchived(SCAN_PAGE_SIZE)) {
+      const state = item.state
+      if (
+        state.status === 'claimed' &&
+        (state.claim?.expiresAt ?? Infinity) <= now &&
+        (mutable === undefined || mutable(state))
+      ) {
+        // Settle one expired marked claim per call; never-claimable does not depend on this.
+        if (state.permit !== undefined) expiredMarked ??= item
+        else if (state.attempt >= maxAttempts) expiredMax ??= item
+      }
+      if (
+        state.permit === undefined &&
+        ((state.status === 'pending' && state.scheduledAt <= now) ||
+          (state.status === 'failed' &&
+            state.scheduledAt <= now &&
+            (state.nextRetryAt ?? Infinity) <= now) ||
+          (state.status === 'claimed' && (state.claim?.expiresAt ?? Infinity) <= now)) &&
+        state.attempt < maxAttempts &&
+        (eligible === undefined || eligible(state)) &&
+        (candidate === undefined || claimOrder(item, candidate) < 0)
+      )
+        candidate = item
+    }
     if (expiredMarked)
       this.update(
         expiredMarked,
@@ -208,9 +261,6 @@ export class TriggerOccurrenceStore {
         now,
         OUTCOME_UNKNOWN_EVENT
       )
-    const expiredMax = expired.find(
-      (item) => item.state.permit === undefined && item.state.attempt >= maxAttempts
-    )
     if (expiredMax) {
       this.update(
         expiredMax,
@@ -219,25 +269,6 @@ export class TriggerOccurrenceStore {
         'occurrence.dead-lettered'
       )
     }
-    const candidate = this.list()
-      .filter(
-        (item) =>
-          item.state.permit === undefined &&
-          ((item.state.status === 'pending' && item.state.scheduledAt <= now) ||
-            (item.state.status === 'failed' &&
-              item.state.scheduledAt <= now &&
-              (item.state.nextRetryAt ?? Infinity) <= now) ||
-            (item.state.status === 'claimed' &&
-              (item.state.claim?.expiresAt ?? Infinity) <= now)) &&
-          item.state.attempt < maxAttempts &&
-          (eligible === undefined || eligible(item.state))
-      )
-      .sort(
-        (a, b) =>
-          a.state.scheduledAt - b.state.scheduledAt ||
-          a.state.requestedAt - b.state.requestedAt ||
-          a.id.localeCompare(b.id)
-      )[0]
     if (!candidate) return undefined
     const state: TriggerOccurrenceState = {
       ...withoutExecutionState(candidate.state),
