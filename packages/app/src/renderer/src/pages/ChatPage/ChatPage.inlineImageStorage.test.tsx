@@ -392,6 +392,64 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
     expect(fixture.notifyError).not.toHaveBeenCalled()
   })
 
+  it('auto-saves a generated image once, also after its stored form replaced the inline copy', async () => {
+    const generated = inlinePng('auto-saved')
+    const hex = (bytes: ArrayBuffer): string =>
+      Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    const bytesOf = (dataUrl: string): Uint8Array =>
+      Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(',') + 1)), (char) => char.charCodeAt(0))
+    // As main does: the managed id is the SHA-256 of the image's bytes.
+    fixture.importDataUrl.mockImplementation(
+      async (request: { dataUrl: string; originalFileName: string }) => {
+        const id = hex(await crypto.subtle.digest('SHA-256', bytesOf(request.dataUrl)))
+        mediaStore.set(id, request.dataUrl)
+        const reference: MediaReference = {
+          version: 1,
+          kind: 'managed',
+          relativePath: `originals/${id.slice(0, 2)}/${id}.png`,
+          sha256: id,
+          sizeBytes: bytesOf(request.dataUrl).length,
+          mimeType: 'image/png',
+          originalFileName: request.originalFileName,
+          status: 'ready'
+        }
+        return { reference, localMediaUrl: `local-media:///managed/originals/${id}.png` }
+      }
+    )
+    const realFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const managed = /([0-9a-f]{64})\.png$/u.exec(url)
+      if (url.startsWith('local-media:') && managed) {
+        return realFetch(mediaStore.get(managed[1]) ?? 'data:,')
+      }
+      return realFetch(input, init)
+    })
+    const saveImageToDir = (
+      window as unknown as { api: { svcHyper: { saveImageToDir: ReturnType<typeof vi.fn> } } }
+    ).api.svcHyper.saveImageToDir
+    await seed({ id: 'auto', title: 'Auto', profileId: 'inline-vision-fixture', messages: [] })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'auto')
+    fixture.ipcChat
+      .mockResolvedValueOnce({ content: 'auto reply', imageUrl: generated })
+      .mockResolvedValue({ content: 'you are welcome' })
+
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('auto'))
+    await sendComposer('draw an owl')
+    await waitFor(() => {
+      const shown = storedAttachments(readSessionFromUi() ?? undefined)
+      expect(shown[0]?.url).toMatch(/^local-media:\/\//)
+    })
+    // The page scans its last message again after each change.
+    await sendComposer('thanks')
+    await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
+    expect(saveImageToDir).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the image inline, and saves, when the managed import fails', async () => {
     const generated = inlinePng('refused')
     fixture.importDataUrl.mockRejectedValue(new Error('media store unavailable'))

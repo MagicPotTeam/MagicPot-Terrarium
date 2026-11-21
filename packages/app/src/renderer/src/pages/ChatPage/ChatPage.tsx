@@ -809,6 +809,18 @@ const buildChatImageAttachmentAutoSaveFileName = (
   return `chat_upload_${timestamp}_${index + 1}.${extension}`
 }
 
+/** The hex SHA-256 of `bytes`, the id managed media gives the same image; null when unavailable. */
+const sha256HexOf = async (bytes: Uint8Array): Promise<string | null> => {
+  try {
+    const subtle = globalThis.crypto?.subtle
+    if (!subtle) return null
+    const digest = new Uint8Array(await subtle.digest('SHA-256', bytes as BufferSource))
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return null
+  }
+}
+
 const readBlobAsUint8Array = (blob: Blob): Promise<Uint8Array> => {
   if (typeof blob.arrayBuffer === 'function') {
     return blob.arrayBuffer().then((buffer) => new Uint8Array(buffer))
@@ -5379,12 +5391,22 @@ const ChatPage: React.FC<ChatPageProps> = ({
               const attachment = message.attachments[attachmentIndex]
               if (attachment.type === 'image' && attachment.url) {
                 if (/^file:\/\//i.test(attachment.url)) continue
-                const trackerKey = buildAutoSavedChatImageKey({
-                  sessionId: session.id,
-                  messageIndex,
-                  attachmentIndex,
-                  url: attachment.url
-                })
+                // The image's own identity where there is one: the save guard turns an inline
+                // image into a managed reference (data: becomes local-media:), and the same image
+                // must not look new and be saved again.
+                const keyFor = (identity: string): string =>
+                  buildAutoSavedChatImageKey({
+                    sessionId: session.id,
+                    messageIndex,
+                    attachmentIndex,
+                    url: identity
+                  })
+                const reference = normalizeMediaReference(attachment.media)
+                const managedSha256 =
+                  reference?.kind === 'managed' && reference.sha256 ? reference.sha256 : null
+                const trackerKey = managedSha256
+                  ? keyFor(`sha256:${managedSha256}`)
+                  : keyFor(attachment.url)
                 if (hasAutoSavedChatImageKey(trackerKey)) continue
                 recordAutoSavedChatImageKey(trackerKey)
 
@@ -5398,6 +5420,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   const response = await fetch(attachment.url)
                   const blob = await response.blob()
                   const data = await readBlobAsUint8Array(blob)
+                  if (!managedSha256) {
+                    // Its managed id comes from its bytes: an image saved already under that id
+                    // (after the guard adopted its reference) is not saved twice.
+                    const sha256 = await sha256HexOf(data)
+                    if (sha256) {
+                      const contentKey = keyFor(`sha256:${sha256}`)
+                      if (hasAutoSavedChatImageKey(contentKey)) continue
+                      recordAutoSavedChatImageKey(contentKey)
+                    }
+                  }
                   const res = await api().svcHyper.saveImageToDir({
                     data,
                     fileName,
