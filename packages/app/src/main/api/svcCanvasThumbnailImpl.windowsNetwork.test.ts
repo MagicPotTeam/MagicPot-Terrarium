@@ -142,6 +142,16 @@ const manifestFor = (canonicalPath: string) => ({
 })
 
 describe('canvas thumbnails with Windows path rules', () => {
+  it('leaves a granted source above the byte budget to the worker', async () => {
+    const huge = 'C:\\Users\\u\\Pictures\\huge.png'
+    disk.files.set(huge.toLowerCase(), { size: 512 * 1024 * 1024 + 1, mtimeMs: 1 })
+    expect(authorizeScopedLocalMediaPath(huge)).toBe(true)
+    await expect(service.createNativeThumbnail({ fullPath: huge, maxSide: 128 })).rejects.toThrow(
+      /byte budget/
+    )
+    expect(native.createThumbnailFromPath).not.toHaveBeenCalled()
+  })
+
   it('never touches a network source, cache root or manifest source the user did not grant', async () => {
     for (const spelling of NETWORK_SPELLINGS) {
       await expect(service.getSourceFileMetadata({ fullPath: spelling })).resolves.toMatchObject({

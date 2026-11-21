@@ -263,6 +263,29 @@ describe('FsSvcImpl', () => {
       })
     })
 
+    it('refuses a whole-file read of a file that grows while it is read', async () => {
+      const fullPath = path.join(testRoot, 'growing.txt')
+      fs.writeFileSync(fullPath, 'abc')
+      for (const read of [
+        () => service.readTextFile({ fullPath }),
+        () => service.readFileFromPath({ fullPath })
+      ]) {
+        fs.writeFileSync(fullPath, 'abc')
+        const handle = await fsPromises.open(fullPath, 'r')
+        const originalStat = handle.stat.bind(handle)
+        vi.spyOn(handle, 'stat').mockImplementationOnce(async () => {
+          const stats = await originalStat()
+          fs.writeFileSync(fullPath, 'x'.repeat(4096))
+          return stats
+        })
+        const close = vi.spyOn(handle, 'close')
+        vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle)
+
+        await expect(read()).rejects.toThrow(`File changed while it was read: ${fullPath}`)
+        expect(close).toHaveBeenCalledOnce()
+      }
+    })
+
     it('rejects oversized text reads and writes', async () => {
       const fullPath = path.join(testRoot, 'large.txt')
       fs.writeFileSync(fullPath, Buffer.alloc(1))

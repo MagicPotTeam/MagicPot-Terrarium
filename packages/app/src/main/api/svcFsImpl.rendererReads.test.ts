@@ -164,6 +164,8 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
     const metadata = write(path.join(lora, 'sub', 'style.metadata.json'), '{}')
     const other = write(path.join(lora, 'notes.pem'), 'KEY')
     fs.symlinkSync(p('home', '.config', 'app', 'credentials.json'), path.join(lora, 'evil.json'))
+    // A link whose name fits but whose file does not: the canonical file decides.
+    fs.symlinkSync(other, path.join(lora, 'notes.txt'))
 
     const { files } = await service.listFilesInFolder({
       folderPath: lora,
@@ -188,8 +190,13 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
     await expect(service.readFileSlice({ fullPath: text, length: 8 })).rejects.toThrow(
       NOT_AUTHORIZED
     )
+    // The bytes of a file: only what the local-media protocol serves, not the LoRA folder.
     await expect(service.readFileFromPath({ fullPath: model })).rejects.toThrow(NOT_AUTHORIZED)
+    await expect(service.readFileFromPath({ fullPath: text })).rejects.toThrow(NOT_AUTHORIZED)
     await expect(service.readTextFile({ fullPath: path.join(lora, 'evil.json') })).rejects.toThrow(
+      /not found|not authorized/
+    )
+    await expect(service.readTextFile({ fullPath: path.join(lora, 'notes.txt') })).rejects.toThrow(
       /not found|not authorized/
     )
   })
