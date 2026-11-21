@@ -29,7 +29,12 @@ export type ListFilesInFolderResp = {
     fullPath: string
     lastModifiedMs: number
   }[]
+  /** The scan stopped at MAX_LISTED_FOLDER_ENTRIES entries: the list is not complete. */
+  truncated?: boolean
 }
+
+/** A listing looks at no more entries (files and folders, across every level) than this. */
+export const MAX_LISTED_FOLDER_ENTRIES = 100_000
 
 export type PruneAutoSaveProjectsReq = {
   currentProjectDirName: string

@@ -37,6 +37,7 @@ import {
   ReadSkillResourceFileResp,
   WriteTextFileReq,
   WriteTextFileResp,
+  MAX_LISTED_FOLDER_ENTRIES,
   formatLocalFileUnavailableMessage
 } from '@shared/api/svcFs'
 import fs, { type FileHandle } from 'fs/promises'
@@ -647,7 +648,13 @@ export type RendererConfiguredReadRoots = {
 
 const NO_CONFIGURED_READ_ROOTS: RendererConfiguredReadRoots = { projectDirs: [], loraDirs: [] }
 
-const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredReadRoots> => {
+let configuredReadRootsFailureLogged = false
+
+/**
+ * The configured folders from main's config. When they cannot be read, renderer reads there are
+ * refused (the canvas project folder and the LoRA lookup then find nothing): said once in the log.
+ */
+export const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredReadRoots> => {
   try {
     const [{ getConfig }, { getBuildEnv }, { ConfigUtils }] = await Promise.all([
       import('../config/config'),
@@ -663,9 +670,20 @@ const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredRe
       projectDirs: absolute(config.download_dir),
       loraDirs: absolute(new ConfigUtils(config, getBuildEnv(), path).getLoraDir())
     }
-  } catch {
+  } catch (error) {
+    if (!configuredReadRootsFailureLogged) {
+      configuredReadRootsFailureLogged = true
+      console.warn(
+        '[svcFs] Could not read the configured project and LoRA folders; renderer reads there are refused:',
+        error
+      )
+    }
     return NO_CONFIGURED_READ_ROOTS
   }
+}
+
+export const resetConfiguredReadRootsFailureLogForTest = (): void => {
+  configuredReadRootsFailureLogged = false
 }
 
 /**
@@ -857,6 +875,7 @@ export class FsSvcImpl implements FsSvc {
     // Listed through the canonical folder; the paths keep the spelling the caller named.
     const files = await runBoundedFsOp(() => fs.readdir(canonicalFolder))
     const images = files
+      .slice(0, MAX_LISTED_FOLDER_ENTRIES)
       .filter((file) => {
         const ext = path.extname(file).toLowerCase()
         return IMAGE_EXTENSIONS.includes(ext)
@@ -888,6 +907,8 @@ export class FsSvcImpl implements FsSvc {
     // nor a directory), so the scan stays inside the authorized folder.
     const directoriesToScan = [{ dir: canonicalFolder, shown: folderPath }]
     const files: ListFilesInFolderResp['files'] = []
+    // Every entry seen counts, at every level: a huge tree costs main a bounded scan.
+    let entriesSeen = 0
 
     while (directoriesToScan.length > 0) {
       const current = directoriesToScan.shift()
@@ -897,6 +918,8 @@ export class FsSvcImpl implements FsSvc {
 
       const entries = await runBoundedFsOp(() => fs.readdir(current.dir, { withFileTypes: true }))
       for (const entry of entries) {
+        if (entriesSeen >= MAX_LISTED_FOLDER_ENTRIES) return { files, truncated: true }
+        entriesSeen += 1
         const fullPath = path.join(current.dir, entry.name)
         const shownPath = path.join(current.shown, entry.name)
 
