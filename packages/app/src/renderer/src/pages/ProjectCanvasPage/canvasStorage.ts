@@ -10,7 +10,11 @@ import type {
   CanvasVideoItem
 } from './types'
 import type { CanvasFigmaBinding } from '@shared/figma'
-import { MAX_FULL_FILE_BYTES } from '@shared/api/svcFs'
+import {
+  isLocalFileNotFoundError,
+  isLocalFileUnavailableError,
+  MAX_FULL_FILE_BYTES
+} from '@shared/api/svcFs'
 import { restoreGlobalQAppCache } from '../QuickAppPage/components/QAppContext'
 import { buildProjectStorageDirName, getProjectById } from '../MainPage/projectStore'
 import { normalizeGeneratedRootDirName, unprefixGeneratedRootDirName } from '@shared/projectStorage'
@@ -1589,8 +1593,13 @@ function restorePersistedCanvasItems(
   return restored
 }
 
+/**
+ * The file is not there. Never a read main could not answer now (a disk that did not answer
+ * in time, every slot held by calls that did not): that file may still exist, and the mirror
+ * prunes what only the files it reads still name.
+ */
 function isMissingMirrorFileError(error: unknown): boolean {
-  return error instanceof Error && /file not found/i.test(error.message)
+  return isLocalFileNotFoundError(error)
 }
 
 async function loadCanvasItemsFromAutoSaveFile(storeKey: string): Promise<CanvasSnapshot | null> {
@@ -3358,13 +3367,19 @@ async function stageCanvasMirrorAsset(
   }
 }
 
+/** Main could not read the previous project file now; it may well be there. */
+const CANVAS_MIRROR_PREVIOUS_FILE_UNAVAILABLE = 'unavailable'
+
 /**
  * The "assets/..." reference of every slot in the project file currently on
  * disk, by item id or model texture key (absolute references into the asset
  * folder are turned into that form). Null when the file cannot be read; an
- * empty map when there is none.
+ * empty map when there is none; CANVAS_MIRROR_PREVIOUS_FILE_UNAVAILABLE when
+ * main could not tell now (a disk that did not answer in time).
  */
-async function readPreviousCanvasMirrorRefs(plan: CanvasMirrorPlan): Promise<Map<string, string> | null> {
+async function readPreviousCanvasMirrorRefs(
+  plan: CanvasMirrorPlan
+): Promise<Map<string, string> | null | typeof CANVAS_MIRROR_PREVIOUS_FILE_UNAVAILABLE> {
   const refs = new Map<string, string>()
   const toRef = (value: unknown): string | null => {
     if (typeof value !== 'string' || !value) return null
@@ -3381,7 +3396,8 @@ async function readPreviousCanvasMirrorRefs(plan: CanvasMirrorPlan): Promise<Map
       })
     ).content
   } catch (error) {
-    return isMissingMirrorFileError(error) ? refs : null
+    if (isMissingMirrorFileError(error)) return refs
+    return isLocalFileUnavailableError(error) ? CANVAS_MIRROR_PREVIOUS_FILE_UNAVAILABLE : null
   }
   try {
     const parsed = JSON.parse(content) as { items?: unknown }
@@ -3483,7 +3499,15 @@ async function executeCanvasMirrorSave(
     let pruneIsSafe = true
     let previousRefs: Map<string, string> | null | undefined
     const readPreviousRefsOnce = async (): Promise<Map<string, string> | null> => {
-      if (previousRefs === undefined) previousRefs = await readPreviousCanvasMirrorRefs(plan)
+      if (previousRefs === undefined) {
+        const read = await readPreviousCanvasMirrorRefs(plan)
+        // The previous project file may name the only copy of what the history can bring
+        // back: it stays as it is, and the next save tries again. IndexedDB holds the board.
+        if (read === CANVAS_MIRROR_PREVIOUS_FILE_UNAVAILABLE) {
+          throw new Error('CANVAS_MIRROR_PREVIOUS_PROJECT_FILE_UNAVAILABLE')
+        }
+        previousRefs = read
+      }
       return previousRefs
     }
     for (const slotPlan of unsafeSlotPlans) {
