@@ -10,6 +10,10 @@ import {
   CanvasThumbnailSvcImpl,
   type CanvasThumbnailSvcImplOptions
 } from './svcCanvasThumbnailImpl'
+import {
+  authorizeScopedLocalMediaPath,
+  clearScopedLocalMediaPathsForTest
+} from '../localMediaAccess'
 
 const electronMock = vi.hoisted(() => ({
   userDataRoot: '',
@@ -131,15 +135,18 @@ describe('CanvasThumbnailSvcImpl', () => {
   })
 
   afterEach(() => {
+    clearScopedLocalMediaPathsForTest()
     fs.rmSync(testRoot, { recursive: true, force: true })
     vol.reset()
   })
 
+  /** A file the user dropped on the board: main holds its scoped grant. */
   async function createSourceFile(filename = 'source.png'): Promise<string> {
     const sourcePath = path.join(testRoot, filename)
     await fsp.writeFile(sourcePath, Buffer.from([1, 2, 3, 4]))
     const mtime = new Date('2026-05-02T00:00:00.000Z')
     await fsp.utimes(sourcePath, mtime, mtime)
+    expect(authorizeScopedLocalMediaPath(sourcePath)).toBe(true)
     return sourcePath
   }
 
@@ -329,6 +336,88 @@ describe('CanvasThumbnailSvcImpl', () => {
 
     await writeManifestSet(manifest, cacheRoot)
     expect(fs.existsSync(path.join(cacheRoot, manifest.cacheKey, 'manifest.json'))).toBe(true)
+  })
+
+  it('refuses a cache root spelled outside the app bases even when it links inside them', async () => {
+    // The requested spelling is checked before it is canonicalized (a board file can carry it).
+    const inside = path.join(electronMock.userDataRoot, 'project-canvas-thumbnail-cache')
+    await fsp.mkdir(inside, { recursive: true })
+    // Outside the app's data, the repo test folders and the magicpot temp folders.
+    const link = path.join(os.tmpdir(), `elsewhere-link-to-cache-${process.pid}`)
+    await fsp.mkdir(os.tmpdir(), { recursive: true })
+    fs.symlinkSync(inside, link, 'dir')
+
+    await expect(service.getThumbnailCacheRoot({ cacheRootDir: link })).rejects.toThrow(
+      /Unsafe canvas thumbnail cache root/
+    )
+    await expect(
+      service.readThumbnailManifest({ cacheKey: 'thumb-0123456789abcdef', cacheRootDir: link })
+    ).rejects.toThrow(/Unsafe canvas thumbnail cache root/)
+    fs.unlinkSync(link)
+  })
+
+  it('tells nothing about and decodes nothing of a file the user did not grant', async () => {
+    // Outside every application root, never dropped or picked (a board file can name it).
+    const secretPath = path.join(testRoot, 'secret.png')
+    await fsp.writeFile(secretPath, Buffer.from([1, 2, 3, 4, 5, 6]))
+    const generateViaSidecar = vi.fn()
+    const guarded = createServiceWithSidecar(generateViaSidecar)
+
+    for (const fullPath of [secretPath, path.join(testRoot, 'missing.png')]) {
+      await expect(guarded.getSourceFileMetadata({ fullPath })).resolves.toEqual({
+        exists: false,
+        canonicalPath: path.resolve(fullPath),
+        sizeBytes: 0,
+        lastModifiedMs: 0
+      })
+    }
+    await expect(
+      guarded.createNativeThumbnail({ fullPath: secretPath, maxSide: 128 })
+    ).rejects.toThrow()
+    await expect(guarded.generateThumbnailSet({ fullPath: secretPath })).resolves.toMatchObject({
+      manifest: null,
+      status: 'failed'
+    })
+    expect(electronMock.createThumbnailFromPath).not.toHaveBeenCalled()
+    expect(generateViaSidecar).not.toHaveBeenCalled()
+
+    // A manifest naming it (written by the renderer) is refused before its file is looked at.
+    const granted = await createSourceFile()
+    const manifest = createManifest({ sourcePath: granted })
+    await expect(
+      writeManifestSet({ ...manifest, canonicalPath: secretPath.replace(/\\/g, '/') })
+    ).rejects.toThrow(/not authorized/)
+  })
+
+  it('reads an application-owned source without a grant', async () => {
+    const managedPath = path.join(electronMock.userDataRoot, 'chat-media', 'managed.png')
+    await fsp.mkdir(path.dirname(managedPath), { recursive: true })
+    await fsp.writeFile(managedPath, Buffer.from([1, 2, 3]))
+
+    await expect(service.getSourceFileMetadata({ fullPath: managedPath })).resolves.toMatchObject({
+      exists: true,
+      canonicalPath: fs.realpathSync.native(managedPath),
+      sizeBytes: 3
+    })
+  })
+
+  it('drops the cached thumbnails of a board item whose grant was evicted', async () => {
+    const sourcePath = await createSourceFile()
+    const manifest = createManifest({ sourcePath })
+    await writeManifestSet(manifest)
+    await expect(
+      service.readThumbnailManifest({ cacheKey: manifest.cacheKey })
+    ).resolves.toMatchObject({ manifest: { cacheKey: manifest.cacheKey } })
+
+    // More than 1000 newer grants push it out: the board cannot display it, and main neither
+    // looks at it nor makes thumbnails of it.
+    clearScopedLocalMediaPathsForTest()
+    await expect(service.readThumbnailManifest({ cacheKey: manifest.cacheKey })).resolves.toEqual({
+      manifest: null
+    })
+    await expect(service.getSourceFileMetadata({ fullPath: sourcePath })).resolves.toMatchObject({
+      exists: false
+    })
   })
 
   it('rejects cache entries that resolve outside the authorized cache root through symlinks', async () => {

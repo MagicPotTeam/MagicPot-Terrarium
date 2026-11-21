@@ -900,21 +900,32 @@ export function useCanvasFileIntake({
     ): Promise<CanvasImageSourceObject> => {
       signal.throwIfAborted()
       const metadata = await readCanvasImageBlobMetadata(file)
-      const thumbnailCacheRoot = await resolveCanvasThumbnailCacheRoot(canvasId)
-      const sourceIdentity =
-        (await resolveCanvasImageLocalSourceIdentity(file, thumbnailCacheRoot)) ??
-        buildCanvasSessionBlobSourceIdentity({
-          sourceKey: createCanvasSessionSourceKey(),
-          sizeBytes: file.size,
-          mimeType: file.type,
-          fileName: file.name
-        })
+      // The source first: it grants main access to the dropped file, and main tells a file's
+      // identity (for the thumbnail cache) only for a file the user granted.
       const src = await resolveCanvasImageFileSource(file, readFileAsDataURL, signal)
       if (signal.aborted) {
         if (src.startsWith('blob:')) releaseCanvasImageObjectUrl(src)
         signal.throwIfAborted()
       }
       if (src.startsWith('blob:')) pendingSourceUrlsRef.current.add(src)
+      let sourceIdentity: CanvasImageSourceIdentity
+      try {
+        const thumbnailCacheRoot = await resolveCanvasThumbnailCacheRoot(canvasId)
+        sourceIdentity =
+          (await resolveCanvasImageLocalSourceIdentity(file, thumbnailCacheRoot)) ??
+          buildCanvasSessionBlobSourceIdentity({
+            sourceKey: createCanvasSessionSourceKey(),
+            sizeBytes: file.size,
+            mimeType: file.type,
+            fileName: file.name
+          })
+      } catch (error) {
+        if (src.startsWith('blob:')) {
+          pendingSourceUrlsRef.current.delete(src)
+          releaseCanvasImageObjectUrl(src)
+        }
+        throw error
+      }
       const shouldRetainSourceFile = !/^(local-media|file):\/\//i.test(src.trim())
       const source: CanvasImageSourceObject = {
         src,
