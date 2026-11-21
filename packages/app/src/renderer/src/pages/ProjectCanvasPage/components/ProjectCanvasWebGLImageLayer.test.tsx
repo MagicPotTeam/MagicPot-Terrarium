@@ -819,6 +819,65 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       })
     }
 
+    it('loads a local image again once main answers for it, never one it refused', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const busy = localSourceItem({ id: 'busy', src: 'local-media:///Volumes/nas/busy.png' })
+      const refused = localSourceItem({
+        id: 'refused',
+        src: 'local-media:///Users/x/refused.png',
+        x: 400
+      })
+      // Main's scoped-path check: the share does not answer at first, then it does; the other
+      // file is never authorized.
+      let busyChecks = 0
+      const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => {
+        if (filePath.includes('busy')) return (busyChecks += 1) <= 2 ? '' : filePath
+        return ''
+      })
+      vi.stubGlobal('electronFile', { resolveAuthorizedLocalMediaPath })
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'HEAD') {
+          return new Response(null, { status: url.includes('busy') ? 503 : 403 })
+        }
+        return new Response(new Blob(['image'], { type: 'image/png' }), { status: 200 })
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      const bitmap = createBitmap(640, 360)
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async () => bitmap)
+      )
+      const failed = vi.fn()
+      const { unmount } = render(
+        <Layer
+          items={[busy, refused]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          onFailedIdsChange={failed}
+        />
+      )
+      await waitFor(() => expect(failed).toHaveBeenLastCalledWith(new Set(['busy', 'refused'])), {
+        timeout: 15000
+      })
+      // Retried after a short wait: the image loads and is no longer failed.
+      await waitFor(
+        () => {
+          expect(getTextureImage(getLiveSpriteByLabel('busy'))).toBe(bitmap)
+          expect(failed).toHaveBeenLastCalledWith(new Set(['refused']))
+        },
+        { timeout: 15000 }
+      )
+      expect(fetchMock).toHaveBeenCalledWith(busy.src, { method: 'HEAD', cache: 'no-store' })
+      // The refused file was asked about once and never loaded again.
+      await new Promise((done) => setTimeout(done, 1_000))
+      expect(
+        resolveAuthorizedLocalMediaPath.mock.calls.filter(([filePath]) =>
+          filePath.includes('refused')
+        )
+      ).toHaveLength(2)
+      expect(getLiveSpriteByLabel('refused')).toBeNull()
+      unmount()
+    }, 30000)
+
     it('closes an initial local bitmap right after its upload and never uploads it again', async () => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
       const bitmap = createBitmap(640, 360)

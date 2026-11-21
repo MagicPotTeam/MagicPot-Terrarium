@@ -114,6 +114,7 @@ import {
   getCanvasImageObjectUrlRegistryMetrics
 } from '../canvasImageObjectUrlRegistry'
 import { withProjectCanvasWebGLTimeout } from './projectCanvasWebGLTimeout'
+import { CanvasImageLoadRetries } from '../canvasImageLoadRetry'
 import {
   PROJECT_CANVAS_WEBGL_STRIP_UPLOAD_METHOD_ID,
   PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES,
@@ -1750,6 +1751,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     hasDeferredImageVersionUpdateRef.current = false
     queueImageVersionFrame()
   }, [queueImageVersionFrame])
+
+  // A local image main could not answer for (503) loads again a few times, later each time: the
+  // drive or its breaker may answer by then, and the image should not stay broken.
+  const imageLoadRetriesRef = useRef<CanvasImageLoadRetries | null>(null)
+  if (!imageLoadRetriesRef.current) {
+    imageLoadRetriesRef.current = new CanvasImageLoadRetries((itemId, src) => {
+      if (failedLoadSrcByIdRef.current.get(itemId) !== src) return
+      failedLoadSrcByIdRef.current.delete(itemId)
+      scheduleImageVersionUpdate()
+    })
+  }
+  useEffect(() => () => imageLoadRetriesRef.current?.dispose(), [])
 
   // One display frame after a large upload: the next one may start (once the GPU finished the
   // previous one). A held-back upload asks for a reconcile pass then.
@@ -4153,6 +4166,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             console.warn('[Canvas WebGL] Source texture decode failed:', item.id, item.src, error)
           } else {
             failedLoadSrcByIdRef.current.set(item.id, item.src)
+            imageLoadRetriesRef.current?.noteFailure(item.id, item.src)
           }
           emitItemLoadMetricsSnapshot()
         } else if (currentItem) {
@@ -4314,6 +4328,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
 
         failedLoadSrcByIdRef.current.delete(item.id)
+        imageLoadRetriesRef.current?.forget(item.id)
         failedSourceUpgradeSrcByIdRef.current.delete(item.id)
         skippedSourceUpgradeSrcByIdRef.current.delete(item.id)
         setCachedImageRecord({
@@ -4961,6 +4976,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         failedLoadSrcByIdRef.current.delete(itemId)
       }
     })
+    imageLoadRetriesRef.current?.retain(nextIds)
     failedSourceUpgradeSrcByIdRef.current.forEach((_src, itemId) => {
       if (!nextIds.has(itemId)) {
         failedSourceUpgradeSrcByIdRef.current.delete(itemId)
