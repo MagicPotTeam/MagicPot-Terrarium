@@ -259,6 +259,34 @@ describe('short-lived local media import grants', () => {
     expect(countLocalMediaImportGrantsForTest()).toBe(0)
   })
 
+  it('records no read grant when the network file answers only after the deadline', async () => {
+    const root = makeTempDir('magicpot-import-grants-')
+    const picked = path.join(root, 'late.png')
+    fs.writeFileSync(picked, 'png')
+    // The mapped share answers the realpath, but its stat comes after the deadline.
+    let answer!: () => void
+    const stat = vi.fn(
+      () =>
+        new Promise<{ isFile(): boolean; size: number }>(
+          (resolve) => (answer = () => resolve({ isFile: () => true, size: 3 }))
+        )
+    )
+    await expect(
+      grantLocalMediaImportFile(picked, 'image/png', {
+        realpath: async () => '//server/share/late.png',
+        stat,
+        timeoutMs: 30,
+        batch: 'drop-5-late'
+      })
+    ).resolves.toEqual({ refused: 'timeout' })
+    answer()
+    await vi.waitFor(() => expect(stat).toHaveBeenCalledOnce())
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // The composer was told 'timeout': no grant shows up afterwards, of either kind.
+    expect(countLocalMediaImportGrantsForTest()).toBe(0)
+    expect(spendLocalMediaImportGrant(path.resolve('//server/share/late.png'), 'read')).toBeNull()
+  })
+
   it('keeps the grants of one drop alive for its own imports, one after another, each spent once', () => {
     const files = ['one.png', 'two.png', 'three.png'].map((name) => `/drop/${name}`)
     const wall = 1_700_000_000_000
