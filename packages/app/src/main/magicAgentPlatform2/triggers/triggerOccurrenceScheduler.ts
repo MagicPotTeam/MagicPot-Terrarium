@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { PersistentTriggerStore } from './persistentTriggerStore'
-import type { TriggerOccurrenceState, TriggerOccurrenceStore } from './triggerOccurrenceStore'
+import {
+  TRIGGER_OCCURRENCE_ARCHIVE_BATCH,
+  type TriggerOccurrenceState,
+  type TriggerOccurrenceStore
+} from './triggerOccurrenceStore'
 
 export type TriggerOccurrenceSchedulerOptions = Readonly<{
   occurrences: TriggerOccurrenceStore
@@ -24,7 +28,9 @@ const loggableErrorName = (error: unknown): string =>
 export class TriggerOccurrenceScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined
   private pollFailure: Readonly<{ name: string; loggedAt: number }> | undefined
+  private archiveFailureLoggedAt: number | undefined
   private running = false
+  private stopRequested = false
   private inFlight: Promise<boolean> | undefined
   private readonly pollIntervalMs: number
   private readonly leaseMs: number
@@ -50,11 +56,13 @@ export class TriggerOccurrenceScheduler {
   start(): void {
     if (this.running) return
     this.running = true
+    this.stopRequested = false
     this.schedule(0)
   }
 
   async stop(): Promise<void> {
     this.running = false
+    this.stopRequested = true
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
     await this.inFlight
@@ -105,7 +113,36 @@ export class TriggerOccurrenceScheduler {
     console.warn('[triggers] Occurrence polls recovered.')
   }
 
+  // Archive before claiming, so the claim scan reads live records plus a bounded tail, never a
+  // backlog. A backlog (an upgraded store) drains in bounded chunks with a yield in between, so
+  // one poll never blocks the main thread for long; stop() ends the drain and skips the claim.
+  // Claiming never depends on archiving: a failure is logged and the claim still runs.
+  private async archiveTerminal(): Promise<boolean> {
+    try {
+      for (;;) {
+        if (this.options.occurrences.archiveTerminal(this.now()) < TRIGGER_OCCURRENCE_ARCHIVE_BATCH)
+          return true
+        if (this.stopRequested) return false
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        if (this.stopRequested) return false
+      }
+    } catch (error) {
+      this.noteArchiveFailed(error)
+      return true
+    }
+  }
+
+  // Content-free, at most once per ten minutes: a failing archive only costs claim-scan time.
+  private noteArchiveFailed(error: unknown): void {
+    const at = this.now()
+    const last = this.archiveFailureLoggedAt
+    if (last !== undefined && at - last < POLL_FAILURE_LOG_INTERVAL_MS) return
+    this.archiveFailureLoggedAt = at
+    console.warn(`[triggers] Occurrence archive failed: ${loggableErrorName(error)}`)
+  }
+
   private async executeOne(): Promise<boolean> {
+    if (!(await this.archiveTerminal())) return false
     const now = this.now()
     const claimId = this.claimId()
     const claimed = this.options.occurrences.claimNext(
