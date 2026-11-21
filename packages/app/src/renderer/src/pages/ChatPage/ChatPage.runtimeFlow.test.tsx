@@ -14,6 +14,7 @@ import type {
 import {
   createTeamMemberInDB,
   saveSessionToDB,
+  setTeamMemberModelChoiceInDB,
   type ChatSession,
   type ChatSessionDraft
 } from './chatStorage'
@@ -438,7 +439,7 @@ vi.mock('./chatStorage', async (importOriginal) => {
         scope: string
         expectedLead: ChatSession
         expectedMember: ChatSession
-        profileId: string
+        profileId: string | null
         shouldUpdate?: () => boolean
       }) => {
         const records =
@@ -458,9 +459,13 @@ vi.mock('./chatStorage', async (importOriginal) => {
           !actual.normalizedSessionsEqual(member, input.expectedMember, input.scope)
         )
           throw new Error('Team changed')
-        const updated = {
-          ...member,
-          memberModelChoice: { version: 1 as const, profileId: input.profileId },
+        // As the real call: a clear removes the property (never `memberModelChoice: undefined`).
+        const { memberModelChoice: _replaced, ...current } = member
+        const updated: ChatSession = {
+          ...current,
+          ...(input.profileId === null
+            ? {}
+            : { memberModelChoice: { version: 1 as const, profileId: input.profileId } }),
           sessionUrl: undefined,
           sessionProfileId: undefined,
           sessionRouteFingerprint: undefined
@@ -820,14 +825,18 @@ vi.mock('./components/ChatPrimarySelection', () => ({
   }: {
     selectedProfileId?: string | null
     selectedReasoningEffort?: string | null
-    memberModel?:
+    memberModel?: (
       | {
           state: 'inherited' | 'selected'
           label: string
-          onSelectProfile?: (id: string) => void
-          selectableProfileIds?: readonly string[]
         }
       | { state: 'unavailable' }
+    ) & {
+      onSelectProfile?: (id: string) => void
+      selectableProfileIds?: readonly string[]
+      disabled?: boolean
+      inheritLead?: { profileId: string; modelName: string; onSelect?: () => void }
+    }
     memberReasoningEffort?: string | null
     onSelectMemberReasoningEffort?: (effort: 'medium' | 'high' | 'xhigh') => void
     onSelectProfile: (profileId: string | null) => void
@@ -840,7 +849,7 @@ vi.mock('./components/ChatPrimarySelection', () => ({
             ? 'unavailable'
             : `${memberModel.state}:${memberModel.label}`}
         </span>
-        {memberModel.state !== 'unavailable' && (
+        {(memberModel.state !== 'unavailable' || memberModel.onSelectProfile) && (
           <>
             <span data-testid="selectable-member-profile-ids">
               {JSON.stringify(memberModel.selectableProfileIds)}
@@ -854,7 +863,17 @@ vi.mock('./components/ChatPrimarySelection', () => ({
             </button>
           </>
         )}
-        {memberModel.state !== 'unavailable' && memberModel.onSelectProfile ? (
+        {memberModel.disabled ? <span data-testid="member-model-disabled" /> : null}
+        {memberModel.inheritLead?.onSelect ? (
+          <button
+            type="button"
+            data-testid="inherit-member-lead"
+            onClick={() => memberModel.inheritLead?.onSelect?.()}
+          >
+            {`Inherit ${memberModel.inheritLead.modelName}`}
+          </button>
+        ) : null}
+        {memberModel.onSelectProfile ? (
           <button
             type="button"
             data-testid="select-member-vision-model"
@@ -7117,6 +7136,443 @@ describe('ChatPage runtime workflow integration', () => {
     } finally {
       page.unmount()
     }
+  })
+
+  describe('re-picking a member model that can no longer be used', () => {
+    const teamRoute = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'runtime-project',
+      threadId: 'runtime-pane'
+    } as const
+    const ui = (active: boolean) => (
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage compact active={active} storageScope="runtime-flow" route={teamRoute} />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const lead = (extra: Partial<ChatSession> = {}): ChatSession => ({
+      id: 'repick-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      ...extra
+    })
+    const writer = (extra: Partial<ChatSession> = {}): ChatSession => ({
+      id: 'repick-writer',
+      title: 'writer',
+      messages: [],
+      teamLeadId: 'repick-lead',
+      teamMemberName: 'writer',
+      ...extra
+    })
+    const stored = (id: string) => hoisted.storedSessions.value.find((item) => item.id === id)
+    const openMember = async (sessions: ChatSession[], active = true) => {
+      hoisted.storedSessions.value = sessions
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        'repick-writer'
+      )
+      vi.mocked(setTeamMemberModelChoiceInDB).mockClear()
+      const page = render(ui(active))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('repick-writer'))
+      return page
+    }
+    const holdStorage = () => {
+      const mock = vi.mocked(setTeamMemberModelChoiceInDB)
+      const original = mock.getMockImplementation()!
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      mock.mockImplementationOnce(async (input) => {
+        await gate
+        return original(input)
+      })
+      return release
+    }
+
+    it('offers a pick for a member whose own model was removed and replaces the stored choice', async () => {
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(
+          JSON.parse(screen.getByTestId('selectable-member-profile-ids').textContent || 'null')
+        ).toEqual(['base-model', 'vision-model', 'translation-model'])
+        expect(screen.queryByTestId('member-model-disabled')).toBeNull()
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() =>
+          expect(stored('repick-writer')?.memberModelChoice).toEqual({
+            version: 1,
+            profileId: 'vision-model'
+          })
+        )
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+            'selected:Vision Model'
+          )
+        )
+        expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1)
+        expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('offers a pick for an inheriting member whose lead has no usable model and keeps the lead', async () => {
+      const page = await openMember([lead({ profileId: 'removed-profile' }), writer()])
+      const leadBefore = structuredClone(stored('repick-lead'))
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+            'selected:Vision Model'
+          )
+        )
+        expect(stored('repick-writer')?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'vision-model'
+        })
+        expect(stored('repick-lead')).toEqual(leadBefore)
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it.each([
+      ['the lead is missing', [writer()]],
+      ['the lead is nested', [lead({ teamLeadId: 'other' }), writer()]],
+      ['the lead is archived', [lead({ archived: true }), writer()]],
+      ['the team ended', [lead({ teamEnded: true }), writer()]],
+      ['the member is archived', [lead(), writer({ archived: true })]],
+      ['the generation changed', [lead({ teamGeneration: 1 }), writer()]],
+      [
+        'the lead holds a legacy team selection',
+        [
+          lead({
+            teamSettings: {
+              maxMembers: 6,
+              defaultModel: null,
+              autoCleanup: false,
+              memberModelSelection: { version: 1, profileId: 'vision-model' }
+            }
+          }),
+          writer()
+        ]
+      ],
+      [
+        'the marker is malformed',
+        [lead(), writer({ memberModelChoice: { version: 1, profileId: ' removed ' } })]
+      ],
+      [
+        'the marker has an unknown version',
+        [
+          lead(),
+          writer({
+            memberModelChoice: { version: 2, profileId: 'vision-model' } as unknown as {
+              version: 1
+              profileId: string
+            }
+          })
+        ]
+      ]
+    ] as const)('offers no pick when %s', async (_reason, sessions) => {
+      const page = await openMember(structuredClone([...sessions]))
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(screen.queryByTestId('select-member-vision-model')).toBeNull()
+        expect(screen.queryByTestId('selectable-member-profile-ids')).toBeNull()
+        expect(setTeamMemberModelChoiceInDB).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('keeps a pick disabled and unwritten in remote mode', async () => {
+      hoisted.currentConfig.value!.use_remote_llm = true
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(screen.getByTestId('member-model-disabled')).toBeInTheDocument()
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        })
+        expect(setTeamMemberModelChoiceInDB).not.toHaveBeenCalled()
+        expect(stored('repick-writer')?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'removed-profile'
+        })
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('answers busy to a second pick and to a send while a pick is pending, then applies it', async () => {
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      const release = holdStorage()
+      try {
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.member_model_save_busy')
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: 'wait for the pick' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledTimes(2)
+        expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith('chat.member_model_save_busy')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('wait for the pick')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1)
+        release()
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+            'selected:Vision Model'
+          )
+        )
+        expect(stored('repick-writer')?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'vision-model'
+        })
+      } finally {
+        release()
+        page.unmount()
+      }
+    })
+
+    it('writes nothing when the pane is hidden before a pending pick is released', async () => {
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      const release = holdStorage()
+      try {
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+        page.rerender(ui(false))
+        release()
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        })
+        expect(stored('repick-writer')?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'removed-profile'
+        })
+      } finally {
+        release()
+        page.unmount()
+      }
+    })
+
+    it('writes nothing and warns nothing when the page unmounts before a pending pick is released', async () => {
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      const release = holdStorage()
+      fireEvent.click(screen.getByTestId('select-member-vision-model'))
+      await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+      page.unmount()
+      release()
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(stored('repick-writer')?.memberModelChoice).toEqual({
+        version: 1,
+        profileId: 'removed-profile'
+      })
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('a member inheriting the lead again', () => {
+    const lead: ChatSession = {
+      id: 'inherit-lead-session',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const chosen = (id: string, name: string, profileId: string): ChatSession => ({
+      id,
+      title: name,
+      messages: [{ role: 'user', content: `${name} task` }] as ChatSession['messages'],
+      teamLeadId: lead.id,
+      teamMemberName: name,
+      memberModelChoice: { version: 1, profileId }
+    })
+    const stored = (id: string) => hoisted.storedSessions.value.find((item) => item.id === id)
+    const ui = (active: boolean) => (
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage
+            compact
+            active={active}
+            storageScope="runtime-flow"
+            route={{
+              channel: 'canvas',
+              scopeType: 'thread',
+              scopeId: 'runtime-project',
+              threadId: 'runtime-pane'
+            }}
+          />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const openMember = async (sessions: ChatSession[], memberId: string) => {
+      hoisted.storedSessions.value = structuredClone(sessions)
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        memberId
+      )
+      vi.mocked(setTeamMemberModelChoiceInDB).mockClear()
+      const page = render(ui(true))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(memberId))
+      return page
+    }
+    const holdStorage = () => {
+      const mock = vi.mocked(setTeamMemberModelChoiceInDB)
+      const original = mock.getMockImplementation()!
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      mock.mockImplementationOnce(async (input) => {
+        await gate
+        return original(input)
+      })
+      return release
+    }
+
+    it('clears a selected member choice and leaves the lead and the other member alone', async () => {
+      const writer = chosen('inherit-writer', 'writer', 'vision-model')
+      const designer = chosen('inherit-designer', 'designer', 'vision-model')
+      const page = await openMember([lead, writer, designer], writer.id)
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+          'selected:Vision Model'
+        )
+        fireEvent.click(screen.getByTestId('inherit-member-lead'))
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
+        )
+        expect(Object.hasOwn(stored(writer.id)!, 'memberModelChoice')).toBe(false)
+        expect(stored(writer.id)?.messages).toEqual(writer.messages)
+        expect(vi.mocked(setTeamMemberModelChoiceInDB)).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ profileId: null })
+        )
+        expect(stored(lead.id)).toEqual(lead)
+        expect(stored(designer.id)).toEqual(designer)
+        expect(screen.queryByTestId('inherit-member-lead')).toBeNull()
+        expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('offers inheriting to a member whose own model was removed only while the lead model can be used', async () => {
+      const writer = chosen('inherit-writer', 'writer', 'removed-profile')
+      const first = await openMember([lead, writer], writer.id)
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(screen.getByTestId('inherit-member-lead')).toHaveTextContent('Inherit GPT-4o')
+        fireEvent.click(screen.getByTestId('inherit-member-lead'))
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
+        )
+        expect(Object.hasOwn(stored(writer.id)!, 'memberModelChoice')).toBe(false)
+      } finally {
+        first.unmount()
+      }
+      const second = await openMember(
+        [{ ...lead, profileId: 'removed-lead-profile' }, writer],
+        writer.id
+      )
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(screen.getByTestId('select-member-vision-model')).toBeInTheDocument()
+        expect(screen.queryByTestId('inherit-member-lead')).toBeNull()
+      } finally {
+        second.unmount()
+      }
+    })
+
+    it('offers no inheriting to a member that already inherits', async () => {
+      const { memberModelChoice: _choice, ...writer } = chosen('inherit-writer', 'writer', 'x')
+      const page = await openMember([lead, writer], writer.id)
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
+        expect(screen.queryByTestId('inherit-member-lead')).toBeNull()
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('answers busy to inheriting while a pick is pending', async () => {
+      const writer = chosen('inherit-writer', 'writer', 'removed-profile')
+      const page = await openMember([lead, writer], writer.id)
+      const release = holdStorage()
+      try {
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+        fireEvent.click(screen.getByTestId('inherit-member-lead'))
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledExactlyOnceWith(
+          'chat.member_model_save_busy'
+        )
+        expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1)
+        release()
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+            'selected:Vision Model'
+          )
+        )
+        expect(stored(writer.id)?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'vision-model'
+        })
+      } finally {
+        release()
+        page.unmount()
+      }
+    })
+
+    it.each(['hidden', 'unmounted'] as const)(
+      'writes nothing when the page is %s before a pending clear is released',
+      async (how) => {
+        const writer = chosen('inherit-writer', 'writer', 'vision-model')
+        const page = await openMember([lead, writer], writer.id)
+        const release = holdStorage()
+        try {
+          fireEvent.click(screen.getByTestId('inherit-member-lead'))
+          await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+          if (how === 'hidden') page.rerender(ui(false))
+          else page.unmount()
+          release()
+          await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 50))
+          })
+          expect(stored(writer.id)?.memberModelChoice).toEqual({
+            version: 1,
+            profileId: 'vision-model'
+          })
+          if (how === 'unmounted') expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+        } finally {
+          release()
+          if (how === 'hidden') page.unmount()
+        }
+      }
+    )
   })
 
   it('requires branch confirmation and preserves original without generation', async () => {

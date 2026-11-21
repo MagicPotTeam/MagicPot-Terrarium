@@ -1481,6 +1481,7 @@
     "new_conversation": "New Conversation",
     "messages": "messages",
     "model": "Model",
+    "member_model_inherit": "Inherit lead",
     "member_model_inherited": "Inherits lead: {{model}}",
     "member_model_selected": "Member model: {{model}}",
     "member_model_unavailable": "Member model unavailable",

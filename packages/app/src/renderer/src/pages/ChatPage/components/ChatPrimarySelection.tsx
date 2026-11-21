@@ -38,6 +38,11 @@ type ChatPrimarySelectionProps = {
     selectableProfileIds?: readonly string[]
     disabled?: boolean
     pending?: boolean
+    /**
+     * The "inherit the lead" row (the lead's model is usable). onSelect clears the member's own
+     * choice; it is absent when the member has none.
+     */
+    inheritLead?: { profileId: string; modelName: string; onSelect?: () => void }
   }
   composerStyle?: boolean
   /**
@@ -385,12 +390,21 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
               defaultValue: 'Member model: {{model}}',
               model: memberModel.label
             })
+    // A member whose model can no longer be used may pick again when the caller offers it.
     const canSelect =
       active &&
-      memberModel.state !== 'unavailable' &&
       !memberModel.disabled &&
       !memberModel.pending &&
       Boolean(memberModel.onSelectProfile)
+    const inheritLead = memberModel.inheritLead
+    const inheriting = memberModel.state === 'inherited'
+    // The model in use is marked (none when it can no longer be used; the inherit row while the
+    // member inherits); the member's own choice is not stored again.
+    const currentProfileId =
+      memberModel.state === 'unavailable' || (inheriting && inheritLead)
+        ? null
+        : (memberModel.profileId ?? null)
+    const ownChoiceId = memberModel.state === 'selected' ? currentProfileId : null
     const selectableProfileIds = memberModel.selectableProfileIds
     const selectableMemberProfiles = selectableProfileIds
       ? availableProfiles.filter((profile) => selectableProfileIds.includes(profile.id))
@@ -472,11 +486,36 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           ))}
         </Menu>
         <Menu anchorEl={anchorEl} open={Boolean(anchorEl) && canSelect} onClose={handleClose}>
+          {inheritLead ? (
+            // Its key cannot equal a model row's key, and it never hands a profile id on.
+            <MenuItem
+              key="inherit-lead"
+              selected={inheriting}
+              onClick={() => {
+                if (canSelect && !inheriting) inheritLead.onSelect?.()
+                handleClose()
+              }}
+            >
+              <Box component="span" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <Box component="span">
+                  {t('chat.member_model_inherit', { defaultValue: 'Inherit lead' })}
+                </Box>
+                <Box
+                  component="span"
+                  sx={{ fontSize: 11, color: 'text.secondary', overflowWrap: 'anywhere' }}
+                >
+                  {inheritLead.modelName}
+                </Box>
+              </Box>
+            </MenuItem>
+          ) : null}
           {selectableMemberProfiles.map((profile) => (
             <MenuItem
-              key={profile.id}
+              key={`profile:${profile.id}`}
+              selected={profile.id === currentProfileId}
               onClick={() => {
-                if (canSelect) memberModel.onSelectProfile?.(profile.id)
+                if (canSelect && profile.id !== ownChoiceId)
+                  memberModel.onSelectProfile?.(profile.id)
                 handleClose()
               }}
             >
