@@ -357,11 +357,14 @@ describe('durable team message queue', () => {
     mkdirSync(join(file, '..'), { recursive: true })
     writeFileSync(file, 'not a database')
     vi.mocked(activeInstanceLeasePids).mockClear()
-    expect(() => list(q, 1)).toThrow()
-    expect(() => list(q, 1)).toThrow()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    // Nothing is listed (the poll gets no error to log every 500 ms); a tool call gets the error.
+    expect(list(q, 1)).toEqual([])
+    expect(list(q, 1)).toEqual([])
     expect(() => q.enqueue(intent, options())).toThrow()
-    // One open attempt; the next ones within the retry window answer with the same failure.
+    // One open attempt, logged once; the next ones within the retry window answer with the same failure.
     expect(activeInstanceLeasePids).toHaveBeenCalledOnce()
+    expect(warn).toHaveBeenCalledOnce()
     expect(readFileSync(file, 'utf8')).toBe('not a database')
   })
 
@@ -389,7 +392,7 @@ describe('durable team message queue', () => {
     mkdirSync(join(broken.file, '..'), { recursive: true })
     writeFileSync(broken.file, 'not a database')
     pollsAt(
-      () => expect(() => list(broken.q, 1)).toThrow(),
+      () => expect(list(broken.q, 1)).toEqual([]),
       [30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000]
     )
     expect(readFileSync(broken.file, 'utf8')).toBe('not a database')

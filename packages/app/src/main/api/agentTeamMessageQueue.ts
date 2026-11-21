@@ -77,6 +77,11 @@ export function teamMessageStoreOpener(file: string, boot: string): TeamMessageS
         return store
       } catch (error) {
         failure = error
+        if (opening && !(error instanceof Error && error.message === TEAM_QUEUE_UNAVAILABLE))
+          console.warn(
+            '[TeamQueue] The team message file could not be opened; nothing is served until it can be.',
+            String(error instanceof Error ? error.message : error).slice(0, 300)
+          )
         retryAt =
           Date.now() + (opening ? Math.min(RETRY_MS * 2 ** failedOpens++, MAX_RETRY_MS) : RETRY_MS)
         throw error
@@ -99,8 +104,6 @@ function productionOpener(): TeamMessageStoreOpener {
     ))
   return { open: (create) => resolve().open(create), close: () => opener?.close() }
 }
-const unavailable = (error: unknown): boolean =>
-  error instanceof Error && error.message === TEAM_QUEUE_UNAVAILABLE
 export const TEAM_MESSAGE_UNAVAILABLE = 'Team message is no longer available.'
 
 /**
@@ -294,9 +297,10 @@ export class AgentTeamMessageQueue {
     let store: TeamMessageStore | undefined
     try {
       store = this.opener.open(false)
-    } catch (error) {
-      if (unavailable(error)) return []
-      throw error
+    } catch {
+      // Fail closed: nothing is listed while the file cannot be opened or another process holds it.
+      // The opener logs a failed open once per attempt; a poll every 500 ms must not log each time.
+      return []
     }
     if (!store) return []
     const routeKey = getAgentSessionKey(normalizeAgentRoute(scope.route))
