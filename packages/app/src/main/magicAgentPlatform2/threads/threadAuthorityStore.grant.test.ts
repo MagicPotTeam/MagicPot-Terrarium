@@ -67,13 +67,15 @@ function setup() {
     new ThreadAuthorityStore(store, { now: () => clock.now, newId, verifyApproval })
   const store = open()
   const authority = build(store)
+  /** Each request carries a new approval proof unless the test passes one. */
+  let proofs = 0
   const request = (pair: ThreadPair, over: Partial<RunGrantRequest> = {}): RunGrantRequest => ({
     threadId: pair.threadId,
     generation: pair.generation,
     subject: trigger(),
     limits: { turns: 10, toolCalls: 100, walltimeSeconds: 3600 },
     expiresAt: clock.now + DAY,
-    approval: { approvedAt: clock.now - 5, proofId: 'proof-1' },
+    approval: { approvedAt: clock.now - 5, proofId: `proof-${(proofs += 1)}` },
     ...over
   })
   const grant = (pair: ThreadPair, over: Partial<RunGrantRequest> = {}): string => {
@@ -497,6 +499,57 @@ describe('run grant: revoke, pause, expiry and the thread cascade', () => {
       usable: false
     })
     expect(storedStatus(reopenedStore, id)).toMatchObject({ status: 'revoked', reason: 'paused' })
+  })
+
+  it('no resume: the approval of a paused, ended, exhausted or lapsed grant never issues another for its subject', () => {
+    const { authority, store, open, build, clock, verifier, request } = setup()
+    const pair = authority.issueThread(target())
+    const ends: [string, (grantId: string) => unknown][] = [
+      ['paused', (grantId) => authority.revokeGrant(grantId, 'paused')],
+      ['user', (grantId) => authority.revokeGrant(grantId, 'user')],
+      ['subject-ended', (grantId) => authority.revokeGrant(grantId, 'subject-ended')],
+      ['exhausted', (grantId) => authority.chargeGrant(grantId, pair, 'c-1', { turns: 11 })],
+      ['lapsed', () => (clock.now += DAY)]
+    ]
+    const replays: RunGrantRequest[] = []
+    for (const [name, end] of ends) {
+      const input = request(pair, { subject: trigger(`d-${name}`) })
+      const first = authority.issueGrant(input)
+      if (!first.ok) throw new Error('grant refused')
+      end(first.grant.grantId)
+      expect(authority.readGrant(first.grant.grantId)?.usable).toBe(false)
+      const replay = clock.now < input.expiresAt ? input : { ...input, expiresAt: clock.now + DAY }
+      replays.push(replay)
+      const calls = verifier.calls.length
+      const before = footprint(store)
+      expect(authority.issueGrant(replay)).toEqual({ ok: false, reason: 'approval-refused' })
+      expect(verifier.calls).toHaveLength(calls)
+      expect(footprint(store)).toEqual(before)
+    }
+    store.close()
+    const reopened = build(open())
+    for (const replay of replays)
+      expect(reopened.issueGrant({ ...replay, expiresAt: clock.now + DAY })).toEqual({
+        ok: false,
+        reason: 'approval-refused'
+      })
+    // A new approval issues a new grant; the old approval for another subject is for the
+    // verifier to judge, and so is any approval in a later generation (it is shown the new pair).
+    const subject = replays[0].subject
+    expect(reopened.issueGrant(request(pair, { subject })).ok).toBe(true)
+    expect(
+      reopened.issueGrant(
+        request(pair, { subject: trigger('other'), approval: replays[0].approval })
+      ).ok
+    ).toBe(true)
+    reopened.revokeThread(target())
+    const next = reopened.issueThread(target())
+    verifier.answer = () => false
+    expect(reopened.issueGrant({ ...replays[0], ...next, expiresAt: clock.now + DAY })).toEqual({
+      ok: false,
+      reason: 'approval-refused'
+    })
+    expect(verifier.calls.at(-1)).toMatchObject({ ...next, approval: replays[0].approval })
   })
 
   it('expiry is computed by reading: usable at expiresAt - 1, expired at expiresAt, nothing written', () => {

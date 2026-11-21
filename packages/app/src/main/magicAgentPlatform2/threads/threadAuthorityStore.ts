@@ -652,8 +652,11 @@ export class ThreadAuthorityStore {
    * 'thread-unknown' | 'thread-stale' | 'thread-revoked' (from the identity),
    * 'subject-has-active-grant' (a grant of this generation with the same subject whose stored
    * status is active and which is not past its expiry), 'capacity' (the generation holds
-   * MAX_RUN_GRANTS_PER_GENERATION grants), 'approval-refused' (the verifier, called once after
-   * every other check with a frozen copy of the values stored, did not return true or threw).
+   * MAX_RUN_GRANTS_PER_GENERATION grants), 'approval-refused' (a grant of this generation with the
+   * same subject carries the same approval proofId, so a paused grant is never resumed with its old
+   * approval; or the verifier, called once after every other check with a frozen copy of the
+   * values stored, did not return true or threw). The verifier must bind the proof to the thread
+   * id and generation it is shown: the store sees only the grants of the current generation.
    * Success is one batch: the identity lists the grant id (closed by the revision read), the grant
    * and its state (active, nothing used) are created, and a grant of the same subject whose stored
    * status is active but which is past its expiry (the issue relied on that) is recorded 'expired'.
@@ -679,6 +682,12 @@ export class ThreadAuthorityStore {
       return { ok: false, reason: 'subject-has-active-grant' }
     if (identity.state.grants.length >= MAX_RUN_GRANTS_PER_GENERATION)
       return { ok: false, reason: 'capacity' }
+    // Pausing is revoking and there is no resume: the approval of an earlier grant of this subject
+    // in this generation (paused, ended or lapsed) never issues another one, whatever the verifier.
+    if (
+      sameSubjectGrants.some((loaded) => loaded.grant.approval.proofId === value.approval.proofId)
+    )
+      return { ok: false, reason: 'approval-refused' }
     const shown: RunGrantApprovalRequest = freezeDeep({
       target: copyTarget(identity.state.target),
       threadId: value.threadId,
