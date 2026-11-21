@@ -255,6 +255,33 @@ describe('ChatInlineAttachmentGuard', () => {
     expect(importer).toHaveBeenCalledTimes(1)
   })
 
+  it('imports one queued inline image, and gives back anything it cannot import', async () => {
+    const { importer } = createImporter()
+    const guard = new ChatInlineAttachmentGuard(importer)
+    const big = image(inlinePng('queued-one'), { metadata: { queued: true } })
+    const small = image(inlinePng('queued-small', 1024))
+    const imported = await guard.importInlineImage(big)
+    expect(imported).toMatchObject({ metadata: { queued: true }, media: { kind: 'managed' } })
+    expect(imported.url).toMatch(/^local-media:/)
+    await expect(guard.importInlineImage(small)).resolves.toBe(small)
+    // The same image saved with the conversation later reuses this import.
+    await guard.externalize({
+      id: 'later',
+      title: 'Later',
+      messages: [{ role: 'user', content: '', attachments: [image(big.url)] }]
+    })
+    expect(importer).toHaveBeenCalledTimes(1)
+
+    importer.mockRejectedValueOnce(new Error('store unavailable'))
+    const refused = image(inlinePng('queued-refused'))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await expect(guard.importInlineImage(refused)).resolves.toBe(refused)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('applies finished imports to a newer live object by url', () => {
     const url = inlinePng('live')
     const replacement: InlineAttachmentReplacement = {
