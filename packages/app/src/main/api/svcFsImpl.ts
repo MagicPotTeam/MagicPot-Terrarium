@@ -43,10 +43,11 @@ import { getCurrentUserDataDirectoryState } from '../config/userDataDirectory'
 import { app } from 'electron'
 import {
   consumeLocalMediaReadGrant,
-  resolveAuthorizedLocalMediaPath,
+  isLexicallyCoveredLocalMediaPath,
   type LocalMediaRoot
 } from '../localMediaAccess'
 import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
+import { authorizeRendererLocalPath } from '../rendererLocalPathAccess'
 import { CHAT_IMAGE_ATTACHMENT_MAX_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
@@ -212,6 +213,46 @@ const assertReadableFileWithinLimit = async (fullPath: string, limit: number): P
   return stats.size
 }
 
+/**
+ * Reads a whole file through one handle, never more than `maxBytes` (checked on the handle
+ * before reading) nor more than the size measured then: a file that grows meanwhile is refused
+ * rather than read unbounded. `label` is the path the caller named, for messages.
+ */
+const readFileWithinByteBudget = (
+  fullPath: string,
+  maxBytes: number,
+  { label = fullPath, tooLargeHint = '' }: { label?: string; tooLargeHint?: string } = {}
+): Promise<Buffer> =>
+  runBoundedFsOp(async () => {
+    // Checked before the open too: opening a FIFO or a device could wait forever.
+    if (!(await fs.stat(fullPath)).isFile()) throw new Error(`Path is not a file: ${label}`)
+    const handle = await fs.open(fullPath, 'r')
+    try {
+      const stats = await handle.stat()
+      if (!stats.isFile()) throw new Error(`Path is not a file: ${label}`)
+      if (stats.size > maxBytes) {
+        throw new Error(`File exceeds the ${maxBytes}-byte full-file IPC limit${tooLargeHint}`)
+      }
+      // One byte more than the size measured detects growth.
+      const buffer = Buffer.allocUnsafe(stats.size + 1)
+      let totalBytes = 0
+      while (totalBytes < buffer.byteLength) {
+        const { bytesRead } = await handle.read(
+          buffer,
+          totalBytes,
+          buffer.byteLength - totalBytes,
+          totalBytes
+        )
+        if (bytesRead === 0) break
+        totalBytes += bytesRead
+      }
+      if (totalBytes > stats.size) throw new Error(`File changed while it was read: ${label}`)
+      return buffer.subarray(0, totalBytes)
+    } finally {
+      await handle.close()
+    }
+  })
+
 const readImageFileWithinByteBudget = (fullPath: string, maxBytes: number): Promise<Buffer> =>
   runBoundedFsOp(async () => {
     const handle = await fs.open(fullPath, 'r')
@@ -266,7 +307,10 @@ const requireCanvasMirrorProjectDirName = (projectDirName: string): string => {
 }
 
 const requireCanvasMirrorAssetFileName = (assetFileName: string): string => {
-  if (typeof assetFileName !== 'string' || !CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(assetFileName)) {
+  if (
+    typeof assetFileName !== 'string' ||
+    !CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(assetFileName)
+  ) {
     throw new Error('Invalid canvas mirror asset file name')
   }
   return assetFileName
@@ -451,11 +495,16 @@ const resolveAbsoluteCanvasMirrorRef = (value: string, assetDir: string): string
   // Compared segment by segment: a lower-case form can have another length than the
   // original, so a prefix length of one must never be used to cut the other.
   const dirSegments = toComparableCanvasMirrorPath(assetDir).split('/')
-  const fileSegments = candidate.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').split('/')
+  const fileSegments = candidate
+    .replace(/[\\/]+/g, '/')
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
   if (
     !dirSegments[0] ||
     fileSegments.length <= dirSegments.length ||
-    dirSegments.some((segment, index) => toComparableCanvasMirrorPath(fileSegments[index]) !== segment)
+    dirSegments.some(
+      (segment, index) => toComparableCanvasMirrorPath(fileSegments[index]) !== segment
+    )
   ) {
     return null
   }
@@ -582,24 +631,139 @@ const reserveCanvasMirrorSpace = async (
   return step
 }
 
+/**
+ * Folders the user configured in the settings that the renderer reads besides the application
+ * roots and its grants: the configured project folder (canvas project files) and the LoRA
+ * model folder (trigger words: sidecar text files, safetensors headers, its listing). Read from
+ * main's own config, never from the request.
+ */
+export type RendererConfiguredReadRoots = {
+  projectDirs: string[]
+  loraDirs: string[]
+}
+
+const NO_CONFIGURED_READ_ROOTS: RendererConfiguredReadRoots = { projectDirs: [], loraDirs: [] }
+
+const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredReadRoots> => {
+  try {
+    const [{ getConfig }, { getBuildEnv }, { ConfigUtils }] = await Promise.all([
+      import('../config/config'),
+      import('../config/buildEnv'),
+      import('@shared/config/configUtils')
+    ])
+    const config = getConfig()
+    const absolute = (value: string | undefined): string[] => {
+      const trimmed = value?.trim() ?? ''
+      return trimmed && path.isAbsolute(trimmed) ? [trimmed] : []
+    }
+    return {
+      projectDirs: absolute(config.download_dir),
+      loraDirs: absolute(new ConfigUtils(config, getBuildEnv(), path).getLoraDir())
+    }
+  } catch {
+    return NO_CONFIGURED_READ_ROOTS
+  }
+}
+
+/**
+ * What a renderer read is for. 'media': a local-media file (a canvas item, a chat attachment),
+ * authorized exactly as the local-media protocol and readImageFromPath authorize it. The other
+ * kinds also count the configured project folder, and inside the LoRA folder only the files
+ * the trigger-word lookup reads (see LORA_FOLDER_READ_EXTENSIONS).
+ */
+type RendererReadKind = 'media' | 'text' | 'slice' | 'directory'
+
+/** Inside the LoRA folder: the extensions each kind may read ('directory': any folder). */
+const LORA_FOLDER_READ_EXTENSIONS: Record<Exclude<RendererReadKind, 'media'>, string[] | null> = {
+  // <name>.txt, <name>.json, <name>.metadata.json, <name>.civitai.info
+  text: ['.txt', '.json', '.info'],
+  slice: ['.safetensors'],
+  directory: null
+}
+
+class RendererReadRefusedError extends Error {}
+
 /** How readImageFromPath reads a read-granted file (a mapped network drive); for tests. */
 export type FsSvcImplDependencies = {
   importSourceGuard?: ImportSourceGuard
   importSourceGate?: ImportSourceGate
   importSourceFs?: typeof fs
+  /** The configured folders renderer reads may use (default: from main's config). */
+  getConfiguredReadRoots?: () => Promise<RendererConfiguredReadRoots>
+  /** The gate of the authorization of renderer-named paths (default: rendererLocalPathGate). */
+  rendererPathGate?: ImportSourceGate
 }
 
 export class FsSvcImpl implements FsSvc {
   constructor(private readonly dependencies: FsSvcImplDependencies = {}) {}
 
+  /**
+   * The canonical path of a path the renderer named, or a RendererReadRefusedError: only what
+   * the user granted (picked or dropped files and folders) or what the app owns (see
+   * getMediaReadRoots), plus for non-media kinds the configured folders. Off main's event
+   * loop and under the renderer path gate; a Windows network spelling never reaches the
+   * filesystem unless it was granted or lies in a configured network folder. A refused path
+   * reads as "File not found" when it lies, by its text alone, where it could have been
+   * authorized, and as not authorized otherwise: whether a file outside exists is never told.
+   */
+  private authorizeRendererRead = async (
+    fullPath: string,
+    kind: RendererReadKind
+  ): Promise<string> => {
+    const mediaRoots = this.getMediaReadRoots()
+    const configured =
+      kind === 'media'
+        ? NO_CONFIGURED_READ_ROOTS
+        : await (this.dependencies.getConfiguredReadRoots ?? readConfiguredReadRootsFromConfig)()
+    const roots = [...mediaRoots, ...configured.projectDirs]
+    const options = {
+      // A storage or model folder the user configured on a share stays readable there.
+      allowNetworkRoots: kind !== 'media',
+      ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
+    }
+    const canonical = await authorizeRendererLocalPath(fullPath, roots, options)
+    if (canonical) return canonical
+
+    const loraExtensions = kind === 'media' ? undefined : LORA_FOLDER_READ_EXTENSIONS[kind]
+    const fitsLoraFolder = (value: string): boolean =>
+      kind !== 'media' &&
+      configured.loraDirs.length > 0 &&
+      (loraExtensions === null ||
+        (loraExtensions ?? []).includes(path.extname(value).toLowerCase()))
+    if (fitsLoraFolder(fullPath)) {
+      const viaLoraFolder = await authorizeRendererLocalPath(fullPath, configured.loraDirs, options)
+      // The canonical file must fit too: a symlink inside the folder cannot widen the kind.
+      if (viaLoraFolder && fitsLoraFolder(viaLoraFolder)) return viaLoraFolder
+    }
+
+    const covered =
+      isLexicallyCoveredLocalMediaPath(fullPath, roots) ||
+      (fitsLoraFolder(fullPath) && isLexicallyCoveredLocalMediaPath(fullPath, configured.loraDirs))
+    throw new RendererReadRefusedError(
+      covered ? `File not found: ${fullPath}` : 'Local file path is not authorized'
+    )
+  }
+
+  /** The canonical folder to list, or null (missing or not authorized: both list nothing). */
+  private authorizeRendererFolder = async (folderPath: string): Promise<string | null> => {
+    try {
+      return await this.authorizeRendererRead(folderPath, 'directory')
+    } catch (error) {
+      if (error instanceof RendererReadRefusedError) return null
+      throw error
+    }
+  }
+
   listImagesInFolder = async (req: ListImagesInFolderReq): Promise<ListImagesInFolderResp> => {
     const { folderPath } = req
 
-    if (!(await pathExists(folderPath))) {
+    const canonicalFolder = await this.authorizeRendererFolder(folderPath)
+    if (!canonicalFolder) {
       return { images: [] }
     }
 
-    const files = await runBoundedFsOp(() => fs.readdir(folderPath))
+    // Listed through the canonical folder; the paths keep the spelling the caller named.
+    const files = await runBoundedFsOp(() => fs.readdir(canonicalFolder))
     const images = files
       .filter((file) => {
         const ext = path.extname(file).toLowerCase()
@@ -616,7 +780,8 @@ export class FsSvcImpl implements FsSvc {
   listFilesInFolder = async (req: ListFilesInFolderReq): Promise<ListFilesInFolderResp> => {
     const { folderPath, extensions, recursive = false } = req
 
-    if (!(await pathExists(folderPath))) {
+    const canonicalFolder = await this.authorizeRendererFolder(folderPath)
+    if (!canonicalFolder) {
       return { files: [] }
     }
 
@@ -626,22 +791,26 @@ export class FsSvcImpl implements FsSvc {
         .filter((value) => value.length > 0)
         .map(normalizeExtension) ?? []
 
-    const directoriesToScan = [folderPath]
+    // Read through the canonical folder; the paths returned keep the spelling the caller named.
+    // Symbolic links are neither followed nor listed (a Dirent of a link is neither a file
+    // nor a directory), so the scan stays inside the authorized folder.
+    const directoriesToScan = [{ dir: canonicalFolder, shown: folderPath }]
     const files: ListFilesInFolderResp['files'] = []
 
     while (directoriesToScan.length > 0) {
-      const currentDir = directoriesToScan.shift()
-      if (!currentDir) {
+      const current = directoriesToScan.shift()
+      if (!current) {
         continue
       }
 
-      const entries = await runBoundedFsOp(() => fs.readdir(currentDir, { withFileTypes: true }))
+      const entries = await runBoundedFsOp(() => fs.readdir(current.dir, { withFileTypes: true }))
       for (const entry of entries) {
-        const fullPath = path.join(currentDir, entry.name)
+        const fullPath = path.join(current.dir, entry.name)
+        const shownPath = path.join(current.shown, entry.name)
 
         if (entry.isDirectory()) {
           if (recursive) {
-            directoriesToScan.push(fullPath)
+            directoriesToScan.push({ dir: fullPath, shown: shownPath })
           }
           continue
         }
@@ -657,10 +826,10 @@ export class FsSvcImpl implements FsSvc {
           continue
         }
 
-        const stats = await runBoundedFsOp(() => fs.stat(fullPath))
+        const stats = await runBoundedFsOp(() => fs.lstat(fullPath))
         files.push({
           filename: entry.name,
-          fullPath,
+          fullPath: shownPath,
           lastModifiedMs: stats.mtimeMs
         })
       }
@@ -783,14 +952,12 @@ export class FsSvcImpl implements FsSvc {
       }
     }
 
-    const storageState = getCurrentUserDataDirectoryState()
-    // The temp media folder only once verified as main's own private directory.
-    const fullPath = resolveAuthorizedLocalMediaPath(req.fullPath, [
-      app.getPath('userData'),
-      ...getVerifiedLocalMediaTempRoots(),
-      storageState.projectRoot,
-      storageState.autoSaveRoot
-    ])
+    // Without a live read grant: the policy of the local-media protocol, off main's event loop
+    // (a path on a mapped drive whose share stopped answering must not block main), under the
+    // renderer path gate and the import-source deadline.
+    const fullPath = await authorizeRendererLocalPath(req.fullPath, this.getMediaReadRoots(), {
+      ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
+    })
     if (!fullPath) {
       throw new Error('Local image path is not authorized')
     }
@@ -818,27 +985,26 @@ export class FsSvcImpl implements FsSvc {
 
   readTextFile = async (req: ReadTextFileReq): Promise<ReadTextFileResp> => {
     const { fullPath } = req
-
-    if (!(await pathExists(fullPath))) {
-      throw new Error(`File not found: ${fullPath}`)
-    }
-
-    await assertReadableFileWithinLimit(fullPath, MAX_TEXT_FILE_BYTES)
+    const canonicalPath = await this.authorizeRendererRead(fullPath, 'text')
+    const buffer = await readFileWithinByteBudget(canonicalPath, MAX_TEXT_FILE_BYTES, {
+      label: fullPath,
+      tooLargeHint: '; use readFileSlice instead'
+    })
     return {
-      content: await runBoundedFsOp(() => fs.readFile(fullPath, 'utf8')),
+      content: buffer.toString('utf8'),
       filename: path.basename(fullPath)
     }
   }
 
   readFileFromPath = async (req: ReadFileFromPathReq): Promise<ReadFileFromPathResp> => {
     const { fullPath } = req
-
-    if (!(await pathExists(fullPath))) {
-      throw new Error(`File not found: ${fullPath}`)
-    }
-
-    await assertReadableFileWithinLimit(fullPath, MAX_FULL_FILE_BYTES)
-    const buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
+    // The bytes of a local-media file (a canvas item, a chat attachment): what the local-media
+    // protocol would serve, no more.
+    const canonicalPath = await this.authorizeRendererRead(fullPath, 'media')
+    const buffer = await readFileWithinByteBudget(canonicalPath, MAX_FULL_FILE_BYTES, {
+      label: fullPath,
+      tooLargeHint: '; use readFileSlice instead'
+    })
     return {
       data: new Uint8Array(buffer),
       filename: path.basename(fullPath)
@@ -856,39 +1022,35 @@ export class FsSvcImpl implements FsSvc {
       throw new Error(`Invalid file slice length: expected 1-${MAX_READ_FILE_SLICE_BYTES}`)
     }
 
-    if (!(await pathExists(fullPath))) {
-      throw new Error(`File not found: ${fullPath}`)
-    }
-
-    const stats = await runBoundedFsOp(() => fs.stat(fullPath))
-    if (!stats.isFile()) {
-      throw new Error(`Path is not a file: ${fullPath}`)
-    }
-
-    if (offset >= stats.size) {
-      return {
-        data: new Uint8Array(),
-        filename: path.basename(fullPath),
-        fileSizeBytes: stats.size
+    const canonicalPath = await this.authorizeRendererRead(fullPath, 'slice')
+    // One handle for the type check, the size and the read.
+    const { buffer, bytesRead, fileSizeBytes } = await runBoundedFsOp(async () => {
+      // Checked before the open too: opening a FIFO or a device could wait forever.
+      if (!(await fs.stat(canonicalPath)).isFile()) {
+        throw new Error(`Path is not a file: ${fullPath}`)
       }
-    }
-
-    const bytesToRead = Math.min(length, stats.size - offset)
-    const { buffer, bytesRead } = await runBoundedFsOp(async () => {
-      const fd = await fs.open(fullPath, 'r')
+      const handle = await fs.open(canonicalPath, 'r')
       try {
+        const stats = await handle.stat()
+        if (!stats.isFile()) {
+          throw new Error(`Path is not a file: ${fullPath}`)
+        }
+        if (offset >= stats.size) {
+          return { buffer: Buffer.alloc(0), bytesRead: 0, fileSizeBytes: stats.size }
+        }
+        const bytesToRead = Math.min(length, stats.size - offset)
         const buffer = Buffer.alloc(bytesToRead)
-        const { bytesRead } = await fd.read(buffer, 0, bytesToRead, offset)
-        return { buffer, bytesRead }
+        const { bytesRead } = await handle.read(buffer, 0, bytesToRead, offset)
+        return { buffer, bytesRead, fileSizeBytes: stats.size }
       } finally {
-        await fd.close()
+        await handle.close()
       }
     })
 
     return {
       data: new Uint8Array(buffer.subarray(0, bytesRead)),
       filename: path.basename(fullPath),
-      fileSizeBytes: stats.size
+      fileSizeBytes
     }
   }
 
@@ -928,8 +1090,12 @@ export class FsSvcImpl implements FsSvc {
     }
   }
 
-  /** The roots the renderer may read media from; the same list readImageFromPath uses. */
-  private getCanvasMirrorSourceRoots = (): LocalMediaRoot[] => {
+  /**
+   * The application roots the renderer may read media from (readImageFromPath, readFileFromPath,
+   * copyCanvasMirrorAsset); the temp media folder only once verified as main's own private
+   * directory.
+   */
+  private getMediaReadRoots = (): LocalMediaRoot[] => {
     const storageState = getCurrentUserDataDirectoryState()
     return [
       app.getPath('userData'),
@@ -942,10 +1108,9 @@ export class FsSvcImpl implements FsSvc {
   copyCanvasMirrorAsset = async (req: CopyCanvasMirrorAssetReq): Promise<CanvasMirrorAssetResp> => {
     const assetFileName = requireCanvasMirrorAssetFileName(req.assetFileName)
     // Canonical (symlinks resolved) and authorized exactly like readImageFromPath.
-    const sourcePath = resolveAuthorizedLocalMediaPath(
-      req.sourcePath,
-      this.getCanvasMirrorSourceRoots()
-    )
+    const sourcePath = await authorizeRendererLocalPath(req.sourcePath, this.getMediaReadRoots(), {
+      ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
+    })
     if (!sourcePath) {
       throw new Error('Canvas mirror asset source is not authorized')
     }
@@ -965,7 +1130,7 @@ export class FsSvcImpl implements FsSvc {
         // Streamed into our own temporary file, so a read-only source copies like any other.
         for await (const chunk of createReadStream(sourcePath)) {
           const buffer = chunk as Buffer
-          for (let offset = 0; offset < buffer.length; ) {
+          for (let offset = 0; offset < buffer.length;) {
             const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset)
             offset += bytesWritten
             wrote(bytesWritten)
@@ -1032,7 +1197,9 @@ export class FsSvcImpl implements FsSvc {
       const canvasStats = await runBoundedFsOp(() => fs.lstat(canvasPath))
       if (canvasStats.isSymbolicLink() || !canvasStats.isFile()) return result
       if (canvasStats.size > MAX_TEXT_FILE_BYTES) return result
-      const parsed: unknown = JSON.parse(await runBoundedFsOp(() => fs.readFile(canvasPath, 'utf8')))
+      const parsed: unknown = JSON.parse(
+        await runBoundedFsOp(() => fs.readFile(canvasPath, 'utf8'))
+      )
       if (!parsed || typeof parsed !== 'object') return result
       collectCanvasMirrorAssetRefs(parsed, referenced, location.assetDir)
     } catch {
@@ -1098,20 +1265,35 @@ export class FsSvcImpl implements FsSvc {
   readLoraTriggerWordsNative = async (
     req: ReadLoraTriggerWordsNativeReq
   ): Promise<ReadLoraTriggerWordsNativeResp> => {
-    const loraDir = req.loraDir.trim()
-    const loraName = req.loraName.trim()
-    if (!loraDir || !loraName) {
-      return { triggerWords: '', source: '', nativeAvailable: false }
+    const unavailable = { triggerWords: '', source: '', nativeAvailable: false }
+    const loraDir = typeof req.loraDir === 'string' ? req.loraDir.trim() : ''
+    const loraName = typeof req.loraName === 'string' ? req.loraName.trim() : ''
+    // The name stays inside the folder: relative, no '..' segment, no drive or NUL.
+    if (
+      !loraDir ||
+      !loraName ||
+      loraName.includes('\0') ||
+      path.isAbsolute(loraName) ||
+      path.win32.isAbsolute(loraName) ||
+      /^[a-zA-Z]:/.test(loraName) ||
+      loraName.split(/[\\/]+/).some((segment) => segment === '..')
+    ) {
+      return unavailable
     }
 
     const sidecarPath = await resolveLoraTriggerSidecarPath()
     if (!sidecarPath) {
-      return { triggerWords: '', source: '', nativeAvailable: false }
+      return unavailable
+    }
+    // The sidecar reads the folder it is given: only a folder renderer reads may list.
+    const canonicalLoraDir = await this.authorizeRendererFolder(loraDir)
+    if (!canonicalLoraDir) {
+      return unavailable
     }
 
     const { stdout } = await execFileAsync(
       sidecarPath,
-      ['--lora-dir', loraDir, '--lora-name', loraName],
+      ['--lora-dir', canonicalLoraDir, '--lora-name', loraName],
       {
         timeout: LORA_TRIGGER_SIDECAR_TIMEOUT_MS,
         windowsHide: true,

@@ -122,11 +122,26 @@ describe('readImageFromPath of a read-granted file (a mapped network drive)', ()
     ).resolves.toEqual({ image: new Uint8Array(PNG), filename: 'a.png' })
     // Nothing on main's event loop waits for the share.
     for (const spy of syncCalls) expect(spy).not.toHaveBeenCalled()
-    vi.restoreAllMocks()
-    // Spent once.
+    // Spent once. Without a live grant the request falls through to the policy, which does
+    // not touch the dropped path on main's event loop either (only the app's own temp folder
+    // may be checked there), nor does the drop flow's scoped-path check.
     await expect(
       new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: IMAGE_LIMIT })
     ).rejects.toThrow('not authorized')
+    const webContents = { isDestroyed: () => false }
+    resetLocalMediaFileIntakeIpcForTest()
+    registerLocalMediaFileIntakeIpc(
+      () => ({ isDestroyed: () => false, webContents }) as unknown as Electron.BrowserWindow
+    )
+    const resolveScopedPath = vi
+      .mocked(ipcMain.handle)
+      .mock.calls.filter(([channel]) => channel === 'local-media:resolve-scoped-path')
+      .at(-1)?.[1] as (event: unknown, filePath: string) => Promise<string>
+    await expect(resolveScopedPath({ sender: webContents }, dropped)).resolves.toBe('')
+    resetLocalMediaFileIntakeIpcForTest()
+    for (const spy of syncCalls) {
+      expect(spy.mock.calls.filter(([target]) => String(target).includes('Z-drive'))).toEqual([])
+    }
   })
 
   it('cuts a read that stalls at its deadline, counted by the import-source gate', async () => {
@@ -276,7 +291,10 @@ describe('a network path the page names, at each reader (Windows)', () => {
       vi.spyOn(fs, 'statSync'),
       vi.spyOn(fs, 'lstatSync'),
       vi.spyOn(fsPromises, 'open'),
-      vi.spyOn(fsPromises, 'access')
+      vi.spyOn(fsPromises, 'access'),
+      vi.spyOn(fsPromises, 'realpath'),
+      vi.spyOn(fsPromises, 'stat'),
+      vi.spyOn(fsPromises, 'readdir')
     ]
     // The trusted main window's renderer, as local-media:resolve-scoped-path checks it.
     const webContents = { isDestroyed: () => false }
@@ -291,8 +309,14 @@ describe('a network path the page names, at each reader (Windows)', () => {
       .mock.calls.find(([channel]) => channel === 'local-media:resolve-scoped-path')?.[1] as (
       event: unknown,
       filePath: string
-    ) => string
-    const service = new FsSvcImpl()
+    ) => Promise<string>
+    const service = new FsSvcImpl({
+      // A LoRA folder the user configured on another share: it never lets another host in.
+      getConfiguredReadRoots: async () => ({
+        projectDirs: [`${roots.base}/CustomProjects`],
+        loraDirs: ['//nas/models/loras']
+      })
+    })
     // Each would make Windows contact the host (SMB, with the user's NTLM credentials).
     // (The path module these tests run with reads each of these spellings as absolute.)
     for (const networkPath of [
@@ -313,7 +337,25 @@ describe('a network path the page names, at each reader (Windows)', () => {
             sourcePath: networkPath
           })
         ).rejects.toThrow('not authorized')
-        expect(resolveScopedPath({ sender: webContents }, networkPath)).toBe('')
+        await expect(resolveScopedPath({ sender: webContents }, networkPath)).resolves.toBe('')
+        await expect(service.readTextFile({ fullPath: networkPath })).rejects.toThrow(
+          'not authorized'
+        )
+        await expect(service.readFileFromPath({ fullPath: networkPath })).rejects.toThrow(
+          'not authorized'
+        )
+        await expect(service.readFileSlice({ fullPath: networkPath, length: 8 })).rejects.toThrow(
+          'not authorized'
+        )
+        await expect(
+          service.listFilesInFolder({ folderPath: networkPath, recursive: true })
+        ).resolves.toEqual({ files: [] })
+        await expect(service.listImagesInFolder({ folderPath: networkPath })).resolves.toEqual({
+          images: []
+        })
+        await expect(
+          service.readLoraTriggerWordsNative({ loraDir: networkPath, loraName: 'x.safetensors' })
+        ).resolves.toMatchObject({ nativeAvailable: false })
       })
     }
     resetLocalMediaFileIntakeIpcForTest()

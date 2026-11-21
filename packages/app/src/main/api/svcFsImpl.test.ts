@@ -221,6 +221,12 @@ describe('FsSvcImpl', () => {
   })
 
   describe('readFileFromPath', () => {
+    // The user picked the folder (a scoped grant): readFileFromPath reads only granted files
+    // and application-owned ones (see svcFsImpl.rendererReads.test.ts).
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+    })
+
     it('reads a normal file and returns its filename', async () => {
       const fullPath = path.join(testRoot, 'image.png')
       fs.writeFileSync(fullPath, Buffer.from([10, 20, 30]))
@@ -241,6 +247,10 @@ describe('FsSvcImpl', () => {
   })
 
   describe('bounded reads and writes', () => {
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+    })
+
     it('rejects full-file reads over the limit while the slice API remains usable', async () => {
       const fullPath = path.join(testRoot, 'large.bin')
       fs.writeFileSync(fullPath, Buffer.alloc(1))
@@ -251,6 +261,29 @@ describe('FsSvcImpl', () => {
         data: new Uint8Array([0]),
         fileSizeBytes: MAX_FULL_FILE_BYTES + 1
       })
+    })
+
+    it('refuses a whole-file read of a file that grows while it is read', async () => {
+      const fullPath = path.join(testRoot, 'growing.txt')
+      fs.writeFileSync(fullPath, 'abc')
+      for (const read of [
+        () => service.readTextFile({ fullPath }),
+        () => service.readFileFromPath({ fullPath })
+      ]) {
+        fs.writeFileSync(fullPath, 'abc')
+        const handle = await fsPromises.open(fullPath, 'r')
+        const originalStat = handle.stat.bind(handle)
+        vi.spyOn(handle, 'stat').mockImplementationOnce(async () => {
+          const stats = await originalStat()
+          fs.writeFileSync(fullPath, 'x'.repeat(4096))
+          return stats
+        })
+        const close = vi.spyOn(handle, 'close')
+        vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle)
+
+        await expect(read()).rejects.toThrow(`File changed while it was read: ${fullPath}`)
+        expect(close).toHaveBeenCalledOnce()
+      }
     })
 
     it('rejects oversized text reads and writes', async () => {
@@ -316,6 +349,10 @@ describe('FsSvcImpl', () => {
   })
 
   describe('readFileSlice', () => {
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+    })
+
     it('reads only the requested file slice and reports file size', async () => {
       const fullPath = path.join(testRoot, 'model.safetensors')
       fs.writeFileSync(fullPath, Buffer.from([1, 2, 3, 4, 5]))
@@ -387,6 +424,10 @@ describe('FsSvcImpl', () => {
   })
 
   describe('listFilesInFolder', () => {
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+    })
+
     it('scans directories with extension filtering and recursive traversal', async () => {
       const nestedDir = path.join(testRoot, 'nested')
       fs.mkdirSync(nestedDir)
@@ -443,6 +484,10 @@ describe('FsSvcImpl', () => {
   })
 
   describe('listImagesInFolder', () => {
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+    })
+
     it('propagates directory scan errors for invalid folder paths', async () => {
       const fullPath = path.join(testRoot, 'not-a-directory')
       fs.writeFileSync(fullPath, 'content')

@@ -4,10 +4,10 @@ import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import {
   authorizeScopedLocalMediaPath,
   localMediaImportGrantClock,
-  recordLocalMediaImportGrant,
-  resolveAuthorizedLocalMediaPath
+  recordLocalMediaImportGrant
 } from './localMediaAccess'
 import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
+import { authorizeRendererLocalPath } from './rendererLocalPathAccess'
 import { toImportSourceLocalPath } from './api/svcManagedMediaImpl'
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
@@ -161,10 +161,20 @@ export function registerLocalMediaFileIntakeIpc(getMainWindow: () => BrowserWind
     }
   )
 
-  ipcMain.handle('local-media:resolve-scoped-path', (event, filePath: string): string => {
-    if (!isTrustedRenderer(event, getMainWindow)) return ''
-    return resolveAuthorizedLocalMediaPath(filePath, getLocalMediaAllowedRoots()) ?? ''
-  })
+  // The page names this path: off main's event loop (a path on a mapped drive whose share
+  // stopped answering must not block main), with the import-source deadline. No gate: the
+  // canvas asks once per image it loads.
+  ipcMain.handle(
+    'local-media:resolve-scoped-path',
+    async (event, filePath: unknown): Promise<string> => {
+      if (!isTrustedRenderer(event, getMainWindow) || typeof filePath !== 'string') return ''
+      return (
+        (await authorizeRendererLocalPath(filePath, getLocalMediaAllowedRoots(), {
+          gate: null
+        })) ?? ''
+      )
+    }
+  )
 
   localMediaFileIntakeIpcRegistered = true
 }
