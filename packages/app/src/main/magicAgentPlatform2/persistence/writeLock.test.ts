@@ -99,6 +99,7 @@ async function crashWithLock(databasePath: string): Promise<ChildProcess> {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await Promise.all([...children].map(terminate))
   children.clear()
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })))
@@ -306,33 +307,80 @@ describe('activeInstanceLeasePids (read-only)', () => {
     expect(existsSync(`${killed.lease}.lock`)).toBe(true)
   })
 
-  it('does not take a leftover lease for a holder when its PID now belongs to another process', async () => {
+  it('passes over a leftover lease whose PID now belongs to another process once its lock stays unrefreshed', async () => {
     const path = await database()
     const directory = instanceLeaseDirectory(path)
     mkdirSync(directory, { recursive: true, mode: 0o700 })
+    let now = Math.floor(performance.now())
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
     // An unrelated live process: its PID stands for one the system reused after the holder ended.
     const reused = (await liveChild()).pid!
-    const lease = (state: 'exited' | 'killed' | 'held' | 'odd-lock'): string => {
+    const lease = (state: 'exited' | 'killed' | 'odd-lock'): string => {
       const file = join(directory, `${reused}-${randomUUID()}.lease`)
       writeFileSync(file, '{}')
-      if (state === 'killed' || state === 'held') mkdirSync(`${file}.lock`)
       // A kill leaves a lock that nobody refreshes any more.
       if (state === 'killed') {
+        mkdirSync(`${file}.lock`)
         const hoursAgo = new Date(Date.now() - 2 * 60 * 60_000)
         utimesSync(`${file}.lock`, hoursAgo, hoursAgo)
       }
       if (state === 'odd-lock') writeFileSync(`${file}.lock`, '')
       return file
     }
+    // Its holder exited: its lock is gone.
     lease('exited')
+    expect(activeInstanceLeasePids(path)).toEqual([])
+    // Held until this process has seen the lock keep its mtime for 30 s, then for 10 s more.
     lease('killed')
-    expect(activeInstanceLeasePids(path)).toEqual([])
-    // A lock refreshed within the last hour is held (fail closed), as is a lock of another shape.
-    const held = lease('held')
     expect(activeInstanceLeasePids(path)).toEqual([reused])
-    await rm(`${held}.lock`, { recursive: true })
+    now += 29_999
+    expect(activeInstanceLeasePids(path)).toEqual([reused])
+    now += 1
+    expect(activeInstanceLeasePids(path)).toEqual([reused])
+    now += 9_999
+    expect(activeInstanceLeasePids(path)).toEqual([reused])
+    now += 1
     expect(activeInstanceLeasePids(path)).toEqual([])
+    expect(activeInstanceLeasePids(path)).toEqual([])
+    // A lock of another shape counts (fail closed), however long it stays as it is.
     lease('odd-lock')
     expect(activeInstanceLeasePids(path)).toEqual([reused])
+    now += 2 * 60 * 60_000
+    expect(activeInstanceLeasePids(path)).toEqual([reused])
+    expect(activeInstanceLeasePids(path)).toEqual([reused])
+  })
+
+  it('takes a live holder whose lock looks hours old (a system sleep, a clock step) for a holder', async () => {
+    const path = await database()
+    const directory = instanceLeaseDirectory(path)
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    let now = Math.floor(performance.now())
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const holder = (await liveChild()).pid!
+    const lease = join(directory, `${holder}-${randomUUID()}.lease`)
+    writeFileSync(lease, '{}')
+    mkdirSync(`${lease}.lock`)
+    const refresh = (at: number) => utimesSync(`${lease}.lock`, new Date(at), new Date(at))
+    // Just woken up from a sleep of over an hour: the holder last refreshed its lock before the
+    // sleep, an hour ago by the wall clock, and refreshes it again up to 10 s after waking up.
+    refresh(Date.now() - 61 * 60_000)
+    expect(activeInstanceLeasePids(path)).toEqual([holder])
+    now += 9_000
+    expect(activeInstanceLeasePids(path)).toEqual([holder])
+    // Every refresh counts, whatever the wall clock says (stepped hours back or ahead).
+    for (let step = 1; step <= 12; step += 1) {
+      refresh(Date.now() + (step % 2 ? 3 : -3) * 60 * 60_000 + step * 1_000)
+      now += 10_000
+      expect(activeInstanceLeasePids(path)).toEqual([holder])
+    }
+    // A monotonic clock that counts a sleep (Windows): the first check after waking up finds the
+    // lock overdue, moments before its holder refreshes it. That alone never ends the lease.
+    now += 2 * 60 * 60_000
+    expect(activeInstanceLeasePids(path)).toEqual([holder])
+    now += 50
+    expect(activeInstanceLeasePids(path)).toEqual([holder])
+    refresh(Date.now())
+    now += 10_000
+    expect(activeInstanceLeasePids(path)).toEqual([holder])
   })
 })

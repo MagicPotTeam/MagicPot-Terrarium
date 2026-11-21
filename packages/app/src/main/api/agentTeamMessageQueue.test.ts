@@ -549,6 +549,17 @@ describe('durable team message queue', () => {
     const hoursAgo = new Date(Date.now() - 3 * 60 * 60_000)
     utimesSync(`${killed}.lock`, hoursAgo, hoursAgo)
     const { q } = queue(first.file)
+    let now = Math.floor(performance.now())
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    // One look cannot tell the killed run's lock from that of a holder that has just woken up
+    // from a long sleep: it is held at first.
+    expect(list(q, 1)).toEqual([])
+    now += 30_000
+    expect(list(q, 1)).toEqual([])
+    // Seen unrefreshed for 30 s, and 10 s more: its holder is gone, whoever has its PID now.
+    now += 30_000
     expect(list(q, 1)).toEqual([{ id: requestId, ...intent, carriedOver: true }])
     expect(() => q.enqueue(intent, options())).not.toThrow()
     expect(existsSync(exited) && existsSync(killed)).toBe(true)
