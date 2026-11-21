@@ -24,6 +24,7 @@ import { createFakeRestoredThreadIndexedDb as createFakeIndexedDb } from '../../
 installFakeIDBKeyRange()
 
 const SCOPE = 'inline-storage-project.pane-a'
+const OTHER_SCOPE = 'inline-storage-project.pane-b'
 
 /** A base64 PNG data: URL of about `chars` characters, distinct per seed. */
 const inlinePng = (seed: string, chars = 70 * 1024): string => {
@@ -75,6 +76,20 @@ vi.mock('@renderer/utils/windowUtils', () => ({ api: () => window.api }))
 vi.mock('./chatRequestUtils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./chatRequestUtils')>()
   return { ...actual, supportsStreamingChatCompletion: vi.fn(() => false) }
+})
+// The stored image migration starts after a short wait here instead of seconds.
+vi.mock('./chatStoredImageMigration', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./chatStoredImageMigration')>()
+  return {
+    ...actual,
+    STORED_IMAGE_MIGRATION_TIMING: {
+      startDelayMs: 20,
+      idleTimeoutMs: 20,
+      pauseRetryMs: 50,
+      busyRetryMs: 100,
+      maxAttemptsPerSession: 3
+    }
+  }
 })
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/SessionHistoryDialog', () => ({ default: () => null }))
@@ -137,7 +152,7 @@ const createConfig = (): Config => ({
 const mediaStore = new Map<string, string>()
 const managedId = (dataUrl: string): string => {
   let hash = 0
-  for (let index = 0; index < dataUrl.length; index += 97) {
+  for (let index = 0; index < dataUrl.length; index += index < 256 ? 1 : 97) {
     hash = (hash * 31 + dataUrl.charCodeAt(index)) >>> 0
   }
   return `${hash.toString(16).padStart(8, '0')}${dataUrl.length.toString(16).padStart(8, '0')}`.repeat(
@@ -338,6 +353,156 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
       )
       expect(storedAttachments(stored).map((attachment) => attachment.url)).toEqual([generated])
       expect(fixture.importDataUrl).toHaveBeenCalled()
+      expect(fixture.notifyError).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+const imagesInRequest = (callIndex: number): ChatAttachment[] =>
+  (
+    ((fixture.ipcChat.mock.calls[callIndex][0] as { messages?: ChatMessage[] }).messages ||
+      []) as ChatMessage[]
+  ).flatMap((message) =>
+    (message.attachments || []).filter((attachment) => attachment.type === 'image')
+  )
+
+describe('ChatPage stored image migration (FIX-PLAN item 4, part 2)', () => {
+  it("moves the open pane's stored inline images to managed media and sends the same images", async () => {
+    const big = inlinePng('history-big')
+    const small = inlinePng('history-small', 2048)
+    const other = inlinePng('history-other')
+    const foreign = inlinePng('other-pane')
+    await seed({
+      id: 'history-a',
+      title: 'History A',
+      profileId: 'inline-vision-fixture',
+      messages: [
+        {
+          role: 'user',
+          content: 'what is in these',
+          attachments: [
+            { type: 'image', url: big, fileName: 'big.png', mimeType: 'image/png' },
+            { type: 'image', url: small, fileName: 'small.png', mimeType: 'image/png' }
+          ]
+        },
+        { role: 'assistant', content: 'two pictures' }
+      ]
+    })
+    await seed({
+      id: 'history-b',
+      title: 'History B',
+      profileId: 'inline-vision-fixture',
+      messages: [
+        {
+          role: 'user',
+          content: 'another',
+          attachments: [{ type: 'image', url: other, fileName: 'other.png' }]
+        }
+      ]
+    })
+    await seed(
+      {
+        id: 'other-pane',
+        title: 'Other pane',
+        messages: [
+          { role: 'user', content: 'not opened', attachments: [{ type: 'image', url: foreign }] }
+        ]
+      },
+      OTHER_SCOPE
+    )
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'history-a')
+    fixture.ipcChat.mockImplementation(async () => ({
+      content: `reply-${fixture.ipcChat.mock.calls.length}`
+    }))
+
+    const first = renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('history-a'))
+    await waitFor(
+      async () => {
+        const records = await loadAllSessions(SCOPE)
+        expect(records).toHaveLength(2)
+        for (const record of records) {
+          expect(JSON.stringify(record)).not.toContain('data:image')
+          expect(JSON.stringify(record).length).toBeLessThan(50_000)
+        }
+      },
+      { timeout: 5000 }
+    )
+    // Nothing lost or reordered; the pane shows the references it stored.
+    const [storedA] = (await loadAllSessions(SCOPE)).filter((record) => record.id === 'history-a')
+    expect(storedAttachments(storedA).map((attachment) => attachment.fileName)).toEqual([
+      'big.png',
+      'small.png'
+    ])
+    await waitFor(() =>
+      expect(
+        storedAttachments(readSessionFromUi() ?? undefined).map((attachment) => attachment.url)
+      ).toEqual(storedAttachments(storedA).map((attachment) => attachment.url))
+    )
+    // A scope the user did not open is never touched.
+    const [otherRecord] = await loadAllSessions(OTHER_SCOPE)
+    expect(storedAttachments(otherRecord)[0]?.url).toBe(foreign)
+    expect(
+      fixture.migrateLegacyDataUrl.mock.calls.some(
+        ([request]) => (request as { dataUrl: string }).dataUrl === foreign
+      )
+    ).toBe(false)
+
+    // The next message sends both history images, with the bytes they had inline.
+    await sendComposer('and now?')
+    await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(1))
+    expect(imagesInRequest(0).map((attachment) => attachment.url)).toEqual([big, small])
+    await waitForStored(
+      (session) =>
+        session.id === 'history-a' &&
+        session.messages.some((message) => message.content === 'reply-1')
+    )
+    await activeFakeDb?.state.database?.waitForTransactions()
+    const migrations = fixture.migrateLegacyDataUrl.mock.calls.length
+
+    // After a restart on the same profile: still migrated, nothing migrated again, same images.
+    await act(async () => {
+      first.unmount()
+    })
+    document.body.innerHTML = ''
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('history-a'))
+    expect(storedAttachments(readSessionFromUi() ?? undefined)[0]?.url).toMatch(/^local-media:/)
+    await sendComposer('once more')
+    await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(2))
+    expect(imagesInRequest(1).map((attachment) => attachment.url)).toEqual([big, small])
+    expect(fixture.migrateLegacyDataUrl.mock.calls.length).toBe(migrations)
+    expect(fixture.notifyError).not.toHaveBeenCalled()
+  })
+
+  it('keeps the record as it was when the import fails, and does not try again in this start', async () => {
+    const inline = inlinePng('kept')
+    fixture.migrateLegacyDataUrl.mockRejectedValue(new Error('store unavailable'))
+    fixture.importDataUrl.mockRejectedValue(new Error('store unavailable'))
+    await seed({
+      id: 'kept',
+      title: 'Kept',
+      profileId: 'inline-vision-fixture',
+      messages: [
+        { role: 'user', content: 'keep me', attachments: [{ type: 'image', url: inline }] }
+      ]
+    })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'kept')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      renderPage()
+      await waitFor(() => expect(readSessionFromUi()?.id).toBe('kept'))
+      await waitFor(() => expect(fixture.migrateLegacyDataUrl).toHaveBeenCalled(), {
+        timeout: 3000
+      })
+      // Tried once in this start, not in a loop.
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(fixture.migrateLegacyDataUrl).toHaveBeenCalledTimes(1)
+      const [record] = await loadAllSessions(SCOPE)
+      expect(storedAttachments(record).map((attachment) => attachment.url)).toEqual([inline])
+      expect(storedAttachments(readSessionFromUi() ?? undefined)[0]?.url).toBe(inline)
       expect(fixture.notifyError).not.toHaveBeenCalled()
     } finally {
       warn.mockRestore()

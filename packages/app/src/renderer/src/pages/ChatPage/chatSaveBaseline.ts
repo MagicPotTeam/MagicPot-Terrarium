@@ -226,6 +226,41 @@ export class ChatSessionSaveBaseline {
     }
   }
 
+  /**
+   * Rewrite a stored record in this session's save order (FIX-PLAN item 4: the migration of
+   * stored inline images). `write` receives the record this owner expects in storage (its
+   * baseline) and resolves to the record it stored, or null when it stored nothing. A stored
+   * record becomes the baseline, so the next save compares against it. Without a baseline (the
+   * session is unknown or expected absent) nothing runs.
+   */
+  async rewriteStored(
+    scope: string,
+    sessionId: string,
+    resolveBaseline: () => ChatSession | null,
+    write: (expected: ChatSession) => Promise<ChatSession | null>
+  ): Promise<ChatSession | null> {
+    const key = baselineKey(scope, sessionId)
+    const callEpoch = this.epoch
+    const keyEpoch = this.keyEpochs.get(key) ?? 0
+    return this.enqueue(key, async () => {
+      const epochIsCurrent = () =>
+        this.epoch === callEpoch && (this.keyEpochs.get(key) ?? 0) === keyEpoch
+      if (!epochIsCurrent()) return null
+      if (!this.baselines.has(key)) {
+        const resolved = resolveBaseline()
+        this.baselines.set(key, resolved && structuredClone(resolved))
+      }
+      const expected = this.baselines.get(key)
+      if (!expected || expected.id !== sessionId) return null
+      // The writer only reads `expected`; a copy of a record that still holds its inline images
+      // would cost their size once more.
+      const written = await write(expected)
+      if (!written || written.id !== sessionId) return null
+      if (epochIsCurrent()) this.baselines.set(key, structuredClone(written))
+      return written
+    })
+  }
+
   /** Queue a live-state read with all saves for this session.
    * `onAcknowledged` is a non-throwing owner callback invoked synchronously after a successful
    * commit and baseline update, before the save promise can deliver a batch completion callback.

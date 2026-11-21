@@ -115,7 +115,9 @@ import {
   migrateFromLocalStorage,
   readSessionDraftBackup,
   hasSessionDeleteTombstone,
+  migrateStoredSessionImages,
   readSessionDeleteTombstones,
+  sessionNeedsLegacyAttachmentMigration,
   debouncedSaveSessions,
   setSessionDeleteTombstone,
   writeSessionDraftBackup,
@@ -124,6 +126,12 @@ import {
   type ChatSessionDraft
 } from './chatStorage'
 import { attemptedSessionOf, ChatSessionSaveBaseline } from './chatSaveBaseline'
+import {
+  createStoredImageMigrationProgress,
+  startStoredImageMigration,
+  STORED_IMAGE_MIGRATION_TIMING,
+  type StoredImageMigrationOutcome
+} from './chatStoredImageMigration'
 import {
   applyInlineAttachmentReplacements,
   ChatInlineAttachmentGuard,
@@ -648,6 +656,8 @@ const CHAT_DRAFT_PERSIST_DELAY_MS = 200
  * it is: the save chain of that conversation is held while it waits.
  */
 const STORED_INLINE_IMAGE_IMPORT_TIMEOUT_MS = 30_000
+/** The stored image migration does not start while the composer changed this recently. */
+const STORED_IMAGE_MIGRATION_TYPING_PAUSE_MS = 2_000
 const STORAGE_KEY_REASONING_EFFORT = 'chat.reasoningEffort'
 const CHAT_REASONING_EFFORT_SYNC_EVENT = 'chat:reasoning-effort-sync'
 const AUTO_CONTEXT_COMPRESSION_TRIGGER_PERCENT = 80
@@ -3811,6 +3821,111 @@ const ChatPage: React.FC<ChatPageProps> = ({
   useEffect(() => {
     if (sessionsLoaded) queuedSendDraftSyncRef.current({ updateSessions: true })
   }, [queuedSessionSends, sessions, sessionsLoaded, storageScope])
+
+  // FIX-PLAN item 4, part 2: the inline images this pane's stored conversations still hold are
+  // moved to managed media in idle time, one conversation at a time, through the save baseline.
+  // Only conversations of this pane's own scope, only while the pane is shown and loaded.
+  const storedImageMigrationProgressRef = useRef(
+    new Map<string, ReturnType<typeof createStoredImageMigrationProgress>>()
+  )
+  const migrateStoredSessionImagesOfScope = useCallback(
+    async (scope: string, sessionId: string): Promise<StoredImageMigrationOutcome> => {
+      const epoch = sessionLoadEpochRef.current
+      const key = getSessionStorageKey(scope, sessionId)
+      const loaded = sessionsRef.current.find((session) => session.id === sessionId)
+      if (!loaded || storageScopeRef.current !== scope) return 'gone'
+      // Only a conversation this page holds exactly as stored: no unsaved change, no save or
+      // reply running for it, not deleted.
+      const untouched = (): boolean =>
+        isMountedRef.current &&
+        storageScopeRef.current === scope &&
+        sessionLoadEpochRef.current === epoch &&
+        sessionsRef.current.find((session) => session.id === sessionId) === loaded &&
+        persistedSessionsRef.current.get(sessionId) === loaded &&
+        !dirtySessionSnapshotsRef.current.has(key) &&
+        !loadingSessionIdsRef.current.has(sessionId) &&
+        !sendingSessionIdsRef.current.has(sessionId) &&
+        !deletedSessionKeysRef.current.has(key) &&
+        !hasSessionDeleteTombstone(sessionId, scope)
+      if (!untouched() || chatSaveBaselineRef.current.isPending(scope, sessionId)) return 'busy'
+      let outcome: StoredImageMigrationOutcome = 'not-written'
+      await chatSaveBaselineRef.current.rewriteStored(
+        scope,
+        sessionId,
+        () => persistedSessionsRef.current.get(sessionId) ?? null,
+        async (expected) => {
+          if (!untouched()) {
+            outcome = 'busy'
+            return null
+          }
+          const result = await migrateStoredSessionImages(expected, scope, {
+            shouldUpdate: untouched
+          })
+          if (result.status !== 'migrated') {
+            outcome = result.status === 'unchanged' ? 'unchanged' : result.status
+            return null
+          }
+          outcome = 'migrated'
+          // The record changed under any storage read still in progress: that read must not
+          // bring the inline form back.
+          noteSessionWriteAcknowledged(scope)
+          if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+            return result.session
+          }
+          persistedSessionsRef.current.set(sessionId, result.session)
+          const live = sessionsRef.current.find((session) => session.id === sessionId)
+          // A change made while the record was being written gets the same references and is
+          // saved as usual (against the migrated record, which becomes the baseline).
+          const next =
+            live === loaded
+              ? result.session
+              : live
+                ? applyInlineAttachmentReplacements(live, result.replacements)
+                : live
+          if (live && next && next !== live) {
+            setSessions((previous) =>
+              previous.map((session) => (session === live ? next : session))
+            )
+          }
+          return result.session
+        }
+      )
+      return outcome
+    },
+    [getSessionStorageKey, noteSessionWriteAcknowledged, setSessions]
+  )
+  useEffect(() => {
+    if (!sessionsLoaded || !active) return
+    const scope = storageScope
+    const progressByScope = storedImageMigrationProgressRef.current
+    let progress = progressByScope.get(scope)
+    if (!progress) {
+      progress = createStoredImageMigrationProgress()
+      progressByScope.set(scope, progress)
+    }
+    const scheduler = startStoredImageMigration({
+      progress,
+      timing: STORED_IMAGE_MIGRATION_TIMING,
+      pendingSessionIds: () => {
+        if (storageScopeRef.current !== scope) return []
+        const current = currentSessionIdRef.current
+        const ids = sessionsRef.current
+          .filter((session) => sessionNeedsLegacyAttachmentMigration(session))
+          .map((session) => session.id)
+        // The conversation on screen first.
+        return current && ids.includes(current)
+          ? [current, ...ids.filter((id) => id !== current)]
+          : ids
+      },
+      isPaused: () =>
+        loadingSessionIdsRef.current.size > 0 ||
+        sendingSessionIdsRef.current.size > 0 ||
+        Date.now() - composerDraftMutationRef.current.updatedAt <
+          STORED_IMAGE_MIGRATION_TYPING_PAUSE_MS,
+      migrate: (sessionId) => migrateStoredSessionImagesOfScope(scope, sessionId)
+    })
+    return () => scheduler.stop()
+  }, [active, migrateStoredSessionImagesOfScope, sessionsLoaded, storageScope])
 
   useEffect(() => {
     if (!sessionsLoaded || !currentSessionId) {
