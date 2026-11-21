@@ -396,7 +396,7 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
     const generated = inlinePng('auto-saved')
     const hex = (bytes: ArrayBuffer): string =>
       Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
-    const bytesOf = (dataUrl: string): Uint8Array =>
+    const bytesOf = (dataUrl: string): Uint8Array<ArrayBuffer> =>
       Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(',') + 1)), (char) => char.charCodeAt(0))
     // As main does: the managed id is the SHA-256 of the image's bytes.
     fixture.importDataUrl.mockImplementation(
