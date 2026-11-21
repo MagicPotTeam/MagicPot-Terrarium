@@ -412,6 +412,30 @@ describe('managedMediaStore', () => {
     expect(await fs.readdir(path.join(storeRoot, '.staging'))).toEqual([])
   })
 
+  it('rejects growth between lstat and open before reading the original', async () => {
+    const result = await importMedia()
+    const originalRead = vi.fn((): never => {
+      throw new Error('Should not hash a changed file')
+    })
+    let raced = false
+    const open = async (...args: Parameters<typeof fs.open>) => {
+      if (args[0] !== result.absolutePath) return fs.open(...args)
+      await fs.appendFile(result.absolutePath, Buffer.from([0]))
+      const handle = await fs.open(...args)
+      raced = true
+      vi.spyOn(handle, 'read').mockImplementation(originalRead)
+      return handle
+    }
+    await expect(
+      resolveManagedMediaReference(storeRoot, result.reference, {
+        authorizedRoot,
+        fs: { ...fs, open }
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+    expect(raced).toBe(true)
+    expect(originalRead).not.toHaveBeenCalled()
+  })
+
   it('resolves legacy scoped references beneath the authorized root and rejects traversal prefixes', async () => {
     const scopedRoot = path.join(authorizedRoot, 'codex-images-owned-scope')
     const imported = await importManagedMedia(scopedRoot, input(), { authorizedRoot })

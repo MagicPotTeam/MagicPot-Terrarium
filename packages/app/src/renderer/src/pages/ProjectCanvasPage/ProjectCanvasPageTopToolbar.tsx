@@ -568,6 +568,7 @@ function ProjectCanvasPageTopToolbar(props: ProjectCanvasPageTopToolbarProps) {
   ])
   return (
     <Box
+      data-workbench-toolbar="canvas"
       sx={(theme) => ({
         display: 'flex',
         position: 'relative',

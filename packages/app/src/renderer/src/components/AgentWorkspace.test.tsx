@@ -1,6 +1,14 @@
 import React from 'react'
 import { createPortal } from 'react-dom'
-import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import {
+  act,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -20,7 +28,6 @@ import {
   STORAGE_KEY_EXTERNAL_LOADING_IDS,
   updateScopedExternalLoadingSessionId
 } from '@renderer/pages/ChatPage/chatPageShared'
-import { PROJECT_TRACE_CAPTURE_STATE_EVENT } from '@renderer/features/projectTrace/projectTraceRuntime'
 import {
   AgentColumnToastContext,
   type AgentColumnToastSink
@@ -63,7 +70,12 @@ const chatPageMock = vi.fn((props?: unknown) => {
       {typedProps.threadSubRowsHost &&
         createPortal(
           subRowLabels.map((label, index) => (
-            <AgentThreadSubRow key={label} label={label} selected={index === 0} onSelect={() => {}} />
+            <AgentThreadSubRow
+              key={label}
+              label={label}
+              selected={index === 0}
+              onSelect={() => {}}
+            />
           )),
           typedProps.threadSubRowsHost
         )}
@@ -88,9 +100,14 @@ vi.mock('react-i18next', () => ({
       if (key.startsWith('agent_workspace.toast.') || key.startsWith('agent_workspace.trace_')) {
         const value = key
           .split('.')
-          .reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], zhRenderer)
+          .reduce<unknown>(
+            (node, part) => (node as Record<string, unknown> | undefined)?.[part],
+            zhRenderer
+          )
         if (typeof value === 'string') {
-          return value.replace(/{{(\w+)}}/g, (_match, name: string) => String(options?.[name] ?? ''))
+          return value.replace(/{{(\w+)}}/g, (_match, name: string) =>
+            String(options?.[name] ?? '')
+          )
         }
       }
       return key
@@ -179,16 +196,6 @@ const storePanes = (count: number) =>
 const getThreadRows = (): HTMLElement[] => [
   ...document.querySelectorAll<HTMLElement>('[data-agent-thread-row]')
 ]
-
-type WorkspaceMenuProps = {
-  traceRecording: boolean
-  onToggleTrace: () => void
-  onOpenCanvasTarget: () => void
-}
-
-/** The "+" menu actions the workspace handed to the most recently rendered ChatPage. */
-const latestWorkspaceMenu = (): WorkspaceMenuProps =>
-  (chatPageMock.mock.calls.at(-1)?.[0] as { workspaceMenu: WorkspaceMenuProps }).workspaceMenu
 
 const waitForThreadSummary = (title: string) =>
   waitFor(() => expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(title))
@@ -326,32 +333,15 @@ describe('AgentWorkspace', () => {
     })
   })
 
-  it('keeps trace and canvas target out of the header and hands them to the conversation menu', async () => {
-    expect(zhRenderer.agent_workspace.canvas_target).toBe('画布目标')
-    expect(enRenderer.agent_workspace.canvas_target).toBe('Canvas target')
-    expect(zhRenderer.agent_workspace.trace_start).toBe('开始追踪')
-    expect(enRenderer.agent_workspace.trace_start).toBe('Start trace')
-    expect(zhRenderer.agent_workspace.trace_stop).toBe('停止追踪')
-    expect(enRenderer.agent_workspace.trace_stop).toBe('Stop trace')
-    expect(zhRenderer.agent_workspace.check).toBe('目标')
-    expect(enRenderer.agent_workspace.check).toBe('Target')
-    const listener = vi.fn()
-    window.addEventListener('canvas:run-target-request', listener)
-    try {
-      renderWorkspace()
-      const header = screen.getByText('agent_workspace.title').closest('div')!.parentElement!
-      expect(header.querySelector('button')).toBeNull()
-      expect(screen.queryByTestId('agent-workspace-trace-button')).not.toBeInTheDocument()
-
-      const menu = latestWorkspaceMenu()
-      expect(menu.traceRecording).toBe(false)
-      act(() => menu.onOpenCanvasTarget())
-      expect(listener).toHaveBeenCalledTimes(1)
-      expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({ canvasId: 'project-1' })
-      await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalled())
-    } finally {
-      window.removeEventListener('canvas:run-target-request', listener)
-    }
+  it("has no trace or canvas target anywhere in the Agent column (owner's request)", async () => {
+    renderWorkspace()
+    const header = screen.getByText('agent_workspace.title').closest('div')!.parentElement!
+    expect(header.querySelector('button')).toBeNull()
+    expect(screen.queryByTestId('agent-workspace-trace-button')).not.toBeInTheDocument()
+    await waitFor(() => expect(chatPageMock).toHaveBeenCalled())
+    // The conversations get no workspace actions to put into a menu.
+    for (const [props] of chatPageMock.mock.calls) expect(props).not.toHaveProperty('workspaceMenu')
+    await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalled())
   })
 
   it('mounts ChatPage immediately with the workspace shell', async () => {
@@ -375,7 +365,9 @@ describe('AgentWorkspace', () => {
   it('shows a visible status dot and the title in a thread row, with no per-row close control', async () => {
     renderWorkspaceWithThreadList()
     await waitForThreadSummary('画布检查')
-    const row = document.querySelector('[data-agent-workspace-scope="project-1.agent-1"][role="button"]')
+    const row = document.querySelector(
+      '[data-agent-workspace-scope="project-1.agent-1"][role="button"]'
+    )
     expect(row).not.toBeNull()
     expect(row?.querySelector('[aria-label="agent_workspace.close_thread"]')).toBeNull()
     expect(row?.querySelector('[data-testid="CloseIcon"]')).toBeNull()
@@ -543,12 +535,17 @@ describe('AgentWorkspace', () => {
     mockSubRowLabels.current = { 'project-1.agent-1': ['组长', '设计师'] }
     renderWorkspaceWithThreadList()
     await waitForThreadSummary('画布检查')
-    const host = () => document.querySelector<HTMLElement>('[data-agent-thread-sub-rows="agent-1"]')!
-    await waitFor(() => expect(host().querySelectorAll('[data-agent-thread-sub-row]')).toHaveLength(2))
+    const host = () =>
+      document.querySelector<HTMLElement>('[data-agent-thread-sub-rows="agent-1"]')!
+    await waitFor(() =>
+      expect(host().querySelectorAll('[data-agent-thread-sub-row]')).toHaveLength(2)
+    )
     // The group is named after its thread, so the rows of two team threads can be told apart.
     expect(host()).toHaveAttribute('role', 'group')
     expect(host()).toHaveAccessibleName('画布检查')
-    expect(document.querySelector('[data-agent-thread-sub-rows="agent-2"]')).not.toHaveAttribute('role')
+    expect(document.querySelector('[data-agent-thread-sub-rows="agent-2"]')).not.toHaveAttribute(
+      'role'
+    )
 
     fireEvent.click(getThreadRows()[1])
     await waitFor(() => expect(getThreadRows()[1]).toHaveAttribute('aria-current', 'true'))
@@ -575,7 +572,9 @@ describe('AgentWorkspace', () => {
     const titles = () => screen.getAllByTestId('agent-thread-title')
     await waitFor(() =>
       expect(
-        document.querySelectorAll('[data-agent-thread-sub-rows="agent-1"] [data-agent-thread-sub-row]')
+        document.querySelectorAll(
+          '[data-agent-thread-sub-rows="agent-1"] [data-agent-thread-sub-row]'
+        )
       ).toHaveLength(2)
     )
     // Upstream's label row of a multi-agent session: the row that heads a group is 600.
@@ -653,9 +652,13 @@ describe('AgentWorkspace', () => {
 
     await waitFor(() => {
       expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-2')
-      expect(container.querySelectorAll('[role="button"][data-agent-workspace-scope]')).toHaveLength(2)
+      expect(
+        container.querySelectorAll('[role="button"][data-agent-workspace-scope]')
+      ).toHaveLength(2)
     })
-    const rows = [...container.querySelectorAll<HTMLElement>('[role="button"][data-agent-workspace-scope]')]
+    const rows = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"][data-agent-workspace-scope]')
+    ]
     await waitFor(() => expect(rows[1]).toHaveTextContent('Model preview'))
     for (const row of rows) {
       expect(row).toHaveTextContent('Model preview')
@@ -731,22 +734,29 @@ describe('AgentWorkspace', () => {
     window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
   })
 
-  it.each(['Enter', ' '])('closes the active thread from the keyboard with %s on the close row', async key => {
-    const terminateScope = vi.fn()
-    window.addEventListener('chat:terminate-scope', terminateScope as EventListener)
-    try {
-      renderWorkspaceWithThreadList()
-      const close = screen.getByRole('button', {name: 'agent_workspace.close_thread'})
-      expect(close.tagName).toBe('BUTTON')
-      close.focus()
-      await userEvent.keyboard(key === 'Enter' ? '{Enter}' : ' ')
-      expect(terminateScope).toHaveBeenCalledTimes(1)
-      expect((terminateScope.mock.calls[0]?.[0] as CustomEvent<{scope?:string}>).detail).toEqual({scope:'project-1.agent-1'})
-      expect(screen.queryByRole('button', {name:'agent_workspace.close_thread'})).not.toBeInTheDocument()
-    } finally {
-      window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
+  it.each(['Enter', ' '])(
+    'closes the active thread from the keyboard with %s on the close row',
+    async (key) => {
+      const terminateScope = vi.fn()
+      window.addEventListener('chat:terminate-scope', terminateScope as EventListener)
+      try {
+        renderWorkspaceWithThreadList()
+        const close = screen.getByRole('button', { name: 'agent_workspace.close_thread' })
+        expect(close.tagName).toBe('BUTTON')
+        close.focus()
+        await userEvent.keyboard(key === 'Enter' ? '{Enter}' : ' ')
+        expect(terminateScope).toHaveBeenCalledTimes(1)
+        expect(
+          (terminateScope.mock.calls[0]?.[0] as CustomEvent<{ scope?: string }>).detail
+        ).toEqual({ scope: 'project-1.agent-1' })
+        expect(
+          screen.queryByRole('button', { name: 'agent_workspace.close_thread' })
+        ).not.toBeInTheDocument()
+      } finally {
+        window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
+      }
     }
-  })
+  )
 
   it('swallows preview refresh failures from chat storage', async () => {
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -872,30 +882,25 @@ describe('AgentWorkspace', () => {
     const handler = propsOf().onThreadSubRowChange
     act(() => handler('配色疑问'))
     expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent('画布检查 · 配色疑问')
-    expect(screen.getByTestId('agent-thread-toggle')).toHaveAttribute('title', '画布检查 · 配色疑问')
+    expect(screen.getByTestId('agent-thread-toggle')).toHaveAttribute(
+      'title',
+      '画布检查 · 配色疑问'
+    )
     // The callback keeps its identity, so the chat page is not re-subscribed on every render.
     expect(propsOf().onThreadSubRowChange).toBe(handler)
     act(() => handler(null))
     expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^画布检查$/)
   })
 
-  it('opens the trace dialog from the conversation menu action', async () => {
-    renderWorkspace()
-
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    act(() => latestWorkspaceMenu().onToggleTrace())
-
-    expect(screen.getByTestId('mock-trace-panel')).toHaveAttribute('data-project-id', 'project-1')
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
-  })
-
-  it('offers Refresh after New in the toolbar and runs the active pane\'s reload with it', async () => {
+  it("offers Refresh after New in the toolbar and runs the active pane's reload with it", async () => {
     renderWorkspace()
     const toolbar = screen.getByTestId('agent-thread-toolbar')
     const buttons = within(toolbar).getAllByRole('button')
     const refresh = within(toolbar).getByRole('button', { name: 'agent_workspace.refresh' })
     expect(buttons.at(-1)).toBe(refresh)
-    expect(buttons.at(-2)).toBe(within(toolbar).getByRole('button', { name: 'agent_workspace.new_chat' }))
+    expect(buttons.at(-2)).toBe(
+      within(toolbar).getByRole('button', { name: 'agent_workspace.new_chat' })
+    )
     const props = chatPageMock.mock.calls.at(-1)?.[0] as {
       onRegisterReload: (reload: (() => void) | null) => void
       statusLineHost: HTMLElement | null
@@ -916,42 +921,7 @@ describe('AgentWorkspace', () => {
     expect(reload).toHaveBeenCalledOnce()
   })
 
-  it('shows a text-only status line under the toolbar while a trace is recording', async () => {
-    renderWorkspace()
-    // Mounted while empty, so that a line arriving later is announced.
-    expect(screen.getByTestId('agent-workspace-status-line')).toBeEmptyDOMElement()
-
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(PROJECT_TRACE_CAPTURE_STATE_EVENT, {
-          detail: { projectId: 'project-1', active: true, traceId: 'trace-1', mode: 'realtime' }
-        })
-      )
-    })
-
-    const statusLine = screen.getByTestId('agent-workspace-status-line')
-    expect(statusLine).toHaveAttribute('role', 'status')
-    expect(statusLine).toHaveTextContent('正在记录追踪')
-    expect(statusLine.querySelector('button')).toBeNull()
-    expect(
-      screen.getByTestId('agent-thread-toolbar').compareDocumentPosition(statusLine) &
-        Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-    expect(latestWorkspaceMenu().traceRecording).toBe(true)
-
-    // The same menu action now stops the recording instead of opening the dialog.
-    await act(async () => latestWorkspaceMenu().onToggleTrace())
-    expect(screen.getByTestId('agent-workspace-status-line')).toBeEmptyDOMElement()
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(latestWorkspaceMenu().traceRecording).toBe(false)
-    // The result is a toast at the top of the column, not an app-wide snackbar.
-    const toasts = screen.getByRole('region', { name: '通知' })
-    expect(toasts.closest('[data-agent-workspace-root]')).not.toBeNull()
-    expect(within(toasts).getByRole('status')).toHaveTextContent(/^提示：实时追踪已停止。×$/)
-    expect(enRenderer.agent_workspace.trace_realtime_stopped).toBe('Live trace stopped.')
-  })
-
-  it('shows the messages its conversations raise as toasts of the column, outside its trace dialog', async () => {
+  it('shows the messages its conversations raise as toasts of the column', async () => {
     renderWorkspace()
     await waitFor(() => expect(chatPageMock).toHaveBeenCalled())
     // Each pane is rendered inside the column's toast context.
@@ -961,8 +931,6 @@ describe('AgentWorkspace', () => {
       sink?.push('warning', '团队状态冲突，已保留本地更改')
     })
     expect(screen.getByRole('alert')).toHaveTextContent(/^警告：团队状态冲突，已保留本地更改×$/)
-    act(() => latestWorkspaceMenu().onToggleTrace())
-    expect(screen.getByTestId('mock-trace-panel')).toHaveAttribute('data-toast-sink', 'none')
   })
 
   it('keeps opened chat panes mounted and switches visibility without a reload', async () => {
@@ -1110,12 +1078,11 @@ describe('AgentWorkspace', () => {
       const toggle = screen.getByTestId('agent-thread-toggle')
       const paneHost = root.querySelector<HTMLElement>(':scope > [data-agent-workspace-scope]')!
 
-      // Column top to transcript: header, the toolbar section, the two status lines (empty: they
-      // draw nothing), then the pane host.
-      expect([...root.children].indexOf(paneHost)).toBe(4)
+      // Column top to transcript: header, the toolbar section, the status line host (empty: it
+      // draws nothing), then the pane host.
+      expect([...root.children].indexOf(paneHost)).toBe(3)
       expect(root.children[2]).toBe(screen.getByTestId('agent-workspace-error-line-host'))
-      expect(root.children[3]).toBe(screen.getByTestId('agent-workspace-status-line'))
-      for (const line of [root.children[2], root.children[3]]) expect(line).toBeEmptyDOMElement()
+      expect(root.children[2]).toBeEmptyDOMElement()
       expect(root.children[1]).toContainElement(toolbar)
       expect(root.children[1].children).toHaveLength(1)
       expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument()
@@ -1349,22 +1316,10 @@ describe('AgentWorkspace', () => {
       expect(border(close, 'Bottom')).toBe('none')
       expect(border(close, 'Top')).toBe('none')
 
-      // A status line that follows starts right under that single divider.
-      act(() => {
-        window.dispatchEvent(
-          new CustomEvent(PROJECT_TRACE_CAPTURE_STATE_EVENT, {
-            detail: { projectId: 'project-1', active: true, traceId: 'trace-1', mode: 'capture' }
-          })
-        )
-      })
-      const statusLine = screen.getByTestId('agent-workspace-status-line')
-      // The (empty) host of the error line comes first and draws nothing.
+      // The (empty) host of the error line follows that single divider and draws nothing.
       const errorHost = screen.getByTestId('agent-workspace-error-line-host')
       expect(region.nextElementSibling).toBe(errorHost)
-      expect(errorHost.nextElementSibling).toBe(statusLine)
       expect(border(errorHost, 'Bottom')).toBe('none')
-      expect(border(statusLine, 'Top')).toBe('none')
-      expect(border(statusLine, 'Bottom')).toBe(divider)
       expect(border(region, 'Bottom')).toBe(divider)
     })
 
@@ -1393,7 +1348,11 @@ describe('AgentWorkspace', () => {
       )
       renderWorkspaceWithThreadList()
       await waitFor(() =>
-        expect(getThreadRows().map((row) => row.textContent)).toEqual(['对话 1', '对话 2', '海报配色'])
+        expect(getThreadRows().map((row) => row.textContent)).toEqual([
+          '对话 1',
+          '对话 2',
+          '海报配色'
+        ])
       )
       expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 1$/)
       expect(screen.queryByText('新对话')).not.toBeInTheDocument()
@@ -1418,7 +1377,11 @@ describe('AgentWorkspace', () => {
           'agent-8'
         ])
       )
-      expect(getThreadRows().map((row) => row.textContent)).toEqual(['对话 1', '对话 2', '海报配色'])
+      expect(getThreadRows().map((row) => row.textContent)).toEqual([
+        '对话 1',
+        '对话 2',
+        '海报配色'
+      ])
       expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 2$/)
     })
 
@@ -1449,19 +1412,29 @@ describe('AgentWorkspace', () => {
       // A thread created here is known to have no conversation: it is numbered immediately.
       loadAllSessionsMock.mockImplementation((scope: string) =>
         Promise.resolve(
-          scope === 'project-1.agent-1' ? [{ id: 'session-1', title: '画布检查', messages: [] }] : []
+          scope === 'project-1.agent-1'
+            ? [{ id: 'session-1', title: '画布检查', messages: [] }]
+            : []
         )
       )
       fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
       expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 2$/)
       expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '对话 2'])
       fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
-      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '对话 2', '对话 3'])
+      expect(getThreadRows().map((row) => row.textContent)).toEqual([
+        '画布检查',
+        '对话 2',
+        '对话 3'
+      ])
       await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-3'))
       await act(async () => {
         await Promise.resolve()
       })
-      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '对话 2', '对话 3'])
+      expect(getThreadRows().map((row) => row.textContent)).toEqual([
+        '画布检查',
+        '对话 2',
+        '对话 3'
+      ])
       expect(screen.queryByText('新对话')).not.toBeInTheDocument()
     })
 
@@ -1573,15 +1546,6 @@ describe('AgentWorkspace', () => {
       // No conversation, so nothing fills the model slot either.
       expect(screen.getByTestId('agent-workspace-model-host')).toBeEmptyDOMElement()
 
-      // The status line keeps working without a thread.
-      act(() => {
-        window.dispatchEvent(
-          new CustomEvent(PROJECT_TRACE_CAPTURE_STATE_EVENT, {
-            detail: { projectId: 'project-1', active: true, traceId: 'trace-1', mode: 'realtime' }
-          })
-        )
-      })
-      expect(screen.getByTestId('agent-workspace-status-line')).toHaveTextContent('正在记录追踪')
       expect(screen.getByTestId('agent-workspace-no-thread-composer')).toBeInTheDocument()
 
       fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
@@ -1695,7 +1659,10 @@ describe('AgentWorkspace', () => {
       try {
         renderWorkspaceWithThreadList()
         await waitFor(() => expect(shownTitles()).toEqual(['First thread', 'Second thread']))
-        expect(loadAllSessionsMock.mock.calls.map(([scope]) => scope).sort()).toEqual([FIRST, SECOND])
+        expect(loadAllSessionsMock.mock.calls.map(([scope]) => scope).sort()).toEqual([
+          FIRST,
+          SECOND
+        ])
         loadAllSessionsMock.mockClear()
 
         // Every kind of refresh while nothing was saved, including the 4 second poll.
@@ -1793,8 +1760,12 @@ describe('AgentWorkspace', () => {
       let clockOffset = 0
       const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffset)
       try {
-        loadAllSessionsMock.mockRejectedValueOnce(new DOMException('Broken record', 'NotReadableError'))
-        loadAllSessionsMock.mockRejectedValueOnce(new DOMException('Broken record', 'NotReadableError'))
+        loadAllSessionsMock.mockRejectedValueOnce(
+          new DOMException('Broken record', 'NotReadableError')
+        )
+        loadAllSessionsMock.mockRejectedValueOnce(
+          new DOMException('Broken record', 'NotReadableError')
+        )
         renderWorkspaceWithThreadList()
         await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalledTimes(2))
         await settle()

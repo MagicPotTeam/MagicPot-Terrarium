@@ -15,10 +15,12 @@ import type {
   ChatMessage
 } from '../../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import type { ChatSession } from '../chatStorage'
+import zh from '@shared/locales/zh-CN/renderer.json'
 
 const notifySuccessMock = vi.fn()
 
 const chatImageTranslations: Record<string, string> = {
+  'chat.agent_processing': zh.chat.agent_processing,
   'chat.loading_auto_retry_wait':
     'Retry {{attempt}} in {{seconds}} seconds. You can stop at any time.',
   'chat.loading_auto_retry_active': 'Retry {{attempt}} in progress. You can stop at any time.',
@@ -54,9 +56,11 @@ type OnSendEditedMessage = (
 type OnDownloadAttachment = (attachment: ChatAttachment) => void
 
 const buildChatMessageList = (
-  currentSession: ChatSession,
+  currentSession: ChatSession | undefined,
   options?: {
+    pendingConfirmation?: React.ComponentProps<typeof ChatMessageList>['pendingConfirmation']
     active?: boolean
+    columnStyle?: boolean
     loadingStatus?: import('../chatLoadingStatus').ChatLoadingStatus
     isLoading?: boolean
     editingMessageIndex?: number | null
@@ -80,6 +84,8 @@ const buildChatMessageList = (
       active={options?.active}
       currentSession={currentSession}
       isLoading={options?.isLoading ?? false}
+      columnStyle={options?.columnStyle}
+      pendingConfirmation={options?.pendingConfirmation}
       loadingStatus={options?.loadingStatus}
       editingMessageIndex={options?.editingMessageIndex ?? null}
       editingContent={options?.editingContent ?? ''}
@@ -102,6 +108,7 @@ const renderChatMessageList = (
   currentSession: ChatSession,
   options?: {
     active?: boolean
+    columnStyle?: boolean
     loadingStatus?: import('../chatLoadingStatus').ChatLoadingStatus
     isLoading?: boolean
     editingMessageIndex?: number | null
@@ -122,6 +129,106 @@ const renderChatMessageList = (
 ) => render(buildChatMessageList(currentSession, options))
 
 describe('ChatMessageList inline tool calls', () => {
+  it.each(['empty', 'text', 'image'] as const)(
+    'shows a running image tool only in its column tool row alongside %s content',
+    (kind) => {
+      const session: ChatSession = {
+        id: 'image-call',
+        title: 'Image',
+        messages: [
+          {
+            role: 'assistant',
+            content: kind === 'text' ? 'Editing the image.' : '',
+            attachments:
+              kind === 'image' ? [{ type: 'image', url: 'data:image/png;base64,AAAA' }] : [],
+            toolHistory: [
+              {
+                runId: 'run',
+                toolCallId: 'call',
+                toolName: 'image_gen',
+                args: {},
+                status: 'running'
+              }
+            ]
+          }
+        ]
+      }
+      renderChatMessageList(session, {
+        columnStyle: true,
+        isLoading: true,
+        loadingStatus: {
+          label: '出图中',
+          detail: 'image_gen',
+          presentation: 'tool-row-only'
+        }
+      })
+      expect(screen.queryByTestId('assistant-loading-status')).not.toBeInTheDocument()
+      expect(screen.queryByText('出图中')).not.toBeInTheDocument()
+      expect(screen.queryByText('chat.response_interrupted')).not.toBeInTheDocument()
+      if (kind === 'text') expect(screen.getByText('Editing the image.')).toBeInTheDocument()
+      if (kind === 'image') expect(screen.getByRole('img')).toBeInTheDocument()
+    }
+  )
+
+  it('reads routine request phases in the column as the Kohaku working line', () => {
+    renderChatMessageList(
+      { id: 'wait', title: '', messages: [{ role: 'assistant', content: 'Visible text' }] },
+      {
+        columnStyle: true,
+        isLoading: true,
+        loadingStatus: { presentation: 'routine', step: 3, totalSteps: 4, label: '等待模型响应' }
+      }
+    )
+    expect(screen.getByText('Visible text')).toBeVisible()
+    expect(screen.getByTestId('assistant-loading-line')).toHaveTextContent(
+      /^KohakUwUing...（生成中）$/
+    )
+    expect(screen.queryByText(/等待模型响应/)).not.toBeInTheDocument()
+  })
+
+  it('keeps a non-routine phase label in the column working line', () => {
+    renderChatMessageList(
+      { id: 'tool', title: '', messages: [{ role: 'assistant', content: '' }] },
+      { columnStyle: true, isLoading: true, loadingStatus: { label: 'Reading the canvas' } }
+    )
+    expect(screen.getByTestId('assistant-loading-line')).toHaveTextContent('Reading the canvas')
+  })
+
+  it('shows the column approval card instead of the working line', () => {
+    const session: ChatSession = {
+      id: 'approval',
+      title: '',
+      messages: [{ role: 'assistant', content: '' }]
+    }
+    const running = { columnStyle: true, isLoading: true, loadingStatus: { label: 'Waiting' } }
+    const pendingConfirmation = {
+      requestId: 'c',
+      prompt: 'Continue?',
+      confirmLabel: 'Allow',
+      cancelLabel: 'Cancel'
+    }
+    const { rerender } = render(buildChatMessageList(session, { ...running, pendingConfirmation }))
+    expect(screen.getByRole('button', { name: 'Allow' })).toBeEnabled()
+    expect(screen.queryByTestId('assistant-loading-status')).toBeNull()
+    expect(screen.queryByText('chat.response_interrupted')).toBeNull()
+    rerender(buildChatMessageList(session, running))
+    expect(screen.getByTestId('assistant-loading-status')).toBeVisible()
+  })
+
+  it.each(['Partial response', ''])(
+    'shows a single inline interruption with partial or empty text: %s',
+    (content) => {
+      renderChatMessageList({
+        id: 'interrupted',
+        title: '',
+        messages: [{ role: 'assistant', content, responseInterrupted: true }]
+      })
+      if (content) expect(screen.getByText(content)).toBeVisible()
+      expect(screen.getAllByText('chat.response_interrupted')).toHaveLength(1)
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    }
+  )
+
   it('renders a tool-only assistant message as an expandable call, not an interrupted reply', () => {
     renderChatMessageList({
       id: 'tool-only',

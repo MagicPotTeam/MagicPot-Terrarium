@@ -1,0 +1,31 @@
+/* Panels own their outline. Resize targets occupy the seams rather than drawing a second line. */
+[data-project-frame] {
+  box-sizing: border-box;
+  padding: 2px 4px 4px;
+  gap: 4px;
+  background: var(--workbench-seam);
+}
+[data-project-frame] [data-workbench-module] {
+  box-sizing: border-box;
+  border: 1px solid var(--workbench-outline);
+  border-radius: 6px;
+}
+[data-project-frame] [data-workbench-module="canvas"][data-agent-open],
+[data-project-frame] [data-canvas-document-drop-bypass="bottom-panel"][data-agent-open] {
+  margin-right: 4px;
+}
+[data-project-frame] [data-workbench-sash] { background: transparent; }
+[data-project-frame] [data-workbench-sash]::before { opacity: 0; }
+[data-project-frame] [data-workbench-sash]:hover::before,
+[data-project-frame] [data-workbench-sash]:active::before { opacity: 1; }
+[data-project-frame] [data-workbench-toolbar],
+[data-project-frame] [data-testid="agent-workbench-header"] { border-bottom: 0; }
+[data-project-frame] [data-testid="agent-workbench-header"] + nav {
+  margin-inline: 8px;
+  padding-inline: 0;
+  border: 0;
+  border-top: 1px solid var(--workbench-outline);
+}
+@media (forced-colors: active) {
+  [data-project-frame] [data-workbench-module] { border-color: CanvasText; }
+}

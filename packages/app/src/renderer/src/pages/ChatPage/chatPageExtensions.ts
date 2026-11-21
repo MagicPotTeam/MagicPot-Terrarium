@@ -6,6 +6,16 @@ import {
   resolveRendererChatReasoningPreferenceKey
 } from '@renderer/extensions/rendererHostExtensionHelpers'
 import { getBaseProfileId } from './chatPageShared'
+import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
+
+/** Synchronous, read-only selection check. MAIN revalidates the same backend at dispatch. */
+export const hasThreadImageTool = (
+  config: Config,
+  profileId: string | null | undefined
+): boolean => {
+  if (config.use_remote_llm || !profileId) return false
+  return rendererHostExtensionApiV1.chat?.hasThreadImageTool?.(config, profileId) ?? false
+}
 
 export const resolveChatReasoningPreferenceKey = (
   profileId: string | null | undefined,

@@ -4,6 +4,9 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
+import type { LLMChatReq } from '@shared/api/svcLLMProxy'
+import type { AgentRouteLike } from '@shared/agent'
+import { hasThreadImageTool } from './chatPageExtensions'
 import type { ChatAttachment } from '@shared/llm'
 import type { ChatSession, ChatSessionDraft } from './chatStorage'
 import { UNVERIFIED_REPORT_BUNDLE_MESSAGE } from '@shared/llm/unverifiedReport'
@@ -37,7 +40,12 @@ const fixture = vi.hoisted(() => ({
   selectFile: vi.fn(),
   fileTooLarge: false,
   discoverVideoFrames: vi.fn(),
-  videoExpansionOverride: null as null | ((attachments: ChatAttachment[] | undefined, content: string) => Promise<{ content: string; attachments: ChatAttachment[] }>),
+  videoExpansionOverride: null as
+    | null
+    | ((
+        attachments: ChatAttachment[] | undefined,
+        content: string
+      ) => Promise<{ content: string; attachments: ChatAttachment[] }>),
   useRealVideoHelper: false,
   videoExpansionFrames: 0,
   useRealCompletion: false,
@@ -328,7 +336,7 @@ const configure = (maxInputImages?: number): void => {
   fixture.profiles = fixture.config!.llm_config.api_profiles
 }
 
-const renderPage = async (session: ChatSession): Promise<void> => {
+const renderPage = async (session: ChatSession, route?: AgentRouteLike): Promise<void> => {
   const fixtureSession = {
     ...cloneValue(session),
     storageScope: scope,
@@ -348,7 +356,7 @@ const renderPage = async (session: ChatSession): Promise<void> => {
       <MemoryRouter>
         <div id={buildChatWorkspaceControlsPortalId(scope)} />
         <div id="agent-workspace-skill-portal" />
-        <ChatPage storageScope={scope} />
+        <ChatPage storageScope={scope} route={route} />
       </MemoryRouter>
     </ThemeProvider>
   )
@@ -455,45 +463,73 @@ describe('ChatPage image preflight at the send boundary', () => {
     const second = image(2, 'local-media:///fixture/same-source.png')
     await act(async () => {
       for (const attachment of [first, second]) {
-        window.dispatchEvent(new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment } }))
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', { detail: { targetScope: scope, attachment } })
+        )
       }
     })
     await waitFor(() => expect(pendingAttachments()).toEqual([first, second]))
     fireEvent.click(screen.getByTestId('composer-send'))
     await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
-    const sent = fixture.request.mock.calls[0][0].messages.find((message: { role: string }) => message.role === 'user')
+    const sent = fixture.request.mock.calls[0][0].messages.find(
+      (message: { role: string }) => message.role === 'user'
+    )
     expect(sent.attachments).toEqual([first, second])
   })
 
-  it.each([false, true])('rejects a single external batch of 51 identical image occurrences before materialization (auto=%s)', async (autoSend) => {
-    configure()
-    await renderPage(makeSession([]))
-    await settleInitialDraftPersistence()
-    const before = pendingAttachments()
-    const same = image(1, 'blob:fixture-repeated')
-    await act(async () => {
-      window.dispatchEvent(new CustomEvent('send-to-agent', {
-        detail: { targetScope: scope, autoSend, text: 'should not append', attachments: Array.from({ length: 51 }, () => same) }
-      }))
-    })
-    await waitFor(() => expect(fixture.notifyError).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送'))
-    expect(fixture.materializeInternalImageDragAttachment).not.toHaveBeenCalled()
-    expect(fixture.fetch).not.toHaveBeenCalled()
-    expect(fixture.request).not.toHaveBeenCalled()
-    expect(pendingAttachments()).toEqual(before)
-    expect(screen.getByTestId('composer-input')).toHaveValue(draftText)
-  })
+  it.each([false, true])(
+    'rejects a single external batch of 51 identical image occurrences before materialization (auto=%s)',
+    async (autoSend) => {
+      configure()
+      await renderPage(makeSession([]))
+      await settleInitialDraftPersistence()
+      const before = pendingAttachments()
+      const same = image(1, 'blob:fixture-repeated')
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              targetScope: scope,
+              autoSend,
+              text: 'should not append',
+              attachments: Array.from({ length: 51 }, () => same)
+            }
+          })
+        )
+      })
+      await waitFor(() =>
+        expect(fixture.notifyError).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
+      )
+      expect(fixture.materializeInternalImageDragAttachment).not.toHaveBeenCalled()
+      expect(fixture.fetch).not.toHaveBeenCalled()
+      expect(fixture.request).not.toHaveBeenCalled()
+      expect(pendingAttachments()).toEqual(before)
+      expect(screen.getByTestId('composer-input')).toHaveValue(draftText)
+    }
+  )
 
   it('rejects an external batch of 50 image descriptors plus an inline image before resolution', async () => {
     configure()
     await renderPage(makeSession([]))
     await settleInitialDraftPersistence()
     await act(async () => {
-      window.dispatchEvent(new CustomEvent('send-to-agent', {
-        detail: { targetScope: scope, autoSend: true, text: 'Analyze', image: 'data:image/png;base64,ZmFrZQ==', attachments: Array.from({ length: 50 }, (_, i) => image(i, `local-media:///fixture-${i}.png`)) }
-      }))
+      window.dispatchEvent(
+        new CustomEvent('send-to-agent', {
+          detail: {
+            targetScope: scope,
+            autoSend: true,
+            text: 'Analyze',
+            image: 'data:image/png;base64,ZmFrZQ==',
+            attachments: Array.from({ length: 50 }, (_, i) =>
+              image(i, `local-media:///fixture-${i}.png`)
+            )
+          }
+        })
+      )
     })
-    await waitFor(() => expect(fixture.notifyError).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送'))
+    await waitFor(() =>
+      expect(fixture.notifyError).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
+    )
     expect(fixture.materializeInternalImageDragAttachment).not.toHaveBeenCalled()
     expect(fixture.fetch).not.toHaveBeenCalled()
     expect(fixture.request).not.toHaveBeenCalled()
@@ -673,18 +709,20 @@ describe('ChatPage image preflight at the send boundary', () => {
   it('keeps an over-limit canvas overview removable and preserves the draft across incoming event mocks', async () => {
     configure()
     // The inline overview is imported into managed media at the hand-off.
-    fixture.importDataUrl.mockImplementation(async ({ originalFileName }: { originalFileName: string }) => ({
-      reference: {
-        version: 1,
-        kind: 'managed',
-        relativePath: `user-output/chat-attachments/originals/ab/${'ab'.repeat(32)}.png`,
-        sha256: 'ab'.repeat(32),
-        sizeBytes: 3,
-        mimeType: 'image/png',
-        originalFileName
-      },
-      localMediaUrl: `local-media:///fixture-media/${'ab'.repeat(32)}.png`
-    }))
+    fixture.importDataUrl.mockImplementation(
+      async ({ originalFileName }: { originalFileName: string }) => ({
+        reference: {
+          version: 1,
+          kind: 'managed',
+          relativePath: `user-output/chat-attachments/originals/ab/${'ab'.repeat(32)}.png`,
+          sha256: 'ab'.repeat(32),
+          sizeBytes: 3,
+          mimeType: 'image/png',
+          originalFileName
+        },
+        localMediaUrl: `local-media:///fixture-media/${'ab'.repeat(32)}.png`
+      })
+    )
     await renderPage(makeSession([], 'canvas overview'))
     await settleInitialDraftPersistence()
     await act(async () => {
@@ -824,15 +862,19 @@ describe('ChatPage image preflight at the send boundary', () => {
       await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
       const attachment = video()
       await act(async () => {
-        window.dispatchEvent(new CustomEvent('send-to-agent', {
-          detail: { targetScope: scope, text: 'queued video text', attachment }
-        }))
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: { targetScope: scope, text: 'queued video text', attachment }
+          })
+        )
       })
       await waitFor(() => expect(pendingAttachments()).toEqual([attachment]))
       expect(screen.getByTestId('composer-input')).toHaveValue('queued video text')
       fixture.videoExpansionFrames = 3
       fireEvent.click(screen.getByTestId('composer-send'))
-      await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued video text'))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued video text')
+      )
       expect(screen.getByTestId('composer-input')).toHaveValue('')
       expect(pendingAttachments()).toEqual([])
       expect(fixture.request).toHaveBeenCalledOnce()
@@ -843,9 +885,17 @@ describe('ChatPage image preflight at the send boundary', () => {
       expect(fixture.discoverVideoFrames).toHaveBeenCalledTimes(1)
       expect(fixture.request).toHaveBeenCalledOnce()
       expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued video text')
-      await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('未发送 · 已暂停'))
-      expect(currentSession().messages.some((message) => message.content === 'queued video text')).toBe(false)
-      fireEvent.click(within(screen.getByTestId('chat-queue-item')).getByRole('button', { name: 'chat.queue_edit' }))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('未发送 · 已暂停')
+      )
+      expect(
+        currentSession().messages.some((message) => message.content === 'queued video text')
+      ).toBe(false)
+      fireEvent.click(
+        within(screen.getByTestId('chat-queue-item')).getByRole('button', {
+          name: 'chat.queue_edit'
+        })
+      )
       expect(screen.getByTestId('composer-input')).toHaveValue('queued video text')
       expect(pendingAttachments()).toEqual([attachment])
       expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
@@ -866,36 +916,62 @@ describe('ChatPage image preflight at the send boundary', () => {
       await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
       const attachment = video()
       await act(async () => {
-        window.dispatchEvent(new CustomEvent('send-to-agent', {
-          detail: { targetScope: scope, text: 'first queued video', attachment }
-        }))
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: { targetScope: scope, text: 'first queued video', attachment }
+          })
+        )
       })
       await waitFor(() => expect(pendingAttachments()).toEqual([attachment]))
       fixture.videoExpansionFrames = 3
       fireEvent.click(screen.getByTestId('composer-send'))
       await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
-      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'second queued text' } })
+      fireEvent.change(screen.getByTestId('composer-input'), {
+        target: { value: 'second queued text' }
+      })
       fireEvent.click(screen.getByTestId('composer-send'))
       await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
-      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'new unsent draft' } })
-      await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('new unsent draft'))
+      fireEvent.change(screen.getByTestId('composer-input'), {
+        target: { value: 'new unsent draft' }
+      })
+      await waitFor(() =>
+        expect(screen.getByTestId('composer-input')).toHaveValue('new unsent draft')
+      )
       await act(async () => activeRequest.resolve({ content: 'active response' }))
-      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')[0]).toHaveTextContent('未发送 · 已暂停'))
+      await waitFor(() =>
+        expect(screen.getAllByTestId('chat-queue-item')[0]).toHaveTextContent('未发送 · 已暂停')
+      )
       expect(screen.getAllByTestId('chat-queue-item')[0]).toHaveTextContent('first queued video')
       expect(screen.getAllByTestId('chat-queue-item')[1]).toHaveTextContent('second queued text')
-      expect(within(screen.getAllByTestId('chat-queue-item')[0]).getByText('编辑或移除此项后，后续排队消息可能继续发送。')).toBeVisible()
+      expect(
+        within(screen.getAllByTestId('chat-queue-item')[0]).getByText(
+          '编辑或移除此项后，后续排队消息可能继续发送。'
+        )
+      ).toBeVisible()
       expect(screen.getByTestId('composer-input')).toHaveValue('new unsent draft')
-      fireEvent.click(within(screen.getAllByTestId('chat-queue-item')[0]).getByRole('button', { name: 'chat.queue_edit' }))
+      fireEvent.click(
+        within(screen.getAllByTestId('chat-queue-item')[0]).getByRole('button', {
+          name: 'chat.queue_edit'
+        })
+      )
       expect(screen.getByTestId('composer-input')).toHaveValue('new unsent draft')
       expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2)
-      expect(within(screen.getAllByTestId('chat-queue-item')[0]).getByText('编辑或移除此项后，后续排队消息可能继续发送。')).toBeVisible()
+      expect(
+        within(screen.getAllByTestId('chat-queue-item')[0]).getByText(
+          '编辑或移除此项后，后续排队消息可能继续发送。'
+        )
+      ).toBeVisible()
       expect(fixture.request).toHaveBeenCalledOnce()
       fireEvent.click(screen.getByTestId('composer-send'))
       expect(fixture.notifyWarning).toHaveBeenCalledWith('chat.queue_paused_first')
       expect(screen.getByTestId('composer-input')).toHaveValue('new unsent draft')
       expect(fixture.request).toHaveBeenCalledOnce()
-      expect(currentSession().messages.some((message) => message.content === 'first queued video')).toBe(false)
-      expect(currentSession().messages.some((message) => message.content === 'second queued text')).toBe(false)
+      expect(
+        currentSession().messages.some((message) => message.content === 'first queued video')
+      ).toBe(false)
+      expect(
+        currentSession().messages.some((message) => message.content === 'second queued text')
+      ).toBe(false)
     } finally {
       activeRequest.resolve({ content: 'cleanup' })
     }
@@ -912,30 +988,42 @@ describe('ChatPage image preflight at the send boundary', () => {
       await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
       const attachment = video()
       await act(async () => {
-        window.dispatchEvent(new CustomEvent('send-to-agent', {
-          detail: { targetScope: scope, text: 'first paused video', attachment }
-        }))
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: { targetScope: scope, text: 'first paused video', attachment }
+          })
+        )
       })
       await waitFor(() => expect(pendingAttachments()).toEqual([attachment]))
       fixture.videoExpansionFrames = 3
       fireEvent.click(screen.getByTestId('composer-send'))
       await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
-      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'later queued text' } })
+      fireEvent.change(screen.getByTestId('composer-input'), {
+        target: { value: 'later queued text' }
+      })
       fireEvent.click(screen.getByTestId('composer-send'))
       await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
       const warning = '编辑或移除此项后，后续排队消息可能继续发送。'
       expect(screen.queryByText(warning)).not.toBeInTheDocument()
       await act(async () => activeRequest.resolve({ content: 'active response' }))
-      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')[0]).toHaveTextContent('未发送 · 已暂停'))
+      await waitFor(() =>
+        expect(screen.getAllByTestId('chat-queue-item')[0]).toHaveTextContent('未发送 · 已暂停')
+      )
       const [first, second] = screen.getAllByTestId('chat-queue-item')
       expect(within(first).getByText(warning)).toBeVisible()
-      expect(within(first).getByRole('button', { name: 'chat.queue_edit' })).toHaveAccessibleDescription(warning)
-      expect(within(first).getByRole('button', { name: 'chat.queue_remove' })).toHaveAccessibleDescription(warning)
+      expect(
+        within(first).getByRole('button', { name: 'chat.queue_edit' })
+      ).toHaveAccessibleDescription(warning)
+      expect(
+        within(first).getByRole('button', { name: 'chat.queue_remove' })
+      ).toHaveAccessibleDescription(warning)
       expect(within(second).queryByText(warning)).not.toBeInTheDocument()
       expect(fixture.request).toHaveBeenCalledOnce()
       fireEvent.click(within(second).getByRole('button', { name: 'chat.queue_remove' }))
       expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
-      expect(within(screen.getByTestId('chat-queue-item')).queryByText(warning)).not.toBeInTheDocument()
+      expect(
+        within(screen.getByTestId('chat-queue-item')).queryByText(warning)
+      ).not.toBeInTheDocument()
       expect(fixture.request).toHaveBeenCalledOnce()
     } finally {
       activeRequest.resolve({ content: 'cleanup' })
@@ -955,21 +1043,29 @@ describe('ChatPage image preflight at the send boundary', () => {
       await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
       const attachment = video()
       await act(async () => {
-        window.dispatchEvent(new CustomEvent('send-to-agent', {
-          detail: { targetScope: scope, text: 'queued before unmount', attachment }
-        }))
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: { targetScope: scope, text: 'queued before unmount', attachment }
+          })
+        )
       })
       await waitFor(() => expect(pendingAttachments()).toEqual([attachment]))
       fireEvent.click(screen.getByTestId('composer-send'))
-      await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued before unmount'))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued before unmount')
+      )
       await act(async () => activeRequest.resolve({ content: 'active response' }))
       await waitFor(() => expect(fixture.videoExpansionOverride).toHaveBeenCalledOnce())
       const item = screen.getByTestId('chat-queue-item')
       expect(item).toHaveTextContent('正在准备')
       expect(within(item).getByRole('button', { name: 'chat.queue_remove' })).toBeDisabled()
-      expect(within(item).queryByRole('button', { name: 'chat.queue_edit' })).not.toBeInTheDocument()
+      expect(
+        within(item).queryByRole('button', { name: 'chat.queue_edit' })
+      ).not.toBeInTheDocument()
       cleanup()
-      await act(async () => expansion.resolve({ content: 'queued before unmount', attachments: [attachment] }))
+      await act(async () =>
+        expansion.resolve({ content: 'queued before unmount', attachments: [attachment] })
+      )
       expect(fixture.request).toHaveBeenCalledOnce()
     } finally {
       activeRequest.resolve({ content: 'cleanup' })
@@ -988,14 +1084,24 @@ describe('ChatPage image preflight at the send boundary', () => {
     try {
       fireEvent.click(screen.getByTestId('composer-send'))
       await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
-      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'queued before provider error' } })
+      fireEvent.change(screen.getByTestId('composer-input'), {
+        target: { value: 'queued before provider error' }
+      })
       fireEvent.click(screen.getByTestId('composer-send'))
-      await waitFor(() => expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued before provider error'))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(
+          'queued before provider error'
+        )
+      )
       await act(async () => activeRequest.resolve({ content: 'first response' }))
       await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(2))
       await act(async () => queuedRequest.reject(new Error('synthetic provider error')))
       await waitFor(() => expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument())
-      expect(currentSession().messages.filter((message) => message.content === 'queued before provider error')).toHaveLength(1)
+      expect(
+        currentSession().messages.filter(
+          (message) => message.content === 'queued before provider error'
+        )
+      ).toHaveLength(1)
       expect(fixture.request).toHaveBeenCalledTimes(2)
     } finally {
       activeRequest.resolve({ content: 'cleanup' })
@@ -1380,7 +1486,11 @@ describe('ChatPage request image size preflight', () => {
   const configureProvider = (provider: 'gemini' | 'openai'): void => {
     configure()
     fixture.config!.llm_config.api_profiles = [
-      { ...fixture.config!.llm_config.api_profiles[0], provider, ...(provider === 'gemini' ? { api_mode: undefined } : {}) } as LLMAPIProfile
+      {
+        ...fixture.config!.llm_config.api_profiles[0],
+        provider,
+        ...(provider === 'gemini' ? { api_mode: undefined } : {})
+      } as LLMAPIProfile
     ]
     fixture.profiles = fixture.config!.llm_config.api_profiles
   }
@@ -1419,8 +1529,135 @@ describe('ChatPage request image size preflight', () => {
     fixture.fileTooLarge = true
     fixture.selectFile.mockResolvedValue(new File(['x'], 'huge.png', { type: 'image/png' }))
     fireEvent.click(screen.getByTestId('composer-upload'))
-    await waitFor(() => expect(fixture.notifyError).toHaveBeenCalledWith('chat.incoming_image_too_large'))
+    await waitFor(() =>
+      expect(fixture.notifyError).toHaveBeenCalledWith('chat.incoming_image_too_large')
+    )
     expect(alert).not.toHaveBeenCalled()
     expect(pendingAttachments()).toEqual([])
   })
+})
+
+describe('ChatPage image review dispatch projection', () => {
+  const route = {
+    channel: 'canvas',
+    scopeType: 'thread',
+    scopeId: 'review-project',
+    threadId: 'review-thread'
+  } as const
+  const prompt = '你能自己找出问题吗'
+  const reply = '海报上方的标题被裁掉了一部分。'
+  const reference = { sha256: 'a'.repeat(64), mimeType: 'image/png', sizeBytes: 67 }
+  const generated: ChatAttachment = {
+    type: 'image',
+    // A previously saved display URL must not be read to review the managed output.
+    url: 'file:///fixture/generated.png',
+    media: {
+      ...reference,
+      version: 1,
+      kind: 'managed',
+      relativePath: `originals/aa/${reference.sha256}.png`,
+      originalFileName: 'generated.png'
+    }
+  }
+
+  const sendFromCanvas = async (text = prompt, profileId = 'fixture-profile') => {
+    const session = makeSession([], 'image review flow')
+    session.profileId = profileId
+    session.messages = [
+      { role: 'user', content: '画一张海报。' },
+      { role: 'assistant', content: '这是海报。', attachments: [generated] }
+    ]
+    await renderPage(session, route)
+    fireEvent.change(screen.getByTestId('composer-input'), { target: { value: text } })
+    fireEvent.click(screen.getByTestId('composer-send'))
+  }
+
+  it('sends the previous assistant image as a hash-only review hint from the canvas composer', async () => {
+    configure()
+    fixture.profiles[0].model_use = 'chat'
+    expect(hasThreadImageTool(fixture.config!, 'fixture-profile')).toBe(false)
+    fixture.useRealCompletion = true
+    const chat = vi.fn(async (_request: LLMChatReq) => ({
+      content: reply,
+      finishReason: 'stop' as const
+    }))
+    const materializeForRequest = vi.fn()
+    const remoteFetch = vi.fn()
+    const ipc = {
+      svcManagedMedia: { materializeForRequest },
+      svcLLMProxy: { chat, remoteFetch, chatStream: vi.fn() }
+    }
+    vi.stubGlobal('api', ipc)
+
+    await sendFromCanvas()
+    await waitFor(() =>
+      expect(currentSession().messages.at(-1)).toMatchObject({ role: 'assistant', content: reply })
+    )
+
+    expect(chat).toHaveBeenCalledOnce()
+    const [[request]] = chat.mock.calls
+    expect(request.route).toMatchObject(route)
+    expect(request.threadImageReview).toBe('last-output')
+    expect(request.threadImageHistory).toStrictEqual([reference])
+    expect(request.messages).toEqual([{ role: 'user', content: prompt }])
+    expect(request.imageRequest).toBeUndefined()
+    expect(request.imageGenerationOptions?.enabled).not.toBe(true)
+    expect(materializeForRequest).not.toHaveBeenCalled()
+    expect(fixture.fetch).not.toHaveBeenCalled()
+    expect(remoteFetch).not.toHaveBeenCalled()
+    expect(fixture.readTextFile).not.toHaveBeenCalled()
+    expect(fixture.saveImageToDir).not.toHaveBeenCalled()
+  })
+
+  it.each(['生成一张新的海报', '把上一张海报的背景改成蓝色'])(
+    'keeps explicit creation and edits on the Images profile: %s',
+    async (text) => {
+      configure()
+      Object.assign(fixture.profiles[0], { api_mode: 'images', model_use: 'image' })
+      await sendFromCanvas(text)
+      await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
+      const [[request]] = fixture.request.mock.calls
+      expect(request.profileId).toBe('fixture-profile')
+      expect(request.messages.at(-1)).toMatchObject({ role: 'user', content: text })
+      expect(request.threadImageReview).toBeUndefined()
+      expect(fixture.notifyWarning).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    { label: 'Images endpoint', api_mode: 'images', model_use: 'chat' },
+    { label: 'image generation', api_mode: 'responses', model_use: 'image' },
+    { label: 'video generation', api_mode: 'responses', model_use: 'video' },
+    { label: 'Hunyuan 3D', api_mode: 'responses', model_use: 'chat' }
+  ] as const)(
+    'declines review on a $label profile without reading or dispatching',
+    async ({ label, api_mode, model_use }) => {
+      configure()
+      const id = label === 'Hunyuan 3D' ? 'hunyuan3d-pro' : 'fixture-profile'
+      Object.assign(fixture.profiles[0], { id, api_mode, model_use })
+      fixture.useRealCompletion = true
+      const chat = vi.fn(),
+        chatStream = vi.fn(),
+        remoteFetch = vi.fn(),
+        materializeForRequest = vi.fn()
+      vi.stubGlobal('api', {
+        svcLLMProxy: { chat, chatStream, remoteFetch },
+        svcManagedMedia: { materializeForRequest }
+      })
+      await sendFromCanvas(prompt, id)
+      await waitFor(() =>
+        expect(fixture.notifyWarning).toHaveBeenCalledWith(
+          'Choose a chat model that accepts images to review the previous image. No generation request was sent.'
+        )
+      )
+      expect(chat).not.toHaveBeenCalled()
+      expect(chatStream).not.toHaveBeenCalled()
+      expect(remoteFetch).not.toHaveBeenCalled()
+      expect(materializeForRequest).not.toHaveBeenCalled()
+      expect(fixture.fetch).not.toHaveBeenCalled()
+      expect(fixture.readTextFile).not.toHaveBeenCalled()
+      expect(fixture.saveImageToDir).not.toHaveBeenCalled()
+      expect(currentSession().messages).toHaveLength(2)
+    }
+  )
 })

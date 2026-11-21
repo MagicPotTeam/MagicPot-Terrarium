@@ -62,7 +62,11 @@ import {
   type ChatCapabilityProfile
 } from './profileCapabilities'
 import { normalizeLLMStructuredOutput } from './structuredOutput'
-import { ProviderJsonBudgetError, serializeProviderJsonWithBudget, DEFAULT_PROVIDER_JSON_MAX_BYTES } from './providerJsonBudget'
+import {
+  ProviderJsonBudgetError,
+  serializeProviderJsonWithBudget,
+  DEFAULT_PROVIDER_JSON_MAX_BYTES
+} from './providerJsonBudget'
 import { convertBoundedChatImageToBase64 } from './boundedChatImageReader'
 import { assertResponsesImageUrlByteLowerBound } from './responsesImageUrlBudget'
 import { buildModelInvocationHeaders } from './modelInvocationContract'
@@ -377,7 +381,9 @@ const buildFetchFailureError = (label: string, endpoint: string, error: unknown)
  * Fetch API (available in Node 18+ and all modern browsers).
  */
 class ImageAttachmentPreparationError extends Error {
-  constructor() { super('Unable to prepare an image attachment for the model.') }
+  constructor() {
+    super('Unable to prepare an image attachment for the model.')
+  }
 }
 
 export async function convertImageToBase64(
@@ -414,6 +420,12 @@ export function normalizeOpenAIBaseUrl(baseUrl: string): string {
     .replace(/\/responses\/?$/i, '')
     .replace(/\/$/, '')
 }
+
+const chatCompletionsEndpoint = (baseUrl: string): string =>
+  baseUrl
+    .trim()
+    .replace(/\/$/, '')
+    .replace(/\/images$/i, '')
 
 const isOfficialOpenAIBaseUrl = (baseUrl: string): boolean => {
   try {
@@ -992,7 +1004,10 @@ type OpenAICapacityRetryContext = {
 export const buildOpenAIChatCompletionsBody = (
   modelName: string,
   apiMessages: readonly unknown[],
-  params: Pick<LLMChatParams, 'toolTurns' | 'temperature' | 'onDelta' | 'structuredOutput' | 'tools' | 'maxOutputTokens'>
+  params: Pick<
+    LLMChatParams,
+    'toolTurns' | 'temperature' | 'onDelta' | 'structuredOutput' | 'tools' | 'maxOutputTokens'
+  >
 ): Record<string, unknown> => {
   const body: Record<string, unknown> = {
     model: modelName,
@@ -1002,10 +1017,15 @@ export const buildOpenAIChatCompletionsBody = (
     ...(params.onDelta ? { stream_options: { include_usage: true } } : {})
   }
   const structuredOutput = normalizeLLMStructuredOutput(params.structuredOutput)
-  if (structuredOutput) body.response_format = {
-    type: 'json_schema',
-    json_schema: { name: structuredOutput.name, strict: structuredOutput.strict ?? true, schema: structuredOutput.schema }
-  }
+  if (structuredOutput)
+    body.response_format = {
+      type: 'json_schema',
+      json_schema: {
+        name: structuredOutput.name,
+        strict: structuredOutput.strict ?? true,
+        schema: structuredOutput.schema
+      }
+    }
   if (params.tools?.length) {
     body.tools = buildNativeToolDefinitions(params.tools, 'chat-completions')
     body.parallel_tool_calls = false
@@ -1015,6 +1035,22 @@ export const buildOpenAIChatCompletionsBody = (
 }
 
 export class OpenAIAPICli implements LLMCli {
+  get supportsToolFreeImageReview(): boolean {
+    return (
+      !!this.modelName.trim() &&
+      this.supportsNativeTools &&
+      this.options?.modelUse !== 'video' &&
+      !isExplicitImagesApiBaseUrl(this.baseUrl) &&
+      !this.options?.requireSingleTextResponse &&
+      !this.options?.requireTextOnlyResponse
+    )
+  }
+  get toolFreeImageReviewEndpoint(): string | undefined {
+    if (!this.supportsToolFreeImageReview) return undefined
+    return resolveOpenAIClientApiMode(this.baseUrl, this.modelName, this.options) === 'responses'
+      ? `${normalizeOpenAIBaseUrl(this.baseUrl)}/responses`
+      : chatCompletionsEndpoint(this.baseUrl)
+  }
   readonly supportsIsolatedReadOnlyTurns = true
   readonly supportsIsolatedMainToolTurns = true
   get supportsNativeTools(): boolean {
@@ -1035,9 +1071,34 @@ export class OpenAIAPICli implements LLMCli {
   }
 
   async chat(params: LLMChatParams): Promise<LLMChatResult> {
-    if (this.options?.requireSingleTextResponse && (params.retryCapacity || params.onDelta || params.tools?.length || params.toolTurns?.length ||
-        this.options.apiMode !== 'chat-completions' || params.structuredOutput || params.imageGenerationOptions || params.imageRequest ||
-        params.messages.some(message => message.attachments?.length))) throw Error('Single text client requires one unary text request without tools or retry.')
+    if (
+      params.readOnlyImageReview &&
+      (!this.toolFreeImageReviewEndpoint ||
+        !params.disableProviderTools ||
+        !params.disableAutomaticImageGeneration ||
+        params.tools?.length ||
+        params.toolTurns?.length ||
+        params.retryCapacity ||
+        params.sessionUrl ||
+        params.imageRequest ||
+        params.imageGenerationOptions?.enabled)
+    )
+      throw new Error(
+        'Image review requires a selected text model without tools, generation, continuation or retries.'
+      )
+    if (
+      this.options?.requireSingleTextResponse &&
+      (params.retryCapacity ||
+        params.onDelta ||
+        params.tools?.length ||
+        params.toolTurns?.length ||
+        this.options.apiMode !== 'chat-completions' ||
+        params.structuredOutput ||
+        params.imageGenerationOptions ||
+        params.imageRequest ||
+        params.messages.some((message) => message.attachments?.length))
+    )
+      throw Error('Single text client requires one unary text request without tools or retry.')
     if (!params.retryCapacity) return this.chatOnce(params)
     const retryContext: OpenAICapacityRetryContext = { requestId: globalThis.crypto.randomUUID() }
     try {
@@ -1173,10 +1234,7 @@ export class OpenAIAPICli implements LLMCli {
               )
             : await this.chatViaChatCompletions(
                 controlled,
-                this.baseUrl
-                  .trim()
-                  .replace(/\/$/, '')
-                  .replace(/\/images$/i, ''),
+                chatCompletionsEndpoint(this.baseUrl),
                 control,
                 upstreamStreamingMetadataRef
               )
@@ -1471,8 +1529,11 @@ export class OpenAIAPICli implements LLMCli {
     }
 
     try {
-      const hostedFileSearch = !params.disableProviderTools && (this.options?.enableHostedTools ?? isOfficialOpenAIBaseUrl(base))
-      const hostedWebSearch = !params.disableProviderTools && (this.options?.enableHostedWebSearch ?? hostedFileSearch)
+      const hostedFileSearch =
+        !params.disableProviderTools &&
+        (this.options?.enableHostedTools ?? isOfficialOpenAIBaseUrl(base))
+      const hostedWebSearch =
+        !params.disableProviderTools && (this.options?.enableHostedWebSearch ?? hostedFileSearch)
       if (!useImageGeneration && (hostedFileSearch || hostedWebSearch)) {
         if (hostedFileSearch) {
           try {
@@ -1587,7 +1648,15 @@ export class OpenAIAPICli implements LLMCli {
       }
 
       const jsonStatus = data as { status?: string; incomplete_details?: { reason?: string } }
-      const finishReason = streamed?.finishReason ?? (jsonStatus.status === 'incomplete' ? 'length' : jsonStatus.status === 'failed' ? 'error' : jsonStatus.status === 'cancelled' ? 'cancelled' : undefined)
+      const finishReason =
+        streamed?.finishReason ??
+        (jsonStatus.status === 'incomplete'
+          ? 'length'
+          : jsonStatus.status === 'failed'
+            ? 'error'
+            : jsonStatus.status === 'cancelled'
+              ? 'cancelled'
+              : undefined)
       const result = normalizeLLMChatResult(serialized ?? { content: '' })
       const usage = normalizeProviderTokenUsage(data)
       control.check()
@@ -1765,9 +1834,19 @@ export class OpenAIAPICli implements LLMCli {
     }
     if (this.options?.requireSingleTextResponse) {
       const message = data?.choices?.[0]?.message
-      if (data?.choices?.length !== 1 || data.choices[0].finish_reason !== 'stop' || !message ||
-          typeof message.content !== 'string' || !message.content.trim() ||
-          Reflect.ownKeys(message).some(key => !['role', 'content', 'refusal'].includes(String(key)))) throw Error('Single text client refuses tool, media, incomplete or unsupported response frames.')
+      if (
+        data?.choices?.length !== 1 ||
+        data.choices[0].finish_reason !== 'stop' ||
+        !message ||
+        typeof message.content !== 'string' ||
+        !message.content.trim() ||
+        Reflect.ownKeys(message).some(
+          (key) => !['role', 'content', 'refusal'].includes(String(key))
+        )
+      )
+        throw Error(
+          'Single text client refuses tool, media, incomplete or unsupported response frames.'
+        )
     }
     if (usesImagesGenerationEndpoint) {
       const imageResult = extractOpenAIImagesGenerationResult(
@@ -1800,15 +1879,25 @@ export class OpenAIAPICli implements LLMCli {
 
     if (this.options?.requireTextOnlyResponse) {
       const images = data.choices?.[0]?.message?.images
-      const plainParts = Array.isArray(content) && content.every(part => {
-        if (!part || typeof part !== 'object') return false
-        const value = part as { type?: unknown; text?: unknown }
-        return ['text', 'output_text'].includes(String(value.type)) && typeof value.text === 'string' &&
-          Reflect.ownKeys(value).every(key => key === 'type' || key === 'text')
-      })
+      const plainParts =
+        Array.isArray(content) &&
+        content.every((part) => {
+          if (!part || typeof part !== 'object') return false
+          const value = part as { type?: unknown; text?: unknown }
+          return (
+            ['text', 'output_text'].includes(String(value.type)) &&
+            typeof value.text === 'string' &&
+            Reflect.ownKeys(value).every((key) => key === 'type' || key === 'text')
+          )
+        })
       const nativeOnly = content == null && Boolean(data.choices?.[0]?.message?.tool_calls?.length)
-      if ((images !== undefined && (!Array.isArray(images) || images.length > 0)) ||
-          (typeof content !== 'string' && !plainParts && !nativeOnly)) throw Error('Text-only client refuses returned media or non-text content before tool execution.')
+      if (
+        (images !== undefined && (!Array.isArray(images) || images.length > 0)) ||
+        (typeof content !== 'string' && !plainParts && !nativeOnly)
+      )
+        throw Error(
+          'Text-only client refuses returned media or non-text content before tool execution.'
+        )
     }
     const native = params.tools?.length
       ? extractNativeToolResult(data, params.tools, 'chat-completions')
@@ -1818,8 +1907,12 @@ export class OpenAIAPICli implements LLMCli {
     if (native.toolCalls?.length && streamed?.finishReason === 'length')
       throw new Error('Incomplete native tool calls are not executable.')
     if (native.toolCalls?.length) {
-      const text = typeof content === 'string' ? content : this.options?.requireTextOnlyResponse && Array.isArray(content)
-        ? content.map(part => (part as { text: string }).text).join('') : ''
+      const text =
+        typeof content === 'string'
+          ? content
+          : this.options?.requireTextOnlyResponse && Array.isArray(content)
+            ? content.map((part) => (part as { text: string }).text).join('')
+            : ''
       if (!streamed && text) params.onDelta?.({ type: 'text-delta', delta: text })
       return {
         content: text,
@@ -1883,7 +1976,13 @@ export class OpenAIAPICli implements LLMCli {
           ...toolMetadata,
           // Text-parts JSON must preserve the same incomplete status as scalar
           // text, so a complete-looking tool envelope cannot hide truncation.
-          ...(streamed ? { finishReason: streamed.finishReason } : data.choices?.[0]?.finish_reason === 'length' ? { finishReason: 'length' as const } : data.choices?.[0]?.finish_reason === 'content_filter' ? { finishReason: 'error' as const } : {}),
+          ...(streamed
+            ? { finishReason: streamed.finishReason }
+            : data.choices?.[0]?.finish_reason === 'length'
+              ? { finishReason: 'length' as const }
+              : data.choices?.[0]?.finish_reason === 'content_filter'
+                ? { finishReason: 'error' as const }
+                : {}),
           ...(usage ? { usage } : {}),
           ...(upstreamStreamingMetadataRef.current
             ? {
@@ -1930,7 +2029,13 @@ export class OpenAIAPICli implements LLMCli {
     return normalizeLLMChatResult({
       content: content.trim(),
       ...toolMetadata,
-      ...(streamed ? { finishReason: streamed.finishReason } : data.choices?.[0]?.finish_reason === 'length' ? { finishReason: 'length' as const } : data.choices?.[0]?.finish_reason === 'content_filter' ? { finishReason: 'error' as const } : {}),
+      ...(streamed
+        ? { finishReason: streamed.finishReason }
+        : data.choices?.[0]?.finish_reason === 'length'
+          ? { finishReason: 'length' as const }
+          : data.choices?.[0]?.finish_reason === 'content_filter'
+            ? { finishReason: 'error' as const }
+            : {}),
       ...(usage ? { usage } : {}),
       ...(upstreamStreamingMetadataRef.current
         ? {
@@ -2016,7 +2121,11 @@ export class GeminiAPICli implements LLMCli {
           const imageAttachments = msg.attachments.filter((a) => a.type === 'image')
           for (const attachment of imageAttachments) {
             try {
-              const base64 = await convertBoundedChatImageToBase64(attachment.url, control, remainingImageChars)
+              const base64 = await convertBoundedChatImageToBase64(
+                attachment.url,
+                control,
+                remainingImageChars
+              )
               remainingImageChars -= base64.length
               let mimeType = attachment.mimeType || 'image/jpeg'
               if (attachment.url.startsWith('data:')) {
@@ -2103,7 +2212,10 @@ export class GeminiAPICli implements LLMCli {
       }
 
       const data = (await control.json(resp, PROVIDER_JSON_MAX_BYTES)) as {
-        candidates?: Array<{ finishReason?: string; content?: { parts?: Array<{ text?: unknown }> } }>
+        candidates?: Array<{
+          finishReason?: string
+          content?: { parts?: Array<{ text?: unknown }> }
+        }>
       }
       const content = data?.candidates?.[0]?.content?.parts
         ?.map((part: { text?: unknown }) => (typeof part?.text === 'string' ? part.text : ''))
@@ -2115,7 +2227,9 @@ export class GeminiAPICli implements LLMCli {
       const usage = normalizeProviderTokenUsage(data)
       const result = normalizeLLMChatResult({
         content: content.trim(),
-        ...(data.candidates?.[0]?.finishReason === 'MAX_TOKENS' ? { finishReason: 'length' as const } : {}),
+        ...(data.candidates?.[0]?.finishReason === 'MAX_TOKENS'
+          ? { finishReason: 'length' as const }
+          : {}),
         ...(usage ? { usage } : {})
       })
       try {
@@ -2126,7 +2240,12 @@ export class GeminiAPICli implements LLMCli {
       }
       return result
     } catch (error) {
-      if (callbackFailed || error instanceof ImageAttachmentPreparationError || error instanceof ProviderJsonBudgetError) throw error
+      if (
+        callbackFailed ||
+        error instanceof ImageAttachmentPreparationError ||
+        error instanceof ProviderJsonBudgetError
+      )
+        throw error
       if (control.signal.aborted) throw control.signal.reason
       throw buildFetchFailureError('Gemini API', endpoint, error)
     } finally {
@@ -2222,7 +2341,11 @@ export class ClaudeAPICli implements LLMCli {
 
             for (const attachment of imageAttachments) {
               try {
-                const base64 = await convertBoundedChatImageToBase64(attachment.url, control, remainingImageChars)
+                const base64 = await convertBoundedChatImageToBase64(
+                  attachment.url,
+                  control,
+                  remainingImageChars
+                )
                 remainingImageChars -= base64.length
                 let mediaType = attachment.mimeType || 'image/jpeg'
                 if (attachment.url.startsWith('data:')) {
@@ -2332,7 +2455,12 @@ export class ClaudeAPICli implements LLMCli {
       }
       return result
     } catch (error) {
-      if (callbackFailed || error instanceof ImageAttachmentPreparationError || error instanceof ProviderJsonBudgetError) throw error
+      if (
+        callbackFailed ||
+        error instanceof ImageAttachmentPreparationError ||
+        error instanceof ProviderJsonBudgetError
+      )
+        throw error
       if (control.signal.aborted) throw control.signal.reason
       throw buildFetchFailureError('Claude API', endpoint, error)
     } finally {
@@ -2487,7 +2615,11 @@ export class OllamaAPICli implements LLMCli {
             ollamaMsg.images = []
             for (const attachment of imageAttachments) {
               try {
-                const base64 = await convertBoundedChatImageToBase64(attachment.url, control, remainingImageChars)
+                const base64 = await convertBoundedChatImageToBase64(
+                  attachment.url,
+                  control,
+                  remainingImageChars
+                )
                 remainingImageChars -= base64.length
                 ollamaMsg.images.push(base64)
               } catch (err) {
@@ -2552,7 +2684,12 @@ export class OllamaAPICli implements LLMCli {
       }
       return result
     } catch (error) {
-      if (callbackFailed || error instanceof ImageAttachmentPreparationError || error instanceof ProviderJsonBudgetError) throw error
+      if (
+        callbackFailed ||
+        error instanceof ImageAttachmentPreparationError ||
+        error instanceof ProviderJsonBudgetError
+      )
+        throw error
       if (control.signal.aborted) throw control.signal.reason
       throw buildFetchFailureError('Ollama API', endpoint, error)
     } finally {

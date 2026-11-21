@@ -3,11 +3,13 @@ import { describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { MenuItem, ThemeProvider } from '@mui/material'
 import { theme } from '@renderer/theme'
+import zhRenderer from '@shared/locales/zh-CN/renderer.json'
 import ChatComposer from './ChatComposer'
 import { useRef, useState } from 'react'
 import { QAPP_IMAGE_DRAG_MIME } from '@renderer/utils/droppedImageUtils'
 
 const chatImageTranslations: Record<string, string> = {
+  'chat.workbench_prompt': zhRenderer.chat.workbench_prompt,
   'chat.preview_alt_index': 'Preview {{index}}',
   'chat.image_load_failed_label': '{{name}} failed to load',
   'chat.image_unavailable': 'Image unavailable'
@@ -75,15 +77,33 @@ describe('ChatComposer', () => {
     render(
       <ThemeProvider theme={theme}>
         <ChatComposer
-          inputValue="" onInputChange={vi.fn()} onSend={vi.fn()} onUploadFile={upload}
-          pendingAttachments={[]} uploadProgress={{}} onRemoveAttachment={vi.fn()}
-          isLoading={false} onStopGenerating={vi.fn()} disabled={false}
-          composerInputRef={{ current: null }} onPreviewImage={vi.fn()}
+          inputValue=""
+          onInputChange={vi.fn()}
+          onSend={vi.fn()}
+          onUploadFile={upload}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={{ current: null }}
+          onPreviewImage={vi.fn()}
           addMenuSlot={(closeMenu) => [
             null,
             false,
             <MenuItem key="image">Image generation</MenuItem>,
-            [<MenuItem key="preview" onClick={() => { preview(); closeMenu() }}>Local preview</MenuItem>]
+            [
+              <MenuItem
+                key="preview"
+                onClick={() => {
+                  preview()
+                  closeMenu()
+                }}
+              >
+                Local preview
+              </MenuItem>
+            ]
           ]}
         />
       </ThemeProvider>
@@ -107,6 +127,41 @@ describe('ChatComposer', () => {
     fireEvent.click(screen.getByTitle('chat.add_file'))
     expect(await screen.findByRole('menuitem', { name: 'chat.add_file' })).toBeVisible()
     expect(upload).not.toHaveBeenCalled()
+  })
+
+  it('keeps the Agent thread selectors inside the column composer with no add menu', () => {
+    render(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          layout="column"
+          workbench
+          inputValue=""
+          onInputChange={vi.fn()}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={{ current: null }}
+          onPreviewImage={vi.fn()}
+          modelSelectorSlot={
+            <>
+              <button>Model</button>
+              <button>Reasoning</button>
+            </>
+          }
+        />
+      </ThemeProvider>
+    )
+    expect(screen.getByRole('textbox')).toHaveAttribute('placeholder', '输入信息...')
+    const shell = screen.getByTestId('chat-composer-shell')
+    expect(within(shell).getByRole('button', { name: 'Model' })).toBeVisible()
+    expect(within(shell).getByRole('button', { name: 'Reasoning' })).toBeVisible()
+    expect(screen.queryByTestId('chat-composer-add-menu-button')).toBeNull()
+    expect(shell.querySelector('[aria-haspopup="menu"]')).toBeNull()
   })
 
   const createRect = (top: number, height: number): DOMRect =>
@@ -158,19 +213,45 @@ describe('ChatComposer', () => {
   })
 
   it('keeps parent Stop and offers separate explicit /btw submission while busy without widening ordinary sends', () => {
-    const onSend = vi.fn(), onStop = vi.fn()
-    const renderComposer = (text: string, enabled = true) => <ThemeProvider theme={theme}><ChatComposer inputValue={text} inputSyncKey={text} onInputChange={vi.fn()} onSend={onSend} onUploadFile={vi.fn()} pendingAttachments={[]} uploadProgress={{}} onRemoveAttachment={vi.fn()} isLoading sideCommandEnabled={enabled} onStopGenerating={onStop} disabled={false} composerInputRef={{ current: null }} onPreviewImage={vi.fn()} /></ThemeProvider>
+    const onSend = vi.fn(),
+      onStop = vi.fn()
+    const renderComposer = (text: string, enabled = true) => (
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue={text}
+          inputSyncKey={text}
+          onInputChange={vi.fn()}
+          onSend={onSend}
+          onUploadFile={vi.fn()}
+          pendingAttachments={[]}
+          uploadProgress={{}}
+          onRemoveAttachment={vi.fn()}
+          isLoading
+          sideCommandEnabled={enabled}
+          onStopGenerating={onStop}
+          disabled={false}
+          composerInputRef={{ current: null }}
+          onPreviewImage={vi.fn()}
+        />
+      </ThemeProvider>
+    )
     const view = render(renderComposer('/btw question'))
-    fireEvent.click(screen.getByTitle('chat.agent_side.command_send')); expect(onSend).toHaveBeenCalledOnce(); expect(onStop).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByTitle('chat.stop_generating')); expect(onStop).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByTitle('chat.agent_side.command_send'))
+    expect(onSend).toHaveBeenCalledOnce()
+    expect(onStop).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTitle('chat.stop_generating'))
+    expect(onStop).toHaveBeenCalledOnce()
     view.rerender(renderComposer('/skill list'))
-    fireEvent.click(screen.getByTitle('chat.agent_skill_session.command_send')); expect(onSend).toHaveBeenCalledTimes(2)
+    fireEvent.click(screen.getByTitle('chat.agent_skill_session.command_send'))
+    expect(onSend).toHaveBeenCalledTimes(2)
     expect(screen.getByTitle('chat.stop_generating')).toBeInTheDocument()
     view.rerender(renderComposer('/scratchpad'))
-    fireEvent.click(screen.getByTitle('chat.agent_scratchpad.command_send')); expect(onSend).toHaveBeenCalledTimes(3)
+    fireEvent.click(screen.getByTitle('chat.agent_scratchpad.command_send'))
+    expect(onSend).toHaveBeenCalledTimes(3)
     expect(screen.getByTitle('chat.stop_generating')).toBeInTheDocument()
     view.rerender(renderComposer('/pad'))
-    fireEvent.click(screen.getByTitle('chat.agent_scratchpad.command_send')); expect(onSend).toHaveBeenCalledTimes(4)
+    fireEvent.click(screen.getByTitle('chat.agent_scratchpad.command_send'))
+    expect(onSend).toHaveBeenCalledTimes(4)
     view.rerender(renderComposer('ordinary queued text'))
     expect(screen.queryByTitle('chat.agent_side.command_send')).not.toBeInTheDocument()
     view.rerender(renderComposer('/pad', false))
@@ -239,7 +320,9 @@ describe('ChatComposer', () => {
     expect(within(sendGroup).getByTitle('chat.send_message')).toBeInTheDocument()
     const modelSlot = within(sendGroup).getByTestId('chat-composer-model-selector-slot')
     expect(within(modelSlot).getByRole('button', { name: 'model fixture' })).toBeInTheDocument()
-    expect(modelSlot.previousElementSibling).toBe(within(sendGroup).getByTestId('chat-composer-status-slot'))
+    expect(modelSlot.previousElementSibling).toBe(
+      within(sendGroup).getByTestId('chat-composer-status-slot')
+    )
     expect(modelSlot.nextElementSibling).toBe(within(sendGroup).getByTitle('chat.send_message'))
     expect(within(actionBar).getByTestId('skill-slot-content')).toBeInTheDocument()
   })
@@ -952,7 +1035,9 @@ describe('ChatComposer', () => {
             <div style={{ display: 'contents' }}>
               <div style={{ display: 'contents' }}>
                 <ChatComposer
-                  inputValue={Array.from({ length: 80 }, (_, index) => `line ${index + 1}`).join('\n')}
+                  inputValue={Array.from({ length: 80 }, (_, index) => `line ${index + 1}`).join(
+                    '\n'
+                  )}
                   onInputChange={vi.fn()}
                   onSend={vi.fn()}
                   onUploadFile={vi.fn()}
@@ -979,7 +1064,9 @@ describe('ChatComposer', () => {
       try {
         fireEvent(window, new Event('resize'))
         await waitFor(() => {
-          expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({ maxHeight: '192px' })
+          expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({
+            maxHeight: '192px'
+          })
           expect(screen.getByTestId('chat-composer-input')).toHaveStyle({ maxHeight: '256px' })
         })
         fireEvent.click(screen.getByRole('img', { name: 'Preview 1' }))
@@ -1073,7 +1160,9 @@ describe('ChatComposer', () => {
       try {
         fireEvent(window, new Event('resize'))
         await waitFor(() =>
-          expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({ maxHeight: '192px' })
+          expect(screen.getByTestId('chat-composer-attachments')).toHaveStyle({
+            maxHeight: '192px'
+          })
         )
         view.rerender(composer(true))
         await act(async () => {
@@ -1210,15 +1299,36 @@ describe('ChatComposer', () => {
   it('reveals an over-limit hidden image for removal without granting a count exemption', () => {
     const onRemoveAttachment = vi.fn()
     const attachments = [
-      ...Array.from({ length: 50 }, (_, index) => ({ type: 'image' as const, url: `data:image/png;base64,${index}`, fileName: `image-${index}.png` })),
-      { type: 'image' as const, url: 'data:image/png;base64,HIDDEN', fileName: 'canvas-selection.png', hiddenFromChatView: true }
+      ...Array.from({ length: 50 }, (_, index) => ({
+        type: 'image' as const,
+        url: `data:image/png;base64,${index}`,
+        fileName: `image-${index}.png`
+      })),
+      {
+        type: 'image' as const,
+        url: 'data:image/png;base64,HIDDEN',
+        fileName: 'canvas-selection.png',
+        hiddenFromChatView: true
+      }
     ]
-    render(<ThemeProvider theme={theme}><ChatComposer
-      inputValue="fixture" onInputChange={vi.fn()} onSend={vi.fn()} onUploadFile={vi.fn()}
-      pendingAttachments={attachments} uploadProgress={{}} onRemoveAttachment={onRemoveAttachment}
-      isLoading={false} onStopGenerating={vi.fn()} disabled={false}
-      composerInputRef={{ current: null }} onPreviewImage={vi.fn()}
-    /></ThemeProvider>)
+    render(
+      <ThemeProvider theme={theme}>
+        <ChatComposer
+          inputValue="fixture"
+          onInputChange={vi.fn()}
+          onSend={vi.fn()}
+          onUploadFile={vi.fn()}
+          pendingAttachments={attachments}
+          uploadProgress={{}}
+          onRemoveAttachment={onRemoveAttachment}
+          isLoading={false}
+          onStopGenerating={vi.fn()}
+          disabled={false}
+          composerInputRef={{ current: null }}
+          onPreviewImage={vi.fn()}
+        />
+      </ThemeProvider>
+    )
     const tray = screen.getByTestId('chat-composer-attachments')
     expect(within(tray).getByRole('img', { name: 'Preview 51' })).toBeInTheDocument()
     expect(within(tray).getByTitle('canvas-selection.png')).toBeInTheDocument()

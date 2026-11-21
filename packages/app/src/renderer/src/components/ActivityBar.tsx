@@ -123,6 +123,7 @@ const ActivityBar: React.FC = () => {
   return (
     <Box
       component="nav"
+      data-workbench-module="activity"
       aria-label={t('menu.navigation', { defaultValue: 'Main navigation' })}
       sx={(theme) => ({
         width: ACTIVITY_BAR_WIDTH,

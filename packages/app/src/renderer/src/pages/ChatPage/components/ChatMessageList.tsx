@@ -111,6 +111,7 @@ export {
 export type ChatAnchoredTailGroup = { after: number; node: React.ReactNode }
 
 interface ChatMessageListProps {
+  workbench?: boolean
   active?: boolean
   /**
    * Agent column look (flat rows, neutral user bubble, one-line tool rows). The
@@ -836,6 +837,7 @@ function useKeepEndOnGrowth(
 }
 
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
+  workbench: workbenchProp = false,
   active = true,
   columnStyle = false,
   tail,
@@ -872,6 +874,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     [columnStyle, theme]
   )
   const { notifySuccess } = useMessage()
+  // The workbench (Agent column) rows: the column presentation.
+  const workbench = workbenchProp || columnStyle
   const messages = React.useMemo(() => currentSession?.messages ?? [], [currentSession?.messages])
   const hasTail = columnStyle && tail !== undefined && tail !== null && tail !== false
   const tailRef = React.useRef<HTMLDivElement | null>(null)
@@ -1216,7 +1220,20 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
             gap: 2
           }}
         >
-          <Typography variant="h6">{t('chat.welcome_message')}</Typography>
+          {workbench ? (
+            <Box sx={{ px: 2, textAlign: 'center' }}>
+              <Typography variant="subtitle2" color="text.primary">
+                {t('chat.workbench_empty', { defaultValue: 'Start a conversation' })}
+              </Typography>
+              <Typography variant="caption">
+                {t('chat.workbench_hint', {
+                  defaultValue: 'Ask a question, attach a file, or describe an image.'
+                })}
+              </Typography>
+            </Box>
+          ) : (
+            <Typography variant="h6">{t('chat.welcome_message')}</Typography>
+          )}
         </Box>
       )}
       {virtualized && virtualWindow.top > 0 ? (
@@ -1349,8 +1366,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     isLoading && index === messages.length - 1 ? loadingStatus : undefined
                   }
                   workingLineHost={
-                    (hasTail || hasTailEnd) && isLoading && index === messages.length - 1 ? workingLineHost : null
+                    (hasTail || hasTailEnd) && isLoading && index === messages.length - 1
+                      ? workingLineHost
+                      : null
                   }
+                  // The column shows the pending approval card instead of the working line.
+                  workingLineHidden={columnStyle && Boolean(pendingConfirmation)}
                   onPreviewImage={onPreviewImage}
                   onImageContextMenu={onImageContextMenu}
                   onDownloadAttachment={onDownloadAttachment}
@@ -2896,6 +2917,8 @@ const AssistantMessageBubble: React.FC<{
   columnTokens?: AgentColumnTokens
   /** When set, the working line is drawn there (below the transcript tail) instead of inline. */
   workingLineHost?: HTMLElement | null
+  /** No working line at all, e.g. while an approval card waits for the user. */
+  workingLineHidden?: boolean
 }> = ({
   message,
   replyDownloadBaseName,
@@ -2906,6 +2929,7 @@ const AssistantMessageBubble: React.FC<{
   isLoading,
   loadingStatus,
   workingLineHost,
+  workingLineHidden = false,
   onPreviewImage,
   onImageContextMenu,
   onDownloadAttachment,
@@ -2934,11 +2958,19 @@ const AssistantMessageBubble: React.FC<{
   const loadingProgress = formatChatLoadingStatusProgress(loadingStatus)
   const showLoadingStatus = isLoading && Boolean(loadingStatus?.label)
   const renderWorkingLine = (label: string): React.ReactNode => {
+    // Agent column (owner's request): a running image tool shows only in its tool row, and
+    // routine request phases read like Kohaku, "KohakUwUing...", without step or detail.
+    if (workingLineHidden || (columnTokens && loadingStatus?.presentation === 'tool-row-only'))
+      return null
+    const routine =
+      Boolean(columnTokens) &&
+      !retry &&
+      (!loadingStatus?.label || loadingStatus.presentation === 'routine')
     const line = (
       <AssistantLoadingStatus
-        label={label}
-        progress={loadingProgress}
-        detail={loadingDetail}
+        label={routine ? t('chat.agent_processing') : label}
+        progress={routine ? undefined : loadingProgress}
+        detail={routine ? undefined : loadingDetail}
         theme={theme}
         columnTokens={columnTokens}
       />
@@ -3073,6 +3105,20 @@ const AssistantMessageBubble: React.FC<{
             {t('chat.response_interrupted')}
           </Typography>
         )}
+        {!isLoading &&
+          message.responseInterrupted &&
+          Boolean(
+            message.toolHistory?.length || (message.content !== undefined && message.content !== '')
+          ) && (
+            <Typography
+              component="p"
+              variant="caption"
+              color="text.secondary"
+              sx={{ mt: 0.5, mb: 0 }}
+            >
+              {t('chat.response_interrupted')}
+            </Typography>
+          )}
       </Box>
     </Box>
   )
@@ -3094,7 +3140,14 @@ const AssistantLoadingStatus: React.FC<{
       sx={{ padding: '8px 4px', minWidth: 0, color: columnTokens.attention }}
     >
       <Box
-        sx={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, fontSize: 14, lineHeight: 1.2 }}
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          minWidth: 0,
+          fontSize: 14,
+          lineHeight: 1.2
+        }}
       >
         <Box
           aria-hidden="true"

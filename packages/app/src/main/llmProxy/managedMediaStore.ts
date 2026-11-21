@@ -1619,7 +1619,12 @@ export async function resolveManagedMediaReference(
     const handle = await fileSystem.open(absolutePath, fsConstants.O_RDONLY | NOFOLLOW)
     try {
       const opened = await handle.stat()
-      const contentHash = await hashHandle(handle, opened.size)
+      if (!sameFileState(before, opened))
+        throw new ManagedMediaResolutionError(
+          'MANAGED_MEDIA_CORRUPT',
+          'Managed media changed before hashing'
+        )
+      const contentHash = await hashHandle(handle, before.size)
       const after = await handle.stat()
       const current = await fileSystem.lstat(absolutePath)
       if (

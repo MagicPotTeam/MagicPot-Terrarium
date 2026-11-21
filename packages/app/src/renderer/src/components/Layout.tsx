@@ -3,6 +3,7 @@
 import React, { Suspense, useState, useCallback, useRef, useEffect } from 'react'
 import { flushSync } from 'react-dom'
 import { Box } from '@mui/material'
+import './projectWorkbench.css'
 import TitleBar from './TitleBar'
 import ActivityBar from './ActivityBar'
 import MainArea from './MainArea'
@@ -24,7 +25,10 @@ import {
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useExistingConversationLayout } from './useExistingConversationLayout'
 import ExistingConversationOpenStatus from './ExistingConversationOpenStatus'
-import { AGENT_MANAGEMENT_ROUTE_PATH, isAgentManagementRoute } from '../utils/agentManagementRouting'
+import {
+  AGENT_MANAGEMENT_ROUTE_PATH,
+  isAgentManagementRoute
+} from '../utils/agentManagementRouting'
 import {
   isProjectCanvasRoutePath,
   normalizeProjectCanvasRoutePath
@@ -252,6 +256,7 @@ const ResizeHandle: React.FC<ResizeHandleProps> = ({ direction, onMouseDown }) =
   const isH = direction === 'horizontal'
   return (
     <Box
+      data-workbench-sash={direction}
       onMouseDown={onMouseDown}
       sx={(theme) => ({
         [isH ? 'width' : 'height']: LAYOUT_RESIZE_HANDLE_SIZE,
@@ -312,9 +317,15 @@ const Layout: React.FC = () => {
   const bottomPanelMaximized = !managementRoute && bottomPanelMaximizedRequested
   const currentRoute = `${location.pathname}${location.search}${location.hash}`
   const conversationOpenLayout = useExistingConversationLayout({
-    activeTabId, openTabs, rightPanelVisible, bottomPanelVisible: bottomPanelRequested,
-    bottomPanelMaximized: bottomPanelMaximizedRequested, startupRestorePending,
-    route: currentRoute, dispatch, navigate
+    activeTabId,
+    openTabs,
+    rightPanelVisible,
+    bottomPanelVisible: bottomPanelRequested,
+    bottomPanelMaximized: bottomPanelMaximizedRequested,
+    startupRestorePending,
+    route: currentRoute,
+    dispatch,
+    navigate
   })
   const { reconcileRouteTab } = conversationOpenLayout
 
@@ -411,16 +422,20 @@ const Layout: React.FC = () => {
 
       if (isAgentManagementRoute(location.pathname)) {
         if (!openTabs.some((tab) => tab.id === 'tab-agent-management')) {
-          reconcileRouteTab(currentRoute, 'tab-agent-management', () => dispatch(
-            openTab({
-              id: 'tab-agent-management',
-              label: 'Agent management',
-              routePath: AGENT_MANAGEMENT_ROUTE_PATH,
-              closable: true
-            })
-          ))
+          reconcileRouteTab(currentRoute, 'tab-agent-management', () =>
+            dispatch(
+              openTab({
+                id: 'tab-agent-management',
+                label: 'Agent management',
+                routePath: AGENT_MANAGEMENT_ROUTE_PATH,
+                closable: true
+              })
+            )
+          )
         } else if (activeTabId !== 'tab-agent-management') {
-          reconcileRouteTab(currentRoute, 'tab-agent-management', () => dispatch(setActiveTab('tab-agent-management')))
+          reconcileRouteTab(currentRoute, 'tab-agent-management', () =>
+            dispatch(setActiveTab('tab-agent-management'))
+          )
         }
         return
       }
@@ -711,7 +726,10 @@ const Layout: React.FC = () => {
   }, [activeSidePanel, dispatch, isProjectRoute, isProjectTab, projectEntrySidePanelIntent])
 
   const effectSidePanel = isProjectTab && isProjectRoute ? activeSidePanel : null
-  const effectRightPanelVisible = isProjectTab && isProjectRoute && conversationOpenLayout.allowWorkspace ? rightPanelVisible : false
+  const effectRightPanelVisible =
+    isProjectTab && isProjectRoute && conversationOpenLayout.allowWorkspace
+      ? rightPanelVisible
+      : false
   const sidePanelVisible = Boolean(effectSidePanel)
   const mainAreaInsets = resolveMainAreaOverlayInsets({
     sidePanelVisible,
@@ -771,13 +789,25 @@ const Layout: React.FC = () => {
       <MemoizedExistingConversationOpenStatus />
 
       <Box
-        sx={{ display: 'flex', flexDirection: 'row', flex: 1, overflow: 'hidden', minHeight: 0 }}
+        data-project-frame={isProjectRoute && isProjectTab ? '' : undefined}
+        sx={(theme) => ({
+          display: 'flex',
+          flexDirection: 'row',
+          flex: 1,
+          overflow: 'hidden',
+          minHeight: 0,
+          '--workbench-seam': theme.palette.mode === 'dark' ? '#141416' : '#e3e6eb',
+          '--workbench-outline':
+            theme.palette.mode === 'dark' ? 'rgba(255,255,255,.085)' : 'rgba(28,34,48,.14)'
+        })}
       >
         <MemoizedActivityBar />
 
         <Box sx={{ position: 'relative', flex: 1, overflow: 'hidden', minWidth: 0, minHeight: 0 }}>
           <Box
             ref={mainAreaElementRef}
+            data-workbench-module="canvas"
+            data-agent-open={effectRightPanelVisible || undefined}
             sx={{
               position: 'absolute',
               ...mainAreaInsets,
@@ -818,6 +848,7 @@ const Layout: React.FC = () => {
           {bottomPanelVisible && (
             <Box
               ref={bottomPanelElementRef}
+              data-agent-open={effectRightPanelVisible || undefined}
               data-canvas-document-drop-bypass="bottom-panel"
               sx={{
                 position: 'absolute',
@@ -849,6 +880,7 @@ const Layout: React.FC = () => {
           {effectRightPanelVisible && (
             <Box
               ref={rightPanelElementRef}
+              data-workbench-module="agent"
               data-canvas-document-drop-bypass="right-panel"
               sx={(theme) => ({
                 width: rightPanelWidth,

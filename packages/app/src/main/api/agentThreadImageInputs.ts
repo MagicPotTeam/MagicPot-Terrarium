@@ -5,10 +5,11 @@ import { inspectStillRaster } from '../utils/stillRaster'
 
 export const THREAD_IMAGE_INPUT_MAX_BYTES = 20 * 1024 * 1024
 const MAX_ENCODED = Math.ceil(THREAD_IMAGE_INPUT_MAX_BYTES / 3) * 4
+export const THREAD_IMAGE_INPUT_MAX_PIXELS = 64 * 1024 * 1024
 const limits = Object.freeze({
   maxBytes: THREAD_IMAGE_INPUT_MAX_BYTES,
   maxEdge: 16384,
-  maxPixels: 64 * 1024 * 1024
+  maxPixels: THREAD_IMAGE_INPUT_MAX_PIXELS
 })
 const invalid = (): never => {
   throw new Error(
@@ -83,6 +84,12 @@ export function captureThreadRecentImages(
   return images
 }
 
+export function inspectThreadImageInput(bytes: Buffer, declaredMime: string | undefined) {
+  const info = inspectStillRaster(bytes, limits)
+  if ((declaredMime && declaredMime !== info.mimeType) || info.orientation !== 1) return invalid()
+  return info
+}
+
 /** MAIN-owned bytes only. NativeImage is an existing decoder, not a new host or
  * interruptible sandbox. Structural/pixel budgets precede decode; check() discards
  * output after Stop/config/scope revocation but cannot preempt synchronous codecs.
@@ -94,38 +101,46 @@ export async function prepareThreadImageBytes(
   check: () => void
 ): Promise<PreparedThreadImage> {
   check()
-  const info = inspectStillRaster(bytes, limits)
-  // Electron nativeImage documents PNG/JPEG decoding; the local 42.11.16 probe
-  // returns empty for WebP. Reject consistently, rather than add another host or
-  // upload an undecoded format on platforms with a different codec build.
-  if (
-    info.mimeType === 'image/webp' ||
-    (declaredMime && declaredMime !== info.mimeType) ||
-    info.orientation !== 1
-  )
-    return invalid()
+  const info = inspectThreadImageInput(bytes, declaredMime)
   const sourceSha256 = createHash('sha256').update(bytes).digest('hex')
   const sourceSizeBytes = bytes.length
-  const { nativeImage } = await import('electron')
-  check()
-  const decoded = nativeImage.createFromBuffer(bytes)
-  check()
-  const size = decoded.getSize()
-  if (decoded.isEmpty() || size.width !== info.width || size.height !== info.height)
-    return invalid()
-  let width = info.width,
-    height = info.height,
-    mimeType: string = info.mimeType
-  const resized = Math.max(width, height) > 2048
-  if (resized) {
-    const scale = 2048 / Math.max(width, height)
-    width = Math.max(1, Math.round(width * scale))
-    height = Math.max(1, Math.round(height * scale))
-    const output = decoded.resize({ width, height, quality: 'best' })
+  const resized = Math.max(info.width, info.height) > 2048
+  const scale = resized ? 2048 / Math.max(info.width, info.height) : 1
+  const width = Math.max(1, Math.round(info.width * scale))
+  const height = Math.max(1, Math.round(info.height * scale))
+  let mimeType: string = info.mimeType
+  if (info.mimeType === 'image/webp') {
+    // Electron nativeImage cannot reliably verify WebP. Decode bounded local bytes
+    // before upload, preserving original WebP on the wire when no resize is needed.
+    const { default: sharp } = await import('sharp')
     check()
-    const actual = output.getSize()
-    if (output.isEmpty() || actual.width !== width || actual.height !== height) return invalid()
-    bytes = output.toPNG()
+    let image = sharp(bytes, { limitInputPixels: limits.maxPixels, failOn: 'warning', pages: 1 })
+    if (resized) image = image.resize(width, height, { fit: 'fill' })
+    const output = await (resized ? image.png() : image.raw()).toBuffer({ resolveWithObject: true })
+    check()
+    if (output.info.width !== width || output.info.height !== height) return invalid()
+    if (resized) {
+      bytes = output.data
+      mimeType = 'image/png'
+    }
+  } else {
+    const { nativeImage } = await import('electron')
+    check()
+    const decoded = nativeImage.createFromBuffer(bytes)
+    check()
+    const size = decoded.getSize()
+    if (decoded.isEmpty() || size.width !== info.width || size.height !== info.height)
+      return invalid()
+    if (resized) {
+      const output = decoded.resize({ width, height, quality: 'best' })
+      check()
+      const actual = output.getSize()
+      if (output.isEmpty() || actual.width !== width || actual.height !== height) return invalid()
+      bytes = output.toPNG()
+      mimeType = 'image/png'
+    }
+  }
+  if (resized) {
     check()
     const prepared = inspectStillRaster(bytes, { ...limits, maxEdge: 2048, maxPixels: 2048 * 2048 })
     if (
@@ -135,7 +150,6 @@ export async function prepareThreadImageBytes(
       prepared.height !== height
     )
       return invalid()
-    mimeType = 'image/png'
   }
   check()
   return {

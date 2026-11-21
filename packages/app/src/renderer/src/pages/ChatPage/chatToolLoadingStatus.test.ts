@@ -25,7 +25,11 @@ describe('observed tool activity labels', () => {
     ['critic', 'Running a read-only sub-agent'],
     ['fork', 'Running a read-only sub-agent']
   ])('labels %s without inventing numeric progress', (name, label) => {
-    expect(getChatToolLoadingStatus(event(name), t)).toEqual({ label, detail: name })
+    expect(getChatToolLoadingStatus(event(name), t)).toEqual({
+      label,
+      detail: name,
+      ...(name === 'image_gen' ? { presentation: 'tool-row-only' } : {})
+    })
   })
 
   it.each([

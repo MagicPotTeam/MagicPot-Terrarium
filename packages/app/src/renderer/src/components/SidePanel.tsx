@@ -1620,6 +1620,7 @@ const SidePanel: React.FC<SidePanelProps> = ({ width = SIDE_PANEL_DEFAULT_WIDTH,
   const title = isQuickApp ? qt('quickapp.workspace.title') : panel.title
   return (
     <Box
+      data-workbench-module="sidebar"
       sx={(theme) => ({
         width,
         minWidth: width,

@@ -141,7 +141,15 @@ const config = {
   ],
   extraFiles: bundledContentExtraFiles,
   asar: true,
-  asarUnpack: ['**/*.safetensors', '**/*.ckpt', '**/*.pt', '**/*.pth', '**/models/**/*'],
+  asarUnpack: [
+    '**/node_modules/@img/**/*',
+    '**/node_modules/sharp/**/*',
+    '**/*.safetensors',
+    '**/*.ckpt',
+    '**/*.pt',
+    '**/*.pth',
+    '**/models/**/*'
+  ],
   win: {
     icon: `${buildResourcesDir}/icon.png`,
     artifactName: `${releaseArtifactName}-win.\${ext}`,

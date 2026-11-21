@@ -239,11 +239,14 @@ function model(native: boolean, toolArgs: Record<string, unknown> = args) {
   const chat = vi.fn().mockImplementation(async (input) => {
     expect(input.disableAutomaticImageGeneration).toBe(true)
     if (chat.mock.calls.length > 1) {
-      const transcript = JSON.stringify(native ? input.toolTurns : input.messages)
-      expect(transcript).toContain('local-media:')
-      expect(
-        transcript.replace(/data:image\/png;base64,[A-Za-z0-9+/=]+/gu, '[input]')
-      ).not.toContain('base64,')
+      const output = native
+        ? input.toolTurns.at(-1).results.at(-1).output
+        : input.messages.at(-1).content
+      const counts = `image_count=1; edited_images=${toolArgs.num_last_images_to_include ?? 0}`
+      const summary = `Image generation completed. ${counts}${toolArgs.gif ? '; output_format=gif' : ''}.`
+      if (native) expect(output).toBe(summary)
+      else expect(output.split('\n').at(-1)).toBe(summary)
+      expect(output).not.toMatch(/local-media:|base64,|relativePath|user-output/)
       return { content: 'Generated image receipt received.', finishReason: 'stop' }
     }
     const name = 'image_gen'
@@ -650,6 +653,37 @@ it.each([
   }
 )
 
+it.each(['response', 'store'] as const)(
+  'keeps a safe, actionable %s failure after dispatch without releasing retry protection',
+  async (stage) => {
+    const provider = await gifProvider(false)
+    if (stage === 'response')
+      h.generate.mockRejectedValueOnce(
+        Object.assign(new Error('SECRET_PAYLOAD'), {
+          imageFailureStage: 'decode',
+          imageHttpStatus: 200
+        })
+      )
+    else
+      h.generate.mockResolvedValueOnce({
+        content: '',
+        finishReason: 'stop',
+        attachments: [{ type: 'image', mimeType: 'image/png', url: 'data:image/png;base64,QUJD' }]
+      })
+    const pending = provider
+      .callTool('image_gen', args, { route, runId: 'image-diag', toolCallId: 'one' })
+      .catch((e) => e)
+    const permit = await approval()
+    permit.resolve()
+    const error = await pending
+    expect(error).toMatchObject({ code: 'TOOL_EXECUTION_OUTCOME_UNKNOWN', retryBlocked: true })
+    expect(error.message).toContain(stage === 'response' ? 'HTTP 200' : '本地图片库未完成保存')
+    expect(error.message).not.toContain('SECRET_PAYLOAD')
+    expect(error.message).not.toContain('base64')
+    expect(h.generate).toHaveBeenCalledOnce()
+  }
+)
+
 it.each(['fresh', 'replay'] as const)(
   'GIF %s owned output remains a newest input sentinel, never substitutes the older PNG',
   async (kind) => {
@@ -1041,6 +1075,471 @@ const variant = (value: number) => {
   }
 }
 
+it.each([false, true])(
+  'image_gen follow-up %s native=%s strips images but keeps text/files; streamed output survives follow-up failure',
+  async (native) => {
+    const current = sourceImage()
+    const historical = {
+      ...sourceImage(),
+      url: `data:image/png;base64,${Buffer.concat([png(), Buffer.from([0])]).toString('base64')}`
+    }
+    const file = {
+      type: 'file' as const,
+      url: 'file:///fixture/notes.txt',
+      mimeType: 'text/plain',
+      fileName: 'notes.txt'
+    }
+    const editArgs = { ...args, num_last_images_to_include: 1 }
+    const imageHistory = [
+      {
+        sha256: createHash('sha256').update(png()).digest('hex'),
+        mimeType: 'image/png',
+        sizeBytes: png().length
+      }
+    ]
+    const chat = vi.fn().mockImplementation(async (input) => {
+      expect(input.disableAutomaticImageGeneration).toBe(true)
+      expect(Object.hasOwn(input, 'threadImageHistory')).toBe(false)
+      if (chat.mock.calls.length === 1) {
+        expect(input.messages).toEqual([
+          { role: 'assistant', content: 'Earlier picture.' },
+          {
+            role: 'user',
+            content: 'Please edit this picture; keep these notes.',
+            attachments: [current, file]
+          }
+        ])
+        expect(JSON.stringify(input)).not.toContain(historical.url)
+        if (native) {
+          const index = input.tools.findIndex((tool: { name: string }) => tool.name === 'image_gen')
+          expect(index).toBeGreaterThanOrEqual(0)
+          return {
+            content: '',
+            toolCalls: [
+              {
+                id: 'edit-once',
+                name: 'image_gen',
+                wireName: `mp_tool_${index}`,
+                arguments: JSON.stringify(editArgs)
+              }
+            ]
+          }
+        }
+        return JSON.stringify({ toolName: 'image_gen', args: editArgs })
+      }
+      expect(
+        input.messages.map(({ role, content, attachments }) => ({ role, content, attachments }))
+      ).toEqual([
+        { role: 'assistant', content: 'Earlier picture.', attachments: undefined },
+        {
+          role: 'user',
+          content: 'Please edit this picture; keep these notes.',
+          attachments: [file]
+        },
+        ...(native
+          ? []
+          : [
+              {
+                role: 'assistant',
+                content: JSON.stringify({ toolName: 'image_gen', args: editArgs }),
+                attachments: undefined
+              },
+              expect.objectContaining({ role: 'user', attachments: undefined })
+            ])
+      ])
+      expect(JSON.stringify(input.messages)).not.toMatch(
+        /data:image\/(?:png|jpeg|webp);base64,|local-media:/u
+      )
+      expect(JSON.stringify(input.messages)).toContain('notes.txt')
+      expect(JSON.stringify(input.messages)).toContain(
+        'Please edit this picture; keep these notes.'
+      )
+      expect(Object.hasOwn(input, 'threadImageHistory')).toBe(false)
+      throw new Error('fixture follow-up provider failure')
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: native } as never)
+    const events = vi.fn<(event: LLMChatStreamResp) => void>()
+    const pending = start('chatStream', events, {
+      imageHistoryPolicy: 'all',
+      threadImageHistory: imageHistory,
+      messages: [
+        { role: 'assistant', content: 'Earlier picture.', attachments: [historical] },
+        {
+          role: 'user',
+          content: 'Please edit this picture; keep these notes.',
+          attachments: [current, file]
+        }
+      ]
+    })
+    const permit = await approval()
+    expect(h.edit).not.toHaveBeenCalled()
+    permit.resolve()
+    const outcome = await pending
+    expect(outcome.ok).toBe(true) // Streaming reports terminal failures as an error delta.
+    expect(chat).toHaveBeenCalledTimes(2)
+    expect(h.edit).toHaveBeenCalledOnce()
+    expect(h.generate).not.toHaveBeenCalled()
+    const streamEvents = events.mock.calls.map(([event]) => event)
+    const published = streamEvents.filter((event) => event.type === 'attachment')
+    expect(published).toHaveLength(1)
+    expect(published[0].attachment?.url).toMatch(/^local-media:/u)
+    expect(streamEvents.filter((event) => event.type === 'error')).toHaveLength(1)
+    expect(streamEvents.some((event) => event.type === 'done')).toBe(true)
+    expect(streamEvents.find((event) => event.type === 'done')?.finishReason).toBe('error')
+    const actions = await results()
+    expect(actions).toHaveLength(1)
+    expect(actions[0]!.payload).toMatchObject({ ok: true, toolName: 'image_gen' })
+    const savedReceipt = JSON.parse(actions[0]!.payload.content!)
+    expect(savedReceipt).toMatchObject({ completed: true, image_count: 1, edited_images: 1 })
+    expect(getAssistantTerminalPolicyRuntime().listPendingTerminalApprovals()).toEqual([])
+  }
+)
+
+// The real runtime, desktop read callback and journal remain in the path. Only
+// the model, image service and Electron document are fixtures.
+it.each(['chat', 'chatStream'] as const)(
+  'oversized desktop read: %s retains prose and the previous managed image, but not the remaining batch',
+  async (method) => {
+    const file = path.join(h.data, 'oversized-fixture.png')
+    await fs.writeFile(file, Buffer.alloc(4 * 1024 * 1024))
+    const chat = vi.fn().mockImplementation(async (input) => {
+      const call = (name: string, toolArgs: Record<string, unknown>, id: string) => {
+        const index = input.tools.findIndex((tool: { name: string }) => tool.name === name)
+        expect(index).toBeGreaterThanOrEqual(0)
+        return { id, name, wireName: `mp_tool_${index}`, arguments: JSON.stringify(toolArgs) }
+      }
+      if (chat.mock.calls.length === 1)
+        return { content: '', toolCalls: [call('image_gen', args, 'image')] }
+      const content = 'Checking the saved file.'
+      input.onDelta({ type: 'text-delta', delta: content })
+      return {
+        content,
+        toolCalls: [
+          call('files.read', { path: file }, 'read'),
+          call('image_gen', args, 'must-not-run')
+        ]
+      }
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: true } as never)
+    const events = vi.fn<(event: LLMChatStreamResp) => void>()
+    const pending = start(method, events, {
+      messages: [
+        {
+          role: 'user',
+          content:
+            method === 'chat'
+              ? '请生成图片并检查文件。'
+              : 'Generate a picture and inspect the file.'
+        }
+      ]
+    })
+    ;(await approval()).resolve()
+    const outcome = await pending
+    if (!outcome.ok) throw outcome.error
+    const response =
+      method === 'chat'
+        ? (outcome.value as LLMChatResp)
+        : events.mock.calls.map(([e]) => e).findLast((e) => e.type === 'done')
+    expect(response?.finishReason).toBe('stop')
+    expect(response?.content).toMatch(/^Checking the saved file\./u)
+    expect(response?.content).toContain(method === 'chat' ? '未能检查' : 'could not inspect')
+    expect(response?.content).not.toContain(file)
+    expect(response?.attachments).toHaveLength(1)
+    expect(response?.attachments?.[0].url).toMatch(/^local-media:/u)
+    expect(response?.metadata?.toolHistory).toMatchObject([
+      { toolName: 'image_gen', status: 'completed' },
+      { toolName: 'files.read', status: 'failed' }
+    ])
+    expect((await results()).map((a) => a!.payload)).toMatchObject([
+      { toolName: 'image_gen', ok: true },
+      { toolName: 'files.read', ok: false, error: { code: 'FILE_TOO_LARGE' } }
+    ])
+    expect(chat).toHaveBeenCalledTimes(2)
+    expect(h.generate).toHaveBeenCalledOnce()
+    expect(h.fetch).not.toHaveBeenCalled()
+    if (method === 'chatStream') {
+      expect(events.mock.calls.filter(([e]) => e.type === 'attachment')).toHaveLength(1)
+      expect(
+        events.mock.calls
+          .filter(([e]) => e.type === 'text-delta')
+          .map(([e]) => e.delta)
+          .join('')
+      ).toBe(response?.content)
+    }
+  }
+)
+
+it.each([
+  'path denial',
+  'cancel after host size failure',
+  'document revoked',
+  'same-code impostor'
+] as const)('oversized desktop read: %s is not converted to a completed reply', async (mode) => {
+  const file =
+    mode === 'path denial'
+      ? path.join(h.data, 'sub') + '/../../../forbidden.png'
+      : path.join(h.data, 'big-fixture.png')
+  if (mode !== 'path denial') await fs.writeFile(file, Buffer.alloc(4 * 1024 * 1024))
+  const abort = new AbortController()
+  if (mode === 'cancel after host size failure' || mode === 'document revoked') {
+    // Deliver Stop or navigation exactly after the failed result is journalled and before
+    // the outer catch sees the same exception: cancellation must still win.
+    const call = h.runtime!.callTool.bind(h.runtime!)
+    vi.spyOn(h.runtime!, 'callTool').mockImplementation(async (...args) => {
+      try {
+        return await call(...args)
+      } catch (error) {
+        if (mode === 'document revoked') sender.emit('did-start-navigation')
+        else abort.abort(new Error('fixture stopped'))
+        throw error
+      }
+    })
+  } else if (mode === 'same-code impostor') {
+    const { AgentLocalFileError } = await import('@shared/api/svcAgentLocalFiles')
+    vi.spyOn(h.runtime!, 'callTool').mockRejectedValue(new AgentLocalFileError('FILE_TOO_LARGE'))
+  }
+  const chat = vi
+    .fn()
+    .mockResolvedValue(JSON.stringify({ toolName: 'files.read', args: { path: file } }))
+  vi.mocked(cliFromProfile).mockReturnValue({ chat, supportsNativeTools: false } as never)
+  const request = service.chat(
+    {
+      ...scope,
+      profileId: 'agent-profile',
+      messages: [{ role: 'user', content: 'Inspect file.' }]
+    },
+    { ...invocation('chat'), signal: abort.signal }
+  )
+  if (mode === 'cancel after host size failure')
+    await expect(request).rejects.toThrow('fixture stopped')
+  else await expect(request).rejects.toThrow()
+  if (mode !== 'same-code impostor')
+    expect((await results()).map((a) => a!.payload)).toMatchObject([
+      {
+        toolName: 'files.read',
+        ok: false,
+        error: { code: mode === 'path denial' ? 'PATH_DENIED' : 'FILE_TOO_LARGE' }
+      }
+    ])
+  expect(chat).toHaveBeenCalledOnce()
+  expect(h.generate).not.toHaveBeenCalled()
+  expect(h.fetch).not.toHaveBeenCalled()
+})
+
+const historyTuple = () => ({
+  sha256: createHash('sha256').update(png()).digest('hex'),
+  mimeType: 'image/png',
+  sizeBytes: png().length
+})
+const historyCall = { route, runId: 'history-test', toolCallId: 'image' }
+async function historyProvider(
+  threadImageHistory: LLMChatReq['threadImageHistory'],
+  messages: LLMChatReq['messages'] = [],
+  conversationId = scope.conversationId,
+  directStillGeneration = true
+) {
+  const { createAgentThreadImageTools } = await import('./agentThreadImageTools')
+  return createAgentThreadImageTools({
+    route,
+    conversationId,
+    messages,
+    threadImageHistory,
+    signal: new AbortController().signal,
+    generator: {
+      directStillGeneration,
+      approval: {
+        backend: 'codex-json-api-key',
+        endpoint: 'https://image.fixture/codex',
+        profileId: 'agent-profile'
+      },
+      assertCurrent: h.current,
+      generate: h.generate,
+      edit: h.edit
+    },
+    assertInvocation: () => {},
+    assertLive: () => {}
+  })
+}
+
+it('reference-only edit asks for upload approval, then uses same-run, current, then scoped history; no eager reads on generate', async () => {
+  const store = await import('../llmProxy/managedMediaStore')
+  const read = vi.spyOn(store, 'readManagedMediaBytes')
+  const original = await historyProvider([])
+  await original.callTool('image_gen', args, historyCall)
+  const current = variant(2),
+    sameRun = variant(3)
+  const history = [historyTuple()]
+  const next = await historyProvider(history, [
+    { role: 'user', content: '', attachments: [current] }
+  ])
+  history[0].sha256 = '0'.repeat(64) // Snapshot binding, not mutable provider/request data.
+  h.generate.mockResolvedValueOnce({ ...imageResult(), attachments: [sameRun] })
+  const result = await next.callTool('image_gen', args, { ...historyCall, toolCallId: 'generate' })
+  await next.acceptCompletedResult(result)
+  expect(read).not.toHaveBeenCalled()
+  const edit = next.callTool(
+    'image_gen',
+    { ...args, num_last_images_to_include: 3 },
+    { ...historyCall, toolCallId: 'edit' }
+  )
+  // Uploading images always waits for the formal approval, even on a direct backend.
+  const permit = await approval()
+  expect(h.edit).not.toHaveBeenCalled()
+  permit.resolve()
+  await edit
+  expect(read).toHaveBeenCalledTimes(2)
+  expect(h.edit).toHaveBeenCalledExactlyOnceWith(
+    args.prompt,
+    [sameRun.url, current.url, sourceImage().url],
+    {
+      transparentBackground: true,
+      signal: expect.any(AbortSignal)
+    }
+  )
+})
+
+it('reference-only history preserves upload approval for a non-direct backend', async () => {
+  await (await historyProvider([])).callTool('image_gen', args, historyCall)
+  const provider = await historyProvider([historyTuple()], [], scope.conversationId, false)
+  const pending = provider.callTool(
+    'image_gen',
+    { ...args, num_last_images_to_include: 1 },
+    historyCall
+  )
+  const permit = await approval()
+  expect(h.edit).not.toHaveBeenCalled()
+  permit.resolve(false)
+  await expect(pending).rejects.toThrow()
+  expect(h.edit).not.toHaveBeenCalled()
+})
+
+it('reference-only edit of latest attachment asks for approval and ignores unavailable history without disk reads', async () => {
+  const store = await import('../llmProxy/managedMediaStore')
+  const read = vi.spyOn(store, 'readManagedMediaBytes')
+  const current = variant(1)
+  const provider = await historyProvider(
+    [null],
+    [{ role: 'user', content: '', attachments: [current] }]
+  )
+  const edit = provider.callTool(
+    'image_gen',
+    { ...args, num_last_images_to_include: 1 },
+    historyCall
+  )
+  ;(await approval()).resolve()
+  await edit
+  expect(read).not.toHaveBeenCalled()
+  expect(h.edit).toHaveBeenCalledExactlyOnceWith(args.prompt, [current.url], expect.anything())
+})
+
+it.each([
+  'null',
+  'absent file',
+  'wrong size',
+  'wrong MIME',
+  'foreign scope',
+  'forged path',
+  'oversized',
+  'bad envelope'
+] as const)(
+  'reference-only edit refuses %s without using older references or inline history',
+  async (mode) => {
+    await (await historyProvider([])).callTool('image_gen', args, historyCall)
+    const valid = historyTuple()
+    const first =
+      mode === 'null'
+        ? null
+        : mode === 'absent file'
+          ? { ...valid, sha256: '0'.repeat(64) }
+          : mode === 'wrong size'
+            ? { ...valid, sizeBytes: valid.sizeBytes + 1 }
+            : mode === 'wrong MIME'
+              ? { ...valid, mimeType: 'image/webp' }
+              : mode === 'forged path'
+                ? { ...valid, relativePath: 'user-output/foreign/file.png' }
+                : valid
+    const entries =
+      mode === 'oversized'
+        ? Array(6).fill(valid)
+        : mode === 'bad envelope'
+          ? { 0: valid, length: 1 }
+          : [first, valid]
+    const provider = await historyProvider(
+      entries as LLMChatReq['threadImageHistory'],
+      [
+        { role: 'assistant', content: '', attachments: [sourceImage()] },
+        { role: 'user', content: 'Edit.' }
+      ],
+      mode === 'foreign scope' ? 'sibling' : scope.conversationId
+    )
+    await expect(
+      provider.callTool('image_gen', { ...args, num_last_images_to_include: 1 }, historyCall)
+    ).rejects.toThrow(/attach/i)
+    expect(h.edit).not.toHaveBeenCalled()
+    expect(h.decode).not.toHaveBeenCalled()
+    expect(getAssistantTerminalPolicyRuntime().listPendingTerminalApprovals()).toEqual([])
+  }
+)
+
+it.each(['another conversation', 'mixed with an older upload'] as const)(
+  'does not extend direct image continuation to %s',
+  async (boundary) => {
+    const { createAgentThreadImageTools } = await import('./agentThreadImageTools')
+    const make = (id: string, messages: import('@shared/llm').ChatMessage[]) =>
+      createAgentThreadImageTools({
+        route,
+        conversationId: id,
+        messages,
+        signal: new AbortController().signal,
+        generator: {
+          directStillGeneration: true,
+          approval: {
+            backend: 'codex-json-api-key',
+            endpoint: 'https://image.fixture/codex',
+            profileId: 'agent-profile'
+          },
+          assertCurrent: h.current,
+          generate: h.generate,
+          edit: h.edit
+        },
+        assertInvocation: () => {},
+        assertLive: () => {}
+      })
+    const original = make(scope.conversationId, [])
+    const result = await original.callTool('image_gen', args, {
+      route,
+      runId: 'first',
+      toolCallId: 'image'
+    })
+    await original.acceptCompletedResult(result)
+    const [publication] = original.completedAttachments()
+    const second = make(boundary === 'another conversation' ? 'sibling' : scope.conversationId, [
+      { role: 'user', content: 'An older upload.', attachments: [variant(7)] },
+      {
+        role: 'assistant',
+        content: 'Done.',
+        attachments: [{ ...sourceImage(), media: publication.media }]
+      },
+      { role: 'user', content: 'Edit.' }
+    ])
+    const pending = second
+      .callTool(
+        'image_gen',
+        { ...args, num_last_images_to_include: boundary === 'another conversation' ? 1 : 2 },
+        { route, runId: 'next', toolCallId: 'edit' }
+      )
+      .then(
+        () => true,
+        () => false
+      )
+    const permit = await approval()
+    expect(h.edit).not.toHaveBeenCalled()
+    permit.resolve(false)
+    expect(await pending).toBe(false)
+    expect(h.edit).not.toHaveBeenCalled()
+  }
+)
+
 it.each(['current', 'legacy'] as const)(
   'repeated acceptance of one %s durable result does not invent another recent image',
   async (format) => {
@@ -1269,6 +1768,12 @@ it.each(modes)(
     const action = actions[0]!
     expect(action.payload).toMatchObject({ ok: true, toolName: 'image_gen' })
     const receipt = JSON.parse(action.payload.content!)
+    expect(response?.metadata?.toolHistory).toEqual([
+      expect.objectContaining({
+        content: action.payload.content,
+        metadata: expect.objectContaining({ source: 'agent-thread-image-gen' })
+      })
+    ])
     expect(receipt).toMatchObject({ image_count: 1, edited_images: 0, completed: true })
     expect(JSON.stringify(receipt)).not.toContain('base64,')
     await expect(
@@ -1681,5 +2186,229 @@ it.each(
     expect((settled[0].metadata!.agentAction as ToolResultAction).payload.ok).toBe(true)
     await reopened.flush()
     expect(h.fetch).not.toHaveBeenCalled()
+  }
+)
+
+it.each(['chat', 'chatStream'] as const)(
+  'reviews the previous generated image without reading it as text (%s)',
+  async (method) => {
+    // Only synthetic generation and approval, never a provider or the user's output.
+    model(true)
+    const generated = start('chat', vi.fn())
+    ;(await approval()).resolve()
+    const first = await generated
+    if (!first.ok) throw first.error
+    const published = (first.value as LLMChatResp).attachments![0]
+    const { sha256, mimeType, sizeBytes } = published.media!
+    if (!sha256 || !mimeType || !sizeBytes)
+      throw new Error('expected a complete generated-media reference')
+    const prompt = '你能自己找出问题吗'
+    const chat = vi.fn(async (input: import('@shared/llm').LLMChatParams) => {
+      expect(input.messages).toEqual([
+        { role: 'user', content: prompt, attachments: [expect.objectContaining({ type: 'image' })] }
+      ])
+      const [preview] = input.messages[0].attachments!
+      expect(preview).toEqual({
+        type: 'image',
+        mimeType: 'image/png',
+        sizeBytes: expect.any(Number),
+        url: expect.stringMatching(/^data:image\/png;base64,/)
+      })
+      expect(preview.sizeBytes).toBeLessThanOrEqual(1536 * 1024)
+      expect(JSON.stringify(input)).not.toContain(published.url)
+      expect(input).toMatchObject({
+        readOnlyImageReview: true,
+        disableProviderTools: true,
+        disableAutomaticImageGeneration: true,
+        imageGenerationOptions: { enabled: false },
+        retryCapacity: false
+      })
+      for (const key of [
+        'tools',
+        'toolTurns',
+        'sessionUrl',
+        'threadImageReview',
+        'threadImageHistory'
+      ])
+        expect(input).not.toHaveProperty(key)
+      return { content: 'Visible detail in the upper right.', finishReason: 'stop' as const }
+    })
+    vi.mocked(cliFromProfile).mockReturnValue({
+      chat,
+      supportsToolFreeImageReview: true,
+      toolFreeImageReviewEndpoint: 'https://text.fixture/v1'
+    })
+    const tool = vi.spyOn(h.runtime!, 'callTool')
+    const events = vi.fn<(event: LLMChatStreamResp) => void>()
+    const outcome = await start(method, events, {
+      threadImageReview: 'last-output',
+      threadImageHistory: [{ sha256, mimeType, sizeBytes }],
+      sessionUrl: 'unused-provider-continuation',
+      messages: [
+        { role: 'assistant', content: 'Earlier output.', attachments: [published] },
+        { role: 'user', content: prompt }
+      ]
+    })
+    if (!outcome.ok) throw outcome.error
+    const reply =
+      method === 'chat'
+        ? outcome.value
+        : events.mock.calls.map(([event]) => event).find((e) => e.type === 'done')
+    expect(reply).toMatchObject({
+      content: 'Visible detail in the upper right.',
+      finishReason: 'stop'
+    })
+    expect(chat).toHaveBeenCalledOnce()
+    expect(tool).not.toHaveBeenCalled()
+    expect(h.generate).toHaveBeenCalledOnce()
+    expect(h.edit).not.toHaveBeenCalled()
+    expect(h.fetch).not.toHaveBeenCalled()
+    expect(await results()).toHaveLength(1)
+  }
+)
+
+it.each(['chat', 'chatStream'] as const)(
+  'does not interrupt or replace a missing review image with a tools request (%s)',
+  async (method) => {
+    const chat = vi.fn()
+    vi.mocked(cliFromProfile).mockReturnValue({
+      chat,
+      supportsToolFreeImageReview: true,
+      toolFreeImageReviewEndpoint: 'https://text.fixture/v1'
+    })
+    const tool = vi.spyOn(h.runtime!, 'callTool')
+    const events = vi.fn<(event: LLMChatStreamResp) => void>()
+    const outcome = await start(method, events, {
+      threadImageReview: 'last-output',
+      threadImageHistory: [null, historyTuple()],
+      messages: [{ role: 'user', content: '你能自己找出问题吗' }]
+    })
+    if (!outcome.ok) throw outcome.error
+    const reply =
+      method === 'chat'
+        ? outcome.value
+        : events.mock.calls.map(([event]) => event).find((e) => e.type === 'done')
+    expect(reply).toMatchObject({
+      finishReason: 'stop',
+      content: expect.stringContaining('不能判断')
+    })
+    expect(events.mock.calls.some(([e]) => e.type === 'error')).toBe(false)
+    expect(tool).not.toHaveBeenCalled()
+    expect(chat).not.toHaveBeenCalled()
+    expect(h.fetch).not.toHaveBeenCalled()
+  }
+)
+
+it.each(['chat-completions', 'responses'] as const)(
+  'serializes only the newest preview on one selected %s POST',
+  async (mode) => {
+    const { default: sharp } = await import('sharp')
+    const { threadImageOutputScope } = await import('./agentThreadImageReview')
+    const { getChatMediaDir, getChatMediaNamespaceDir } = await import('../llmProxy/chatMediaDir')
+    const { importManagedMedia } = await import('../llmProxy/managedMediaStore')
+    const outputDir = getChatMediaNamespaceDir(
+      'user-output',
+      threadImageOutputScope(route, scope.conversationId)
+    )
+    const newest = await sharp({
+      create: {
+        width: 1600,
+        height: 800,
+        channels: 4,
+        background: { r: 77, g: 22, b: 101, alpha: 1 }
+      }
+    })
+      .png()
+      .toBuffer()
+    async function publish(bytes: Buffer) {
+      await importManagedMedia(
+        outputDir,
+        {
+          bytes,
+          mimeType: 'image/png',
+          originalFileName: 'synthetic.png',
+          provenance: { source: 'agent-thread-image-gen', conversationId: scope.conversationId }
+        },
+        { authorizedRoot: getChatMediaDir() }
+      )
+      return {
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        mimeType: 'image/png',
+        sizeBytes: bytes.length
+      }
+    }
+    const older = await publish(png()),
+      latest = await publish(newest)
+    const profile = getConfig().llm_config.api_profiles[0]
+    profile.api_mode = mode
+    profile.base_url =
+      mode === 'responses'
+        ? 'https://text.fixture/chosen/v1'
+        : 'https://text.fixture/chosen/chat/completions'
+    const endpoint = mode === 'responses' ? `${profile.base_url}/responses` : profile.base_url
+    const actual = await vi.importActual<typeof import('@shared/llm')>('@shared/llm')
+    vi.mocked(cliFromProfile).mockImplementation(actual.cliFromProfile)
+    const prompt = '你能自己找出问题吗'
+    const reply = 'A violet rectangle is visible.'
+    h.fetch.mockImplementation(async (url: string, init: RequestInit) => {
+      expect(url).toBe(endpoint)
+      expect(init).toMatchObject({ method: 'POST', redirect: 'error', credentials: 'omit' })
+      const body = JSON.parse(String(init.body))
+      expect(body.model).toBe(profile.model_name)
+      expect(body).not.toHaveProperty('tools')
+      expect(body).not.toHaveProperty('previous_response_id')
+      expect(JSON.stringify(body)).not.toMatch(
+        /SECRET_HISTORY|SECRET_CONTINUATION|threadImageReview|threadImageHistory|user-output|local-media:/u
+      )
+      if (mode === 'responses') expect(body.input).toHaveLength(1)
+      else expect(body.messages.map((m: { role: string }) => m.role)).toEqual(['system', 'user'])
+      const user = mode === 'responses' ? body.input[0] : body.messages[1]
+      expect(user.role).toBe('user')
+      expect(user.content).toHaveLength(2)
+      const [text, image] = user.content
+      expect(text.text).toBe(prompt)
+      const dataUrl: string = mode === 'responses' ? image.image_url : image.image_url.url
+      expect(dataUrl).toMatch(/^data:image\/png;base64,/u)
+      const preview = Buffer.from(dataUrl.split(',')[1], 'base64')
+      expect(preview.length).toBeLessThanOrEqual(1536 * 1024)
+      expect(await sharp(preview).metadata()).toMatchObject({
+        width: 1024,
+        height: 512,
+        format: 'png'
+      })
+      expect(
+        await sharp(preview).extract({ left: 500, top: 260, width: 1, height: 1 }).raw().toBuffer()
+      ).toEqual(Buffer.from([77, 22, 101, 255]))
+      return Response.json(
+        mode === 'responses'
+          ? {
+              status: 'completed',
+              output: [
+                {
+                  type: 'message',
+                  role: 'assistant',
+                  content: [{ type: 'output_text', text: reply }]
+                }
+              ]
+            }
+          : { choices: [{ message: { role: 'assistant', content: reply }, finish_reason: 'stop' }] }
+      )
+    })
+    const tool = vi.spyOn(h.runtime!, 'callTool')
+    const out = await start('chat', vi.fn(), {
+      threadImageReview: 'last-output',
+      threadImageHistory: [latest, older],
+      sessionUrl: 'SECRET_CONTINUATION',
+      messages: [
+        { role: 'assistant', content: 'SECRET_HISTORY' },
+        { role: 'user', content: prompt }
+      ]
+    })
+    if (!out.ok) throw out.error
+    expect(out.value).toMatchObject({ content: reply, finishReason: 'stop' })
+    expect(h.fetch).toHaveBeenCalledOnce()
+    expect(tool).not.toHaveBeenCalled()
+    expect(h.generate).not.toHaveBeenCalled()
+    expect(h.edit).not.toHaveBeenCalled()
   }
 )

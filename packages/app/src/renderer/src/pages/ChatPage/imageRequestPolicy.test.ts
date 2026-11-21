@@ -2,6 +2,32 @@ import { describe, expect, it } from 'vitest'
 import { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 describe('resolveChatPageRequestExecutionImagePolicy', () => {
+  it.each([
+    {
+      supportsSessionContinuation: false,
+      hasUsableSessionContinuation: false,
+      shouldResetContinuation: false
+    },
+    {
+      supportsSessionContinuation: true,
+      hasUsableSessionContinuation: true,
+      shouldResetContinuation: true
+    }
+  ])(
+    'ordinary canvas image-tool turns stay current-only even without reusable continuation: %j',
+    (options) => {
+      expect(
+        resolveChatPageRequestExecutionImagePolicy({
+          ...options,
+          currentTurnImagesOnly: true,
+          isImageGenerationRequest: true
+        })
+      ).toEqual({
+        preliminaryImageHistoryPolicy: 'latest-user-turn',
+        imageHistoryPolicy: 'latest-user-turn'
+      })
+    }
+  )
   it('replays all image history when the provider does not support session continuation', () => {
     expect(
       resolveChatPageRequestExecutionImagePolicy({

@@ -1148,6 +1148,7 @@ const BottomPanel: React.FC<BottomPanelProps> = ({ height = BOTTOM_PANEL_DEFAULT
 
   return (
     <Box
+      data-workbench-module="terminal"
       sx={(theme) => ({
         height,
         minHeight: height,
@@ -1160,6 +1161,7 @@ const BottomPanel: React.FC<BottomPanelProps> = ({ height = BOTTOM_PANEL_DEFAULT
       })}
     >
       <Box
+        data-workbench-toolbar="terminal"
         sx={{
           display: 'flex',
           alignItems: 'center',

@@ -3,6 +3,8 @@ import type { LLMRetryStatus } from '@shared/llm/modelCapacityRetry'
 export type ChatLoadingStatus = {
   retry?: LLMRetryStatus
   label: string
+  /** Routine request phases stay in runtime state, not in the Agent transcript. */
+  presentation?: 'routine' | 'tool-row-only'
   /** Sanitized name for a call last observed running, with no terminal event observed for it. */
   observedTool?: string
   detail?: string

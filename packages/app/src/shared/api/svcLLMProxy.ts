@@ -1,13 +1,64 @@
-import type { AgentTeamMessageClaim, AgentTeamMessageIntent, AgentTeamMessageQueueScope } from './agentTeamMessage'
-import type { AgentThreadNotes, AgentArchiveQuery, ResolveAgentArchiveQueryReq } from './agentThreadMemory'
-import type { AgentGoalScope, AgentGoalScopeReq, AgentGoalShareReq, AgentGoalShare, AgentGoalMutationReq, AgentGoalMutationResult, AgentGoalView } from './agentThreadGoal'
-import type { AgentSkillScope, AgentSkillScopeReq, AgentSkillPreferenceReq, AgentSkillSessionList, AgentSkillPreferenceResult, AgentSkillShowReq, AgentSkillUserDetail } from './agentThreadSkillSession'
-import type { AgentHtmlApp, AgentHtmlReq, AgentHtmlStorageStatus, AgentHtmlSaved, AgentHtmlSaveReq, AgentHtmlSavedReq, AgentHtmlRestoreReq, AgentHtmlScope, AgentHtmlScopeReq } from './agentThreadHtml'
-import type { AgentSideStartReq, AgentSideContinueReq, AgentSideReq, AgentSideMutationReq, AgentSideSummary, AgentSideOpen } from './agentThreadSide'
-import type { AgentProcessJob, AgentProcessJobReq, AgentProcessReadReq, AgentProcessReadResult } from './agentThreadProcessJob'
+import type {
+  AgentTeamMessageClaim,
+  AgentTeamMessageIntent,
+  AgentTeamMessageQueueScope
+} from './agentTeamMessage'
+import type {
+  AgentThreadNotes,
+  AgentArchiveQuery,
+  ResolveAgentArchiveQueryReq
+} from './agentThreadMemory'
+import type {
+  AgentGoalScope,
+  AgentGoalScopeReq,
+  AgentGoalShareReq,
+  AgentGoalShare,
+  AgentGoalMutationReq,
+  AgentGoalMutationResult,
+  AgentGoalView
+} from './agentThreadGoal'
+import type {
+  AgentSkillScope,
+  AgentSkillScopeReq,
+  AgentSkillPreferenceReq,
+  AgentSkillSessionList,
+  AgentSkillPreferenceResult,
+  AgentSkillShowReq,
+  AgentSkillUserDetail
+} from './agentThreadSkillSession'
+import type {
+  AgentHtmlApp,
+  AgentHtmlReq,
+  AgentHtmlStorageStatus,
+  AgentHtmlSaved,
+  AgentHtmlSaveReq,
+  AgentHtmlSavedReq,
+  AgentHtmlRestoreReq,
+  AgentHtmlScope,
+  AgentHtmlScopeReq
+} from './agentThreadHtml'
+import type {
+  AgentSideStartReq,
+  AgentSideContinueReq,
+  AgentSideReq,
+  AgentSideMutationReq,
+  AgentSideSummary,
+  AgentSideOpen
+} from './agentThreadSide'
+import type {
+  AgentProcessJob,
+  AgentProcessJobReq,
+  AgentProcessReadReq,
+  AgentProcessReadResult
+} from './agentThreadProcessJob'
 import type { AgentThreadJob, AgentThreadJobReq, AgentThreadJobReadReq } from './agentThreadJob'
+import type { ThreadImageHistoryEntry } from '../llm/imageHistory'
 import type { LLMRetryStatus } from '../llm/modelCapacityRetry'
-import type { AgentThreadInteraction, AgentThreadInteractionScope, ResolveAgentThreadInteractionReq } from './agentThreadInteraction'
+import type {
+  AgentThreadInteraction,
+  AgentThreadInteractionScope,
+  ResolveAgentThreadInteractionReq
+} from './agentThreadInteraction'
 import type { ManagedFirstRunPaneScopeReq } from './agentThreadManagedFirstRun'
 // LLM 代理服务 API 定义
 // 用于 AIEngine 实例之间的 LLM 请求转发
@@ -90,6 +141,8 @@ export type ChatMessage = {
   /** 生成此消息的模型名称（仅 assistant 消息，用于 UI 显示） */
   preferredDownloadBaseName?: string
   modelName?: string
+  /** Renderer display metadata, separate from the text sent to the model. */
+  responseInterrupted?: boolean
   /** Structured tool-loop records persisted with assistant messages. */
   toolHistory?: ToolHistoryEntry[]
 }
@@ -191,6 +244,10 @@ export type LLMChatReq = {
   imageGenerationOptions?: OpenAIImageGenerationOptions
   imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
+  /** Local canvas image tool only. Never forward to a model, extension or remote proxy. */
+  threadImageHistory?: (ThreadImageHistoryEntry | null)[]
+  /** Local canvas review intent only, not permission to read an image. Never provider-facing. */
+  threadImageReview?: 'last-output'
   videoGenerationOptions?: VideoGenerationOptions
   skillRuntime?: LLMChatSkillRuntime
   route?: AgentRouteLike
@@ -467,18 +524,26 @@ export type LLMProxySvc = {
   ): Promise<void>
 
   /** Trusted local desktop only. A claim is a lease on a durable record (given out once), not a delivery. */
-  listAgentTeamMessages(req: AgentTeamMessageQueueScope): Promise<{ intents: AgentTeamMessageIntent[] }>
+  listAgentTeamMessages(
+    req: AgentTeamMessageQueueScope
+  ): Promise<{ intents: AgentTeamMessageIntent[] }>
   claimAgentTeamMessage(req: AgentTeamMessageClaim): Promise<{ intent?: AgentTeamMessageIntent }>
   /** Conversation feedback, never operation approval. */
   getAgentNotes(req: AgentThreadInteractionScope): Promise<AgentThreadNotes>
-  listAgentArchiveQueries(req: AgentThreadInteractionScope): Promise<{ queries: AgentArchiveQuery[] }>
+  listAgentArchiveQueries(
+    req: AgentThreadInteractionScope
+  ): Promise<{ queries: AgentArchiveQuery[] }>
   resolveAgentArchiveQuery(req: ResolveAgentArchiveQueryReq): Promise<{ ok: true }>
-  listAgentInteractions(req: AgentThreadInteractionScope): Promise<{ interactions: AgentThreadInteraction[] }>
+  listAgentInteractions(
+    req: AgentThreadInteractionScope
+  ): Promise<{ interactions: AgentThreadInteraction[] }>
   resolveAgentInteraction(req: ResolveAgentThreadInteractionReq): Promise<void>
 
   prepareAgentGoalProgress(req: AgentGoalShareReq): Promise<AgentGoalShare>
   /** Retires an unclaimed share only; already-claimed does not cancel provider work. */
-  retireAgentGoalProgress(req: AgentGoalScope & { token: string }): Promise<{ status: 'retired' | 'already-claimed' | 'unknown' }>
+  retireAgentGoalProgress(
+    req: AgentGoalScope & { token: string }
+  ): Promise<{ status: 'retired' | 'already-claimed' | 'unknown' }>
   agentGoalScopeRevision(req: AgentThreadInteractionScope): Promise<{ revision: number }>
   setAgentGoalScope(req: AgentGoalScopeReq): Promise<{ documentToken?: string }>
   listAgentGoals(req: AgentGoalScope): Promise<AgentGoalView>
@@ -511,7 +576,15 @@ export type LLMProxySvc = {
   readAgentProcess(req: AgentProcessReadReq): Promise<AgentProcessReadResult>
   stopAgentProcess(req: AgentProcessJobReq): Promise<{ job: AgentProcessJob }>
   listAgentJobs(req: AgentThreadInteractionScope): Promise<{ jobs: AgentThreadJob[] }>
-  readAgentJob(req: AgentThreadJobReadReq): Promise<{ job: AgentThreadJob; text: string; nextOffset: number; totalCharacters: number; untrustedData: boolean }>
+  readAgentJob(
+    req: AgentThreadJobReadReq
+  ): Promise<{
+    job: AgentThreadJob
+    text: string
+    nextOffset: number
+    totalCharacters: number
+    untrustedData: boolean
+  }>
   stopAgentJob(req: AgentThreadJobReq): Promise<{ job: AgentThreadJob }>
   cancelConversation(req: LLMCancelConversationReq): Promise<LLMCancelConversationResp>
 
