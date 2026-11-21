@@ -13,6 +13,7 @@ import {
   MAX_RUN_GRANTS_PER_GENERATION,
   RUN_GRANT_KIND as GRANT,
   RUN_GRANT_STATE_KIND as STATE,
+  THREAD_IDENTITY_INDEX_KIND as INDEX,
   THREAD_IDENTITY_KIND as IDENTITY,
   ThreadAuthorityStore,
   ThreadAuthorityUnavailableError,
@@ -575,6 +576,29 @@ describe('run grant: revoke, pause, expiry and the thread cascade', () => {
     expect(authority.readGrant(id)).toMatchObject({ status: 'active', usable: false })
   })
 
+  it('the cascade commits with the clock set back below a grant state newer than the identity', () => {
+    const { authority, store, clock, grant } = setup()
+    const pair = authority.issueThread(target())
+    clock.now = T0 + 5_000
+    const id = grant(pair)
+    clock.now = T0 + 9_000
+    expect(authority.chargeGrant(id, pair, 'c-1', { turns: 1 }).ok).toBe(true)
+    const key = store.listResources({ kind: IDENTITY })[0].id
+    expect(store.getResource(IDENTITY, key)!.updatedAt).toBe(T0 + 5_000)
+    clock.now = T0 + 100
+    expect(authority.revokeThread(target())).toEqual({ status: 'revoked' })
+    expect(storedStatus(store, id)).toMatchObject({
+      status: 'revoked',
+      reason: 'thread-revoked',
+      endedAt: T0 + 100
+    })
+    for (const [kind, rowId] of [
+      [IDENTITY, key],
+      [STATE, id]
+    ])
+      expect(store.getResource(kind, rowId)!.updatedAt).toBe(T0 + 9_000)
+  })
+
   it('revokes with the clock set back below the updatedAt of the grant state', () => {
     const { authority, store, clock, grant } = setup()
     clock.now = 5_000_000
@@ -794,7 +818,21 @@ describe('run grant: unavailable rows fail closed', () => {
       'state revoked without a reason',
       change(STATE, (s) => ({ ...s, status: 'revoked', endedAt: 1 }))
     ],
-    ['state deleted', (store, id) => rawWrite(store, STATE, id, 'delete')]
+    ['state deleted', (store, id) => rawWrite(store, STATE, id, 'delete')],
+    [
+      'identity of the thread with v: 2',
+      (store) => {
+        const key = store.listResources({ kind: IDENTITY })[0].id
+        rawWrite(store, IDENTITY, key, 'update', { ...rawState(store, IDENTITY, key), v: 2 })
+      }
+    ],
+    [
+      'index of the thread deleted',
+      (store, id) => {
+        const threadId = rawState(store, GRANT, id).threadId as string
+        rawWrite(store, INDEX, threadId, 'delete')
+      }
+    ]
   ]
   const methods = (
     authority: ThreadAuthorityStore,
@@ -806,7 +844,8 @@ describe('run grant: unavailable rows fail closed', () => {
     () => authority.readGrant(grantId),
     () => authority.listGrants(pair.threadId, pair.generation),
     () => authority.revokeGrant(grantId, 'user'),
-    () => authority.revokeThread(target())
+    () => authority.revokeThread(target()),
+    () => authority.chargeGrant(grantId, pair, 'c-1', { turns: 1 })
   ]
   it.each(shapes)(
     '%s: issue, read, list, revoke and the cascade throw and write nothing',
@@ -866,7 +905,7 @@ describe('run grant: unavailable rows fail closed', () => {
     expect(authority.issueGrant(request(next)).ok).toBe(true)
   })
 
-  it('a grant its identity does not list (a partial batch) cannot be read or revoked', () => {
+  it('a grant its identity does not list (a partial batch) cannot be read, revoked or charged', () => {
     const { authority, store, request } = setup()
     const pair = authority.issueThread(target())
     const commit = store.mutateResourcesBatch.bind(store)
@@ -878,6 +917,9 @@ describe('run grant: unavailable rows fail closed', () => {
     const before = footprint(store)
     expect(() => authority.readGrant(result.grant.grantId)).toThrow(ThreadAuthorityUnavailableError)
     expect(() => authority.revokeGrant(result.grant.grantId, 'user')).toThrow(
+      ThreadAuthorityUnavailableError
+    )
+    expect(() => authority.chargeGrant(result.grant.grantId, pair, 'c-1', { turns: 1 })).toThrow(
       ThreadAuthorityUnavailableError
     )
     expect(footprint(store)).toEqual(before)
