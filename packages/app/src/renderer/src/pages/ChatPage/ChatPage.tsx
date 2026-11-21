@@ -130,7 +130,9 @@ import { beginUnwrittenManagedMediaImports } from '@renderer/services/managedMed
 import {
   applyInlineAttachmentReplacements,
   ChatInlineAttachmentGuard,
-  type InlineAttachmentReplacement
+  InlineAttachmentBackgroundImports,
+  type InlineAttachmentReplacement,
+  type InlineAttachmentsImported
 } from './chatInlineAttachmentGuard'
 import { importQueuedImages, serializeDraftAttachments } from './chatDraftAttachments'
 import {
@@ -648,8 +650,8 @@ const HY3D_SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const CHAT_INPUT_STATE_COMMIT_DELAY_MS = 80
 const CHAT_DRAFT_PERSIST_DELAY_MS = 200
 /**
- * Longest a save waits for one oversized inline image to be imported before it writes the image as
- * it is: the save chain of that conversation is held while it waits.
+ * Longest the guard's background import of one oversized inline image may take before the image
+ * stays inline (no save waits for it: it runs outside the save chain).
  */
 const STORED_INLINE_IMAGE_IMPORT_TIMEOUT_MS = 30_000
 /** The stored image migration does not start while the composer changed this recently. */
@@ -1454,6 +1456,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const inlineAttachmentReplacementsRef = useRef(
     new WeakMap<ChatSession, ReadonlyMap<string, InlineAttachmentReplacement>>()
   )
+  // Writes the guard's finished imports back (assigned below, once its dependencies exist).
+  const rewriteStoredInlineImagesRef = useRef<InlineAttachmentsImported>(async () => undefined)
+  const inlineAttachmentImportsRef = useRef<InlineAttachmentBackgroundImports | null>(null)
+  inlineAttachmentImportsRef.current ??= new InlineAttachmentBackgroundImports(
+    inlineAttachmentGuardRef.current,
+    (scope, sessionId, replacements) =>
+      rewriteStoredInlineImagesRef.current(scope, sessionId, replacements)
+  )
   const sessionsRef = useRef<ChatSession[]>([])
   const compactingSessionIdsRef = useRef<Set<string>>(new Set())
   const contextCompactAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
@@ -1526,13 +1536,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
   }, [])
   useLayoutEffect(() => {
     chatSaveBaselineRef.current.setStoredForm({
-      prepare: (_scope, session) => {
+      // Never waits: the user's message and the reply reach storage at once. Images imported
+      // already are written as references; the others are written as they are and imported
+      // outside the save chain, and the stored record is rewritten once they are.
+      prepare: (scope, session) => {
         const guard = inlineAttachmentGuardRef.current
         if (!guard?.needsImport(session)) return session
-        return guard.externalize(session).then(({ session: stored, replacements }) => {
-          if (stored !== session) inlineAttachmentReplacementsRef.current.set(stored, replacements)
-          return stored
-        })
+        const known = guard.externalizeKnown(session)
+        if (known.pending) inlineAttachmentImportsRef.current?.request(scope, session)
+        if (known.session !== session) {
+          inlineAttachmentReplacementsRef.current.set(known.session, known.replacements)
+        }
+        return known.session
       },
       // The written form replaces the live object it was prepared from. A live object that moved
       // on meanwhile (a streamed reply, a draft) gets the same references; it is saved as usual.
@@ -3859,6 +3874,55 @@ const ChatPage: React.FC<ChatPageProps> = ({
     },
     [getSessionStorageKey, noteSessionWriteAcknowledged, setSessions]
   )
+  // The save guard's imports finished outside the save chain: the stored record (the one this
+  // owner last wrote, its save baseline) gets the references, in the save order, and so does the
+  // live conversation. When the record is not the expected one (another writer), nothing is
+  // written; the next save writes the references from the guard's finished imports.
+  rewriteStoredInlineImagesRef.current = async (scope, sessionId, replacements) => {
+    const epoch = sessionLoadEpochRef.current
+    const key = getSessionStorageKey(scope, sessionId)
+    const notDeleted = (): boolean =>
+      !deletedSessionKeysRef.current.has(key) && !hasSessionDeleteTombstone(sessionId, scope)
+    await chatSaveBaselineRef.current.rewriteStored(
+      scope,
+      sessionId,
+      () =>
+        storageScopeRef.current === scope
+          ? (persistedSessionsRef.current.get(sessionId) ?? null)
+          : null,
+      async (expected) => {
+        if (!isMountedRef.current || !notDeleted()) return null
+        if (applyInlineAttachmentReplacements(expected, replacements) === expected) return null
+        const committed = await compareAndUpdateSessionInDB(sessionId, scope, {
+          expectedSession: expected,
+          shouldUpdate: notDeleted,
+          update: (current) => applyInlineAttachmentReplacements(current, replacements)
+        })
+        if (!committed) return null
+        noteSessionWriteAcknowledged(scope)
+        if (storageScopeRef.current !== scope || sessionLoadEpochRef.current !== epoch) {
+          return committed
+        }
+        const persistedBefore = persistedSessionsRef.current.get(sessionId)
+        persistedSessionsRef.current.set(sessionId, committed)
+        const live = sessionsRef.current.find((session) => session.id === sessionId)
+        if (!live) return committed
+        // A clean conversation holds the record as written; one with newer changes gets the same
+        // references and is saved as usual (against the rewritten record, the new baseline).
+        const next =
+          live === persistedBefore
+            ? committed
+            : applyInlineAttachmentReplacements(live, replacements)
+        if (next !== live) {
+          if (dirtySessionSnapshotsRef.current.get(key) === live) {
+            dirtySessionSnapshotsRef.current.set(key, next)
+          }
+          setSessions((previous) => previous.map((session) => (session === live ? next : session)))
+        }
+        return committed
+      }
+    )
+  }
   useEffect(() => {
     if (!sessionsLoaded || !active) return
     const scope = storageScope

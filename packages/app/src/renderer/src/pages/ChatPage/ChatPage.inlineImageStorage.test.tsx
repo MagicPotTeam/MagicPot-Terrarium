@@ -341,6 +341,57 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
     expect(fixture.notifyError).not.toHaveBeenCalled()
   })
 
+  it('stores the reply at once while its image import hangs, and the reference after it', async () => {
+    const generated = inlinePng('slow')
+    let finishImport: () => void = () => undefined
+    const imported = new Promise<void>((resolve) => (finishImport = resolve))
+    fixture.importDataUrl.mockImplementation(
+      async (request: { dataUrl: string; originalFileName: string }) => {
+        await imported
+        return importInto(request.dataUrl, request.originalFileName)
+      }
+    )
+    await seed({ id: 'slow', title: 'Slow', profileId: 'inline-vision-fixture', messages: [] })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'slow')
+    fixture.ipcChat.mockResolvedValue({ content: 'slow reply', imageUrl: generated })
+
+    renderPage()
+    await waitFor(() => expect(readSessionFromUi()?.id).toBe('slow'))
+    await sendComposer('draw a fox')
+    // The import has not finished: the message and the reply are stored anyway, the image as it
+    // is. Before, the save waited for the import (up to 30 s per image).
+    const early = await waitForStored(
+      (session) =>
+        session.id === 'slow' &&
+        session.messages.some((message: ChatMessage) => message.content === 'slow reply')
+    )
+    expect(early.messages.map((message: ChatMessage) => message.content)).toEqual([
+      'draw a fox',
+      'slow reply'
+    ])
+    expect(storedAttachments(early).map((attachment) => attachment.url)).toEqual([generated])
+    await waitFor(() => expect(fixture.importDataUrl).toHaveBeenCalledTimes(1))
+
+    finishImport()
+    const rewritten = await waitForStored(
+      (session) =>
+        session.id === 'slow' &&
+        storedAttachments(session).some((attachment) => attachment.media?.kind === 'managed')
+    )
+    expect(JSON.stringify(rewritten)).not.toContain('data:image/png;base64')
+    expect(rewritten.messages.map((message: ChatMessage) => message.content)).toEqual([
+      'draw a fox',
+      'slow reply'
+    ])
+    await waitFor(() => {
+      const shown = storedAttachments(readSessionFromUi() ?? undefined)
+      expect(shown).toHaveLength(1)
+      expect(shown[0]?.url).toMatch(/^local-media:\/\//)
+    })
+    expect(fixture.importDataUrl).toHaveBeenCalledTimes(1)
+    expect(fixture.notifyError).not.toHaveBeenCalled()
+  })
+
   it('keeps the image inline, and saves, when the managed import fails', async () => {
     const generated = inlinePng('refused')
     fixture.importDataUrl.mockRejectedValue(new Error('media store unavailable'))

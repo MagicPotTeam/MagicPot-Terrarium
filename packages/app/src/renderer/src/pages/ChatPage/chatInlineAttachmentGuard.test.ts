@@ -15,6 +15,7 @@ import {
   CHAT_STORED_INLINE_ATTACHMENT_MAX_CHARS,
   ChatInlineAttachmentGuard,
   INLINE_ATTACHMENT_IMPORT_RETRY_MS,
+  InlineAttachmentBackgroundImports,
   isOversizedInlineImageAttachment,
   type InlineAttachmentReplacement
 } from './chatInlineAttachmentGuard'
@@ -414,5 +415,73 @@ describe('the save baseline with the inline image guard', () => {
     expect(prepare).toHaveBeenCalledTimes(1)
     expect(importer).not.toHaveBeenCalled()
     expect(fake.save.mock.calls[0][0]).toEqual(original)
+  })
+})
+
+describe('the guard outside the save chain', () => {
+  const conversation = (...urls: string[]): ChatSession => ({
+    id: 'background',
+    title: 'Background',
+    messages: urls.map((url) => ({ role: 'assistant', content: '', attachments: [image(url)] }))
+  })
+
+  it('applies finished imports without waiting and says which are still to come', async () => {
+    const first = inlinePng('known')
+    const second = inlinePng('unknown')
+    const { importer } = createImporter()
+    const guard = new ChatInlineAttachmentGuard(importer)
+    const session = conversation(first, second)
+
+    const before = guard.externalizeKnown(session)
+    expect(before.session).toBe(session)
+    expect(before.pending).toBe(true)
+    expect(importer).not.toHaveBeenCalled()
+
+    await guard.importInlineImage(image(first))
+    const after = guard.externalizeKnown(session)
+    expect(after.pending).toBe(true)
+    expect(after.session.messages[0].attachments?.[0]?.media).toMatchObject({ kind: 'managed' })
+    expect(after.session.messages[1].attachments?.[0]?.url).toBe(second)
+
+    await guard.importInlineImage(image(second))
+    expect(guard.externalizeKnown(session).pending).toBe(false)
+    expect(importer).toHaveBeenCalledTimes(2)
+  })
+
+  it('imports once per conversation at a time, takes up requests made meanwhile, and keeps the scanner waiting', async () => {
+    const first = inlinePng('first')
+    const later = inlinePng('later')
+    const releases: Array<() => void> = []
+    const { importer: managed } = createImporter()
+    const importer = vi.fn(async (attachment: ChatAttachment) => {
+      await new Promise<void>((resolve) => releases.push(resolve))
+      return managed(attachment)
+    })
+    const guard = new ChatInlineAttachmentGuard(importer)
+    const written: Array<string[]> = []
+    const onImported = vi.fn(
+      async (_scope: string, _id: string, replacements: ReadonlyMap<string, unknown>) => {
+        written.push([...replacements.keys()])
+      }
+    )
+    const close = vi.fn()
+    const open = vi.fn(() => close)
+    const imports = new InlineAttachmentBackgroundImports(guard, onImported, open)
+
+    imports.request('scope', conversation(first))
+    imports.request('scope', conversation(first))
+    await vi.waitFor(() => expect(importer).toHaveBeenCalledTimes(1))
+    expect(imports.isRunning('scope', 'background')).toBe(true)
+    // A save while the import runs: a newer image arrived.
+    imports.request('scope', conversation(first, later))
+    releases.shift()!()
+    await vi.waitFor(() => expect(importer).toHaveBeenCalledTimes(2))
+    releases.shift()!()
+    await vi.waitFor(() => expect(imports.isRunning('scope', 'background')).toBe(false))
+
+    expect(importer.mock.calls.map(([attachment]) => attachment.url)).toEqual([first, later])
+    expect(written).toEqual([[first], [first, later]])
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1)
   })
 })

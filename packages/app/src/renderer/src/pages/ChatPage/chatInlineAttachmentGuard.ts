@@ -1,12 +1,15 @@
 // The save boundary's guard against inline images (FIX-PLAN item 4, part 1). An image attachment
-// whose url is a base64 data: URL longer than CHAT_STORED_INLINE_ATTACHMENT_MAX_CHARS is never
-// written as it is: it is imported into managed media first and the record keeps the reference.
-// Such a string is copied into every state copy, baseline, save and whole-scope read of its
-// conversation; the reference is a few hundred characters. When the import fails the attachment
-// is written as it was: the guard never drops an image and never fails a save.
+// whose url is a base64 data: URL longer than CHAT_STORED_INLINE_ATTACHMENT_MAX_CHARS is moved to
+// managed media and the record keeps the reference. Such a string is copied into every state
+// copy, baseline, save and whole-scope read of its conversation; the reference is a few hundred
+// characters. A save never waits for the import: it writes the image as it is (the user's message
+// and the reply reach storage at once), the import runs outside the save chain, and the stored
+// record is rewritten with the reference afterwards (InlineAttachmentBackgroundImports). When the
+// import fails the image stays inline: the guard never drops an image and never fails a save.
 
 import type { ChatAttachment, ChatMessage } from '@shared/api/svcLLMProxy'
 import { normalizeMediaReference } from '@shared/mediaReference'
+import { beginUnwrittenManagedMediaImports } from '@renderer/services/managedMediaUnwrittenImports'
 import type { ChatSession } from './chatStorage'
 
 /** An inline data: URL longer than this is not written to a stored conversation as it is. */
@@ -222,14 +225,18 @@ export class ChatInlineAttachmentGuard {
     return found
   }
 
+  /** A finished import of this data: URL that may still be reused. */
+  private cachedReplacement(url: string): InlineAttachmentReplacement | null {
+    const cached = this.recent.get(url)
+    return cached && this.now() - cached.at <= RECENT_IMPORT_TTL_MS ? cached.replacement : null
+  }
+
   private importOne(
     url: string,
     attachment: ChatAttachment
   ): Promise<InlineAttachmentReplacement | null> {
-    const cached = this.recent.get(url)
-    if (cached && this.now() - cached.at <= RECENT_IMPORT_TTL_MS) {
-      return Promise.resolve(cached.replacement)
-    }
+    const cached = this.cachedReplacement(url)
+    if (cached) return Promise.resolve(cached)
     const existing = this.inFlight.get(url)
     if (existing) return existing
     const flight = (async () => {
@@ -278,6 +285,35 @@ export class ChatInlineAttachmentGuard {
   }
 
   /**
+   * The stored form of `session` without waiting: references in place of the oversized inline
+   * images whose import has already finished. `pending` is true when others are still to be
+   * imported (they stay inline in this form). The same object when nothing was replaced.
+   */
+  externalizeKnown(session: ChatSession): ExternalizedSession & { pending: boolean } {
+    const replacements = new Map<string, InlineAttachmentReplacement>()
+    let pending = false
+    forEachAttachmentList(session, (attachments) => {
+      for (const attachment of attachments) {
+        if (
+          !isOversizedInlineImageAttachment(attachment) ||
+          replacements.has(attachment.url) ||
+          !this.shouldTry(attachment.url)
+        ) {
+          continue
+        }
+        const cached = this.cachedReplacement(attachment.url)
+        if (cached) replacements.set(attachment.url, cached)
+        else pending = true
+      }
+    })
+    return {
+      session: applyInlineAttachmentReplacements(session, replacements),
+      replacements,
+      pending
+    }
+  }
+
+  /**
    * The stored form of `session`: references in place of the oversized inline images that could
    * be imported, every other value as it is. Resolves to the same object when nothing was
    * replaced. Never rejects.
@@ -302,5 +338,83 @@ export class ChatInlineAttachmentGuard {
       if (replacement) replacements.set(url, replacement)
     }
     return { session: applyInlineAttachmentReplacements(session, replacements), replacements }
+  }
+}
+
+/** How often one background run looks again for images that arrived while it was importing. */
+const BACKGROUND_IMPORT_MAX_PASSES = 3
+
+/**
+ * Writes finished imports back into the stored conversation (in the save order, against the
+ * record the owner expects) and into the owner's live state.
+ */
+export type InlineAttachmentsImported = (
+  scope: string,
+  sessionId: string,
+  replacements: ReadonlyMap<string, InlineAttachmentReplacement>
+) => Promise<void>
+
+/**
+ * The guard's imports, outside the save chain: a save writes what is known at once and asks for
+ * the rest here. One run per conversation at a time; a request during a run is taken up by that
+ * run when it has finished. While a run is open the reference scanner waits (its references are
+ * not stored yet).
+ */
+export class InlineAttachmentBackgroundImports {
+  private readonly runs = new Map<string, { latest: ChatSession | null }>()
+
+  constructor(
+    private readonly guard: ChatInlineAttachmentGuard,
+    private readonly onImported: InlineAttachmentsImported,
+    private readonly openUnwrittenWindow: () => () => void = beginUnwrittenManagedMediaImports
+  ) {}
+
+  /** Imports the oversized inline images of `session` that are not imported yet. */
+  request(scope: string, session: ChatSession): void {
+    const key = `${scope}\u0000${session.id}`
+    const run = this.runs.get(key)
+    if (run) {
+      run.latest = session
+      return
+    }
+    const state = { latest: null as ChatSession | null }
+    this.runs.set(key, state)
+    void this.run(key, scope, session, state)
+  }
+
+  /** Whether a run for this conversation is open. */
+  isRunning(scope: string, sessionId: string): boolean {
+    return this.runs.has(`${scope}\u0000${sessionId}`)
+  }
+
+  private async run(
+    key: string,
+    scope: string,
+    first: ChatSession,
+    state: { latest: ChatSession | null }
+  ): Promise<void> {
+    const close = this.openUnwrittenWindow()
+    try {
+      let session: ChatSession | null = first
+      for (let pass = 0; session && pass < BACKGROUND_IMPORT_MAX_PASSES; pass += 1) {
+        state.latest = null
+        const { replacements } = await this.guard.externalize(session)
+        if (replacements.size > 0) {
+          try {
+            await this.onImported(scope, session.id, replacements)
+          } catch (error) {
+            console.warn(
+              '[ChatInlineAttachmentGuard] Imported images were not written back:',
+              error
+            )
+          }
+        }
+        const latest: ChatSession | null = state.latest
+        session = latest && this.guard.externalizeKnown(latest).pending ? latest : null
+      }
+    } finally {
+      this.runs.delete(key)
+      close()
+    }
   }
 }
