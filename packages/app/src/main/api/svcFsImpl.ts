@@ -34,7 +34,8 @@ import {
   ReadTextFileReq,
   ReadTextFileResp,
   WriteTextFileReq,
-  WriteTextFileResp
+  WriteTextFileResp,
+  formatLocalFileUnavailableMessage
 } from '@shared/api/svcFs'
 import fs, { type FileHandle } from 'fs/promises'
 import { createReadStream, type Stats } from 'fs'
@@ -47,7 +48,7 @@ import {
   type LocalMediaRoot
 } from '../localMediaAccess'
 import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
-import { authorizeRendererLocalPath } from '../rendererLocalPathAccess'
+import { authorizeRendererLocalPath, checkRendererLocalPath } from '../rendererLocalPathAccess'
 import { CHAT_IMAGE_ATTACHMENT_MAX_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
 import {
   DEFAULT_IMPORT_SOURCE_GUARD,
@@ -702,9 +703,13 @@ export class FsSvcImpl implements FsSvc {
    * the user granted (picked or dropped files and folders) or what the app owns (see
    * getMediaReadRoots), plus for non-media kinds the configured folders. Off main's event
    * loop and under the renderer path gate; a Windows network spelling never reaches the
-   * filesystem unless it was granted or lies in a configured network folder. A refused path
-   * reads as "File not found" when it lies, by its text alone, where it could have been
-   * authorized, and as not authorized otherwise: whether a file outside exists is never told.
+   * filesystem unless it was granted or lies in a configured network folder. The message of a
+   * refusal never tells whether a file outside exists, and never calls a file missing that may
+   * be there:
+   * - outside where it could have been authorized (by the path's text alone): not authorized;
+   * - inside, when the filesystem did not answer in time (or every gate slot is held by calls
+   *   that did not): unavailable (formatLocalFileUnavailableMessage);
+   * - inside, when the file does not exist or resolves outside: "File not found".
    */
   private authorizeRendererRead = async (
     fullPath: string,
@@ -721,8 +726,9 @@ export class FsSvcImpl implements FsSvc {
       allowNetworkRoots: kind !== 'media',
       ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
     }
-    const canonical = await authorizeRendererLocalPath(fullPath, roots, options)
-    if (canonical) return canonical
+    const decision = await checkRendererLocalPath(fullPath, roots, options)
+    if (decision.canonicalPath) return decision.canonicalPath
+    let unavailable = decision.reason === 'unavailable'
 
     const loraExtensions = kind === 'media' ? undefined : LORA_FOLDER_READ_EXTENSIONS[kind]
     const fitsLoraFolder = (value: string): boolean =>
@@ -731,20 +737,22 @@ export class FsSvcImpl implements FsSvc {
       (loraExtensions === null ||
         (loraExtensions ?? []).includes(path.extname(value).toLowerCase()))
     if (fitsLoraFolder(fullPath)) {
-      const viaLoraFolder = await authorizeRendererLocalPath(fullPath, configured.loraDirs, options)
+      const viaLoraFolder = await checkRendererLocalPath(fullPath, configured.loraDirs, options)
+      const canonical = viaLoraFolder.canonicalPath
       // The canonical file must fit too: a symlink inside the folder cannot widen the kind.
-      if (viaLoraFolder && fitsLoraFolder(viaLoraFolder)) return viaLoraFolder
+      if (canonical && fitsLoraFolder(canonical)) return canonical
+      if (viaLoraFolder.reason === 'unavailable') unavailable = true
     }
 
     const covered =
       isLexicallyCoveredLocalMediaPath(fullPath, roots) ||
       (fitsLoraFolder(fullPath) && isLexicallyCoveredLocalMediaPath(fullPath, configured.loraDirs))
-    throw new RendererReadRefusedError(
-      covered ? `File not found: ${fullPath}` : 'Local file path is not authorized'
-    )
+    if (!covered) throw new RendererReadRefusedError('Local file path is not authorized')
+    if (unavailable) throw new RendererReadRefusedError(formatLocalFileUnavailableMessage(fullPath))
+    throw new RendererReadRefusedError(`File not found: ${fullPath}`)
   }
 
-  /** The canonical folder to list, or null (missing or not authorized: both list nothing). */
+  /** The canonical folder to list, or null (missing, unavailable or not authorized: nothing). */
   private authorizeRendererFolder = async (folderPath: string): Promise<string | null> => {
     try {
       return await this.authorizeRendererRead(folderPath, 'directory')

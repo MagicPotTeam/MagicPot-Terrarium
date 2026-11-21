@@ -35,6 +35,13 @@ import {
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest
 } from '../localMediaAccess'
+import { isLocalFileNotFoundError, LOCAL_FILE_UNAVAILABLE_ERROR } from '@shared/api/svcFs'
+import {
+  createImportSourceGate,
+  importSourceRootKey,
+  runImportSourceOperation,
+  type ImportSourceGate
+} from '../llmProxy/managedMediaStore'
 
 const NOT_AUTHORIZED = 'Local file path is not authorized'
 
@@ -235,5 +242,60 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
     } finally {
       fs.rmSync(path.join(process.cwd(), 'bin'), { recursive: true, force: true })
     }
+  })
+
+  it('never says "File not found" for a file it could not check: gate full, no answer', async () => {
+    const autosave = write(p('AutoSave', '.board__board', 'project.mpcanvas'), '{"items":[]}')
+    const missing = p('AutoSave', '.other__other', 'project.mpcanvas')
+    // Every slot of the renderer path gate is held by calls on another share that never return.
+    const gate = createImportSourceGate({ onSaturated: () => undefined })
+    await Promise.all(
+      ['/Volumes/nas/a.png', '/Volumes/nas2/b.png', '/mnt/x/c.png'].map((file) =>
+        runImportSourceOperation(() => new Promise<never>(() => undefined), {
+          key: importSourceRootKey(file),
+          file,
+          timeoutMs: 5,
+          gate
+        }).catch(() => undefined)
+      )
+    )
+    expect(gate.overdue).toBe(3)
+    const saturated = new FsSvcImpl({
+      getConfiguredReadRoots: async () => ({ projectDirs: [], loraDirs: [] }),
+      rendererPathGate: gate
+    })
+    for (const fullPath of [autosave, missing]) {
+      const error = await saturated.readTextFile({ fullPath }).catch((caught: unknown) => caught)
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).not.toMatch(/file not found/i)
+      expect((error as Error).message).toContain(LOCAL_FILE_UNAVAILABLE_ERROR)
+      expect(isLocalFileNotFoundError(error)).toBe(false)
+    }
+    // A refusing gate (the shape of one that is full) reads the same.
+    const refusing: ImportSourceGate = {
+      acquire: (_key, _start, refuse) => {
+        refuse()
+        return () => false
+      },
+      active: 3,
+      overdue: 3
+    }
+    await expect(
+      new FsSvcImpl({
+        getConfiguredReadRoots: async () => ({ projectDirs: [], loraDirs: [] }),
+        rendererPathGate: refusing
+      }).readTextFile({ fullPath: autosave })
+    ).rejects.toThrow(LOCAL_FILE_UNAVAILABLE_ERROR)
+
+    // With a healthy gate: the file reads, and only a file that is really not there is missing.
+    await expect(service.readTextFile({ fullPath: autosave })).resolves.toMatchObject({
+      content: '{"items":[]}'
+    })
+    const notFound = await service.readTextFile({ fullPath: missing }).catch((caught) => caught)
+    expect(isLocalFileNotFoundError(notFound)).toBe(true)
+    // Outside every place it may read, a refusal tells nothing about the file, whatever happens.
+    await expect(saturated.readTextFile({ fullPath: p('home', '.ssh', 'id_rsa') })).rejects.toThrow(
+      NOT_AUTHORIZED
+    )
   })
 })

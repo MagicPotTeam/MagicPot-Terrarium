@@ -82,6 +82,28 @@ export type ReadTextFileResp = {
   filename: string
 }
 
+/**
+ * The mark of a read of a path the renderer named whose answer main does not know now: the
+ * filesystem did not answer in time or failed, or every slot was held by calls that did not.
+ * Such a file may well exist, so its error never says "File not found".
+ */
+export const LOCAL_FILE_UNAVAILABLE_ERROR = 'LOCAL_FILE_UNAVAILABLE'
+
+export const formatLocalFileUnavailableMessage = (fullPath: string): string =>
+  `${LOCAL_FILE_UNAVAILABLE_ERROR}: the local file did not answer and may still exist: ${fullPath}`
+
+export const isLocalFileUnavailableError = (error: unknown): boolean =>
+  error instanceof Error && error.message.includes(LOCAL_FILE_UNAVAILABLE_ERROR)
+
+/**
+ * A read refused because the file is not there: "File not found", and never an unavailable
+ * one, whatever the path in its message spells.
+ */
+export const isLocalFileNotFoundError = (error: unknown): boolean =>
+  error instanceof Error &&
+  !isLocalFileUnavailableError(error) &&
+  /file not found/i.test(error.message)
+
 export type ReadFileFromPathReq = {
   fullPath: string
 }

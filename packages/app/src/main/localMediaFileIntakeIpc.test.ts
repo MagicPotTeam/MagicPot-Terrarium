@@ -25,7 +25,10 @@ vi.mock('./localMediaAccess', () => ({
   localMediaImportGrantClock: () => 0,
   recordLocalMediaImportGrant: recordImportGrantMock,
   // The scoped-path check runs off main's event loop: only the async policy may be used.
-  resolveAuthorizedLocalMediaPathAsync: resolveMock
+  authorizeLocalMediaPathAsync: async (filePath: string, roots: unknown, options: unknown) => {
+    const canonicalPath = await resolveMock(filePath, roots, options)
+    return canonicalPath ? { canonicalPath } : { canonicalPath: null, reason: 'refused' }
+  }
 }))
 
 import {

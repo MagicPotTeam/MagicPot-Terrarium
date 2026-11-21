@@ -6,7 +6,8 @@ import {
   type ImportSourceGate
 } from './llmProxy/managedMediaStore'
 import {
-  resolveAuthorizedLocalMediaPathAsync,
+  authorizeLocalMediaPathAsync,
+  type LocalMediaPathAuthorization,
   type LocalMediaPathAuthorizationOptions,
   type LocalMediaRoot
 } from './localMediaAccess'
@@ -52,14 +53,18 @@ function settleWithin<T>(promise: Promise<T>, timeoutMs: number, fallback: T): P
   })
 }
 
+const UNAVAILABLE: LocalMediaPathAuthorization = { canonicalPath: null, reason: 'unavailable' }
+
 /**
- * The canonical path of a path the renderer named, when the user granted it or it is under one
- * of `roots`; otherwise null (also when it did not answer within the deadline). Nothing runs on
- * main's event loop: Windows network spellings are refused before any filesystem call (unless
- * granted, or inside a network root with allowNetworkRoots), and every realpath runs on the
- * threadpool, under the import-source deadline (and the gate, unless `gate` is null).
+ * Whether a path the renderer named may be read, and its canonical path: when the user granted
+ * it or it is under one of `roots`. A refusal says why (see LocalMediaPathRefusalReason): a call
+ * that did not answer within the deadline, or that the gate or the breaker refused, is
+ * 'unavailable', never 'missing'. Nothing runs on main's event loop: Windows network spellings
+ * are refused before any filesystem call (unless granted, or inside a network root with
+ * allowNetworkRoots), and every realpath runs on the threadpool, under the import-source
+ * deadline (and the gate, unless `gate` is null).
  */
-export async function authorizeRendererLocalPath(
+export async function checkRendererLocalPath(
   filePath: string,
   roots: readonly LocalMediaRoot[],
   {
@@ -67,10 +72,12 @@ export async function authorizeRendererLocalPath(
     timeoutMs = DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs,
     ...options
   }: RendererLocalPathAuthorizationOptions = {}
-): Promise<string | null> {
-  if (typeof filePath !== 'string') return null
-  const authorize = () => resolveAuthorizedLocalMediaPathAsync(filePath, roots, options)
-  if (gate === null) return settleWithin(Promise.resolve().then(authorize), timeoutMs, null)
+): Promise<LocalMediaPathAuthorization> {
+  if (typeof filePath !== 'string') return { canonicalPath: null, reason: 'refused' }
+  const authorize = () => authorizeLocalMediaPathAsync(filePath, roots, options)
+  if (gate === null) {
+    return settleWithin(Promise.resolve().then(authorize), timeoutMs, UNAVAILABLE)
+  }
   try {
     return await runImportSourceOperation(authorize, {
       key: importSourceRootKey(filePath),
@@ -79,6 +86,15 @@ export async function authorizeRendererLocalPath(
       gate
     })
   } catch {
-    return null
+    return UNAVAILABLE
   }
+}
+
+/** checkRendererLocalPath without the reason: the canonical path, or null. */
+export async function authorizeRendererLocalPath(
+  filePath: string,
+  roots: readonly LocalMediaRoot[],
+  options: RendererLocalPathAuthorizationOptions = {}
+): Promise<string | null> {
+  return (await checkRendererLocalPath(filePath, roots, options)).canonicalPath
 }
