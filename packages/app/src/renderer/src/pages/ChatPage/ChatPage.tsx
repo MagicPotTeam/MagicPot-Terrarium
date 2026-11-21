@@ -7738,9 +7738,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ),
         hasRealSessionContinuationTransport: !activeExternalAgentSkill,
         shouldResetContinuation: false,
-        currentTurnImagesOnly:
-          ordinaryCanvasChat &&
-          (useThreadImageTool || localReviewIntent || !provisionalIsImageGenerationRequest),
+        // Only when the local image tool (or the review) supplies earlier images by
+        // reference; otherwise a follow-up still shows the model the images it discusses.
+        currentTurnImagesOnly: ordinaryCanvasChat && (useThreadImageTool || localReviewIntent),
         isImageGenerationRequest: provisionalIsImageGenerationRequest
       }).imageHistoryPolicy
       const provisionalUserMessage: ChatMessage = {
@@ -7935,8 +7935,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             (Boolean(cs.sessionRouteFingerprint) &&
               cs.sessionRouteFingerprint === routeFingerprint)))
       const reviewLastOutput = localReviewIntent && !rawAttachments.length
-      const currentTurnImagesOnly =
-        ordinaryCanvasChat && (useThreadImageTool || reviewLastOutput || !isImageGenerationRequest)
+      const currentTurnImagesOnly = ordinaryCanvasChat && (useThreadImageTool || reviewLastOutput)
       const preflightImageHistoryPolicy = resolveChatPageRequestExecutionImagePolicy({
         supportsSessionContinuation: activeProfileCapabilities.supportsSessionContinuation,
         hasUsableSessionContinuation: Boolean(
