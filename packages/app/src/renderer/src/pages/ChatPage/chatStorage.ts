@@ -358,13 +358,40 @@ let dbInitPromise: Promise<IDBDatabase> | null = null
 const sessionMutationQueues = new Map<string, Promise<void>>()
 const legacyMigrationFlights = new Map<string, Promise<ChatSession>>()
 
+/**
+ * The inline image formats main's legacy migration imports (the managed store's formats), with
+ * `image/jpg`, a common misspelling of `image/jpeg`. Any other inline image stays as it is.
+ */
+const LEGACY_IMPORTABLE_IMAGE_HEADER = /^data:image\/(png|jpeg|jpg|webp|gif);base64,/i
+const STRICT_BASE64_PAYLOAD = /^[A-Za-z0-9+/]+={0,2}$/
+
 function attachmentNeedsLegacyMigration(attachment: ChatAttachment): boolean {
-  // The url test first: it is the cheap one, and most attachments are not inline.
+  // The url test first: it is the cheap one, and most attachments are not inline. Only the
+  // header is read here (this runs over whole conversations); the payload is checked when the
+  // image is about to be imported.
   return (
     attachment.type === 'image' &&
-    /^data:image\/[a-z0-9!#$&^_.+-]+;base64,/i.test(attachment.url) &&
+    LEGACY_IMPORTABLE_IMAGE_HEADER.test(attachment.url) &&
     !normalizeMediaReference(attachment.media)
   )
+}
+
+/**
+ * The data: URL to hand to main's legacy migration for this inline image, or null when main would
+ * refuse it (a payload that is not strict base64, an empty image): such an image stays inline and
+ * is never sent. `image/jpg` is spelled `image/jpeg`; the store checks the bytes anyway.
+ */
+function importableLegacyDataUrl(url: string): string | null {
+  const header = LEGACY_IMPORTABLE_IMAGE_HEADER.exec(url)
+  if (!header) return null
+  const payloadStart = header[0].length
+  const payloadLength = url.length - payloadStart
+  if (payloadLength === 0 || payloadLength % 4 !== 0) return null
+  const payload = url.slice(payloadStart)
+  if (!STRICT_BASE64_PAYLOAD.test(payload)) return null
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  if ((payloadLength / 4) * 3 - padding <= 0) return null
+  return header[1].toLowerCase() === 'jpg' ? `data:image/jpeg;base64,${payload}` : url
 }
 
 async function reclaimLegacyImports(
@@ -381,15 +408,17 @@ async function reclaimLegacyImports(
 export type LegacyAttachmentReplacement = Pick<ChatAttachment, 'url' | 'media'>
 
 type LegacyAttachmentMigrationPlan = {
-  /** The record with every legacy inline image replaced; null when there was nothing to do. */
+  /** The record with every imported legacy inline image replaced; null when none was imported. */
   replacement: ChatSession | null
   replacements: Map<string, LegacyAttachmentReplacement>
 }
 
 /**
- * Imports every legacy inline image of `original` into managed media (one at a time) and builds
- * the record that references them. Nothing is written here. Any import failure rejects; the
- * imports already made are listed in `pendingReclaims`.
+ * Imports the legacy inline images of `original` into managed media (one at a time) and builds
+ * the record that references them. Nothing is written here. An image main cannot import (another
+ * format, a payload that is not strict base64) is not sent and stays inline; one whose import
+ * fails stays inline too, and the others are still migrated. Rejects only when images were tried
+ * and none could be imported. The imports made are listed in `pendingReclaims`.
  */
 async function planLegacyAttachmentMigration(
   original: ChatSession,
@@ -397,23 +426,39 @@ async function planLegacyAttachmentMigration(
   pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][]
 ): Promise<LegacyAttachmentMigrationPlan> {
   const replacements = new Map<string, LegacyAttachmentReplacement>()
+  // Images left inline in this pass: not importable, or their import failed.
+  const keptInline = new Set<string>()
+  let failure: { error: unknown } | undefined
   const migrate = async (attachment: ChatAttachment): Promise<ChatAttachment> => {
     if (!attachmentNeedsLegacyMigration(attachment)) return attachment
     // The same image held twice (a message and its compacted copy) is imported once.
     const known = replacements.get(attachment.url)
     if (known) return { ...attachment, ...known }
-    const migrated = await service.migrateLegacyDataUrl({
-      dataUrl: attachment.url,
-      metadata: {
-        originalFileName: attachment.fileName || 'legacy-image',
-        sourceWidth: attachment.sourceWidth,
-        sourceHeight: attachment.sourceHeight
-      },
-      // Legacy chat images become durable user-owned media rather than task
-      // scratch data. The explicit namespace keeps old requests compatible
-      // while allowing the physical lifecycle policy to apply on migration.
-      storage: CHAT_ATTACHMENT_STORAGE
-    })
+    if (keptInline.has(attachment.url)) return attachment
+    const dataUrl = importableLegacyDataUrl(attachment.url)
+    if (!dataUrl) {
+      keptInline.add(attachment.url)
+      return attachment
+    }
+    let migrated: MigrateLegacyManagedMediaResp
+    try {
+      migrated = await service.migrateLegacyDataUrl({
+        dataUrl,
+        metadata: {
+          originalFileName: attachment.fileName || 'legacy-image',
+          sourceWidth: attachment.sourceWidth,
+          sourceHeight: attachment.sourceHeight
+        },
+        // Legacy chat images become durable user-owned media rather than task
+        // scratch data. The explicit namespace keeps old requests compatible
+        // while allowing the physical lifecycle policy to apply on migration.
+        storage: CHAT_ATTACHMENT_STORAGE
+      })
+    } catch (error) {
+      keptInline.add(attachment.url)
+      failure ??= { error }
+      return attachment
+    }
     pendingReclaims.push(migrated.checkpoint)
     const replacement = { url: migrated.localMediaUrl, media: migrated.reference }
     replacements.set(attachment.url, replacement)
@@ -449,7 +494,16 @@ async function planLegacyAttachmentMigration(
       draft.pendingAttachments.push(await migrate(attachment))
     }
   }
-  if (replacements.size === 0) return { replacement: null, replacements }
+  if (replacements.size === 0) {
+    if (failure) throw failure.error
+    return { replacement: null, replacements }
+  }
+  if (failure) {
+    console.warn(
+      '[ChatStorage] Kept some inline images of a conversation; their migration failed:',
+      failure.error
+    )
+  }
   const contextCompression = original.contextCompression
     ? {
         ...original.contextCompression,
@@ -517,7 +571,10 @@ function migrateLegacyAttachmentsSingleFlight(
   return flight
 }
 
-/** Whether a conversation still holds a legacy inline image (a base64 data: URL, no reference). */
+/**
+ * Whether a conversation still holds a legacy inline image in a format the migration imports (a
+ * base64 data: URL, no reference). Other inline images (BMP, SVG) stay inline by design.
+ */
 export function sessionNeedsLegacyAttachmentMigration(session: ChatSession): boolean {
   const holds = (attachments?: readonly ChatAttachment[]): boolean =>
     Array.isArray(attachments) &&

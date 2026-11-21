@@ -26,11 +26,12 @@ installFakeIDBKeyRange()
 const SCOPE = 'inline-storage-project.pane-a'
 const OTHER_SCOPE = 'inline-storage-project.pane-b'
 
-/** A base64 PNG data: URL of about `chars` characters, distinct per seed. */
+/** A strict base64 PNG data: URL of about `chars` characters, distinct per seed. */
 const inlinePng = (seed: string, chars = 70 * 1024): string => {
   const prefix = 'data:image/png;base64,'
   const stem = btoa(`${seed}-`.padEnd(48, '.')).replace(/=+$/u, '')
-  return `${prefix}${stem}${'A'.repeat(chars - prefix.length - stem.length)}`
+  const fill = chars - prefix.length - stem.length
+  return `${prefix}${stem}${'A'.repeat(fill - ((stem.length + fill) % 4))}`
 }
 
 const fixture = vi.hoisted(() => ({
