@@ -514,6 +514,8 @@ async function mountChannelPage(input: {
   secondPane?: boolean
   /** Prepares the fake MAIN before the page's first poll (for example carried-over messages). */
   beforeMount?: (main: FakeTeamMain) => void
+  /** The chat models of the configuration (default: the one fixture model, `PROFILE_ID`). */
+  profiles?: readonly { id: string; model_name: string }[]
 }): Promise<ChannelPage> {
   if (mountedPage)
     throw new Error('mountChannelPage: finish() the earlier page of this test first.')
@@ -526,17 +528,17 @@ async function mountChannelPage(input: {
 
   const config = structuredClone(DEFAULT_CONFIG) as Config
   config.use_remote_llm = false
-  config.llm_config.api_profiles = [
-    {
-      id: PROFILE_ID,
-      model_name: 'fixture-model',
-      model_use: 'chat',
-      api_mode: 'chat-completions',
-      // Never resolved: MAIN is the in-memory fake, and the guards refuse every connection.
-      base_url: 'http://channel-fixture.invalid/v1/chat/completions',
-      api_key: 'fixture-only'
-    }
-  ] as Config['llm_config']['api_profiles']
+  config.llm_config.api_profiles = (
+    input.profiles ?? [{ id: PROFILE_ID, model_name: 'fixture-model' }]
+  ).map((profile) => ({
+    id: profile.id,
+    model_name: profile.model_name,
+    model_use: 'chat',
+    api_mode: 'chat-completions',
+    // Never resolved: MAIN is the in-memory fake, and the guards refuse every connection.
+    base_url: 'http://channel-fixture.invalid/v1/chat/completions',
+    api_key: 'fixture-only'
+  })) as Config['llm_config']['api_profiles']
   h.config.value = config
 
   const expectedKeys = ['lead', ...input.members.map((session) => session.id)]
@@ -2136,6 +2138,139 @@ describe('real ChatPage stop on in-memory fakes', () => {
     } finally {
       leadExternalRun(false)
     }
+    await page.finish()
+  }, 30000)
+})
+
+describe('real ChatPage member model on the real composer selector', () => {
+  // The Agent column passes these hosts (AgentWorkspace); the model selector itself stays in the
+  // composer (owner's request), the header host holds the team actions.
+  const A = { id: PROFILE_ID, model_name: 'fixture-model' }
+  const B = { id: 'fixture-profile-b', model_name: 'fixture-model-b' }
+  const INHERITED = 'Inherits lead: {{model}}'
+  const SELECTED = 'Member model: {{model}}'
+  let pillHost: HTMLElement
+  let overlayHost: HTMLElement
+  beforeEach(() => {
+    pillHost = document.createElement('div')
+    overlayHost = document.createElement('div')
+    document.body.append(pillHost, overlayHost)
+  })
+  afterEach(() => {
+    pillHost.remove()
+    overlayHost.remove()
+  })
+  const team = () => [member('designer', '设计师'), member('writer', '文案')]
+  const mountTeam = (input: Partial<Parameters<typeof mountChannelPage>[0]> = {}) =>
+    mountChannelPage({
+      members: team(),
+      model: ({ request }) => ({ text: `${request.conversationId} reply fixture` }),
+      profiles: [A, B],
+      props: { modelPillHost: pillHost, overlayHost },
+      ...input
+    })
+  const slot = (): HTMLElement => screen.getByTestId('chat-composer-model-selector-slot')
+  const openConversation = async (page: ChannelPage, name: string, label: string) => {
+    fireEvent.click(within(page.rows).getByRole('button', { name }))
+    return within(slot()).findByRole('button', { name: label })
+  }
+  const openLead = async (page: ChannelPage) => {
+    fireEvent.click(within(page.rows).getAllByRole('button')[0])
+    return within(slot()).findByRole('button', { name: 'fixture-model' })
+  }
+  const openMenu = async (button: HTMLElement): Promise<HTMLElement> => {
+    fireEvent.click(button)
+    return screen.findByRole('menu')
+  }
+  const rowNames = (menu: HTMLElement): string[] =>
+    within(menu)
+      .getAllByRole('menuitem')
+      .map((item) => item.textContent ?? '?')
+  const closeMenu = async () => {
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+  }
+  const requestProfiles = (page: ChannelPage, conversationId: string) =>
+    page.main.chatRequests
+      .filter((request) => request.conversationId === conversationId)
+      .map((request) => request.profileId)
+  const storedReply = async (page: ChannelPage, id: string, count: number) =>
+    waitFor(async () =>
+      expect(
+        (await page.stored(id))?.messages.filter((message) => message.role === 'assistant')
+      ).toHaveLength(count)
+    )
+  const rawRow = (idb: FakeChatIndexedDb, id: string): Record<string, unknown> | undefined =>
+    idb
+      .values(SESSION_STORE)
+      .find((value) => (value as { storageKey?: string }).storageKey === storageKey(id)) as
+      Record<string, unknown> | undefined
+  // Waits until the storage saw no put for a second (the page's debounced saves are 500 ms).
+  const quietPuts = async (page: ChannelPage): Promise<number> => {
+    let puts = page.idb.stats.calls.put
+    for (let stable = 0; stable < 10;) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      stable = page.idb.stats.calls.put === puts ? stable + 1 : 0
+      puts = page.idb.stats.calls.put
+    }
+    return puts
+  }
+
+  it('shows the lead model selector in the composer and leaves the header host to the team actions', async () => {
+    const page = await mountTeam()
+    const selector = within(slot()).getByRole('button', { name: 'fixture-model' })
+    expect(within(pillHost).getByTestId('agent-header-team-actions')).toBeInTheDocument()
+    expect(within(pillHost).queryByRole('button', { name: /fixture-model/ })).toBeNull()
+    const menu = await openMenu(selector)
+    expect(rowNames(menu)).toEqual(['fixture-model', 'fixture-model-b'])
+    expect(pillHost.contains(menu)).toBe(false)
+    expect(overlayHost.childElementCount).toBe(0)
+    await closeMenu()
+    await page.finish()
+  }, 30000)
+
+  it('stores a member pick, routes that member only, and leaves the lead and the other member alone', async () => {
+    const page = await mountTeam()
+    const inherited = await openConversation(page, 'designer', INHERITED)
+    expect(inherited).toBeEnabled()
+    const leadBefore = await page.stored('lead')
+    const menu = await openMenu(inherited)
+    expect(rowNames(menu)).toEqual(['fixture-model', 'fixture-model-b'])
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'fixture-model-b' }))
+    await waitFor(async () =>
+      expect((await page.stored('designer'))?.memberModelChoice).toEqual({
+        version: 1,
+        profileId: B.id
+      })
+    )
+    expect(await page.stored('lead')).toEqual(leadBefore)
+    expect(Object.hasOwn((await page.stored('writer'))!, 'memberModelChoice')).toBe(false)
+    expect(Object.hasOwn(rawRow(page.idb, 'writer')!, 'memberModelChoice')).toBe(false)
+    const selected = await within(slot()).findByRole('button', { name: SELECTED })
+    expect(rowNames(await openMenu(selected))).toEqual(['fixture-model', 'fixture-model-b'])
+    await closeMenu()
+
+    page.send('designer task fixture')
+    await waitFor(() => expect(requestProfiles(page, 'designer')).toEqual([B.id]))
+    await storedReply(page, 'designer', 1)
+    await openLead(page)
+    page.send('@writer hi')
+    await waitFor(() => expect(requestProfiles(page, 'writer')).toEqual([A.id]))
+    await storedReply(page, 'writer', 1)
+    expect(requestProfiles(page, 'designer')).toEqual([B.id])
+    await page.finish()
+  }, 30000)
+
+  it('closes the member menu and writes nothing when the pane is hidden', async () => {
+    const page = await mountTeam()
+    const inherited = await openConversation(page, 'designer', INHERITED)
+    await openMenu(inherited)
+    const putsBefore = await quietPuts(page)
+    page.rerender({ active: false })
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+    expect(pillHost.childElementCount).toBe(0)
+    expect(await quietPuts(page)).toBe(putsBefore)
+    expect(Object.hasOwn((await page.stored('designer'))!, 'memberModelChoice')).toBe(false)
     await page.finish()
   }, 30000)
 })
