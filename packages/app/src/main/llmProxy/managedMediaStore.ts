@@ -1382,6 +1382,132 @@ export async function importManagedMediaStream(
   }
 }
 
+/**
+ * The calls of one read of a source (which may be a stalled or hostile mount), each with a
+ * deadline from when it gets its slot: no more than operationTimeoutMs, nor past the copy's
+ * cap once startCopy() set it. Without a guard (main-owned callers) a call runs as it is.
+ */
+function guardedSourceCalls(
+  guard: ImportSourceGuard | undefined,
+  { key, file, gate }: { key: string; file: string; gate?: ImportSourceGate }
+) {
+  // Monotonic time; set when the open gets its slot (see ImportSourceGuard).
+  let copyDeadline = Number.POSITIVE_INFINITY
+  let timedOut = false
+  return {
+    /** Whether a call hit its deadline (its handle may still wait for a stalled call). */
+    get timedOut() {
+      return timedOut
+    },
+    /** The copy's cap starts now, for a source of sizeBytes. */
+    startCopy(sizeBytes: number): void {
+      if (!guard) return
+      copyDeadline =
+        monotonicNow() +
+        Math.min(
+          guard.copyMaxTimeoutMs ?? IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS,
+          guard.copyBaseTimeoutMs + Math.ceil((sizeBytes / guard.copyMinBytesPerSecond) * 1000)
+        )
+    },
+    call<T>(operation: () => Promise<T>, onLateResult?: (value: T) => void): Promise<T> {
+      if (!guard) return operation()
+      return runImportSourceOperation(operation, {
+        key,
+        file,
+        timeoutMs: guard.operationTimeoutMs,
+        notAfter: () => copyDeadline,
+        gate,
+        onLateResult
+      }).catch((error: unknown) => {
+        if ((error as ManagedMediaImportError)?.code === 'MANAGED_MEDIA_IMPORT_TIMEOUT')
+          timedOut = true
+        throw error
+      })
+    }
+  }
+}
+
+/**
+ * Reads one source file main granted for a single read (a file the user dropped from a
+ * mapped network drive) into memory, at most maxBytes, with the guards of an import's source
+ * calls: the open, the stat and every read run under the import-source gate, each with its
+ * own deadline, and the whole read under the copy's cap from when the open got its slot; a
+ * handle that opens late is closed, and one whose call stalled is closed in the background.
+ * Refused: anything but a regular file, and more than maxBytes (also bytes that appear while
+ * it is read). Errors never contain the path.
+ */
+export async function readImportSourceFile(
+  sourcePath: string,
+  {
+    maxBytes,
+    guard = DEFAULT_IMPORT_SOURCE_GUARD,
+    key = importSourceRootKey(sourcePath),
+    file = sourcePath,
+    gate,
+    fs: fileSystem = fs
+  }: {
+    maxBytes: number
+    guard?: ImportSourceGuard
+    /** The gate key and file of the path the user named (default: of sourcePath). */
+    key?: string
+    file?: string
+    gate?: ImportSourceGate
+    fs?: typeof fs
+  }
+): Promise<Buffer> {
+  const tooLarge = () =>
+    new ManagedMediaImportError(
+      'MANAGED_MEDIA_TOO_LARGE',
+      `Managed media source exceeds the ${maxBytes} byte limit`
+    )
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+    throw new ManagedMediaImportError('MANAGED_MEDIA_INVALID', 'Invalid managed media read limit')
+  const source = guardedSourceCalls(guard, { key, file, gate })
+  let handle: FileHandle
+  try {
+    handle = await source.call(
+      () => {
+        source.startCopy(maxBytes)
+        return fileSystem.open(sourcePath, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK)
+      },
+      (lateHandle) => void lateHandle.close().catch(() => undefined)
+    )
+  } catch (error) {
+    if (error instanceof ManagedMediaImportError) throw error
+    throw new ManagedMediaImportError('MANAGED_MEDIA_IO', 'Unable to read managed media source')
+  }
+  try {
+    const opened = await source.call(() => handle.stat())
+    if (!opened.isFile())
+      throw new ManagedMediaImportError(
+        'MANAGED_MEDIA_INVALID',
+        'Managed media source is not a file'
+      )
+    if (opened.size > maxBytes) throw tooLarge()
+    const chunk = Buffer.allocUnsafe(Math.min(IO_CHUNK_BYTES, maxBytes + 1))
+    const chunks: Buffer[] = []
+    let total = 0
+    // One byte more than the limit detects growth without reading an unbounded file.
+    for (;;) {
+      const length = Math.min(chunk.length, maxBytes + 1 - total)
+      const { bytesRead } = await source.call(() => handle.read(chunk, 0, length, total))
+      if (!bytesRead) break
+      total += bytesRead
+      if (total > maxBytes) throw tooLarge()
+      chunks.push(Buffer.from(chunk.subarray(0, bytesRead)))
+    }
+    return Buffer.concat(chunks, total)
+  } catch (error) {
+    if (error instanceof ManagedMediaImportError) throw error
+    throw new ManagedMediaImportError('MANAGED_MEDIA_IO', 'Unable to read managed media source')
+  } finally {
+    // FileHandle.close() waits for the handle's pending calls: after a deadline it would wait
+    // for the stalled call, so it is then left to finish in the background.
+    if (source.timedOut) void handle.close().catch(() => undefined)
+    else await handle.close().catch(() => undefined)
+  }
+}
+
 export async function importManagedMediaFile(
   input: ImportManagedMediaFileInput,
   dependencies: ManagedMediaStoreDependencies
@@ -1391,28 +1517,13 @@ export async function importManagedMediaFile(
   const authorizedRoot = await canonicalAuthorizedRoot(dependencies.authorizedRoot, fileSystem)
   const canonicalRoot = await prepareStoreRoot(input.chatMediaRoot, authorizedRoot, fileSystem)
   throwIfAborted(input.signal)
-  const guard = input.sourceGuard
   const resolvedSource = path.resolve(input.sourcePath)
-  const sourceKey = importSourceRootKey(resolvedSource)
-  // Monotonic time; set when the open gets its slot (see ImportSourceGuard).
-  let copyDeadline = Number.POSITIVE_INFINITY
-  let timedOut = false
-  // Every call on the source (which may be a stalled or hostile mount) has a deadline, from
-  // when it gets its slot: no more than operationTimeoutMs, nor past the copy's cap.
-  const onSource = <T>(operation: () => Promise<T>, onLateResult?: (value: T) => void) => {
-    if (!guard) return operation()
-    return runImportSourceOperation(operation, {
-      key: sourceKey,
-      file: resolvedSource,
-      timeoutMs: guard.operationTimeoutMs,
-      notAfter: () => copyDeadline,
-      onLateResult
-    }).catch((error: unknown) => {
-      if ((error as ManagedMediaImportError)?.code === 'MANAGED_MEDIA_IMPORT_TIMEOUT')
-        timedOut = true
-      throw error
-    })
-  }
+  const source = guardedSourceCalls(input.sourceGuard, {
+    key: importSourceRootKey(resolvedSource),
+    file: resolvedSource
+  })
+  const onSource = <T>(operation: () => Promise<T>, onLateResult?: (value: T) => void) =>
+    source.call(operation, onLateResult)
   const sourceLstat = await onSource(() => fileSystem.lstat(resolvedSource))
   if (sourceLstat.isSymbolicLink() || !sourceLstat.isFile())
     throw new Error('Managed media source must be a regular non-symlink file')
@@ -1431,14 +1542,7 @@ export async function importManagedMediaFile(
   const sourceHandle = await onSource(
     () => {
       // The copy's cap starts now that its open has a slot, not when the import was asked.
-      if (guard)
-        copyDeadline =
-          monotonicNow() +
-          Math.min(
-            guard.copyMaxTimeoutMs ?? IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS,
-            guard.copyBaseTimeoutMs +
-              Math.ceil((sourceLstat.size / guard.copyMinBytesPerSecond) * 1000)
-          )
+      source.startCopy(sourceLstat.size)
       return fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK)
     },
     (lateHandle) => void lateHandle.close().catch(() => undefined)
@@ -1492,7 +1596,7 @@ export async function importManagedMediaFile(
   } finally {
     // FileHandle.close() waits for the handle's pending calls: after a deadline it would wait
     // for the stalled read, so it is then left to finish in the background.
-    if (timedOut) void sourceHandle.close().catch(() => undefined)
+    if (source.timedOut) void sourceHandle.close().catch(() => undefined)
     else await sourceHandle.close().catch(() => undefined)
     if (staged) await fileSystem.unlink(staged.stagedPath).catch(() => undefined)
   }

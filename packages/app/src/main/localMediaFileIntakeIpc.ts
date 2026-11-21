@@ -110,7 +110,11 @@ export async function grantLocalMediaImportFile(
     if (!granted) return null
     // Each grant is recorded only here, once the answer came in time: a late one never is.
     if ('readPath' in granted) {
-      recordLocalMediaImportGrant(granted.readPath, now(), 'read', { batch })
+      // Found later by the path the user dropped, which the page names when it reads it.
+      recordLocalMediaImportGrant(granted.readPath, now(), 'read', {
+        batch,
+        requestedPath: filePath
+      })
       return { refused: 'network', sizeBytes: granted.sizeBytes }
     }
     recordLocalMediaImportGrant(granted.path, now(), 'import', { batch })
