@@ -26,9 +26,17 @@
  * form; after the write the owner adopts it as its live object, so the acknowledgement compares the
  * object it now holds with what was written.
  */
-import { ChatSessionSaveSupersededError, matchesTeamEndBaseline, normalizedSessionsEqual, sameTeamLifecycle, saveSessionToDB, type ChatSession } from './chatStorage'
+import {
+  ChatSessionSaveSupersededError,
+  matchesTeamEndBaseline,
+  normalizedSessionsEqual,
+  sameTeamLifecycle,
+  saveSessionToDB,
+  type ChatSession
+} from './chatStorage'
 
-const baselineKey = (scope: string, sessionId: string): string => `${scope || 'default'}\u0000${sessionId}`
+const baselineKey = (scope: string, sessionId: string): string =>
+  `${scope || 'default'}\u0000${sessionId}`
 
 /**
  * persistLatest refused an ordinary save because the payload's team membership / lifecycle fences
@@ -89,7 +97,10 @@ export class ChatSessionSaveBaseline {
   private baselines = new Map<string, ChatSession | null>()
   private chains = new Map<string, Promise<unknown>>()
   private savedSnapshots = new WeakMap<ChatSession, Map<string, ChatSession>>()
-  private saveAcks = new WeakMap<ChatSession, Map<string, {epoch:number; keyEpoch:number; observation:number}>>()
+  private saveAcks = new WeakMap<
+    ChatSession,
+    Map<string, { epoch: number; keyEpoch: number; observation: number }>
+  >()
   private acknowledgementObservations = new Map<string, number>()
   private keyEpochs = new Map<string, number>()
   private epoch = 0
@@ -140,9 +151,16 @@ export class ChatSessionSaveBaseline {
     const saved = this.savedSnapshots.get(session)?.get(key)
     const baseline = this.baselines.get(key)
     const ack = this.saveAcks.get(session)?.get(key)
-    return Boolean(saved && baseline && ack && ack.epoch === this.epoch && ack.keyEpoch === (this.keyEpochs.get(key) ?? 0) &&
+    return Boolean(
+      saved &&
+      baseline &&
+      ack &&
+      ack.epoch === this.epoch &&
+      ack.keyEpoch === (this.keyEpochs.get(key) ?? 0) &&
       ack.observation === (this.acknowledgementObservations.get(key) ?? 0) &&
-      normalizedSessionsEqual(session, saved, scope) && normalizedSessionsEqual(saved, baseline, scope))
+      normalizedSessionsEqual(session, saved, scope) &&
+      normalizedSessionsEqual(saved, baseline, scope)
+    )
   }
 
   /** Whether a baseline has already been frozen for this session. */
@@ -182,11 +200,25 @@ export class ChatSessionSaveBaseline {
     const key = baselineKey(scope, local.id)
     const baseline = this.baselines.get(key)
     this.keyEpochs.set(key, (this.keyEpochs.get(key) ?? 0) + 1)
-    if (!baseline || !sameTeamLifecycle(local, baseline) || !matchesTeamEndBaseline(baseline, persisted, scope)) return null
+    if (
+      !baseline ||
+      !sameTeamLifecycle(local, baseline) ||
+      !matchesTeamEndBaseline(baseline, persisted, scope)
+    )
+      return null
     this.baselines.set(key, structuredClone(persisted))
     return local.teamLeadId
-      ? {...local, archived: persisted.archived, teamLifecycleRevision: persisted.teamLifecycleRevision}
-      : {...local, teamEnded: persisted.teamEnded, teamGeneration: persisted.teamGeneration, teamLifecycleRevision: persisted.teamLifecycleRevision}
+      ? {
+          ...local,
+          archived: persisted.archived,
+          teamLifecycleRevision: persisted.teamLifecycleRevision
+        }
+      : {
+          ...local,
+          teamEnded: persisted.teamEnded,
+          teamGeneration: persisted.teamGeneration,
+          teamLifecycleRevision: persisted.teamLifecycleRevision
+        }
   }
 
   /** Drop the baseline (e.g. after the record is clean or deleted). */
@@ -289,7 +321,8 @@ export class ChatSessionSaveBaseline {
         this.baselines.set(key, resolved && structuredClone(resolved))
       }
       const expected = this.baselines.get(key) ?? null
-      const epochIsCurrent = () => this.epoch === callEpoch && (this.keyEpochs.get(key) ?? 0) === keyEpoch
+      const epochIsCurrent = () =>
+        this.epoch === callEpoch && (this.keyEpochs.get(key) ?? 0) === keyEpoch
       let current = session
       const firstPrepared = this.prepareStored(scope, current)
       let stored = isPromiseLike(firstPrepared) ? await firstPrepared : firstPrepared
@@ -311,9 +344,18 @@ export class ChatSessionSaveBaseline {
           })
           break
         } catch (error) {
-          this.acknowledgementObservations.set(key, (this.acknowledgementObservations.get(key) ?? 0) + 1)
+          this.acknowledgementObservations.set(
+            key,
+            (this.acknowledgementObservations.get(key) ?? 0) + 1
+          )
           noteAttempt(error, current)
-          if (!(error instanceof ChatSessionSaveSupersededError) || !retrySuperseded || attempt >= 2 || !epochIsCurrent()) throw error
+          if (
+            !(error instanceof ChatSessionSaveSupersededError) ||
+            !retrySuperseded ||
+            attempt >= 2 ||
+            !epochIsCurrent()
+          )
+            throw error
           const latest = resolveLatest()
           if (!latest || latest.id !== sessionId || latest === current) throw error
           current = latest
