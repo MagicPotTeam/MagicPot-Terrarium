@@ -104,6 +104,9 @@ export class ChatSessionSaveBaseline {
   private acknowledgementObservations = new Map<string, number>()
   private keyEpochs = new Map<string, number>()
   private epoch = 0
+  // A live object -> the object the owner put in its place with the same content in its stored
+  // form (noteReplaced). Weak: an entry lives only as long as the replaced object.
+  private successors = new WeakMap<ChatSession, ChatSession>()
 
   private enqueue<T>(key: string, task: () => Promise<T>): Promise<T> {
     const previous = this.chains.get(key) ?? Promise.resolve()
@@ -143,6 +146,54 @@ export class ChatSessionSaveBaseline {
     } catch (error) {
       return keepLive(error)
     }
+  }
+
+  /**
+   * `next` took the place of `previous` as the owner's live object and holds the same content,
+   * only in its stored form (managed references in place of inline images: a background
+   * write-back, an adopted stored form). A save bound to `previous` (persistExact) saves `next`
+   * instead of giving up because its object was swapped.
+   */
+  noteReplaced(previous: ChatSession, next: ChatSession): void {
+    if (previous !== next && previous.id === next.id) this.successors.set(previous, next)
+  }
+
+  /** The object that stands for `session` now: itself, or what replaced it (noteReplaced). */
+  latestFormOf(session: ChatSession): ChatSession {
+    let current = session
+    // Bounded: each replacement is one write-back or adopted save of the same conversation.
+    for (let hops = 0; hops < 64; hops += 1) {
+      const next = this.successors.get(current)
+      if (!next) break
+      current = next
+    }
+    return current
+  }
+
+  /**
+   * Saves exactly `session`, the object a caller changed and must see saved (a team receipt, a
+   * draft): nothing is written and it resolves to null when the live object (`resolveLive`) is
+   * another one, unless the owner put that one in its place with the same content (noteReplaced),
+   * which is then saved and returned. A swap made by a background write-back while this save
+   * waits in the chain is therefore not a failure.
+   */
+  persistExact(
+    scope: string,
+    session: ChatSession,
+    resolveLive: () => ChatSession | null,
+    resolveBaseline: () => ChatSession | null,
+    onAcknowledged?: () => void
+  ): Promise<ChatSession | null> {
+    return this.persistLatest(
+      scope,
+      session.id,
+      () => {
+        const live = resolveLive()
+        return live && live === this.latestFormOf(session) ? live : null
+      },
+      resolveBaseline,
+      onAcknowledged
+    )
   }
 
   /** An acknowledgement is valid only while the exact immutable payload remains current. */
@@ -393,6 +444,8 @@ export class ChatSessionSaveBaseline {
           console.warn('[ChatSessionSaveBaseline] The owner did not adopt the written form:', error)
           saved = stored
         }
+        // The written form stands for `current` from now on: a save still bound to it follows.
+        this.noteReplaced(current, saved)
       }
       const savedKeys = this.savedSnapshots.get(saved) ?? new Map<string, ChatSession>()
       savedKeys.set(key, payload)

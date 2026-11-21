@@ -119,3 +119,89 @@ describe('persistLatest with a stored form that waits', () => {
     expect(stored.messages[0].attachments?.[0]?.media).toMatchObject({ sha256: id })
   })
 })
+
+describe('persistExact while a background write-back swaps the live object', () => {
+  const setUp = async () => {
+    const storage = await import('./chatStorage')
+    const { ChatSessionSaveBaseline } = await import('./chatSaveBaseline')
+    type ChatSession = import('./chatStorage').ChatSession
+    await storage.saveSessionToDB(
+      {
+        id: 's',
+        title: 'T',
+        messages: [{ role: 'user', content: 'hi', attachments: [{ type: 'image', url: inline }] }]
+      },
+      SCOPE
+    )
+    const loaded = (await storage.loadAllSessions(SCOPE)).find((session) => session.id === 's')!
+    const baseline = new ChatSessionSaveBaseline()
+    baseline.adoptLoaded(SCOPE, [loaded], new Set())
+    const withReference = (session: ChatSession): ChatSession => ({
+      ...session,
+      messages: session.messages.map((message) =>
+        message.attachments ? { ...message, attachments: [managed] } : message
+      )
+    })
+    // The user's change the save is bound to (a team receipt, a draft), live and unsaved.
+    const edited: ChatSession = { ...loaded, title: 'edited' }
+    const state = { live: edited }
+    // The guard's write-back: the stored record gets the reference, and the live object is
+    // swapped for one with the same content and the reference, as ChatPage does.
+    const rewrite = baseline.rewriteStored(
+      SCOPE,
+      's',
+      () => loaded,
+      async (expected) => {
+        const committed = await storage.compareAndUpdateSessionInDB('s', SCOPE, {
+          expectedSession: expected,
+          update: (current) => withReference(current)
+        })
+        if (!committed) return null
+        const next = withReference(state.live)
+        baseline.noteReplaced(state.live, next)
+        state.live = next
+        return committed
+      }
+    )
+    const readStored = async () =>
+      (await storage.loadAllSessions(SCOPE)).find((session) => session.id === 's')!
+    return { baseline, loaded, edited, state, rewrite, readStored }
+  }
+
+  it('saves the object the write-back put in its place, with the change and the reference', async () => {
+    const { baseline, loaded, edited, state, rewrite, readStored } = await setUp()
+    // Queued while the write-back runs: before, it found another object live and gave up (the
+    // team receipt said "message was not queued", the draft save returned silently).
+    const save = baseline.persistExact(
+      SCOPE,
+      edited,
+      () => state.live,
+      () => loaded
+    )
+    await expect(rewrite).resolves.toBeTruthy()
+    const saved = await save
+    expect(saved).not.toBeNull()
+    expect(saved).toBe(state.live)
+    expect(saved).not.toBe(edited)
+    expect(baseline.isAcknowledgementCurrent(SCOPE, saved!)).toBe(true)
+    const stored = await readStored()
+    expect(stored.title).toBe('edited')
+    expect(stored.messages[0].attachments?.[0]?.media).toMatchObject({ sha256: id })
+    expect(JSON.stringify(stored)).not.toContain('data:image')
+  })
+
+  it('still writes nothing when the bound object was replaced by a real change', async () => {
+    const { baseline, loaded, edited, state, rewrite, readStored } = await setUp()
+    const save = baseline.persistExact(
+      SCOPE,
+      edited,
+      () => state.live,
+      () => loaded
+    )
+    // A later edit, not a stored form of the bound object: the bound save must not write it.
+    state.live = { ...state.live, title: 'edited again' }
+    await rewrite
+    await expect(save).resolves.toBeNull()
+    expect((await readStored()).title).toBe('T')
+  })
+})

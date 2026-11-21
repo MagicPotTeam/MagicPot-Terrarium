@@ -1588,6 +1588,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
               ? applyInlineAttachmentReplacements(live, replacements)
               : live
         if (next !== live) {
+          chatSaveBaselineRef.current.noteReplaced(live, next)
           setSessions((previous) =>
             previous.map((candidate) => (candidate === live ? next : candidate))
           )
@@ -1728,13 +1729,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
    */
   const persistSessionWithBaseline = useCallback(
     async (session: ChatSession, scope: string): Promise<ChatSession> => {
-      const saved = await chatSaveBaselineRef.current.persistLatest(
+      // Bound to `session`, or to the object a background write-back put in its place with the
+      // same content (its inline images as references) while this save waited.
+      const saved = await chatSaveBaselineRef.current.persistExact(
         scope,
-        session.id,
+        session,
         () =>
-          storageScopeRef.current === scope &&
-          sessionsRef.current.find((candidate) => candidate.id === session.id) === session
-            ? session
+          storageScopeRef.current === scope
+            ? (sessionsRef.current.find((candidate) => candidate.id === session.id) ?? null)
             : null,
         () => persistedSessionsRef.current.get(session.id) ?? null,
         () => noteSessionWriteAcknowledged(scope)
@@ -1773,7 +1775,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
             () =>
               isCurrentScope()
                 ? (sessionsRef.current.find(
-                    (candidate) => candidate.id === sessionId && (saveLive || candidate === session)
+                    (candidate) =>
+                      candidate.id === sessionId &&
+                      (saveLive || candidate === chatSaveBaselineRef.current.latestFormOf(session))
                   ) ?? null)
                 : null,
             () => persistedSessionsRef.current.get(sessionId) ?? null,
@@ -3893,6 +3897,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
             if (dirtySessionSnapshotsRef.current.get(key) === live) {
               dirtySessionSnapshotsRef.current.set(key, next)
             }
+            // A save bound to the object it replaces (a team receipt, a draft) saves this one.
+            chatSaveBaselineRef.current.noteReplaced(live, next)
             setSessions((previous) =>
               previous.map((session) => (session === live ? next : session))
             )
