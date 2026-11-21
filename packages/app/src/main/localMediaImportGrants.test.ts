@@ -364,6 +364,20 @@ describe('short-lived local media import grants', () => {
     realpathSync.mockRestore()
   })
 
+  it('never spends a read grant for a UNC, mixed-separator or NT namespace spelling', () => {
+    // Main records read grants only for a plain local path; even a grant keyed by one of these
+    // spellings is not handed out for it.
+    for (const networkPath of [
+      '/\\server\\share\\mapped.png',
+      '\\/server/share/mapped.png',
+      '/??/UNC/server/share/mapped.png',
+      '\\??\\UNC\\server\\share\\mapped.png'
+    ]) {
+      recordLocalMediaImportGrant(networkPath, undefined, 'read')
+      expect(consumeLocalMediaReadGrant(networkPath)).toBeNull()
+    }
+  })
+
   it('does not let an import grant authorize a different file', async () => {
     const root = makeTempDir('magicpot-import-grants-')
     const picked = path.join(root, 'picked.png')

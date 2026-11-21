@@ -239,3 +239,58 @@ describe('readImageFromPath of a read-granted file (a mapped network drive)', ()
     expect(countLocalMediaImportGrantsForTest()).toBe(0)
   })
 })
+
+describe('readImageFromPath of a network path the page names (Windows)', () => {
+  beforeEach(() => {
+    roots.base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mp-read-unc-')))
+    forgetLocalMediaTempRootVerification()
+    clearScopedLocalMediaPathsForTest()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    forgetLocalMediaTempRootVerification()
+    clearScopedLocalMediaPathsForTest()
+    fs.rmSync(roots.base, { recursive: true, force: true })
+  })
+
+  const asWindows = async <T>(run: () => Promise<T>): Promise<T> => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+    try {
+      return await run()
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor)
+    }
+  }
+
+  it('refuses UNC, mixed-separator and NT namespace spellings before any filesystem call', async () => {
+    const calls = [
+      vi.spyOn(fs.realpathSync, 'native'),
+      vi.spyOn(fs, 'realpathSync'),
+      vi.spyOn(fs, 'statSync'),
+      vi.spyOn(fs, 'lstatSync'),
+      vi.spyOn(fsPromises, 'open'),
+      vi.spyOn(fsPromises, 'access')
+    ]
+    // Each would make Windows contact the host (SMB, with the user's NTLM credentials).
+    // (The path module these tests run with reads each of these spellings as absolute.)
+    for (const networkPath of [
+      '//attacker/share/x.png',
+      '/\\attacker\\share\\x.png',
+      '/??/UNC/attacker/share/x.png',
+      '/??/C:/Users/me/x.png'
+    ]) {
+      await asWindows(async () => {
+        await expect(
+          new FsSvcImpl().readImageFromPath({ fullPath: networkPath, maxBytes: IMAGE_LIMIT })
+        ).rejects.toThrow('not authorized')
+      })
+    }
+    // The verified temp folder may be looked at; the page's path never is.
+    for (const spy of calls) {
+      const touched = spy.mock.calls.filter(([target]) => /attacker|[?]{2}/.test(String(target)))
+      expect(touched).toEqual([])
+    }
+  })
+})

@@ -221,6 +221,15 @@ export function isWindowsNetworkLocalMediaPath(value: string): boolean {
 }
 
 /**
+ * The NT object-namespace prefix ('\' + '??' + '\', separators of either kind): Windows file
+ * APIs hand such a path to the object manager as it is, so '\??\UNC\host\share' contacts the
+ * host as a UNC path does, and no user grant is ever for such a spelling.
+ */
+function isWindowsNtNamespaceLocalMediaPath(value: string): boolean {
+  return /^[\\/][?]{2}[\\/]/.test(value)
+}
+
+/**
  * A network path the user granted (an exact picked file or a picked directory), decided on the
  * resolved spelling alone: no filesystem call. Only such a path is canonicalized afterwards.
  */
@@ -257,6 +266,8 @@ export function resolveAuthorizedLocalMediaPath(
     return null
   }
   // Before any filesystem call: an unsolicited network path never makes main contact its host.
+  // No grant is ever for an NT namespace spelling, and its realpath alone would reach a host.
+  if (process.platform === 'win32' && isWindowsNtNamespaceLocalMediaPath(trimmed)) return null
   if (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) return null
 
   const canonical = canonicalizeExistingPath(trimmed)
@@ -510,7 +521,9 @@ export function consumeLocalMediaReadGrant(
   | null {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
-  if (trimmed.startsWith('\\\\') || trimmed.startsWith('//')) return null
+  // A read grant is only ever for a plain local path the user dropped or picked.
+  if (isWindowsNetworkLocalMediaPath(trimmed) || isWindowsNtNamespaceLocalMediaPath(trimmed))
+    return null
   const requestedPath = path.resolve(trimmed)
   const granted = spendLocalMediaGrantEntry(requestedPath, 'read', now, wallNow)
   if (!granted) return null
@@ -565,7 +578,11 @@ export async function authorizeLocalMediaImportSourcePathAsync(
       ? isWindowsNetworkLocalMediaPath(trimmed)
       : trimmed.startsWith('\\\\') || trimmed.startsWith('//')
   // Before any filesystem call on Windows: see resolveAuthorizedLocalMediaPath.
-  if (process.platform === 'win32' && isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) {
+  if (
+    process.platform === 'win32' &&
+    (isWindowsNtNamespaceLocalMediaPath(trimmed) ||
+      (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)))
+  ) {
     return null
   }
   const canonical = await canonicalizeExistingPathAsync(trimmed, realpath)
