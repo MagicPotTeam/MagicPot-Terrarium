@@ -24,7 +24,8 @@ vi.mock('./localMediaAccess', () => ({
   authorizeScopedLocalMediaPath: authorizeMock,
   localMediaImportGrantClock: () => 0,
   recordLocalMediaImportGrant: recordImportGrantMock,
-  resolveAuthorizedLocalMediaPath: resolveMock
+  // The scoped-path check runs off main's event loop: only the async policy may be used.
+  resolveAuthorizedLocalMediaPathAsync: resolveMock
 }))
 
 import {
@@ -48,7 +49,7 @@ describe('local media file intake IPC', () => {
     delete process.env.MAGICPOT_TEST_ARTIFACT_ROOT
   })
 
-  it('registers async handlers before a window exists and trusts only the current main renderer', () => {
+  it('registers async handlers before a window exists and trusts only the current main renderer', async () => {
     let mainWindow: any = null
     registerLocalMediaFileIntakeIpc(() => mainWindow)
 
@@ -74,21 +75,31 @@ describe('local media file intake IPC', () => {
     }
     expect(authorizeHandler({ sender: untrustedSender }, 'C:/picked/image.png')).toBe(false)
     expect(authorizeHandler({ sender: trustedSender }, 'C:/picked/image.png')).toBe(true)
-    expect(resolveHandler({ sender: untrustedSender }, 'C:/picked/image.png')).toBe('')
-    expect(resolveHandler({ sender: trustedSender }, 'C:/picked/image.png')).toBe(
+    await expect(resolveHandler({ sender: untrustedSender }, 'C:/picked/image.png')).resolves.toBe(
+      ''
+    )
+    await expect(resolveHandler({ sender: trustedSender }, 'C:/picked/image.png')).resolves.toBe(
       'C:/picked/image.png'
     )
-    expect(resolveMock).toHaveBeenCalledWith('C:/picked/image.png', [
-      expect.stringMatching(/C:[\\/]userData/),
-      {
-        pinnedCanonicalPath: expect.stringMatching(/C:[\\/]temp[\\/]magicpot-local-media-verified$/)
-      },
-      expect.stringMatching(/C:[\\/]project/),
-      expect.stringMatching(/C:[\\/]autosave/)
-    ])
+    await expect(resolveHandler({ sender: trustedSender }, 42)).resolves.toBe('')
+    expect(resolveMock).toHaveBeenCalledTimes(1)
+    expect(resolveMock).toHaveBeenCalledWith(
+      'C:/picked/image.png',
+      [
+        expect.stringMatching(/C:[\\/]userData/),
+        {
+          pinnedCanonicalPath: expect.stringMatching(
+            /C:[\\/]temp[\\/]magicpot-local-media-verified$/
+          )
+        },
+        expect.stringMatching(/C:[\\/]project/),
+        expect.stringMatching(/C:[\\/]autosave/)
+      ],
+      expect.anything()
+    )
   })
 
-  it('shares the benchmark cache and run-artifact scopes without broad roots', () => {
+  it('shares the benchmark cache and run-artifact scopes without broad roots', async () => {
     process.env.MAGICPOT_PROJECT_CANVAS_REAL_BOARD_BENCHMARK = '1'
     process.env.MAGICPOT_REAL_BOARD_SHARED_THUMBNAIL_CACHE_ROOT = 'C:/shared-thumbnail-cache'
     process.env.MAGICPOT_TEST_ARTIFACT_ROOT = 'C:/artifacts'
@@ -100,20 +111,26 @@ describe('local media file intake IPC', () => {
 
     const resolveHandler = handlerFor('local-media:resolve-scoped-path')
     resolveMock.mockReturnValue('C:/shared-thumbnail-cache/image.webp')
-    expect(
+    await expect(
       resolveHandler({ sender: mainWindow.webContents }, 'C:/shared-thumbnail-cache/image.webp')
-    ).toBe('C:/shared-thumbnail-cache/image.webp')
+    ).resolves.toBe('C:/shared-thumbnail-cache/image.webp')
 
-    expect(resolveMock).toHaveBeenCalledWith('C:/shared-thumbnail-cache/image.webp', [
-      expect.stringMatching(/C:[\\/]userData/),
-      {
-        pinnedCanonicalPath: expect.stringMatching(/C:[\\/]temp[\\/]magicpot-local-media-verified$/)
-      },
-      expect.stringMatching(/C:[\\/]project/),
-      expect.stringMatching(/C:[\\/]autosave/),
-      expect.stringMatching(/C:[\\/]shared-thumbnail-cache/),
-      expect.stringMatching(/C:[\\/]artifacts/)
-    ])
+    expect(resolveMock).toHaveBeenCalledWith(
+      'C:/shared-thumbnail-cache/image.webp',
+      [
+        expect.stringMatching(/C:[\\/]userData/),
+        {
+          pinnedCanonicalPath: expect.stringMatching(
+            /C:[\\/]temp[\\/]magicpot-local-media-verified$/
+          )
+        },
+        expect.stringMatching(/C:[\\/]project/),
+        expect.stringMatching(/C:[\\/]autosave/),
+        expect.stringMatching(/C:[\\/]shared-thumbnail-cache/),
+        expect.stringMatching(/C:[\\/]artifacts/)
+      ],
+      expect.anything()
+    )
   })
 
   it.skipIf(process.platform === 'win32')(
