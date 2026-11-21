@@ -84,6 +84,12 @@ export type TriggerOccurrenceQueueMarker = Readonly<{
 }>
 /** Rows of the old part of the live index one poll reads; see TriggerOccurrenceStore.poll. */
 const SCAN_PAGE_SIZE = 500
+/**
+ * Polls in a row whose archive and dead-letter batch failed before the pass moves past the page
+ * without it. A batch that keeps failing must not hold the pass on one page: the old records past
+ * it would never be read again, so never claimed. The next pass tries those writes again.
+ */
+const PASS_FAILED_BATCH_LIMIT = 3
 export type TriggerOccurrenceClaim = Readonly<{
   owner: string
   claimedAt: number
@@ -300,6 +306,8 @@ export class TriggerOccurrenceStore {
   private markerKnown = false
   private strandedBefore: number | undefined
   private proposedMarker: TriggerOccurrenceQueueMarker | undefined
+  // Batches that failed in a row; see PASS_FAILED_BATCH_LIMIT.
+  private failedBatches = 0
   /** The marker this poll must write, if none is stored yet; sets `strandedBefore` either way. */
   private markerToWrite(now: number, live: number): TriggerOccurrenceQueueMarker | undefined {
     if (this.markerKnown) return undefined
@@ -543,7 +551,8 @@ export class TriggerOccurrenceStore {
    *   Every other record runs, however long it waited.
    * - While a pass spans polls, an old record is claimable only in the poll that reads it; recent
    *   records are read by every poll, so a fresh occurrence is claimed at once.
-   * - A failed batch rolls back whole and is reported; the claim still runs.
+   * - A failed batch rolls back whole and is reported; the claim still runs. After
+   *   PASS_FAILED_BATCH_LIMIT failures in a row the pass moves past the page without it.
    * - The first poll also writes the queue marker (see TriggerOccurrenceQueueMarker).
    */
   poll(input: TriggerOccurrencePollInput): TriggerOccurrencePollResult {
@@ -651,8 +660,16 @@ export class TriggerOccurrenceStore {
         ))
           maintenanceError = error
       }
+    this.failedBatches = committed ? 0 : this.failedBatches + 1
     if (committed && marker) this.markerKnown = true
     if (committed) this.advancePass(old[processed - 1], passDone, kept, quota)
+    else if (this.failedBatches >= PASS_FAILED_BATCH_LIMIT) {
+      // Past the whole page, still counting the stale records it holds among the newest.
+      for (const item of old.slice(processed))
+        if (stale(item) && !doomed.has(item.id)) kept.push(item)
+      this.failedBatches = 0
+      this.advancePass(old.at(-1), passEnds, kept, quota)
+    }
     // One pass over the records read: the sweep targets are never candidates (marked, or out of
     // attempts), so the pre-sweep candidate is the post-sweep one.
     const removed = new Set(archive.map((item) => item.id))
