@@ -78,6 +78,8 @@ export interface ChatMessage {
   hiddenContext?: string
   preferredDownloadBaseName?: string
   modelName?: string
+  /** Local display state; never add transport diagnostics to assistant prose. */
+  responseInterrupted?: boolean
   /** Structured tool-loop records persisted separately from visible assistant prose. */
   toolHistory?: ToolHistoryEntry[]
 }
@@ -224,6 +226,8 @@ export interface LLMChatParams {
   toolTurns?: LLMToolTurn[]
   /** Main-owned interactive Agent policy, not a permission or remote retry directive. */
   retryCapacity?: boolean
+  /** MAIN-only review of a selected image: no discovery, auth refresh, tools or replay. */
+  readOnlyImageReview?: true
   /** Main-owned isolated helper mode: forbid provider-hosted tools/uploads/media. */
   disableProviderTools?: boolean
   /** Main-owned ordinary image tool routing: suppress text-intent auto-generation only. */
@@ -361,6 +365,11 @@ export const normalizeLLMChatResult = (value: string | LLMChatResult): LLMChatRe
 
 /** Common LLM client interface chat only (shared) */
 export interface LLMCli {
+  /** Transport opt-in for one inline user image, hosted/local tools off, text output only.
+   * Not evidence that an arbitrary upstream model supports vision. */
+  readonly supportsToolFreeImageReview?: boolean
+  /** Exact model POST endpoint, declared without discovery by this client, never by chat IPC. */
+  readonly toolFreeImageReviewEndpoint?: string
   /** Explicit opt-in: fresh stateless turns, honoring disableProviderTools and cancellation. */
   readonly supportsIsolatedReadOnlyTurns?: boolean
   /** Independent opt-in: bounded stateless text turns, provider-hosted tools off,

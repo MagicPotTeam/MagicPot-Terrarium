@@ -2,13 +2,18 @@ import Ajv from 'ajv'
 import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
 import { getAgentSessionKey, normalizeAgentRoute, type AgentRouteLike } from '@shared/agent'
-import { normalizeMediaReference } from '@shared/mediaReference'
+import type { ThreadImageHistoryEntry } from '@shared/llm/imageHistory'
+import {
+  captureHistoryReferences,
+  readThreadImageOutput,
+  threadImageOutputScope
+} from './agentThreadImageReview'
+import { normalizeMediaReference, type MediaReference } from '@shared/mediaReference'
 import type { ChatAttachment, ChatMessage, LLMChatResult } from '@shared/llm'
 import {
   captureThreadRecentImages,
   prepareThreadInlineImage,
   prepareThreadImageBytes,
-  THREAD_IMAGE_INPUT_MAX_BYTES,
   type PreparedThreadImage
 } from './agentThreadImageInputs'
 import { ASSISTANT_TOOL_OUTCOME_UNKNOWN } from '../assistantRuntime/toolRecovery'
@@ -23,8 +28,10 @@ import type { AssistantRunToolProvider } from '../assistantRuntime/types'
 export type AgentThreadImageGenerator = {
   /** MAIN-held source-profile opt-in, never tool arguments or linked-target inheritance. */
   gifEnabled?: boolean
+  /** MAIN-owned selected backend may directly execute a bounded text-to-still request. */
+  directStillGeneration?: boolean
   approval: {
-    backend: 'codex-json-oauth' | 'codex-json-api-key'
+    backend: 'codex-json-oauth' | 'codex-json-api-key' | 'openai-images-api-key'
     endpoint: string
     profileId: string
   }
@@ -50,7 +57,7 @@ export type AgentThreadImageGenerator = {
 const stillDefinition = {
   name: 'image_gen',
   description:
-    "Generate or edit a raster image using this request's explicitly selected Codex backend. Requires fresh formal approval before uploading input images/generating; returns managed images, never task IDs. num_last_images_to_include edits 1–5 recent images actually supplied to this request, newest-first, or images completed by this tool in this request. Missing, unsupported or unavailable inputs fail, never silently substitute another image. No arbitrary paths/URLs, omitted conversation history, WebP inputs, GIF/animation or non-default EXIF orientation in this slice; recent edits accept static PNG/JPEG only. image.create remains separate ComfyUI workflow submission.",
+    "Generate or edit a raster image using this request's selected Images backend. Generate a still or edit current attachments and this conversation’s previous generated stills directly; other uploads and animation may require confirmation; returns managed images, never task IDs. num_last_images_to_include selects 1–5 inputs newest-first: images completed by this tool in this request, then current attachments, then recent history supplied inline or verified as a saved output of this conversation. Missing, unsupported or unavailable inputs fail, never silently substitute another image. No arbitrary paths/URLs, omitted conversation history, animated WebP, GIF/animation or non-default EXIF orientation in this slice; recent edits accept static PNG/JPEG/WebP. image.create remains separate ComfyUI workflow submission.",
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -104,6 +111,7 @@ export function createAgentThreadImageTools(options: {
   signal: AbortSignal
   generator: AgentThreadImageGenerator
   messages?: readonly ChatMessage[]
+  threadImageHistory?: readonly (ThreadImageHistoryEntry | null)[]
   assertInvocation(name: string): void
   assertLive(): void
 }): AssistantRunToolProvider & {
@@ -115,16 +123,24 @@ export function createAgentThreadImageTools(options: {
   const validate = gifEnabled ? validateAnimated : validateStill
   const route = Object.freeze(normalizeAgentRoute(options.route))
   const key = getAgentSessionKey(route)
-  const scope = createHash('sha256')
-    .update(JSON.stringify([key, options.conversationId]))
-    .digest('hex')
+  const scope = threadImageOutputScope(route, options.conversationId)
   const approval = Object.freeze({ ...options.generator.approval })
   const completed: ChatAttachment[] = []
-  const suppliedRecent = captureThreadRecentImages(options.messages ?? [])
+  const messages = options.messages ?? []
+  const history = captureHistoryReferences(options.threadImageHistory)
+  // Current user attachments are explicit inputs. Historical inputs need their own
+  // source-byte proof below; renderer role, URL and media metadata are not proof.
+  const lastMessage = messages.at(-1)
+  const attached = lastMessage?.role === 'user' ? captureThreadRecentImages([lastMessage]) : []
+  const suppliedRecent = history === undefined ? captureThreadRecentImages(messages) : attached
   // Only artifacts verified/owned by this MAIN provider enter this list. Renderer
   // attachment.media, receipt URLs and model messages never grant file access.
   const ownedRecent: ChatAttachment[] = []
   const acceptedPublications = new Set<string>()
+  const prepareOutput = async (reference: MediaReference, live: () => void) => {
+    const bytes = await readThreadImageOutput(scope, reference, live)
+    return prepareThreadImageBytes(bytes, reference.mimeType, live)
+  }
   let attempts = 0,
     running = false
   return {
@@ -317,75 +333,70 @@ export function createAgentThreadImageTools(options: {
         )
       running = true
       let dispatched = false
+      let stage: 'request' | 'validate' | 'persist' = 'request'
       try {
         const count = input.num_last_images_to_include as number | undefined
         const inputs: PreparedThreadImage[] = []
+        // Only a bounded text-to-still request may skip the formal approval. Uploading any of
+        // the user's images (an edit) or an animated output always asks first.
+        const needsApproval =
+          options.generator.directStillGeneration !== true ||
+          input.gif !== undefined ||
+          count !== undefined
         if (count !== undefined) {
           if (!options.generator.edit) throw new Error('Selected image backend cannot edit images.')
           const recent = [...ownedRecent].reverse()
-          if (recent.length + suppliedRecent.length < count)
+          const available = recent.length + suppliedRecent.length + (history?.length ?? 0)
+          if (available < count)
             throw new Error(
-              `Only ${recent.length + suppliedRecent.length} recent image(s) are available in this request; ${count} requested. Attach the missing images.`
+              `Only ${available} recent image(s) are available in this request; ${count} requested. Attach the missing images.`
             )
           for (let index = 0; index < count; index++) {
             live()
-            if (index >= recent.length) {
-              inputs.push(
-                await prepareThreadInlineImage(suppliedRecent[index - recent.length], live)
-              )
+            const suppliedIndex = index - recent.length
+            if (suppliedIndex < 0) {
+              inputs.push(await prepareOutput(recent[index].media!, live))
+            } else if (suppliedIndex < suppliedRecent.length) {
+              inputs.push(await prepareThreadInlineImage(suppliedRecent[suppliedIndex], live))
             } else {
-              const reference = recent[index].media!
-              if (!reference.sizeBytes || reference.sizeBytes > THREAD_IMAGE_INPUT_MAX_BYTES)
-                throw new Error('Recent image exceeds the input byte limit.')
-              const [
-                { getChatMediaDir, resolveChatMediaNamespaceDir },
-                { resolveManagedMediaReference, readManagedMediaBytes }
-              ] = await Promise.all([
-                import('../llmProxy/chatMediaDir'),
-                import('../llmProxy/managedMediaStore')
-              ])
-              live()
-              const authorizedRoot = getChatMediaDir()
-              const resolved = await resolveManagedMediaReference(
-                resolveChatMediaNamespaceDir('user-output', scope),
-                reference,
-                { authorizedRoot }
-              )
-              live()
-              const bytes = await readManagedMediaBytes(resolved.storeRoot!, resolved.metadata, {
-                authorizedRoot,
-                maxBytes: THREAD_IMAGE_INPUT_MAX_BYTES
-              })
-              live()
-              inputs.push(await prepareThreadImageBytes(bytes, reference.mimeType, live))
+              const ref = history?.[suppliedIndex - suppliedRecent.length]
+              const missing = 'Recent image is unavailable in this conversation; attach it again.'
+              if (!ref) throw new Error(missing)
+              try {
+                inputs.push(await prepareOutput(ref, live))
+              } catch {
+                live() // Preserve revocation; otherwise hide filesystem/decoder details.
+                throw new Error(missing)
+              }
             }
           }
         }
         live()
-        // Exact prompt + input hashes/bytes + destination/backend, no encoded data
-        // or key/token. Capture bytes before approval; feedback is not a permit.
-        const { requestCreativeToolApproval } =
-          await import('../magicAgentRuntime/creativeToolApproval')
-        live()
-        await requestCreativeToolApproval({
-          toolName: name,
-          route,
-          signal,
-          args: {
-            ...input,
-            ...approval,
-            conversationId: options.conversationId,
-            model: 'gpt-image-2',
-            mayIncurCost: true,
-            persistsManagedImages: true,
-            ...(input.gif !== undefined
-              ? { output_format: 'gif', gifOutputLimits: THREAD_IMAGE_GIF_LIMITS }
-              : {}),
-            ...(inputs.length
-              ? { inputImages: inputs.map((image) => image.receipt), uploadsInputImages: true }
-              : {})
-          }
-        })
+        // ownedRecent was already verified by MAIN and is scoped to this invocation.
+        if (needsApproval) {
+          const { requestCreativeToolApproval } =
+            await import('../magicAgentRuntime/creativeToolApproval')
+          live()
+          await requestCreativeToolApproval({
+            toolName: name,
+            route,
+            signal,
+            args: {
+              ...input,
+              ...approval,
+              conversationId: options.conversationId,
+              model: 'gpt-image-2',
+              mayIncurCost: true,
+              persistsManagedImages: true,
+              ...(input.gif !== undefined
+                ? { output_format: 'gif', gifOutputLimits: THREAD_IMAGE_GIF_LIMITS }
+                : {}),
+              ...(inputs.length
+                ? { inputImages: inputs.map((image) => image.receipt), uploadsInputImages: true }
+                : {})
+            }
+          })
+        }
         live()
         dispatched = true
         const gif = input.gif as { frame_count?: number; frame_duration_ms?: number } | undefined
@@ -410,6 +421,7 @@ export function createAgentThreadImageTools(options: {
               params
             )
           : await options.generator.generate(input.prompt, params)
+        stage = 'validate'
         live()
         const images = result.attachments
         if (
@@ -462,6 +474,7 @@ export function createAgentThreadImageTools(options: {
           }
           return { ...image, bytes }
         })
+        stage = 'persist'
         const [{ getChatMediaDir, getChatMediaNamespaceDir }, { importManagedMediaStream }] =
           await Promise.all([
             import('../llmProxy/chatMediaDir'),
@@ -529,12 +542,50 @@ export function createAgentThreadImageTools(options: {
         if (!dispatched) throw error
         // A failed/missing output or import does not prove the request was uncharged.
         // Existing journal replay recognizes this code and refuses redispatch.
-        throw Object.assign(
-          new Error(
-            'Image generation or persistence failed after dispatch. The outcome may be unknown; review before retrying.'
-          ),
-          { code: ASSISTANT_TOOL_OUTCOME_UNKNOWN, retryBlocked: true }
-        )
+        // Provider messages, file paths, prompts and base64 must never enter durable
+        // tool errors. Retain only structured stage/status and our own per-call UUID.
+        const details = (error instanceof Error ? error : {}) as Record<string, unknown>
+        const http = details.imageHttpStatus ?? details.statusCode
+        const status =
+          typeof http === 'number' && Number.isInteger(http) && http >= 100 && http <= 599
+            ? `（HTTP ${http}）`
+            : ''
+        const id =
+          typeof details.imageClientRequestId === 'string' &&
+          /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(details.imageClientRequestId)
+            ? details.imageClientRequestId
+            : undefined
+        const label =
+          stage === 'persist'
+            ? '图片服务已返回结果，但本地图片库未完成保存'
+            : stage === 'validate'
+              ? '图片服务已返回结果，但图片未通过本地校验'
+              : details.imageFailureStage === 'decode'
+                ? '图片服务的回包无法解析为受支持的图片'
+                : details.imageFailureStage === 'receive'
+                  ? '未能读完图片服务的回包'
+                  : status
+                    ? '图片服务返回错误'
+                    : '没有取得可用的图片响应'
+        const localCode =
+          typeof details.code === 'string' &&
+          [
+            'ENOSPC',
+            'EACCES',
+            'EPERM',
+            'MANAGED_MEDIA_INVALID',
+            'MANAGED_MEDIA_IO',
+            'MANAGED_MEDIA_TOO_LARGE',
+            'MODEL_REQUEST_TIMEOUT'
+          ].includes(details.code)
+            ? ` [${details.code}]`
+            : ''
+        const message = `${label}${status}${localCode}。未自动重试，请先核对用量。${id ? ` 图片请求 ID：${id}` : ''}`
+        console.warn('[image_gen]', message)
+        throw Object.assign(new Error(message), {
+          code: ASSISTANT_TOOL_OUTCOME_UNKNOWN,
+          retryBlocked: true
+        })
       } finally {
         running = false
       }

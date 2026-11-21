@@ -11,11 +11,24 @@ const htmlBootstrapManifest = (): Plugin => ({
   generateBundle(_options, bundle) {
     const chunks = Object.values(bundle).filter((item) => item.type === 'chunk')
     const entry = chunks.find((item) => item.isEntry && item.name === 'index')
-    if (!entry || Object.keys(entry.modules).some((id) => id.replaceAll('\\', '/').endsWith('/main/index.ts'))) throw new Error('HTML bootstrap must not eagerly include normal app initialization.')
-    this.emitFile({ type: 'asset', fileName: 'html-bootstrap-manifest.json', source: JSON.stringify({
-      protocol: 'magicpot-isolated-html-bootstrap/v1', entry: entry.fileName,
-      files: chunks.map((item) => ({ path: item.fileName, bytes: Buffer.byteLength(item.code), sha256: createHash('sha256').update(item.code).digest('hex') }))
-    }) })
+    if (
+      !entry ||
+      Object.keys(entry.modules).some((id) => id.replaceAll('\\', '/').endsWith('/main/index.ts'))
+    )
+      throw new Error('HTML bootstrap must not eagerly include normal app initialization.')
+    this.emitFile({
+      type: 'asset',
+      fileName: 'html-bootstrap-manifest.json',
+      source: JSON.stringify({
+        protocol: 'magicpot-isolated-html-bootstrap/v1',
+        entry: entry.fileName,
+        files: chunks.map((item) => ({
+          path: item.fileName,
+          bytes: Buffer.byteLength(item.code),
+          sha256: createHash('sha256').update(item.code).digest('hex')
+        }))
+      })
+    })
   }
 })
 
@@ -147,6 +160,8 @@ export default defineConfig({
     root: resolve('packages/app/src/renderer'),
     publicDir: resolve('packages/app/src/renderer/public'),
     server: {
+      // Use the same reachable loopback address for Vite and Electron on Windows.
+      host: '127.0.0.1',
       port: 5173,
       strictPort: false,
       watch: {

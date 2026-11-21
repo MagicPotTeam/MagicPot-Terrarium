@@ -7,11 +7,11 @@ import zh from '@shared/locales/zh-CN/renderer.json'
 import en from '@shared/locales/en-US/renderer.json'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
-import ChatPage, { type ChatPageWorkspaceMenu } from './ChatPage'
+import ChatPage from './ChatPage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 
 // Wiring only: where the real ChatPage offers the functions that left the Agent column chrome
-// (composer "+" menu entries and slash commands).
+// (the column header's team buttons and slash commands; the composer has no "+" menu).
 const h = vi.hoisted(() => ({
   config: { value: null as any },
   sessions: { value: [] as any[] },
@@ -179,11 +179,11 @@ const menuEntryIds = () =>
   )
 /** Changes whenever ChatPage clears the composer draft. */
 const draftSyncKey = () => screen.getByTestId('input').getAttribute('data-sync-key')
-const renderPage = (workspaceMenu?: ChatPageWorkspaceMenu) =>
+const renderPage = () =>
   render(
     <MemoryRouter>
       <ThemeProvider theme={createTheme()}>
-        <ChatPage compact storageScope="menu-fixture" route={route} workspaceMenu={workspaceMenu} />
+        <ChatPage compact storageScope="menu-fixture" route={route} />
       </ThemeProvider>
     </MemoryRouter>
   )
@@ -220,44 +220,10 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     sessionStorage.clear()
   })
 
-  it('lists canvas target and start trace after the existing entries and runs the workspace handlers', async () => {
-    const workspaceMenu = {
-      traceRecording: false,
-      onToggleTrace: vi.fn(),
-      onOpenCanvasTarget: vi.fn()
-    }
-    renderPage(workspaceMenu)
+  it('gives the Agent thread composer no "+" menu entries (no image options, canvas target or trace)', async () => {
+    renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-
-    expect(menuEntryIds()).toEqual([
-      'image-generation-entry',
-      'chat-composer-menu-canvas-target',
-      'chat-composer-menu-trace',
-      'chat-composer-menu-add-member'
-    ])
-    expect(screen.getByTestId('chat-composer-menu-canvas-target')).toHaveTextContent('画布目标')
-    expect(screen.getByTestId('chat-composer-menu-trace')).toHaveTextContent('开始追踪')
-    expect(en.agent_workspace.trace_start).toBe('Start trace')
-
-    fireEvent.click(screen.getByTestId('chat-composer-menu-canvas-target'))
-    expect(workspaceMenu.onOpenCanvasTarget).toHaveBeenCalledTimes(1)
-    expect(h.closeMenu).toHaveBeenCalledTimes(1)
-    fireEvent.click(screen.getByTestId('chat-composer-menu-trace'))
-    expect(workspaceMenu.onToggleTrace).toHaveBeenCalledTimes(1)
-    expect(h.closeMenu).toHaveBeenCalledTimes(2)
-  })
-
-  it('offers stop trace in the error colour while a trace is recording', async () => {
-    const theme = createTheme()
-    renderPage({ traceRecording: true, onToggleTrace: vi.fn(), onOpenCanvasTarget: vi.fn() })
-    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-
-    const entry = screen.getByTestId('chat-composer-menu-trace')
-    expect(entry).toHaveTextContent('停止追踪')
-    expect(en.agent_workspace.trace_stop).toBe('Stop trace')
-    const probe = document.createElement('span')
-    probe.style.color = theme.palette.error.main
-    expect(getComputedStyle(entry).color).toBe(probe.style.color)
+    expect(menuEntryIds()).toEqual([])
   })
 
   it('shows no goal row until /goal adds the goal records as a card of the transcript', async () => {
@@ -303,23 +269,22 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(draftSyncKey()).toBe(syncKey)
   })
 
-  it('offers "add member" instead of a team banner and opens the existing member form', async () => {
+  it('offers "add member" in the header instead of a team banner and opens the existing member form', async () => {
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     expect(screen.queryByTestId('team-conversation-actions')).toBeNull()
     expect(screen.queryByText('团队协作')).toBeNull()
-    await waitFor(() => expect(menuEntryIds()).toContain('chat-composer-menu-add-member'))
+    const addMember = await screen.findByTestId('agent-header-add-member')
     // No team yet: nothing to manage.
-    expect(menuEntryIds()).not.toContain('chat-composer-menu-team')
-    expect(screen.getByTestId('chat-composer-menu-add-member')).toHaveTextContent('添加成员…')
+    expect(screen.queryByTestId('agent-header-team')).toBeNull()
+    expect(addMember).toHaveAccessibleName('添加成员…')
     expect(en.chat.team_menu_add_member).toBe('Add member…')
 
-    fireEvent.click(screen.getByTestId('chat-composer-menu-add-member'))
-    expect(h.closeMenu).toHaveBeenCalledTimes(1)
+    fireEvent.click(addMember)
     expect(await screen.findByRole('dialog', { name: '创建成员' })).toBeInTheDocument()
   })
 
-  it('offers "team" after "add member" when the thread has a team and opens team management', async () => {
+  it('offers "team" after "add member" in the header when the thread has a team and opens team management', async () => {
     h.sessions.value = [
       { id: 'lead', title: 'Lead', profileId: 'fixture-profile', messages: [] },
       {
@@ -332,42 +297,44 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
         teamRole: 'designer'
       }
     ]
-    renderPage({ traceRecording: false, onToggleTrace: vi.fn(), onOpenCanvasTarget: vi.fn() })
+    renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    await waitFor(() => expect(menuEntryIds()).toContain('chat-composer-menu-team'))
-    expect(menuEntryIds()).toEqual([
-      'image-generation-entry',
-      'chat-composer-menu-canvas-target',
-      'chat-composer-menu-trace',
-      'chat-composer-menu-add-member',
-      'chat-composer-menu-team'
+    const team = await screen.findByTestId('agent-header-team')
+    const actions = screen.getByTestId('agent-header-team-actions')
+    expect([...actions.children].map((entry) => entry.getAttribute('data-testid'))).toEqual([
+      'agent-header-add-member',
+      'agent-header-team'
     ])
-    expect(screen.getByTestId('chat-composer-menu-team')).toHaveTextContent('团队…')
+    expect(team).toHaveAccessibleName('团队…')
     expect(en.chat.team_menu_manage).toBe('Team…')
-    // The unlabeled trigger in the process area is gone; the menu entry is the only way in.
-    expect(screen.queryByRole('button', { name: '团队管理' })).toBeNull()
+    expect(menuEntryIds()).toEqual([])
     expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
 
-    fireEvent.click(screen.getByTestId('chat-composer-menu-team'))
+    fireEvent.click(team)
     const dialog = await screen.findByRole('dialog', { name: '团队管理' })
-    // The menu entry that opened it is gone, so closing hands the focus to the composer.
     const closeTeam = screen.getByRole('button', { name: '关闭团队管理' })
     await waitFor(() => expect(closeTeam).toHaveFocus())
     fireEvent.keyDown(dialog, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
-    expect(screen.getByTestId('input')).toHaveFocus()
   })
 
-  it('offers no team entries with the remote model service', async () => {
+  it('offers no team buttons with the remote model service', async () => {
     h.config.value.use_remote_llm = true
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    expect(menuEntryIds()).toEqual(['image-generation-entry'])
+    expect(screen.queryByTestId('agent-header-team-actions')).toBeNull()
+    expect(menuEntryIds()).toEqual([])
   })
 
   it('selects a skill accepted from the "/" list exactly as the picker did', async () => {
     h.config.value.llm_config.customSkills = [
-      { id: 'fixture-poster', category: '设计', skillName: '海报设计', prompt: 'fixture', type: 'prompt' }
+      {
+        id: 'fixture-poster',
+        category: '设计',
+        skillName: '海报设计',
+        prompt: 'fixture',
+        type: 'prompt'
+      }
     ]
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
@@ -393,7 +360,7 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(screen.queryByRole('button', { name: '技能' })).toBeNull()
   })
 
-  describe('model pill in the column header', () => {
+  describe("model selector inside the column composer (owner's request)", () => {
     const renderWithHost = (props: { active?: boolean; host?: HTMLElement | null }) => (
       <MemoryRouter>
         <ThemeProvider theme={createTheme()}>
@@ -413,30 +380,34 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
       return host
     }
 
-    it("renders the active conversation's model selector into the header host, not the composer", async () => {
+    it('keeps the model selector in the composer and puts only the team buttons into the header host', async () => {
       const host = header()
       const view = render(renderWithHost({ host }))
       await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
 
-      expect(screen.getByTestId('composer-model-slot')).toHaveAttribute('data-layout', 'column')
-      expect(screen.getByTestId('composer-model-slot')).toBeEmptyDOMElement()
-      expect(host.children).toHaveLength(1)
-      expect(within(host).getByTestId('model-selector')).toHaveAttribute('data-header-pill', 'true')
-      expect(screen.getAllByTestId('model-selector')).toHaveLength(1)
+      const slot = screen.getByTestId('composer-model-slot')
+      expect(slot).toHaveAttribute('data-layout', 'column')
+      expect(within(slot).getByTestId('model-selector')).toHaveAttribute(
+        'data-header-pill',
+        'false'
+      )
+      expect(within(host).queryByTestId('model-selector')).toBeNull()
+      expect(within(host).getByTestId('agent-header-add-member')).toBeInTheDocument()
 
-      // An inactive pane leaves the host to the pane that is active.
+      // An inactive pane leaves the header host to the pane that is active.
       view.rerender(renderWithHost({ host, active: false }))
       expect(host).toBeEmptyDOMElement()
-      expect(screen.queryByTestId('model-selector')).toBeNull()
       view.rerender(renderWithHost({ host, active: true }))
-      expect(within(host).getByTestId('model-selector')).toHaveTextContent('active model')
+      expect(within(host).getByTestId('agent-header-add-member')).toBeInTheDocument()
       host.remove()
     })
 
-    it('shows no model selector while the header host is not mounted yet', async () => {
+    it('shows the model selector in the composer before the header host is mounted', async () => {
       render(renderWithHost({ host: null }))
       await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-      expect(screen.queryByTestId('model-selector')).toBeNull()
+      expect(
+        within(screen.getByTestId('composer-model-slot')).getByTestId('model-selector')
+      ).toBeInTheDocument()
     })
 
     it('keeps the selector in the composer where there is no column header', async () => {
@@ -450,7 +421,7 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
   })
 
   it('clears the draft once /repair-images has run, so the "/" list does not reopen over the result', async () => {
-    renderPage(undefined)
+    renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     const before = draftSyncKey()
 
@@ -468,7 +439,7 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
   })
 
   it('keeps a /repair-images draft that could not run', async () => {
-    renderPage(undefined)
+    renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     const before = draftSyncKey()
 
@@ -479,10 +450,9 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(screen.queryByText(/\/repair-images — /)).toBeNull()
   })
 
-  it('adds no workspace entries outside the Agent column', async () => {
-    renderPage(undefined)
+  it('adds no "+" menu entries outside the Agent column either', async () => {
+    renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    expect(menuEntryIds()).not.toContain('chat-composer-menu-canvas-target')
-    expect(menuEntryIds()).not.toContain('chat-composer-menu-trace')
+    expect(menuEntryIds()).toEqual([])
   })
 })

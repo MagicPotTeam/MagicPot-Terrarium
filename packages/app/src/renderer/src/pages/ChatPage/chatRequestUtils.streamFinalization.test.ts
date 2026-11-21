@@ -53,30 +53,118 @@ describe('IPC stream terminal content', () => {
   })
 
   it('retains failed tool output and rollback data through the existing stream error checkpoint', async () => {
-    const rollback = { attempted: true, succeeded: false, restoredPaths: [], failedPaths: ['a.txt'] }
-    const receipt = { error: { message: 'The second commit failed.', code: 'MAGIC_AGENT_FILES_MUTATION' }, rollback }
-    const history = [{ runId: 'owned-run', toolCallId: 'owned-call', toolName: 'files.multi-edit', args: { edits: [] }, status: 'failed', content: JSON.stringify(receipt), metadata: receipt, error: receipt.error.message }]
-    const metadata = { toolHistory: history, toolResult: { content: JSON.stringify(receipt), metadata: receipt } }
+    const rollback = {
+      attempted: true,
+      succeeded: false,
+      restoredPaths: [],
+      failedPaths: ['a.txt']
+    }
+    const receipt = {
+      error: { message: 'The second commit failed.', code: 'MAGIC_AGENT_FILES_MUTATION' },
+      rollback
+    }
+    const history = [
+      {
+        runId: 'owned-run',
+        toolCallId: 'owned-call',
+        toolName: 'files.multi-edit',
+        args: { edits: [] },
+        status: 'failed',
+        content: JSON.stringify(receipt),
+        metadata: receipt,
+        error: receipt.error.message
+      }
+    ]
+    const metadata = {
+      toolHistory: history,
+      toolResult: { content: JSON.stringify(receipt), metadata: receipt }
+    }
     const result = await runStream([
-      { type: 'tool-status', delta: '', done: false, toolStatus: { runId: 'owned-run', toolCallId: 'owned-call', toolName: 'files.multi-edit', status: 'failed' }, metadata },
-      { type: 'error', delta: '', done: false, error: receipt.error.message, finishReason: 'error', metadata },
-      { type: 'done', delta: '', done: true, error: receipt.error.message, finishReason: 'error', metadata }
+      {
+        type: 'tool-status',
+        delta: '',
+        done: false,
+        toolStatus: {
+          runId: 'owned-run',
+          toolCallId: 'owned-call',
+          toolName: 'files.multi-edit',
+          status: 'failed'
+        },
+        metadata
+      },
+      {
+        type: 'error',
+        delta: '',
+        done: false,
+        error: receipt.error.message,
+        finishReason: 'error',
+        metadata
+      },
+      {
+        type: 'done',
+        delta: '',
+        done: true,
+        error: receipt.error.message,
+        finishReason: 'error',
+        metadata
+      }
     ]).catch((error: unknown) => error)
     expect(result).toBeInstanceOf(Error)
-    expect(result).toMatchObject({ message: receipt.error.message, finishReason: 'error', metadata, partialResult: { finishReason: 'error', metadata } })
-    expect(normalizeChatToolHistory((result as { metadata: typeof metadata }).metadata.toolHistory)).toEqual(history)
+    expect(result).toMatchObject({
+      message: receipt.error.message,
+      finishReason: 'error',
+      metadata,
+      partialResult: { finishReason: 'error', metadata }
+    })
+    expect(
+      normalizeChatToolHistory((result as { metadata: typeof metadata }).metadata.toolHistory)
+    ).toEqual(history)
   })
 
   it('carries image_gen managed references through the existing renderer stream contract', async () => {
-    const attachment = { type: 'image' as const, url: 'local-media:///owned/image.png', mimeType: 'image/png', fileName: 'generated-1.png', media: { version: 1 as const, kind: 'managed' as const, relativePath: 'user-output/scope/images/ab/image.png', sha256: 'a'.repeat(64), sizeBytes: 70, mimeType: 'image/png' } }
-    const metadata = { toolHistory: [{ runId: 'image-run', toolCallId: 'image-call', toolName: 'image_gen', args: { prompt: 'fixture', transparent_background: true }, status: 'completed', content: JSON.stringify({ completed: true, image_count: 1, edited_images: 0, images: [attachment] }) }] }
+    const attachment = {
+      type: 'image' as const,
+      url: 'local-media:///owned/image.png',
+      mimeType: 'image/png',
+      fileName: 'generated-1.png',
+      media: {
+        version: 1 as const,
+        kind: 'managed' as const,
+        relativePath: 'user-output/scope/images/ab/image.png',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 70,
+        mimeType: 'image/png'
+      }
+    }
+    const metadata = {
+      toolHistory: [
+        {
+          runId: 'image-run',
+          toolCallId: 'image-call',
+          toolName: 'image_gen',
+          args: { prompt: 'fixture', transparent_background: true },
+          status: 'completed',
+          content: JSON.stringify({
+            completed: true,
+            image_count: 1,
+            edited_images: 0,
+            images: [attachment]
+          })
+        }
+      ]
+    }
     const result = await runStream([
       { type: 'attachment', delta: '', done: false, attachment },
       { ...done, content: 'Generated image.', attachments: [attachment], metadata }
     ])
-    expect(result).toMatchObject({ response: 'Generated image.', result: { content: 'Generated image.', attachments: [attachment], metadata } })
+    expect(result).toMatchObject({
+      response: 'Generated image.',
+      result: { content: 'Generated image.', attachments: [attachment], metadata }
+    })
     expect(result.result.attachments).toHaveLength(1)
-    expect(normalizeChatToolHistory(result.result.metadata?.toolHistory)).toMatchObject(metadata.toolHistory)
+    expect(normalizeChatToolHistory(result.result.metadata?.toolHistory)).toMatchObject(
+      metadata.toolHistory
+    )
   })
 
   it('retains accumulated deltas when a terminal frame omits both content fields', async () => {
@@ -135,7 +223,21 @@ describe('IPC stream terminal content', () => {
 
   it('continues to reject streams that have no terminal frame', async () => {
     await expect(runStream([delta])).rejects.toMatchObject({
+      code: 'INCOMPLETE_CHAT_STREAM',
       message: expect.stringContaining('incomplete-stream'),
+      partialContent: delta.delta
+    })
+  })
+
+  it('does not mask a real service failure if the transport closes without done', async () => {
+    await expect(
+      runStream([
+        delta,
+        { type: 'error', delta: '', done: false, error: 'Provider unavailable', status: 503 }
+      ])
+    ).rejects.toMatchObject({
+      message: 'Provider unavailable',
+      status: 503,
       partialContent: delta.delta
     })
   })

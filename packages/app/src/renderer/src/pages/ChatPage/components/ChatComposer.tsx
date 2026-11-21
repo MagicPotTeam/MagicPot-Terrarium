@@ -135,6 +135,8 @@ interface ChatComposerProps {
   onSelectSuggestedSkill?: (skillId: string) => void
   /** 'column' is the one-row shell of the Agent column; 'page' (default) the full-page chat. */
   layout?: 'page' | 'column'
+  /** The Agent thread column: no add menu or attachment button, the owner's own placeholder. */
+  workbench?: boolean
 }
 
 const NO_SUGGESTION_COMMANDS: readonly ComposerCommand[] = []
@@ -602,7 +604,8 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   suggestionCommands = NO_SUGGESTION_COMMANDS,
   suggestionSkills,
   onSelectSuggestedSkill,
-  layout = 'page'
+  layout = 'page',
+  workbench = false
 }) => {
   const { t } = useTranslation()
   const isColumn = layout === 'column'
@@ -1491,7 +1494,9 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 : 'chat.agent_side.command_send'
           )
         : null
-    const placeholder = t('chat.composer_column.placeholder')
+    const placeholder = workbench
+      ? t('chat.workbench_prompt')
+      : t('chat.composer_column.placeholder')
     const moreActionsLabel = t('chat.composer_column.more_actions')
     const controlSx = {
       flex: 'none',
@@ -1639,25 +1644,31 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               '&[data-active="true"], &:has(textarea:focus)': { borderColor: columnTokens.accent }
             }}
           >
-            <IconButton
-              data-testid="chat-composer-add-menu-button"
-              aria-label={moreActionsLabel}
-              aria-haspopup="menu"
-              aria-expanded={addMenuOpen}
-              aria-controls={addMenuOpen ? addMenuId : undefined}
-              title={moreActionsLabel}
-              disabled={disabled}
-              // Anchored to the shell: the menu spans the shell's width above it.
-              onClick={(event) => setAddMenuAnchorEl(columnShellRef.current ?? event.currentTarget)}
-              sx={{
-                ...controlSx,
-                color: columnTokens.muted,
-                '&:hover': { backgroundColor: columnTokens.hover }
-              }}
-            >
-              <AddIcon sx={{ fontSize: 18 }} />
-            </IconButton>
-            {addMenu}
+            {workbench ? null : (
+              <>
+                <IconButton
+                  data-testid="chat-composer-add-menu-button"
+                  aria-label={moreActionsLabel}
+                  aria-haspopup="menu"
+                  aria-expanded={addMenuOpen}
+                  aria-controls={addMenuOpen ? addMenuId : undefined}
+                  title={moreActionsLabel}
+                  disabled={disabled}
+                  // Anchored to the shell: the menu spans the shell's width above it.
+                  onClick={(event) =>
+                    setAddMenuAnchorEl(columnShellRef.current ?? event.currentTarget)
+                  }
+                  sx={{
+                    ...controlSx,
+                    color: columnTokens.muted,
+                    '&:hover': { backgroundColor: columnTokens.hover }
+                  }}
+                >
+                  <AddIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+                {addMenu}
+              </>
+            )}
             {toolbarSlot ? (
               <Box
                 data-testid="chat-composer-toolbar-slot"

@@ -105,12 +105,17 @@ it('does not turn an untrusted managed reference into tool authority or fall bac
     url: 'local-media://forged/image.png',
     mimeType: 'image/png',
     media: {
-      version: 1 as const, kind: 'managed' as const,
+      version: 1 as const,
+      kind: 'managed' as const,
       relativePath: `originals/00/${'0'.repeat(64)}.png`,
-      sha256: '0'.repeat(64), sizeBytes: 1, mimeType: 'image/png'
+      sha256: '0'.repeat(64),
+      sizeBytes: 1,
+      mimeType: 'image/png'
     }
   }
-  const captured = captureThreadRecentImages([{ role: 'user', content: '', attachments: [older, newest] }])
+  const captured = captureThreadRecentImages([
+    { role: 'user', content: '', attachments: [older, newest] }
+  ])
   newest.media.relativePath = 'originals/changed.png'
   expect(captured).toHaveLength(2)
   expect(captured[0]?.url).toBe('local-media://forged/image.png')
@@ -143,6 +148,31 @@ it('retains bytes below 2048 and returns exact source/upload hashes without pixe
   })
   expect(JSON.stringify(result.receipt)).not.toContain('base64')
   expect(check.mock.calls.length).toBeGreaterThan(3)
+})
+
+it('validates a real static WebP locally and preserves the original bytes and MIME for editing', async () => {
+  const encoded = 'UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoCAAEAAUAmJaQAA3AA/v02aAA='
+  const original = Buffer.from(encoded, 'base64')
+  const url = `data:image/webp;base64,${encoded}`
+  const fetch = vi.spyOn(globalThis, 'fetch')
+  const result = await prepareThreadInlineImage(
+    { type: 'image', mimeType: 'image/webp', url },
+    () => {}
+  )
+  expect(result.receipt).toMatchObject({
+    sourceMimeType: 'image/webp',
+    sourceWidth: 2,
+    sourceHeight: 1,
+    width: 2,
+    height: 1,
+    mimeType: 'image/webp',
+    resized: false,
+    sourceSha256: createHash('sha256').update(original).digest('hex')
+  })
+  expect(result.dataUrl).toBe(url)
+  expect(result.receipt.sha256).toBe(result.receipt.sourceSha256)
+  expect(codec.decode).not.toHaveBeenCalled()
+  expect(fetch).not.toHaveBeenCalled()
 })
 
 it('validates chunked binary bytes/hash and snapshots frames before the caller can change them', async () => {
@@ -180,7 +210,6 @@ it.each([
   'file:///secret.png',
   'local-media://foreign/image.png',
   'data:image/svg+xml;base64,PHN2Zz4=',
-  'data:image/webp;base64,UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoCAAEAAUAmJaQAA3AA/v02aAA=',
   'data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=',
   'data:image/png;base64,AAA=',
   'data:image/png;base64,\nAAAA',

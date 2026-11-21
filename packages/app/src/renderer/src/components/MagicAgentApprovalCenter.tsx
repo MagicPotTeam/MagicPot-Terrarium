@@ -25,6 +25,7 @@ const actionLabelKeys = {
   scratchpad: 'scratchpad',
   'comfyui.workflow.submit': 'comfyui_workflow_submit',
   'canvas.export': 'canvas_export',
+  image_gen: 'image_create',
   'image.create': 'image_create',
   'video.create': 'video_create',
   'asset.import': 'asset_import',
@@ -84,8 +85,10 @@ const parameterLabelKeys = {
 // ordinary field name here, never a member inherited from Object.prototype.
 const actionLabels: ReadonlyMap<string, (typeof actionLabelKeys)[keyof typeof actionLabelKeys]> =
   new Map(Object.entries(actionLabelKeys))
-const parameterLabels: ReadonlyMap<string, (typeof parameterLabelKeys)[keyof typeof parameterLabelKeys]> =
-  new Map(Object.entries(parameterLabelKeys))
+const parameterLabels: ReadonlyMap<
+  string,
+  (typeof parameterLabelKeys)[keyof typeof parameterLabelKeys]
+> = new Map(Object.entries(parameterLabelKeys))
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -110,7 +113,8 @@ const BLANK_DRAWN = /[\t\p{Zs}\u2800\u3164\uffa0\u115f\u{1d159}]|\u1160|\u17b4|\
 // format characters (bidi controls, zero-width characters, word joiner, BOM, soft hyphen, the
 // U+E0000 tag block), private-use, unassigned and lone surrogate code points, default-ignorable
 // code points and variation selectors.
-const HIDDEN = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]/u
+const HIDDEN =
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]/u
 const COMBINING_MARK = /^\p{M}$/u
 // A line that draws blank: blank-drawing characters and combining marks only (or nothing).
 const BLANK_LINE = /^(?:[\t\p{Zs}\p{M}\u2800\u3164\uffa0\u115f\u{1d159}]|\u1160)*$/u
@@ -128,7 +132,8 @@ const MAX_BLANK_LINES = 2
 const MARKER_OPEN = '\u27e6'
 const FORGED_MARKUP = /[\u27e6\u301a\u29f5\u29f9\ufe68\uff3c\u2216]/u
 
-const escapedCharacter = (character: string): string => `\\u{${character.codePointAt(0)!.toString(16)}}`
+const escapedCharacter = (character: string): string =>
+  `\\u{${character.codePointAt(0)!.toString(16)}}`
 const codePointName = (character: string): string =>
   `U+${character.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`
 /** The marker that stands for `count` collapsed characters, naming their first 4 code points. */
@@ -235,7 +240,8 @@ const visibleText = (text: string, limit: number, rules: VisibleRules): VisibleT
       while (at < end) {
         const item = characterAt(at)
         const itemMark = COMBINING_MARK.test(item)
-        const escaped = rules.escape(item, text, at) ?? (itemMark && lastEscaped ? escapedCharacter(item) : null)
+        const escaped =
+          rules.escape(item, text, at) ?? (itemMark && lastEscaped ? escapedCharacter(item) : null)
         if (!push(escaped ?? item, escaped !== null)) {
           if (itemMark) dropBase()
           break
@@ -255,7 +261,9 @@ const valueRules: VisibleRules = {
   escape: (character, text, index) =>
     // Every blank-drawing character but U+0020 and the tab is escaped even in a short run, so
     // short runs cannot add up to padding that hides the rest of a value.
-    (character !== ' ' && character !== '\t' && (BLANK_DRAWN.test(character) || HIDDEN.test(character))) ||
+    (character !== ' ' &&
+      character !== '\t' &&
+      (BLANK_DRAWN.test(character) || HIDDEN.test(character))) ||
     FORGED_MARKUP.test(character) ||
     // A backslash that starts what reads like an escape is escaped too, so an escape is never
     // text the model wrote.
@@ -325,16 +333,18 @@ const shownValue = (text: string): { text: string; truncated: boolean; changed: 
       line = nextLine()
     }
     if (blankLines > MAX_BLANK_LINES) lines.push({ marker: collapsedMarker(count, seen) })
-    else for (const blank of first) {
-      if (lines.length === MAX_VALUE_LINES) {
-        truncated = true
-        break
+    else
+      for (const blank of first) {
+        if (lines.length === MAX_VALUE_LINES) {
+          truncated = true
+          break
+        }
+        lines.push({ text: blank })
       }
-      lines.push({ text: blank })
-    }
     if (truncated) break
   }
-  const isBlankLine = (item: (typeof lines)[number]): boolean => 'text' in item && BLANK_LINE.test(item.text)
+  const isBlankLine = (item: (typeof lines)[number]): boolean =>
+    'text' in item && BLANK_LINE.test(item.text)
   if (truncated) while (lines.length > 1 && isBlankLine(lines[lines.length - 1])) lines.pop()
   const pieces: string[] = []
   let size = 0
@@ -365,10 +375,14 @@ const shownValue = (text: string): { text: string; truncated: boolean; changed: 
 // What Details shows: the request as JSON with every hidden or blank-drawing character written
 // as a JSON \u escape (such characters only occur inside JSON strings), so the full request
 // reads exactly as it is and stays valid JSON.
-const DETAILS_ESCAPE = /(?![\t\n ])(?:[\p{Zs}\u2800\u3164\uffa0\u115f\u{1d159}]|\u1160|\u17b4|\u17b5|[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])/gu
+const DETAILS_ESCAPE =
+  /(?![\t\n ])(?:[\p{Zs}\u2800\u3164\uffa0\u115f\u{1d159}]|\u1160|\u17b4|\u17b5|[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}])/gu
 const detailsJson = (value: unknown): string =>
   JSON.stringify(value, null, 2).replace(DETAILS_ESCAPE, (character) =>
-    Array.from({ length: character.length }, (_, unit) => `\\u${character.charCodeAt(unit).toString(16).padStart(4, '0')}`).join('')
+    Array.from(
+      { length: character.length },
+      (_, unit) => `\\u${character.charCodeAt(unit).toString(16).padStart(4, '0')}`
+    ).join('')
   )
 
 const parameterText = (value: unknown): string => {
@@ -390,7 +404,8 @@ const parameterText = (value: unknown): string => {
 // overrides, zero-width), line and paragraph separators, spaces other than U+0020, characters
 // that draw blank or nothing, the marker bracket and its lookalikes, and the quote and backslash
 // used by the quoted form below.
-const UNCLEAR_NAME_CHARACTER = /[\p{C}\p{Zl}\p{Zp}"\\\u27e6\u301a\u29f5\u29f9\ufe68\uff3c\u2216\u2800\u3164\uffa0\u115f\u{1d159}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]|\u1160|\u17b4|\u17b5|(?! )\p{Zs}/u
+const UNCLEAR_NAME_CHARACTER =
+  /[\p{C}\p{Zl}\p{Zp}"\\\u27e6\u301a\u29f5\u29f9\ufe68\uff3c\u2216\u2800\u3164\uffa0\u115f\u{1d159}\p{Default_Ignorable_Code_Point}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}]|\u1160|\u17b4|\u17b5|(?! )\p{Zs}/u
 // A name with a colon could read as "label: value" inside the row; it is quoted, not escaped.
 const NAME_SEPARATOR = /[:：]/u
 // A name with a character outside printable ASCII and the Han script may hold a letter that draws
@@ -401,7 +416,12 @@ const OTHER_SCRIPT = /[^\x20-\x7e\p{Script=Han}]/u
 // Letters of other scripts that draw like a Latin letter, as pairs of the letter and the Latin
 // letter it draws like (Cyrillic, Greek, Armenian and a few Latin ones outside ASCII).
 const LOOKALIKES: ReadonlyMap<string, string> = new Map(
-  Array.from('\u0410a\u0412b\u0415e\u0405s\u0406l\u0408j\u041ak\u041cm\u041dh\u041eo\u0420p\u0421c\u0422t\u0425x\u0423y\u04aey\u0430a\u0435e\u0455s\u0456i\u0458j\u043eo\u0440p\u0441c\u0443y\u0445x\u04bbh\u0501d\u051bq\u051dw\u04cfl\u04afy\u043fn\u0433r\u044cb\u0391a\u0392b\u0395e\u0396z\u0397h\u0399l\u039ak\u039cm\u039dn\u039fo\u03a1p\u03a4t\u03a5y\u03a7x\u03b1a\u03bfo\u03bdv\u03c1p\u03b9i\u03bak\u03c5u\u03c7x\u03b5e\u03b7n\u0585o\u057du\u0570h\u0578n\u0581g\u0566q\u0131i\u0261g\u01c0l'.matchAll(/(.)(.)/gu), ([, letter, latin]) => [letter, latin])
+  Array.from(
+    '\u0410a\u0412b\u0415e\u0405s\u0406l\u0408j\u041ak\u041cm\u041dh\u041eo\u0420p\u0421c\u0422t\u0425x\u0423y\u04aey\u0430a\u0435e\u0455s\u0456i\u0458j\u043eo\u0440p\u0441c\u0443y\u0445x\u04bbh\u0501d\u051bq\u051dw\u04cfl\u04afy\u043fn\u0433r\u044cb\u0391a\u0392b\u0395e\u0396z\u0397h\u0399l\u039ak\u039cm\u039dn\u039fo\u03a1p\u03a4t\u03a5y\u03a7x\u03b1a\u03bfo\u03bdv\u03c1p\u03b9i\u03bak\u03c5u\u03c7x\u03b5e\u03b7n\u0585o\u057du\u0570h\u0578n\u0581g\u0566q\u0131i\u0261g\u01c0l'.matchAll(
+      /(.)(.)/gu
+    ),
+    ([, letter, latin]) => [letter, latin]
+  )
 )
 const ASCII_LOOKALIKES: Readonly<Record<string, string>> = { i: 'l', '1': 'l', '|': 'l', '0': 'o' }
 
@@ -413,9 +433,13 @@ const ASCII_LOOKALIKES: Readonly<Record<string, string>> = { i: 'l', '1': 'l', '
  * merged. Two names with the same skeleton can be taken for each other.
  */
 const nameSkeleton = (name: string): string => {
-  const lookalike = (text: string): string => Array.from(text, (character) => LOOKALIKES.get(character) ?? character).join('')
+  const lookalike = (text: string): string =>
+    Array.from(text, (character) => LOOKALIKES.get(character) ?? character).join('')
   const folded = name.normalize('NFKD').replace(/\p{M}/gu, '')
-  return Array.from(lookalike(lookalike(folded).toLowerCase()), (character) => ASCII_LOOKALIKES[character] ?? character)
+  return Array.from(
+    lookalike(lookalike(folded).toLowerCase()),
+    (character) => ASCII_LOOKALIKES[character] ?? character
+  )
     .join('')
     .replace(/rn/g, 'm')
     .replace(/vv/g, 'w')
@@ -425,12 +449,18 @@ const nameSkeleton = (name: string): string => {
 
 /** A character outside ASCII that reads as another one or adds a mark to one (see nameSkeleton). */
 const isLookalikeCharacter = (character: string): boolean =>
-  character > '\u007f' && (LOOKALIKES.has(character) || character.normalize('NFKD') !== character || /\p{M}/u.test(character))
+  character > '\u007f' &&
+  (LOOKALIKES.has(character) ||
+    character.normalize('NFKD') !== character ||
+    /\p{M}/u.test(character))
 
 const nameRules: VisibleRules = {
   blank: valueRules.blank,
   hidden: (character) =>
-    character !== '"' && character !== '\\' && !FORGED_MARKUP.test(character) && UNCLEAR_NAME_CHARACTER.test(character),
+    character !== '"' &&
+    character !== '\\' &&
+    !FORGED_MARKUP.test(character) &&
+    UNCLEAR_NAME_CHARACTER.test(character),
   escape: (character) =>
     character === '"' || character === '\\'
       ? `\\${character}`
@@ -445,7 +475,8 @@ const lookalikeNameRules: VisibleRules = {
   blank: nameRules.blank,
   hidden: nameRules.hidden,
   escape: (character, text, index) =>
-    nameRules.escape(character, text, index) ?? (isLookalikeCharacter(character) ? escapedCharacter(character) : null)
+    nameRules.escape(character, text, index) ??
+    (isLookalikeCharacter(character) ? escapedCharacter(character) : null)
 }
 
 /**
@@ -457,7 +488,10 @@ const lookalikeNameRules: VisibleRules = {
  * a fullwidth, compatibility-ideograph, Cyrillic or other-case form of it). `cut` tells that the
  * name was cut after NAME_TRUNCATE_AT characters.
  */
-const unlabelledParameterName = (key: string, knownSkeletons: ReadonlySet<string>): { text: string; cut: boolean } => {
+const unlabelledParameterName = (
+  key: string,
+  knownSkeletons: ReadonlySet<string>
+): { text: string; cut: boolean } => {
   const lookalike = knownSkeletons.has(nameSkeleton(key))
   if (
     key &&
@@ -471,18 +505,24 @@ const unlabelledParameterName = (key: string, knownSkeletons: ReadonlySet<string
     return cutName === null ? { text: key, cut: false } : { text: cutName, cut: true }
   }
   const quoted = visibleText(key, NAME_TRUNCATE_AT - 1, lookalike ? lookalikeNameRules : nameRules)
-  return quoted.cut ? { text: `"${quoted.text}`, cut: true } : { text: `"${quoted.text}"`, cut: false }
+  return quoted.cut
+    ? { text: `"${quoted.text}`, cut: true }
+    : { text: `"${quoted.text}"`, cut: false }
 }
 
 /**
  * The skeletons of every known field's key and of its label in each shipped language, which an
  * unlabelled name must not share.
  */
-const labelSkeletons = (t: TFunction<'translation'>, languages: readonly string[]): ReadonlySet<string> => {
+const labelSkeletons = (
+  t: TFunction<'translation'>,
+  languages: readonly string[]
+): ReadonlySet<string> => {
   const skeletons = new Set<string>()
   for (const [key, labelKey] of parameterLabels) {
     skeletons.add(nameSkeleton(key))
-    for (const lng of languages) skeletons.add(nameSkeleton(t(`agent_workspace.approval.parameters.${labelKey}`, { lng })))
+    for (const lng of languages)
+      skeletons.add(nameSkeleton(t(`agent_workspace.approval.parameters.${labelKey}`, { lng })))
   }
   return skeletons
 }
@@ -532,7 +572,10 @@ const approvalDisplay = (
     parameters: orderedKeys.map((key) => {
       const value = shownValue(parameterText(ownValue(input, key)))
       const labelled = labelOf(key)
-      const name = labelled === undefined ? unlabelledParameterName(key, knownSkeletons) : { text: labelled, cut: false }
+      const name =
+        labelled === undefined
+          ? unlabelledParameterName(key, knownSkeletons)
+          : { text: labelled, cut: false }
       return {
         key,
         label: name.cut ? t('agent_workspace.approval.truncated', { text: name.text }) : name.text,
@@ -636,15 +679,18 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
   const languages = (shipped.length ? shipped : [i18n.language]).join('\u0000')
   // A name is compared with the labels of every shipped language, not only the shown one, and
   // with the keys themselves; built once per language, not on every poll.
-  const knownSkeletons = React.useMemo(() => labelSkeletons(t, languages.split('\u0000')), [t, languages])
+  const knownSkeletons = React.useMemo(
+    () => labelSkeletons(t, languages.split('\u0000')),
+    [t, languages]
+  )
 
-  const resolving=React.useRef(false)
-  const refreshEpoch=React.useRef(0)
+  const resolving = React.useRef(false)
+  const refreshEpoch = React.useRef(0)
   const refresh = useCallback(async () => {
-    const epoch=++refreshEpoch.current
+    const epoch = ++refreshEpoch.current
     try {
       const result = await api().svcMagicAgentPlatform.listPendingApprovals({})
-      if(epoch===refreshEpoch.current)setApprovals(result.approvals)
+      if (epoch === refreshEpoch.current) setApprovals(result.approvals)
     } catch {
       // Keep current requests visible during transient transport failure.
     }
@@ -656,16 +702,35 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
     return () => window.clearInterval(timer)
   }, [refresh])
 
-  const surfaces=useTeamApprovalSurfaces()
-  const inline=approvals.map(approval=>({approval,surface:surfaces.find(surface=>surface.element.isConnected&&matchTeamApproval(approval.request,surface))})).filter(item=>item.surface)
-  useEffect(()=>{surfaces.forEach(surface=>surface.onWaiting(new Set(inline.filter(item=>item.surface===surface).map(item=>matchTeamApproval(item.approval.request,surface)!))))},[approvals,surfaces])
-  const approval = approvals.find(item=>!inline.some(entry=>entry.approval===item)) ?? inline[0]?.approval
+  const surfaces = useTeamApprovalSurfaces()
+  const inline = approvals
+    .map((approval) => ({
+      approval,
+      surface: surfaces.find(
+        (surface) => surface.element.isConnected && matchTeamApproval(approval.request, surface)
+      )
+    }))
+    .filter((item) => item.surface)
+  useEffect(() => {
+    surfaces.forEach((surface) =>
+      surface.onWaiting(
+        new Set(
+          inline
+            .filter((item) => item.surface === surface)
+            .map((item) => matchTeamApproval(item.approval.request, surface)!)
+        )
+      )
+    )
+  }, [approvals, surfaces])
+  const approval =
+    approvals.find((item) => !inline.some((entry) => entry.approval === item)) ??
+    inline[0]?.approval
   if (!approval) return null
   const display = approvalDisplay(approval, t, knownSkeletons)
 
   const resolve = async (approved: boolean, selected = approval): Promise<void> => {
-    if(resolving.current)return
-    resolving.current=true
+    if (resolving.current) return
+    resolving.current = true
     ++refreshEpoch.current
     setBusy(true)
     setApprovals((current) => current.filter((item) => item.approvalId !== selected.approvalId))
@@ -679,104 +744,235 @@ export default function MagicAgentApprovalCenter(): React.JSX.Element | null {
     } catch {
       await refresh()
     } finally {
-      resolving.current=false
+      resolving.current = false
       setBusy(false)
     }
   }
 
-  const inlineCards=inline.map(({approval:pending,surface})=>{
+  const inlineCards = inline.map(({ approval: pending, surface }) => {
     const shown = approvalDisplay(pending, t, knownSkeletons)
     const note = ownValue(shown.input, 'value')
     const isNote = shown.toolName === 'scratchpad' && ownValue(shown.input, 'action') === 'set'
+    // An image request names how many reference images it uploads; the title and prompt say so.
+    const isImage = shown.toolName === 'image_gen'
+    const uploadsImages = isImage && Boolean(ownValue(shown.input, 'uploadsInputImages'))
+    const inputImages = ownValue(shown.input, 'inputImages')
+    const imageCount = Array.isArray(inputImages) ? inputImages.length : 1
     // A note card shows the note itself as its prompt; every other field is listed below it.
     // A note that is not text is not the prompt, so its value stays in the list. The prompt is
     // the note's own row, so it is shown in the same capped and escaped form as every value.
-    const noteRow = isNote && typeof note === 'string' ? shown.parameters.find(parameter => parameter.key === 'value') : undefined
-    const detailParameters = noteRow ? shown.parameters.filter(parameter => parameter !== noteRow) : shown.parameters
-    const member = surface!.members.get(matchTeamApproval(pending.request,surface!)!)
+    const noteRow =
+      isNote && typeof note === 'string'
+        ? shown.parameters.find((parameter) => parameter.key === 'value')
+        : undefined
+    const detailParameters = noteRow
+      ? shown.parameters.filter((parameter) => parameter !== noteRow)
+      : shown.parameters
+    const member = surface!.members.get(matchTeamApproval(pending.request, surface!)!)
     // Presentation only: a prompt card at the end of the member's team transcript. Which
     // approval is shown here and what the buttons resolve are decided above.
-    return createPortal(<Box key={pending.approvalId} data-approval-id={pending.approvalId} data-approval-revision={pending.revision} sx={{minWidth:0}}>
-      <ChatPromptCard
-        testId="team-approval-card"
-        icon={<WarningAmberIcon aria-hidden="true" />}
-        accent="warning"
-        title={isNote ? t('agent_workspace.approval.member_wants_note', { member }) : t('agent_workspace.approval.member_requests_action', { member })}
-        prompt={isNote ? noteRow ? <ClampedValue kind="note" lineHeight={20} text={noteRow.text} /> : t('agent_workspace.approval.note_missing') : shown.action}
-        detail={!detailParameters.length ? undefined : <>{detailParameters.map(parameter => <Box key={parameter.key} component="span" data-approval-parameter={parameter.key} sx={{display:'block',pl:'1em',textIndent:'-1em'}}><Box component="span" data-approval-parameter-label="" sx={{fontWeight:600,unicodeBidi:'isolate-override',direction:'ltr'}}>{parameter.label}</Box>: <Box component="span" sx={{display:'inline-block',verticalAlign:'top',maxWidth:'100%',textIndent:0}}><ClampedValue kind="parameter" lineHeight={18} text={parameter.text} /></Box></Box>)}</>}
-        options={[
-          { key: 'approve', label: t('agent_workspace.approval.approve'), primary: true, disabled: busy, onSelect: () => void resolve(true, pending) },
-          { key: 'deny', label: t('agent_workspace.approval.deny'), disabled: busy, onSelect: () => void resolve(false, pending) }
-        ]}
+    return createPortal(
+      <Box
+        key={pending.approvalId}
+        data-approval-id={pending.approvalId}
+        data-approval-revision={pending.revision}
+        sx={{ minWidth: 0 }}
       >
-        <Box component="details" sx={{px:'4px',pb:'8px',color:'text.secondary',fontSize:12,'& summary':{cursor:'pointer',fontSize:12,lineHeight:'16px'}}}><summary>{t('agent_workspace.approval.details')}</summary><Typography component="pre" sx={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'16rem',overflow:'auto',m:0,mt:'4px',fontFamily:'monospace',fontSize:11,lineHeight:'16px'}}>{detailsJson(pending.request)}</Typography></Box>
-      </ChatPromptCard>
-    </Box>,surface!.element,pending.approvalId)
-  })
-  if(inline.some(item=>item.approval===approval))return <>{inlineCards}</>
-  return (<>{inlineCards}
-    <Dialog open aria-labelledby="magic-agent-approval-title">
-      <DialogTitle id="magic-agent-approval-title">{t('agent_workspace.approval.dialog_title')}</DialogTitle>
-      {/* Keyed by the approval, so what was opened for one approval (a value shown in full, the
-          Details) is never carried over to the next one. */}
-      <DialogContent key={approval.approvalId}>
-        <Typography fontWeight={600}>{display.action}</Typography>
-        <Typography variant="body2" color="text.secondary">
-          {t('agent_workspace.approval.tool', { name: display.toolName })}
-        </Typography>
-        {approval.graphContext ? (
-          <Typography variant="body2" color="text.secondary">
-            {t('agent_workspace.approval.task_step', {
-              runId: shownText(String(approval.graphContext.runId)),
-              nodeId: shownText(String(approval.graphContext.nodeId))
-            })}
-          </Typography>
-        ) : null}
-        <Box component="dl" sx={{ m: 0, mt: 2 }}>
-          {display.parameters.map((parameter) => (
-            <React.Fragment key={parameter.key}>
-              <Typography component="dt" variant="body2" fontWeight={600} sx={{ overflowWrap: 'anywhere', unicodeBidi: 'isolate-override', direction: 'ltr' }}>
-                {parameter.label}
-              </Typography>
-              <Typography
-                component="dd"
-                variant="body2"
-                sx={{
-                  ml: 0,
-                  mb: 1,
-                  pl: 1,
-                  borderLeft: 2,
-                  borderColor: 'divider',
-                  whiteSpace: 'pre-wrap',
-                  overflowWrap: 'anywhere',
-                  unicodeBidi: 'isolate'
-                }}
-              >
-                <ClampedValue kind="parameter" lineHeight={20} text={parameter.text} />
-              </Typography>
-            </React.Fragment>
-          ))}
-        </Box>
-        <Box component="details" sx={{ mt: 2 }}>
-          <Box component="summary" sx={{ cursor: 'pointer' }}>
-            {t('agent_workspace.approval.full_request')}
-          </Box>
+        <ChatPromptCard
+          testId="team-approval-card"
+          icon={<WarningAmberIcon aria-hidden="true" />}
+          accent="warning"
+          title={
+            isNote
+              ? t('agent_workspace.approval.member_wants_note', { member })
+              : isImage
+                ? t(
+                    uploadsImages
+                      ? 'agent_workspace.approval.image_edit_title'
+                      : 'agent_workspace.approval.image_create_title',
+                    { member }
+                  )
+                : t('agent_workspace.approval.member_requests_action', { member })
+          }
+          prompt={
+            isNote ? (
+              noteRow ? (
+                <ClampedValue kind="note" lineHeight={20} text={noteRow.text} />
+              ) : (
+                t('agent_workspace.approval.note_missing')
+              )
+            ) : isImage ? (
+              uploadsImages ? (
+                t('agent_workspace.approval.image_edit_prompt', { count: imageCount })
+              ) : (
+                t('agent_workspace.approval.image_create_prompt')
+              )
+            ) : (
+              shown.action
+            )
+          }
+          detail={
+            !detailParameters.length ? undefined : (
+              <>
+                {detailParameters.map((parameter) => (
+                  <Box
+                    key={parameter.key}
+                    component="span"
+                    data-approval-parameter={parameter.key}
+                    sx={{ display: 'block', pl: '1em', textIndent: '-1em' }}
+                  >
+                    <Box
+                      component="span"
+                      data-approval-parameter-label=""
+                      sx={{ fontWeight: 600, unicodeBidi: 'isolate-override', direction: 'ltr' }}
+                    >
+                      {parameter.label}
+                    </Box>
+                    :{' '}
+                    <Box
+                      component="span"
+                      sx={{
+                        display: 'inline-block',
+                        verticalAlign: 'top',
+                        maxWidth: '100%',
+                        textIndent: 0
+                      }}
+                    >
+                      <ClampedValue kind="parameter" lineHeight={18} text={parameter.text} />
+                    </Box>
+                  </Box>
+                ))}
+              </>
+            )
+          }
+          options={[
+            {
+              key: 'approve',
+              label: t('agent_workspace.approval.approve'),
+              primary: true,
+              disabled: busy,
+              onSelect: () => void resolve(true, pending)
+            },
+            {
+              key: 'deny',
+              label: t('agent_workspace.approval.deny'),
+              disabled: busy,
+              onSelect: () => void resolve(false, pending)
+            }
+          ]}
+        >
           <Box
-            component="pre"
-            sx={{ maxWidth: 640, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap' }}
+            component="details"
+            sx={{
+              px: '4px',
+              pb: '8px',
+              color: 'text.secondary',
+              fontSize: 12,
+              '& summary': { cursor: 'pointer', fontSize: 12, lineHeight: '16px' }
+            }}
           >
-            {detailsJson(approval.request)}
+            <summary>{t('agent_workspace.approval.details')}</summary>
+            <Typography
+              component="pre"
+              sx={{
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'anywhere',
+                maxHeight: '16rem',
+                overflow: 'auto',
+                m: 0,
+                mt: '4px',
+                fontFamily: 'monospace',
+                fontSize: 11,
+                lineHeight: '16px'
+              }}
+            >
+              {detailsJson(pending.request)}
+            </Typography>
           </Box>
-        </Box>
-      </DialogContent>
-      <DialogActions>
-        <Button disabled={busy} onClick={() => void resolve(false)}>
-          {t('agent_workspace.approval.deny')}
-        </Button>
-        <Button disabled={busy} variant="contained" onClick={() => void resolve(true)}>
-          {t('agent_workspace.approval.allow_once')}
-        </Button>
-      </DialogActions>
-    </Dialog></>
+        </ChatPromptCard>
+      </Box>,
+      surface!.element,
+      pending.approvalId
+    )
+  })
+  if (inline.some((item) => item.approval === approval)) return <>{inlineCards}</>
+  return (
+    <>
+      {inlineCards}
+      <Dialog open aria-labelledby="magic-agent-approval-title">
+        <DialogTitle id="magic-agent-approval-title">
+          {t('agent_workspace.approval.dialog_title')}
+        </DialogTitle>
+        {/* Keyed by the approval, so what was opened for one approval (a value shown in full, the
+          Details) is never carried over to the next one. */}
+        <DialogContent key={approval.approvalId}>
+          <Typography fontWeight={600}>{display.action}</Typography>
+          <Typography variant="body2" color="text.secondary">
+            {t('agent_workspace.approval.tool', { name: display.toolName })}
+          </Typography>
+          {approval.graphContext ? (
+            <Typography variant="body2" color="text.secondary">
+              {t('agent_workspace.approval.task_step', {
+                runId: shownText(String(approval.graphContext.runId)),
+                nodeId: shownText(String(approval.graphContext.nodeId))
+              })}
+            </Typography>
+          ) : null}
+          <Box component="dl" sx={{ m: 0, mt: 2 }}>
+            {display.parameters.map((parameter) => (
+              <React.Fragment key={parameter.key}>
+                <Typography
+                  component="dt"
+                  variant="body2"
+                  fontWeight={600}
+                  sx={{
+                    overflowWrap: 'anywhere',
+                    unicodeBidi: 'isolate-override',
+                    direction: 'ltr'
+                  }}
+                >
+                  {parameter.label}
+                </Typography>
+                <Typography
+                  component="dd"
+                  variant="body2"
+                  sx={{
+                    ml: 0,
+                    mb: 1,
+                    pl: 1,
+                    borderLeft: 2,
+                    borderColor: 'divider',
+                    whiteSpace: 'pre-wrap',
+                    overflowWrap: 'anywhere',
+                    unicodeBidi: 'isolate'
+                  }}
+                >
+                  <ClampedValue kind="parameter" lineHeight={20} text={parameter.text} />
+                </Typography>
+              </React.Fragment>
+            ))}
+          </Box>
+          <Box component="details" sx={{ mt: 2 }}>
+            <Box component="summary" sx={{ cursor: 'pointer' }}>
+              {t('agent_workspace.approval.full_request')}
+            </Box>
+            <Box
+              component="pre"
+              sx={{ maxWidth: 640, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap' }}
+            >
+              {detailsJson(approval.request)}
+            </Box>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => void resolve(false)}>
+            {t('agent_workspace.approval.deny')}
+          </Button>
+          <Button disabled={busy} variant="contained" onClick={() => void resolve(true)}>
+            {t('agent_workspace.approval.allow_once')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
   )
 }

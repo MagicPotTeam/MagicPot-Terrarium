@@ -52,7 +52,10 @@ type ChatPrimarySelectionProps = {
     profileId: string
   ) => { efforts: LLMReasoningEffort[]; effort: LLMReasoningEffort | null } | null
   /** Stores the effort preference of the given model (used when the model changes too). */
-  onSelectProfileReasoningEffort?: (profileId: string, effort: LLMReasoningEffort | undefined) => void
+  onSelectProfileReasoningEffort?: (
+    profileId: string,
+    effort: LLMReasoningEffort | undefined
+  ) => void
   /** All three must be supplied for the caller-resolved effective member profile. */
   memberReasoningEffort?: LLMReasoningEffort | null
   memberAvailableReasoningEfforts?: LLMReasoningEffort[]
@@ -107,14 +110,22 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   useEffect(() => {
     setAnchorEl(null)
     setReasoningAnchorEl(null)
-  }, [active, Boolean(memberModel), memberModel?.state, memberModel?.disabled, memberModel?.pending])
+  }, [
+    active,
+    Boolean(memberModel),
+    memberModel?.state,
+    memberModel?.disabled,
+    memberModel?.pending
+  ])
 
   const selectedProfile = availableProfiles.find((profile) => profile.id === selectedProfileId)
-  const displayLabel = selectedProfile ? selectedProfile.model_name : translate('chat.model_none', 'No model')
+  const displayLabel = selectedProfile
+    ? selectedProfile.model_name
+    : translate('chat.model_none', 'No model')
   // Legacy preferences/remote clients may still send Ultra; never render it as an option.
   const reasoningEfforts = Array.from(
     new Set(
-      (memberModel ? memberAvailableReasoningEfforts ?? [] : availableReasoningEfforts)
+      (memberModel ? (memberAvailableReasoningEfforts ?? []) : availableReasoningEfforts)
         .map((effort) => normalizeReasoningEffort(effort))
         .filter((effort): effort is LLMReasoningEffort => Boolean(effort))
     )
@@ -240,7 +251,11 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           null)
       : selectedProfileId
     const switcherProfiles: ChatModelSwitcherProfile[] = pickableProfiles.map((profile) => {
-      const row = { id: profile.id, model_name: profile.model_name, detail: getModelSwitcherDetail(profile) }
+      const row = {
+        id: profile.id,
+        model_name: profile.model_name,
+        detail: getModelSwitcherDetail(profile)
+      }
       if (profile.id === currentProfileId) {
         return { ...row, efforts: pickableEfforts, effort: normalizedSelectedEffort ?? null }
       }
@@ -358,35 +373,119 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   }
 
   if (memberModel) {
-    const label = memberModel.state === 'unavailable'
-      ? t('chat.member_model_unavailable', { defaultValue: 'Member model unavailable' })
-      : memberModel.state === 'inherited'
-        ? t('chat.member_model_inherited', { defaultValue: 'Inherits lead: {{model}}', model: memberModel.label })
-        : t('chat.member_model_selected', { defaultValue: 'Member model: {{model}}', model: memberModel.label })
-    const canSelect = active && memberModel.state !== 'unavailable' && !memberModel.disabled && !memberModel.pending && Boolean(memberModel.onSelectProfile)
+    const label =
+      memberModel.state === 'unavailable'
+        ? t('chat.member_model_unavailable', { defaultValue: 'Member model unavailable' })
+        : memberModel.state === 'inherited'
+          ? t('chat.member_model_inherited', {
+              defaultValue: 'Inherits lead: {{model}}',
+              model: memberModel.label
+            })
+          : t('chat.member_model_selected', {
+              defaultValue: 'Member model: {{model}}',
+              model: memberModel.label
+            })
+    const canSelect =
+      active &&
+      memberModel.state !== 'unavailable' &&
+      !memberModel.disabled &&
+      !memberModel.pending &&
+      Boolean(memberModel.onSelectProfile)
     const selectableProfileIds = memberModel.selectableProfileIds
     const selectableMemberProfiles = selectableProfileIds
-      ? availableProfiles.filter(profile => selectableProfileIds.includes(profile.id))
+      ? availableProfiles.filter((profile) => selectableProfileIds.includes(profile.id))
       : availableProfiles
-    const showReasoning = memberReasoningEffort !== undefined && memberAvailableReasoningEfforts !== undefined && Boolean(onSelectMemberReasoningEffort) && reasoningEfforts.length > 0
-    const canReason = active && memberModel.state !== 'unavailable' && !memberModel.disabled && !memberModel.pending
-    return <>
-      <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0, ...(composerStyle ? { borderRadius: 999, bgcolor: 'action.hover', px: 0.75, maxWidth: '100%' } : {}) }}>
-      <Button disabled={!canSelect} aria-busy={memberModel.pending || undefined} size="small" aria-label={label} onClick={handleOpen} sx={{ minWidth: 0, maxWidth: 200, borderRadius: 999, textTransform: 'none' }}>
-        <Box component="span" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{label}</Box><ExpandMoreIcon data-testid="member-model-arrow" sx={{ flexShrink: 0, fontSize: 15, ml: 0.25 }} />
-      </Button>
-      {showReasoning ? <Button size="small" disabled={!canReason} aria-label={translate('chat.reasoning_label', 'Reasoning effort')} onClick={handleOpenReasoning} sx={(theme) => buildReasoningButtonSx(theme)}>{displayReasoningLabel}<ExpandMoreIcon sx={{ fontSize: 15, flexShrink: 0 }} /></Button> : null}
-      </Box>
-      <Menu anchorEl={reasoningAnchorEl} open={Boolean(reasoningAnchorEl) && canReason && showReasoning} onClose={handleCloseReasoning}>
-        {[undefined, ...reasoningEfforts].map((effort) => <MenuItem key={effort ?? 'default'} selected={effort === normalizedSelectedEffort} onClick={() => { if (canReason) onSelectMemberReasoningEffort?.(effort); handleCloseReasoning() }}>{effort ? getReasoningEffortLabel(effort) : translate('chat.reasoning_default', 'Default')}</MenuItem>)}
-      </Menu>
-      <Menu anchorEl={anchorEl} open={Boolean(anchorEl) && canSelect} onClose={handleClose}>
-        {selectableMemberProfiles.map((profile) => <MenuItem key={profile.id} onClick={() => {
-          if (canSelect) memberModel.onSelectProfile?.(profile.id)
-          handleClose()
-        }}>{profile.model_name}</MenuItem>)}
-      </Menu>
-    </>
+    const showReasoning =
+      memberReasoningEffort !== undefined &&
+      memberAvailableReasoningEfforts !== undefined &&
+      Boolean(onSelectMemberReasoningEffort) &&
+      reasoningEfforts.length > 0
+    const canReason =
+      active && memberModel.state !== 'unavailable' && !memberModel.disabled && !memberModel.pending
+    return (
+      <>
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            minWidth: 0,
+            ...(composerStyle
+              ? { borderRadius: 999, bgcolor: 'action.hover', px: 0.75, maxWidth: '100%' }
+              : {})
+          }}
+        >
+          <Button
+            disabled={!canSelect}
+            aria-busy={memberModel.pending || undefined}
+            size="small"
+            aria-label={label}
+            onClick={handleOpen}
+            sx={{ minWidth: 0, maxWidth: 200, borderRadius: 999, textTransform: 'none' }}
+          >
+            <Box
+              component="span"
+              sx={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                minWidth: 0
+              }}
+            >
+              {label}
+            </Box>
+            <ExpandMoreIcon
+              data-testid="member-model-arrow"
+              sx={{ flexShrink: 0, fontSize: 15, ml: 0.25 }}
+            />
+          </Button>
+          {showReasoning ? (
+            <Button
+              size="small"
+              disabled={!canReason}
+              aria-label={translate('chat.reasoning_label', 'Reasoning effort')}
+              onClick={handleOpenReasoning}
+              sx={(theme) => buildReasoningButtonSx(theme)}
+            >
+              {displayReasoningLabel}
+              <ExpandMoreIcon sx={{ fontSize: 15, flexShrink: 0 }} />
+            </Button>
+          ) : null}
+        </Box>
+        <Menu
+          anchorEl={reasoningAnchorEl}
+          open={Boolean(reasoningAnchorEl) && canReason && showReasoning}
+          onClose={handleCloseReasoning}
+        >
+          {[undefined, ...reasoningEfforts].map((effort) => (
+            <MenuItem
+              key={effort ?? 'default'}
+              selected={effort === normalizedSelectedEffort}
+              onClick={() => {
+                if (canReason) onSelectMemberReasoningEffort?.(effort)
+                handleCloseReasoning()
+              }}
+            >
+              {effort
+                ? getReasoningEffortLabel(effort)
+                : translate('chat.reasoning_default', 'Default')}
+            </MenuItem>
+          ))}
+        </Menu>
+        <Menu anchorEl={anchorEl} open={Boolean(anchorEl) && canSelect} onClose={handleClose}>
+          {selectableMemberProfiles.map((profile) => (
+            <MenuItem
+              key={profile.id}
+              onClick={() => {
+                if (canSelect) memberModel.onSelectProfile?.(profile.id)
+                handleClose()
+              }}
+            >
+              {profile.model_name}
+            </MenuItem>
+          ))}
+        </Menu>
+      </>
+    )
   }
 
   return !isAgentSkillSelected ? (
@@ -398,7 +497,9 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           gap: compact ? 0.75 : 1,
           minWidth: 0,
           flexWrap: composerStyle ? 'nowrap' : 'wrap',
-          ...(composerStyle ? { borderRadius: 999, bgcolor: 'action.hover', px: 0.75, maxWidth: '100%' } : {})
+          ...(composerStyle
+            ? { borderRadius: 999, bgcolor: 'action.hover', px: 0.75, maxWidth: '100%' }
+            : {})
         }}
       >
         {!compact && (
@@ -412,9 +513,11 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           disabled={availableProfiles.length === 0}
           sx={(theme) => buildSelectorButtonSx(theme)}
         >
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
             <BoltIcon sx={{ fontSize: compact ? 14 : 16, opacity: compact ? 0.85 : 1 }} />
             <Typography
+              noWrap
+              title={displayLabel}
               sx={{
                 fontSize: compact ? 12 : 14,
                 fontWeight: 700,
@@ -432,6 +535,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           <Button
             size="small"
             onClick={handleOpenReasoning}
+            style={{ flexShrink: 0 }}
             aria-label={translate('chat.reasoning_label', 'Reasoning effort')}
             sx={(theme) => buildReasoningButtonSx(theme)}
           >
@@ -479,7 +583,9 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             {'\u9009\u62e9\u6a21\u578b'}
           </Typography>
         </Box>
-        {availableProfiles.length === 0 && <MenuItem disabled>{translate('chat.model_none', 'No model')}</MenuItem>}
+        {availableProfiles.length === 0 && (
+          <MenuItem disabled>{translate('chat.model_none', 'No model')}</MenuItem>
+        )}
         {availableProfiles.map((profile) => {
           const isSelected = profile.id === selectedProfileId
           return (
@@ -570,7 +676,9 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 {isSelected ? <BoltIcon sx={{ fontSize: 16 }} /> : <Box sx={{ width: 16 }} />}
-                {effort ? getReasoningEffortLabel(effort) : translate('chat.reasoning_default', 'Default')}
+                {effort
+                  ? getReasoningEffortLabel(effort)
+                  : translate('chat.reasoning_default', 'Default')}
               </Box>
               {isSelected && <CheckIcon sx={{ fontSize: 16 }} />}
             </MenuItem>

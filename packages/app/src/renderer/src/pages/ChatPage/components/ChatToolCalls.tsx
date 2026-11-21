@@ -705,18 +705,65 @@ const ToolCallRow: React.FC<{
           sx={{ fontSize: 16, flexShrink: 0, transform: open ? 'rotate(180deg)' : undefined }}
         />
       </Box>
-      {card && <Box sx={{ px: 1.5, py: 1, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', ...(cardAccent ? { border: '1px solid', borderColor: cardAccent.borderColor } : {}) }}>
-        <Typography variant="caption" color="text.secondary">{t('chat.tool_call.card_display_notice')}</Typography>
-        <Typography component="h4" variant="subtitle2" sx={{ color: cardAccent?.headerColor }}>{cardIcon !== undefined ? <Box component="span" aria-hidden="true" sx={{ mr: 0.5 }}>{cardIcon}</Box> : null}{formatToolCallValue(card.title).text}</Typography>
-        {card.subtitle !== undefined && <Typography variant="body2" color="text.secondary">{formatToolCallValue(card.subtitle).text}</Typography>}
-        {card.body !== undefined && <AgentThreadCardBody body={card.body} />}
-        {card.fields && <Box sx={{ display: 'grid', gridTemplateColumns: card.fields.some(field => field.inline) ? 'minmax(0, 1fr) minmax(0, 1fr)' : 'minmax(0, 1fr)', columnGap: 1.5, rowGap: 0.5, mt: 1 }}>
-          {card.fields.map((field, index) => <Typography key={index} variant="body2" sx={{ minWidth: 0, gridColumn: field.inline ? undefined : '1 / -1' }}>
-            {formatToolCardField(field.label, field.value)}
-          </Typography>)}
-        </Box>}
-        {card.footer !== undefined && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>{formatToolCallValue(card.footer).text}</Typography>}
-      </Box>}
+      {card && (
+        <Box
+          sx={{
+            px: 1.5,
+            py: 1,
+            maxHeight: 280,
+            overflow: 'auto',
+            whiteSpace: 'pre-wrap',
+            overflowWrap: 'anywhere',
+            ...(cardAccent ? { border: '1px solid', borderColor: cardAccent.borderColor } : {})
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            {t('chat.tool_call.card_display_notice')}
+          </Typography>
+          <Typography component="h4" variant="subtitle2" sx={{ color: cardAccent?.headerColor }}>
+            {cardIcon !== undefined ? (
+              <Box component="span" aria-hidden="true" sx={{ mr: 0.5 }}>
+                {cardIcon}
+              </Box>
+            ) : null}
+            {formatToolCallValue(card.title).text}
+          </Typography>
+          {card.subtitle !== undefined && (
+            <Typography variant="body2" color="text.secondary">
+              {formatToolCallValue(card.subtitle).text}
+            </Typography>
+          )}
+          {card.body !== undefined && <AgentThreadCardBody body={card.body} />}
+          {card.fields && (
+            <Box
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: card.fields.some((field) => field.inline)
+                  ? 'minmax(0, 1fr) minmax(0, 1fr)'
+                  : 'minmax(0, 1fr)',
+                columnGap: 1.5,
+                rowGap: 0.5,
+                mt: 1
+              }}
+            >
+              {card.fields.map((field, index) => (
+                <Typography
+                  key={index}
+                  variant="body2"
+                  sx={{ minWidth: 0, gridColumn: field.inline ? undefined : '1 / -1' }}
+                >
+                  {formatToolCardField(field.label, field.value)}
+                </Typography>
+              ))}
+            </Box>
+          )}
+          {card.footer !== undefined && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+              {formatToolCallValue(card.footer).text}
+            </Typography>
+          )}
+        </Box>
+      )}
       {open && details && (
         <Box sx={{ borderTop: '1px solid', borderColor: 'divider', pb: 1 }}>
           {section(t('chat.tool_call.arguments'), details.args)}
@@ -857,8 +904,10 @@ const ToolCallBatch: React.FC<{
 export default function ChatToolCalls({
   history,
   live,
-  columnStyle = false
+  columnStyle: columnStyleProp = false,
+  grouped = false
 }: {
+  grouped?: boolean
   history?: readonly ToolHistoryEntry[]
   live: boolean
   /** Agent column look: one tinted line per call, one line for three or more calls in a row. */
@@ -866,6 +915,8 @@ export default function ChatToolCalls({
 }) {
   const { t } = useTranslation()
   const entries = React.useMemo(() => visibleToolCalls(history), [history])
+  // The workbench asks for grouped rows: the same compact column presentation.
+  const columnStyle = columnStyleProp || grouped
   // Expanded state lives here, keyed by receipt, so a line keeps it when it moves into a batch.
   const [openKeys, setOpenKeys] = React.useState<ReadonlySet<string>>(() => new Set())
   const toggle = React.useCallback((key: string) => {

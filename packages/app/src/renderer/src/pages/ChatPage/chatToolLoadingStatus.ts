@@ -14,14 +14,14 @@ export function getChatToolLoadingStatus(event: LLMToolStatus, t: TFunction): Ch
       toolName === 'image_gen'
         ? t('chat.loading_image_generation', { defaultValue: '出图中' })
         : toolName === 'web_search'
-        ? t('chat.loading_web_search', { defaultValue: 'Searching the web' })
-        : toolName === 'web_fetch'
-          ? t('chat.loading_web_fetch', { defaultValue: 'Reading a web page' })
-          : ['ask_user', 'show_card', 'show_app'].includes(toolName)
-            ? t('chat.agent_interaction.waiting', { defaultValue: 'Waiting for your feedback' })
-            : ['explore', 'critic', 'fork'].includes(toolName)
-              ? t('chat.loading_subagent', { defaultValue: 'Running a read-only sub-agent' })
-              : t('chat.loading_tool_running', { defaultValue: 'Running a tool' })
+          ? t('chat.loading_web_search', { defaultValue: 'Searching the web' })
+          : toolName === 'web_fetch'
+            ? t('chat.loading_web_fetch', { defaultValue: 'Reading a web page' })
+            : ['ask_user', 'show_card', 'show_app'].includes(toolName)
+              ? t('chat.agent_interaction.waiting', { defaultValue: 'Waiting for your feedback' })
+              : ['explore', 'critic', 'fork'].includes(toolName)
+                ? t('chat.loading_subagent', { defaultValue: 'Running a read-only sub-agent' })
+                : t('chat.loading_tool_running', { defaultValue: 'Running a tool' })
   } else if (event.status === 'completed') {
     label = t('chat.loading_tool_returned', {
       defaultValue: 'Tool returned; waiting for the model to continue'
@@ -32,5 +32,7 @@ export function getChatToolLoadingStatus(event: LLMToolStatus, t: TFunction): Ch
     label = t('chat.loading_tool_failed', { defaultValue: 'Tool failed' })
   }
   // No invented step count, raw arguments, query, response body or file paths.
-  return { label, detail: toolName }
+  return event.status === 'running' && toolName === 'image_gen'
+    ? { label, detail: toolName, presentation: 'tool-row-only' }
+    : { label, detail: toolName }
 }

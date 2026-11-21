@@ -67,7 +67,11 @@ import {
   DEFAULT_LLM_IMAGE_HISTORY_POLICY,
   selectMessagesForImageHistoryPolicy
 } from '@shared/llm/imageHistory'
-import { isOpencodeZenUrl, isRunnableProfile, usesOpenAIResponsesImagePolicy } from '@shared/llm/utils'
+import {
+  isOpencodeZenUrl,
+  isRunnableProfile,
+  usesOpenAIResponsesImagePolicy
+} from '@shared/llm/utils'
 import {
   DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY,
   shouldUseOpenAIImageGeneration
@@ -83,6 +87,12 @@ import {
   type ChatSendStage,
   type ChatSendStageBreadcrumb
 } from '@shared/utils/chatSendStageBreadcrumb'
+import {
+  projectImageToolArgs,
+  projectImageToolId,
+  summarizeCompletedImageToolReceipt
+} from '@shared/llm/imageToolReceipt'
+import type { ThreadImageHistoryEntry } from '@shared/llm/imageHistory'
 export { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 type ChatRequestPayload = {
@@ -103,6 +113,8 @@ type ChatRequestPayload = {
   imageGenerationOptions?: OpenAIImageGenerationOptions
   imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
+  threadImageHistory?: (ThreadImageHistoryEntry | null)[]
+  threadImageReview?: 'last-output'
   apiMode?: LLMOpenAIApiMode
   skillRuntime?: LLMChatSkillRuntime
   teamMember?: LLMTeamMember
@@ -164,6 +176,8 @@ type RequestChatCompletionInput = {
   imageGenerationOptions?: OpenAIImageGenerationOptions
   imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
+  threadImageHistory?: (ThreadImageHistoryEntry | null)[]
+  threadImageReview?: 'last-output'
   apiMode?: LLMOpenAIApiMode
   skillRuntime?: LLMChatSkillRuntime
   externalAgentSkill?: CustomSkill | null
@@ -397,10 +411,14 @@ const normalizeLocalChatRequestError = (value: unknown): LocalChatRequestError =
   )
   if (typeof record?.code === 'string') error.code = record.code
   if (typeof record?.name === 'string' && record.name.trim()) error.name = record.name
-  const receipt = readAgentToolFailurePayload(record ? Object.getOwnPropertyDescriptor(record, 'payload')?.value : undefined)
+  const receipt = readAgentToolFailurePayload(
+    record ? Object.getOwnPropertyDescriptor(record, 'payload')?.value : undefined
+  )
   if (receipt) {
-    const metadata = 'receiptOmitted' in receipt ? { toolReceiptOmitted: true }
-      : { toolHistory: receipt.toolHistory, toolResult: receipt.toolResult }
+    const metadata =
+      'receiptOmitted' in receipt
+        ? { toolReceiptOmitted: true }
+        : { toolHistory: receipt.toolHistory, toolResult: receipt.toolResult }
     error.finishReason = 'error'
     error.metadata = metadata
     error.partialResult = { content: '', finishReason: 'error', metadata }
@@ -435,15 +453,24 @@ const attachStreamPartialToError = (
   return diagnostic
 }
 
+const INCOMPLETE_CHAT_STREAM_MESSAGE =
+  'incomplete-stream: the IPC stream ended before a terminal done event.'
+
+export const isIncompleteChatStreamError = (error: unknown): boolean =>
+  error instanceof Error &&
+  ((error as LocalChatRequestError).code === 'INCOMPLETE_CHAT_STREAM' ||
+    error.message === INCOMPLETE_CHAT_STREAM_MESSAGE ||
+    error.message === 'incomplete-stream: External Agent stream ended without a terminal event.')
+
 const createIncompleteStreamError = (
   partialContent: string,
   finishReason?: LLMChatStreamResp['finishReason'],
   metadata?: Record<string, unknown>
 ): LocalChatRequestError =>
   attachStreamPartialToError(
-    createLocalChatRequestError(
-      'incomplete-stream: the IPC stream ended before a terminal done event.'
-    ),
+    Object.assign(createLocalChatRequestError(INCOMPLETE_CHAT_STREAM_MESSAGE), {
+      code: 'INCOMPLETE_CHAT_STREAM'
+    }),
     partialContent,
     finishReason,
     metadata
@@ -1151,18 +1178,30 @@ const projectToolHistoryForProvider = (
     return { content: message.content }
   }
 
-  const preservedToolHistory = history.map((entry) => ({
-    ...entry,
-    args: { ...entry.args },
-    ...(entry.metadata ? { metadata: { ...entry.metadata } } : {})
-  }))
+  const providerHistory: NonNullable<ChatMessage['toolHistory']> = history.map((entry) => {
+    if (entry.toolName === 'image_gen' && entry.status === 'completed') {
+      return {
+        runId: projectImageToolId(entry.runId),
+        toolCallId: projectImageToolId(entry.toolCallId),
+        toolName: entry.toolName,
+        status: entry.status,
+        args: projectImageToolArgs(entry.args),
+        content: summarizeCompletedImageToolReceipt(entry.content)
+      }
+    }
+    return {
+      ...entry,
+      args: { ...entry.args },
+      ...(entry.metadata ? { metadata: { ...entry.metadata } } : {})
+    }
+  })
   if (history.length === 0) {
-    return { content: message.content, toolHistory: preservedToolHistory }
+    return { content: message.content, toolHistory: providerHistory }
   }
 
   const projection = [
     '[assistant.toolHistory]',
-    ...history.map((entry, index) => {
+    ...providerHistory.map((entry, index) => {
       const lines = [
         `entry[${index + 1}].runId=${JSON.stringify(entry.runId)}`,
         `entry[${index + 1}].toolCallId=${JSON.stringify(entry.toolCallId)}`,
@@ -1188,7 +1227,7 @@ const projectToolHistoryForProvider = (
 
   return {
     content: message.content ? `${message.content}\n\n${projection}` : projection,
-    toolHistory: preservedToolHistory
+    toolHistory: providerHistory
   }
 }
 const withoutReportBundleBinding = (attachment: ChatAttachment): ChatAttachment => {
@@ -1274,7 +1313,9 @@ const buildChatRequestPayload = (
     }),
     ...(input.route ? { route: input.route } : {}),
     profileId: input.profileId || (input.config.use_remote_llm ? selectedProfile?.id : undefined),
-    ...(input.expectedProfileRevision !== undefined ? { expectedProfileRevision: input.expectedProfileRevision } : {}),
+    ...(input.expectedProfileRevision !== undefined
+      ? { expectedProfileRevision: input.expectedProfileRevision }
+      : {}),
     ...(input.stream ? { stream: true } : {}),
     ...(input.config.use_remote_llm
       ? remoteApiMode
@@ -1297,7 +1338,12 @@ const buildChatRequestPayload = (
     ...(input.teamMember ? { teamMember: input.teamMember } : {}),
     ...(input.teamMessageHop ? { teamMessageHop: input.teamMessageHop } : {}),
     ...(input.teamMessageHop && input.teamMessageDelivery && destination.localMainBoundary === true
-      ? { teamMessageDelivery: { id: input.teamMessageDelivery.id, lease: input.teamMessageDelivery.lease } }
+      ? {
+          teamMessageDelivery: {
+            id: input.teamMessageDelivery.id,
+            lease: input.teamMessageDelivery.lease
+          }
+        }
       : {}),
     ...(input.goalProgressToken ? { goalProgressToken: input.goalProgressToken } : {}),
     sessionUrl: input.sessionUrl,
@@ -1305,6 +1351,32 @@ const buildChatRequestPayload = (
     isEdit: input.isEdit
   }
 }
+
+// Keep the edit sidecar out of external-agent/remote requests (including probes).
+const buildLocalChatRequestPayload = (input: RequestChatCompletionInput): ChatRequestPayload => ({
+  ...buildChatRequestPayload(input, { localMainBoundary: true }),
+  ...(!input.config.use_remote_llm &&
+  !input.externalAgentSkill &&
+  !input.skillRuntime &&
+  !input.goalProgressToken &&
+  input.route?.channel === 'canvas' &&
+  input.route.scopeType === 'thread' &&
+  input.threadImageHistory?.length
+    ? {
+        threadImageHistory: input.threadImageHistory,
+        ...(input.threadImageReview === 'last-output' &&
+        !input.teamMember &&
+        !input.teamMessageHop &&
+        !input.isEdit &&
+        !input.imageRequest &&
+        !input.imageGenerationOptions?.enabled &&
+        input.messages.at(-1)?.role === 'user' &&
+        !input.messages.at(-1)?.attachments?.length
+          ? { threadImageReview: 'last-output' as const }
+          : {})
+      }
+    : {})
+})
 
 const hasPrimaryReportBundleInMessages = (messages: ChatMessage[]): boolean =>
   messages.some(
@@ -1732,7 +1804,9 @@ const expandMessagesForImagePreflight = async (
     messages,
     imageHistoryPolicy
   )
-  const latestUserIndex = messagesSelectedForExpansion.findLastIndex((message) => message.role === 'user')
+  const latestUserIndex = messagesSelectedForExpansion.findLastIndex(
+    (message) => message.role === 'user'
+  )
   for (const [index, message] of messagesSelectedForExpansion.entries()) {
     throwIfAborted(signal)
     // Expand before the probe only what the count checks need: every user message
@@ -1755,7 +1829,8 @@ const expandMessagesForImagePreflight = async (
       // MAIN's verified manifest.
       const own = new Set(message.attachments ?? [])
       for (const attachment of attachments) {
-        if (attachment.type === 'image' && !own.has(attachment)) verifiedManifestImages.add(attachment)
+        if (attachment.type === 'image' && !own.has(attachment))
+          verifiedManifestImages.add(attachment)
       }
     }
     expandedMessages.push({ ...message, attachments })
@@ -1765,7 +1840,9 @@ const expandMessagesForImagePreflight = async (
   // This only rejects images already exposed by the legacy best-effort expansion.
   // Expansion may have failed or deduplicated entries, so success is not evidence
   // that the true bundle count or its authorization is safe.
-  assertExplicitUserImageCount(selectedMessages.findLast(message => message.role === 'user')?.attachments)
+  assertExplicitUserImageCount(
+    selectedMessages.findLast((message) => message.role === 'user')?.attachments
+  )
   if (maxImages !== undefined && maxImages !== Infinity) {
     const imageCount = countProviderBoundImages(selectedMessages, imageHistoryPolicy)
     if (imageCount > maxImages) {
@@ -2262,20 +2339,18 @@ const requestLocalChatCompletion = async (
   }
 
   try {
-    const request = {
-      ...buildChatRequestPayload(input, { localMainBoundary: true }),
-      cancellationId
-    }
-    if (input.beforeLocalDispatch) await awaitWithAbort(Promise.resolve().then(input.beforeLocalDispatch), input.signal)
+    const request = { ...buildLocalChatRequestPayload(input), cancellationId }
+    if (input.beforeLocalDispatch)
+      await awaitWithAbort(Promise.resolve().then(input.beforeLocalDispatch), input.signal)
     throwIfAborted(input.signal)
     const pending = window.api.svcLLMProxy.chat(request)
     void pending.catch(() => undefined)
-    try { input.onLocalDispatch?.() } catch { /* observer cannot alter a started request */ }
-    const response = await awaitWithAbort(
-      pending,
-      input.signal,
-      handleAbort
-    )
+    try {
+      input.onLocalDispatch?.()
+    } catch {
+      /* observer cannot alter a started request */
+    }
+    const response = await awaitWithAbort(pending, input.signal, handleAbort)
     throwIfAborted(input.signal)
     return normalizeResponse(response)
   } catch (error) {
@@ -2392,10 +2467,11 @@ const requestLocalChatCompletionStream = async (
     const streamInvoker =
       invoke || (window.api.svcLLMProxy.chatStream as unknown as RendererStreamInvoker)
     const streamRequest = {
-      ...((request ?? buildChatRequestPayload(input, { localMainBoundary: true })) as object),
+      ...((request ?? buildLocalChatRequestPayload(input)) as object),
       cancellationId
     }
-    if (input.beforeLocalDispatch) await Promise.race([Promise.resolve().then(input.beforeLocalDispatch), control])
+    if (input.beforeLocalDispatch)
+      await Promise.race([Promise.resolve().then(input.beforeLocalDispatch), control])
     throwIfAborted(input.signal)
     dispatchStarted = true
     const streamPromise = streamInvoker(streamRequest, {
@@ -2506,19 +2582,21 @@ const requestLocalChatCompletionStream = async (
       }
     })
     void streamPromise.catch(() => undefined)
-    try { input.onLocalDispatch?.() } catch { /* observer cannot alter a started request */ }
+    try {
+      input.onLocalDispatch?.()
+    } catch {
+      /* observer cannot alter a started request */
+    }
     await Promise.race([streamPromise, control])
 
     if (input.signal?.aborted) {
       throwIfAborted(input.signal)
     }
 
+    // Preserve an explicit provider error even if the transport closed before done.
+    if (observedError) throw observedError
     if (!receivedTerminalDone) {
       throw createIncompleteStreamError(partialContent, partialFinishReason, partialMetadata)
-    }
-
-    if (observedError) {
-      throw observedError
     }
 
     return streamedResponse
@@ -2663,6 +2741,8 @@ const ensureReportInlineCapability = async (
     const probeResult = await dispatchChatCompletionRequest({
       ...input,
       messages: [{ role: 'user', content: REPORT_INLINE_CAPABILITY_PROBE }],
+      threadImageHistory: undefined,
+      threadImageReview: undefined,
       systemPrompt: undefined,
       sessionUrl: undefined,
       // Keep capability discovery independent from the user turn while still
@@ -2853,13 +2933,23 @@ const countProviderBoundImages = (
     const groups = new Map<string, { images: number; hint: number; primaries: number }>()
     for (const attachment of message.attachments || []) {
       const id = attachment.reportBundleId
-      if (id && (attachment.reportBundleRole === 'report-image' && attachment.type === 'image' || attachment.reportBundleRole === 'primary-report' && attachment.type !== 'image')) {
+      if (
+        id &&
+        ((attachment.reportBundleRole === 'report-image' && attachment.type === 'image') ||
+          (attachment.reportBundleRole === 'primary-report' && attachment.type !== 'image'))
+      ) {
         const group = groups.get(id) ?? { images: 0, hint: 0, primaries: 0 }
         if (attachment.type === 'image') group.images++
         else {
           group.primaries++
           const hint = attachment.reportBundleImageCount
-          if (sendsBundleImages && typeof hint === 'number' && Number.isSafeInteger(hint) && hint >= 0) group.hint = Math.max(group.hint, hint)
+          if (
+            sendsBundleImages &&
+            typeof hint === 'number' &&
+            Number.isSafeInteger(hint) &&
+            hint >= 0
+          )
+            group.hint = Math.max(group.hint, hint)
         }
         groups.set(id, group)
       } else if (attachment.type === 'image') total++
@@ -3007,7 +3097,9 @@ const mayUseAutomaticImageGeneration = (
     content = preview
   }
   return shouldUseOpenAIImageGeneration({
-    messages: [{ ...latestUser, content: mergeHiddenContextIntoMessageContent(latestUser, content) }],
+    messages: [
+      { ...latestUser, content: mergeHiddenContextIntoMessageContent(latestUser, content) }
+    ],
     modelUse,
     imageGenerationOptions
   })
@@ -3051,7 +3143,9 @@ const resolveRequestImageByteBudgetRoute = (
   }
   if (input.config.use_remote_llm) {
     // Only a streamed remote request goes through MAIN; the unary one is fetched here.
-    return dispatch !== 'unary' && supportsStreamingChatCompletion(input) ? 'remote-stream' : undefined
+    return dispatch !== 'unary' && supportsStreamingChatCompletion(input)
+      ? 'remote-stream'
+      : undefined
   }
   // Without an explicit profile MAIN picks its own default, which may differ from ours.
   if (!getBaseProfileId(input.profileId)) return undefined
@@ -3175,7 +3269,10 @@ const assertRequestImageBytes = (
     if (message.role !== 'user' || (budget.latestUserOnly && index !== latestUserIndex)) continue
     for (const attachment of message.attachments || []) {
       if (attachment.type !== 'image') continue
-      if (budget.skipManagedMedia && normalizeMediaReference(attachment.media)?.kind === 'managed') {
+      if (
+        budget.skipManagedMedia &&
+        normalizeMediaReference(attachment.media)?.kind === 'managed'
+      ) {
         continue
       }
       images.push(attachment)
@@ -3219,7 +3316,10 @@ export const preflightChatRequestImages = (
   const profile = resolveSelectedRequestProfile(input)
   const maxImages = preflightRequestImageCount(input, profile)
   if (input.checkNewMessageImageBytes) {
-    assertRequestImageBytes(input.messages, resolveRequestImageByteBudget(input, profile, 'preflight'))
+    assertRequestImageBytes(
+      input.messages,
+      resolveRequestImageByteBudget(input, profile, 'preflight')
+    )
   }
   return maxImages
 }
@@ -3337,16 +3437,35 @@ export const preflightChatRequestReports = (
 
 const assertLocalProfileRevisionInput = (input: RequestChatCompletionInput): void => {
   if (input.expectedProfileRevision === undefined) return
-  if (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent' ||
-      typeof input.profileId !== 'string' || !input.profileId.trim() ||
-      typeof input.expectedProfileRevision !== 'string' || !/^[a-f0-9]{64}$/.test(input.expectedProfileRevision)) {
+  if (
+    input.config.use_remote_llm ||
+    input.externalAgentSkill?.type === 'agent' ||
+    typeof input.profileId !== 'string' ||
+    !input.profileId.trim() ||
+    typeof input.expectedProfileRevision !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(input.expectedProfileRevision)
+  ) {
     throw new Error('Invalid local profile revision request.')
   }
 }
 
 const assertGoalProgressInput = (input: RequestChatCompletionInput): void => {
   if (input.goalProgressToken === undefined) return
-  if (typeof input.goalProgressToken !== 'string' || !input.goalProgressToken || input.config.use_remote_llm || input.externalAgentSkill || input.skillRuntime || input.sessionUrl || input.isEdit || input.imageRequest || input.imageGenerationOptions && input.imageGenerationOptions.enabled !== false || input.messages.some(message => message.attachments?.length || message.hiddenContext)) throw new Error('Goal progress sharing supports only the explicit plain local text request; no remote/skill/media/continuation fallback.')
+  if (
+    typeof input.goalProgressToken !== 'string' ||
+    !input.goalProgressToken ||
+    input.config.use_remote_llm ||
+    input.externalAgentSkill ||
+    input.skillRuntime ||
+    input.sessionUrl ||
+    input.isEdit ||
+    input.imageRequest ||
+    (input.imageGenerationOptions && input.imageGenerationOptions.enabled !== false) ||
+    input.messages.some((message) => message.attachments?.length || message.hiddenContext)
+  )
+    throw new Error(
+      'Goal progress sharing supports only the explicit plain local text request; no remote/skill/media/continuation fallback.'
+    )
 }
 /**
  * Local diagnostics: tells the main process which send stage this renderer reached, so that a
@@ -3356,7 +3475,8 @@ const assertGoalProgressInput = (input: RequestChatCompletionInput): void => {
  */
 const sendChatSendStage = (breadcrumb: ChatSendStageBreadcrumb): void => {
   try {
-    const report = typeof window === 'undefined' ? undefined : window.appDiagnostics?.reportChatSendStage
+    const report =
+      typeof window === 'undefined' ? undefined : window.appDiagnostics?.reportChatSendStage
     if (report) report(breadcrumb)
   } catch {
     // Diagnostics must never affect a send.
@@ -3401,7 +3521,11 @@ const requestChatCompletionInStages = async (
   input: RequestChatCompletionInput,
   reportChatSendStage: ReportChatSendStage
 ): Promise<RequestChatCompletionResult> => {
-  if (input.teamMessageHop && (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')) throw new Error('Team messages require local transport.')
+  if (
+    input.teamMessageHop &&
+    (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')
+  )
+    throw new Error('Team messages require local transport.')
   assertLocalProfileRevisionInput(input)
   assertGoalProgressInput(input)
   validateCustomSkillForSend(input.externalAgentSkill)
@@ -3447,8 +3571,17 @@ const requestChatCompletionInStages = async (
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
-    !useNativeOpenAIFileSearch && !verifiedInput.teamMember && !verifiedInput.teamMessageHop && verifiedInput.expectedProfileRevision === undefined && hasPrimaryReportBundleInMessages(verifiedInput.messages)
-      ? await ensureReportInlineCapability({ ...verifiedInput, expectedProfileRevision: undefined, beforeLocalDispatch: undefined, onLocalDispatch: undefined })
+    !useNativeOpenAIFileSearch &&
+    !verifiedInput.teamMember &&
+    !verifiedInput.teamMessageHop &&
+    verifiedInput.expectedProfileRevision === undefined &&
+    hasPrimaryReportBundleInMessages(verifiedInput.messages)
+      ? await ensureReportInlineCapability({
+          ...verifiedInput,
+          expectedProfileRevision: undefined,
+          beforeLocalDispatch: undefined,
+          onLocalDispatch: undefined
+        })
       : null
   const skipAttachmentContentAugmentation =
     getBaseProfileId(verifiedInput.profileId) === HUNYUAN_3D_PROFILE_ID
@@ -3482,7 +3615,11 @@ const requestChatCompletionStreamInStages = async (
   input: RequestChatCompletionStreamInput,
   reportChatSendStage: ReportChatSendStage
 ): Promise<RequestChatCompletionStreamResult> => {
-  if (input.teamMessageHop && (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')) throw new Error('Team messages require local transport.')
+  if (
+    input.teamMessageHop &&
+    (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')
+  )
+    throw new Error('Team messages require local transport.')
   assertLocalProfileRevisionInput(input)
   assertGoalProgressInput(input)
   validateCustomSkillForSend(input.externalAgentSkill)
@@ -3528,8 +3665,17 @@ const requestChatCompletionStreamInStages = async (
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
-    !useNativeOpenAIFileSearch && !verifiedInput.teamMember && !verifiedInput.teamMessageHop && verifiedInput.expectedProfileRevision === undefined && hasPrimaryReportBundleInMessages(verifiedInput.messages)
-      ? await ensureReportInlineCapability({ ...verifiedInput, expectedProfileRevision: undefined, beforeLocalDispatch: undefined, onLocalDispatch: undefined })
+    !useNativeOpenAIFileSearch &&
+    !verifiedInput.teamMember &&
+    !verifiedInput.teamMessageHop &&
+    verifiedInput.expectedProfileRevision === undefined &&
+    hasPrimaryReportBundleInMessages(verifiedInput.messages)
+      ? await ensureReportInlineCapability({
+          ...verifiedInput,
+          expectedProfileRevision: undefined,
+          beforeLocalDispatch: undefined,
+          onLocalDispatch: undefined
+        })
       : null
   const skipAttachmentContentAugmentation =
     getBaseProfileId(verifiedInput.profileId) === HUNYUAN_3D_PROFILE_ID
