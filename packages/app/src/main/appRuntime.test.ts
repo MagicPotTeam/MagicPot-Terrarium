@@ -54,7 +54,15 @@ vi.mock('./localMediaAccess', async (importOriginal) => {
     resolveAuthorizedLocalMediaPath: () => {
       throw new Error('the local-media protocol must not use the synchronous policy')
     },
-    resolveAuthorizedLocalMediaPathAsync: resolveAuthorizedLocalMediaPathMock
+    resolveAuthorizedLocalMediaPathAsync: () => {
+      throw new Error('the local-media protocol must say why it refused a path')
+    },
+    // The canonical path the test chooses; refused when it gives none, unavailable on 'stall'.
+    authorizeLocalMediaPathAsync: async (filePath: string, roots: unknown) => {
+      const canonicalPath = await resolveAuthorizedLocalMediaPathMock(filePath, roots)
+      if (canonicalPath === 'stall') return new Promise(() => undefined)
+      return canonicalPath ? { canonicalPath } : { canonicalPath: null, reason: 'refused' }
+    }
   }
 })
 
@@ -71,6 +79,7 @@ vi.mock('./testWindowRuntime', () => ({
 
 import { app, net, protocol } from 'electron'
 import { flushReportBundleRegistry } from './reportBundles/reportBundleRegistry'
+import { DEFAULT_IMPORT_SOURCE_GUARD } from './llmProxy/managedMediaStore'
 import {
   initializeMainProcessRuntime,
   setupReadyAppRuntime,
@@ -202,6 +211,36 @@ describe('appRuntime local-media protocol helpers', () => {
     )
     expect(net.fetch).toHaveBeenNthCalledWith(1, 'file:///C:/images/image%2520one.png')
     expect(net.fetch).toHaveBeenNthCalledWith(2, 'file:///C:/images/image%20one.png')
+  })
+
+  it('answers 503 at its deadline for a path that does not answer, and at once after that', async () => {
+    vi.useFakeTimers()
+    try {
+      resolveAuthorizedLocalMediaPathMock.mockImplementation(() => 'stall')
+      await setupReadyAppRuntime()
+      const handler = vi.mocked(protocol.handle).mock.calls.at(-1)?.[1] as (
+        request: Request
+      ) => Promise<Response>
+
+      const pending = handler(new Request('local-media:///Volumes/dead-share/photos/a.png'))
+      await vi.advanceTimersByTimeAsync(DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs)
+      expect((await pending).status).toBe(503)
+      // The folder still has a call that never returned: its next images are refused at once,
+      // without another filesystem call.
+      resolveAuthorizedLocalMediaPathMock.mockClear()
+      expect(
+        (await handler(new Request('local-media:///Volumes/dead-share/photos/b.png'))).status
+      ).toBe(503)
+      expect(resolveAuthorizedLocalMediaPathMock).not.toHaveBeenCalled()
+      expect(net.fetch).not.toHaveBeenCalled()
+
+      // Another drive is not affected.
+      resolveAuthorizedLocalMediaPathMock.mockImplementation((filePath: string) => filePath)
+      vi.mocked(net.fetch).mockImplementation(async () => new Response('bytes'))
+      expect((await handler(new Request('local-media:///C:/images/c.png'))).status).toBe(200)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('adds CORS headers while preserving the proxied local file response metadata', async () => {
