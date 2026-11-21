@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 // The Windows network checks with Windows path rules: node:path is path.win32 here, and node:fs
@@ -100,6 +101,7 @@ function resetDisk(): void {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
   clearScopedLocalMediaPathsForTest()
 })
 
@@ -124,6 +126,32 @@ describe('Windows network paths with Windows path rules', () => {
       await expect(authorizeLocalMediaImportSourcePathAsync(spelling, [ROOT])).resolves.toBeNull()
     }
     expect(disk.calls).toEqual([])
+  })
+
+  it('refuses NT namespace spellings before any filesystem call, also with the drive root picked', async () => {
+    resetDisk()
+    vi.spyOn(process, 'cwd').mockReturnValue('C:\\Users\\u')
+    disk.directories.add('c:\\')
+    disk.files.add('c:\\pics\\a.png')
+    expect(authorizeScopedLocalMediaDirectory('C:\\')).toBe(true)
+    // With C:\ picked, such a spelling resolves inside it: only the NT namespace rule refuses it.
+    const spellings = [
+      '\\??\\UNC\\evil\\s\\x.png',
+      '/??/UNC/evil/s/x.png',
+      '\\??/UNC\\evil\\s\\x.png',
+      '\\??\\GLOBALROOT\\Device\\Mup\\evil\\s\\x.png'
+    ]
+    expect(spellings.map((spelling) => path.resolve(spelling).slice(0, 6))).toEqual(
+      Array(spellings.length).fill('C:\\??\\')
+    )
+    disk.calls.length = 0
+    for (const spelling of spellings) {
+      expect(resolveAuthorizedLocalMediaPath(spelling, [])).toBeNull()
+      await expect(authorizeLocalMediaImportSourcePathAsync(spelling, [])).resolves.toBeNull()
+    }
+    expect(disk.calls).toEqual([])
+    // The pick itself is in force: a file on the drive is served.
+    expect(resolveAuthorizedLocalMediaPath('C:\\pics\\a.png', [])).toBe('C:\\pics\\a.png')
   })
 
   it('serves a picked network file in the spelling it was dropped with', () => {
