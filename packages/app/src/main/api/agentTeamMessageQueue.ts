@@ -41,19 +41,23 @@ export type TeamMessageStoreOpener = {
  * Opens <file> on first use, like getTeamEndStore. A failure is remembered and the file is not
  * opened again for a while (no open, and no audit of the whole file, on every poll). While another
  * live process holds the file nothing is opened or recovered: every call throws 'Team queue unavailable.',
- * and the cheap check for that holder runs again after RETRY_MS. A failed open of the file itself
+ * and the check for that holder runs again after about RETRY_MS. A failed open of the file itself
  * read and audited all of it on the main thread (seconds for a large file): the wait after it
- * doubles with each failure in a row, up to MAX_RETRY_MS.
+ * doubles with each failure in a row, up to MAX_RETRY_MS. Each wait is drawn between half and one
+ * and a half times that (never over MAX_RETRY_MS), so two processes that open the file together and
+ * find each other do not keep trying again in step. It runs on the monotonic clock: setting the
+ * clock back does not lengthen it. Each distinct failure is logged once.
  */
 export function teamMessageStoreOpener(file: string, boot: string): TeamMessageStoreOpener {
   let store: TeamMessageStore | undefined,
     failure: unknown,
     retryAt = 0,
-    failedOpens = 0
+    failedOpens = 0,
+    logged: string | undefined
   return {
     open(create) {
       if (store) return store
-      if (Date.now() < retryAt) throw failure
+      if (performance.now() < retryAt) throw failure
       if (!create && !existsSync(file)) return undefined
       let opening = false
       try {
@@ -74,16 +78,28 @@ export function teamMessageStoreOpener(file: string, boot: string): TeamMessageS
           throw new Error(TEAM_QUEUE_UNAVAILABLE)
         }
         store = opened
+        failedOpens = 0
+        logged = undefined
         return store
       } catch (error) {
         failure = error
-        if (opening && !(error instanceof Error && error.message === TEAM_QUEUE_UNAVAILABLE))
+        const held = error instanceof Error && error.message === TEAM_QUEUE_UNAVAILABLE
+        const detail = String(error instanceof Error ? error.message : error).slice(0, 300)
+        if (detail !== logged) {
+          logged = detail
           console.warn(
-            '[TeamQueue] The team message file could not be opened; nothing is served until it can be.',
-            String(error instanceof Error ? error.message : error).slice(0, 300)
+            held
+              ? '[TeamQueue] Another running instance of the app holds the team message file; nothing is served here until it is free.'
+              : opening
+                ? '[TeamQueue] The team message file could not be opened; nothing is served until it can be.'
+                : '[TeamQueue] Could not check whether another instance holds the team message file; nothing is served until it can.',
+            detail
           )
-        retryAt =
-          Date.now() + (opening ? Math.min(RETRY_MS * 2 ** failedOpens++, MAX_RETRY_MS) : RETRY_MS)
+        }
+        // Another holder: only the check runs again, at the same pace whatever the count.
+        const wait =
+          opening && !held ? Math.min(RETRY_MS * 2 ** failedOpens++, MAX_RETRY_MS) : RETRY_MS
+        retryAt = performance.now() + Math.min(wait * (0.5 + Math.random()), MAX_RETRY_MS)
         throw error
       }
     },
@@ -299,7 +315,7 @@ export class AgentTeamMessageQueue {
       store = this.opener.open(false)
     } catch {
       // Fail closed: nothing is listed while the file cannot be opened or another process holds it.
-      // The opener logs a failed open once per attempt; a poll every 500 ms must not log each time.
+      // The opener logs each distinct failure once; a poll every 500 ms must not log each time.
       return []
     }
     if (!store) return []
