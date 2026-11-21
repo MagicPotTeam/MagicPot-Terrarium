@@ -137,17 +137,31 @@ describe('the temp media folder at every renderer-facing reader', () => {
 
   it('hands the turn to the next file of the drop once a mapped-drive read is over', async () => {
     const dropped = path.join(victim, 'secret.png')
-    // Two files of one drop: this one is read now, the other waits for its turn.
-    recordLocalMediaImportGrant(fs.realpathSync(dropped), undefined, 'read', { batch: 'drop-9-z' })
-    recordLocalMediaImportGrant('/elsewhere/next.png', undefined, 'import', { batch: 'drop-9-z' })
+    const ttl = LOCAL_MEDIA_IMPORT_GRANT_TTL_MS
+    // Two files of one drop, granted half a time to live ago: this one is read now, the other
+    // waits for its turn (left alone, it would expire half a time to live from now).
+    const grantedAt = { now: performance.now() - ttl / 2, wallNow: Date.now() - ttl / 2 }
+    recordLocalMediaImportGrant(fs.realpathSync(dropped), grantedAt.now, 'read', {
+      wallNow: grantedAt.wallNow,
+      batch: 'drop-9-z'
+    })
+    recordLocalMediaImportGrant('/elsewhere/next.png', grantedAt.now, 'import', {
+      wallNow: grantedAt.wallNow,
+      batch: 'drop-9-z'
+    })
+    const startedAt = { now: performance.now(), wallNow: Date.now() }
     await expect(readers(dropped).readImage()).resolves.toMatchObject({ filename: 'secret.png' })
-    // The read is over: the next file lives one time to live from now, no longer.
-    const later = performance.now() + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS + 1_000
+    const endedAt = { now: performance.now(), wallNow: Date.now() }
+    // The read is over: the next file lives a whole time to live from then...
     expect(
       countLocalMediaImportGrantsForTest(
-        later,
-        Date.now() + LOCAL_MEDIA_IMPORT_GRANT_TTL_MS + 1_000
+        startedAt.now + ttl - 1_000,
+        startedAt.wallNow + ttl - 1_000
       )
+    ).toBe(1)
+    // ...and no longer.
+    expect(
+      countLocalMediaImportGrantsForTest(endedAt.now + ttl + 1_000, endedAt.wallNow + ttl + 1_000)
     ).toBe(0)
   })
 })
