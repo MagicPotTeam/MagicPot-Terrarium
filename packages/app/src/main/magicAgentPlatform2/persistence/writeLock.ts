@@ -133,7 +133,9 @@ export function activeInstanceLeasePids(databasePath: string): number[] {
   const database = resolve(databasePath)
   let names: string[]
   try {
-    names = readdirSync(join(realpathSync(dirname(database)), `${basename(database)}.magicagent.instances`))
+    names = readdirSync(
+      join(realpathSync(dirname(database)), `${basename(database)}.magicagent.instances`)
+    )
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') return []
     throw error

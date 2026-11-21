@@ -1,6 +1,13 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  utimesSync,
+  writeFileSync
+} from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -9,7 +16,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('node:fs', async (importActual) => importActual())
 vi.mock('node:fs/promises', async (importActual) => importActual())
 
-import { acquireEventStoreWriteLock, acquireInstanceLease, activeInstanceLeasePids } from './writeLock'
+import {
+  acquireEventStoreWriteLock,
+  acquireInstanceLease,
+  activeInstanceLeasePids
+} from './writeLock'
 
 const children = new Set<ChildProcess>()
 const directories: string[] = []
@@ -188,14 +199,23 @@ describe('acquireEventStoreWriteLock', () => {
 })
 
 async function liveChild(): Promise<ChildProcess> {
-  const child = spawn(process.execPath, ['-e', "process.stdout.write('READY\\n'); setInterval(() => {}, 1000)"], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    stdio: ['ignore', 'pipe', 'ignore']
-  })
+  const child = spawn(
+    process.execPath,
+    ['-e', "process.stdout.write('READY\\n'); setInterval(() => {}, 1000)"],
+    {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['ignore', 'pipe', 'ignore']
+    }
+  )
   children.add(child)
   await new Promise<void>((resolveReady, reject) => {
     const timer = setTimeout(() => reject(new Error('child timeout')), 10_000)
-    child.stdout?.on('data', (chunk) => { if (String(chunk).includes('READY')) { clearTimeout(timer); resolveReady() } })
+    child.stdout?.on('data', (chunk) => {
+      if (String(chunk).includes('READY')) {
+        clearTimeout(timer)
+        resolveReady()
+      }
+    })
   })
   return child
 }

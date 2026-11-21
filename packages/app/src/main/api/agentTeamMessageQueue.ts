@@ -15,10 +15,17 @@ import { authorizeAgentThreadScope } from './agentThreadScope'
 import { getTeamEndStore } from './teamEndStore'
 import { TEAM_QUEUE_UNAVAILABLE, TeamMessageStore, type TeamMessageEntry } from './teamMessageStore'
 
-const TEAM_CAPACITY = 128, TOTAL_CAPACITY = 1024, RETRY_MS = 30_000
+const TEAM_CAPACITY = 128,
+  TOTAL_CAPACITY = 1024,
+  RETRY_MS = 30_000
 /** This MAIN process. A claim made by another boot is over (see TeamMessageStore). Memory only. */
 const BOOT = randomUUID()
-const valid = (x: unknown): x is string => typeof x === 'string' && x.length > 0 && x.length <= 512 && x.trim() === x && !Array.from(x).some(c => c.charCodeAt(0) < 32)
+const valid = (x: unknown): x is string =>
+  typeof x === 'string' &&
+  x.length > 0 &&
+  x.length <= 512 &&
+  x.trim() === x &&
+  !Array.from(x).some((c) => c.charCodeAt(0) < 32)
 type Sender = NonNullable<ReturnType<typeof webContents.fromId>>
 type Owner = { sender: Sender; fresh: Set<string>; leases: Set<string>; detach(): void }
 type NavigationDetails = { isMainFrame?: boolean; isSameDocument?: boolean } | undefined
@@ -35,19 +42,30 @@ export type TeamMessageStoreOpener = {
  * live process holds the file nothing is opened or recovered: every call throws 'Team queue unavailable.'.
  */
 export function teamMessageStoreOpener(file: string, boot: string): TeamMessageStoreOpener {
-  let store: TeamMessageStore | undefined, failure: unknown, retryAt = 0
+  let store: TeamMessageStore | undefined,
+    failure: unknown,
+    retryAt = 0
   return {
     open(create) {
       if (store) return store
       if (Date.now() < retryAt) throw failure
       if (!create && !existsSync(file)) return undefined
       try {
-        if (activeInstanceLeasePids(file).some(pid => pid !== process.pid)) throw new Error(TEAM_QUEUE_UNAVAILABLE)
+        if (activeInstanceLeasePids(file).some((pid) => pid !== process.pid))
+          throw new Error(TEAM_QUEUE_UNAVAILABLE)
         mkdirSync(dirname(file), { recursive: true })
         const db = new MagicAgentEventStore(file)
         let opened: TeamMessageStore
-        try { opened = new TeamMessageStore(db, boot) } catch (error) { db.close(); throw error }
-        if (opened.unavailable) { opened.close(); throw new Error(TEAM_QUEUE_UNAVAILABLE) }
+        try {
+          opened = new TeamMessageStore(db, boot)
+        } catch (error) {
+          db.close()
+          throw error
+        }
+        if (opened.unavailable) {
+          opened.close()
+          throw new Error(TEAM_QUEUE_UNAVAILABLE)
+        }
         store = opened
         return store
       } catch (error) {
@@ -56,16 +74,25 @@ export function teamMessageStoreOpener(file: string, boot: string): TeamMessageS
         throw error
       }
     },
-    close() { const opened = store; store = undefined; opened?.close() }
+    close() {
+      const opened = store
+      store = undefined
+      opened?.close()
+    }
   }
 }
 
 function productionOpener(): TeamMessageStoreOpener {
   let opener: TeamMessageStoreOpener | undefined
-  const resolve = () => opener ??= teamMessageStoreOpener(join(getBuildEnv().pathMap.data, 'team-messages', 'messages.sqlite'), BOOT)
-  return { open: create => resolve().open(create), close: () => opener?.close() }
+  const resolve = () =>
+    (opener ??= teamMessageStoreOpener(
+      join(getBuildEnv().pathMap.data, 'team-messages', 'messages.sqlite'),
+      BOOT
+    ))
+  return { open: (create) => resolve().open(create), close: () => opener?.close() }
 }
-const unavailable = (error: unknown): boolean => error instanceof Error && error.message === TEAM_QUEUE_UNAVAILABLE
+const unavailable = (error: unknown): boolean =>
+  error instanceof Error && error.message === TEAM_QUEUE_UNAVAILABLE
 export const TEAM_MESSAGE_UNAVAILABLE = 'Team message is no longer available.'
 
 /**
@@ -86,39 +113,77 @@ export class AgentTeamMessageQueue {
   private readonly opener: TeamMessageStoreOpener
   private readonly assertTeamActive: (member: LLMTeamMember) => void
 
-  constructor(options: { store?: TeamMessageStoreOpener; assertTeamActive?: (member: LLMTeamMember) => void } = {}) {
+  constructor(
+    options: {
+      store?: TeamMessageStoreOpener
+      assertTeamActive?: (member: LLMTeamMember) => void
+    } = {}
+  ) {
     this.opener = options.store ?? productionOpener()
-    this.assertTeamActive = options.assertTeamActive ?? (member => getTeamEndStore().assertActive(member))
+    this.assertTeamActive =
+      options.assertTeamActive ?? ((member) => getTeamEndStore().assertActive(member))
   }
 
   private owner(senderId: number, invocation: ServiceInvocationContext): Owner {
     const sender = webContents.fromId(senderId)
-    if (!sender || sender.isDestroyed() || sender.getURL() !== invocation.frameUrl || sender.getURL() !== invocation.senderUrl) throw Error('Team queue owner unavailable.')
+    if (
+      !sender ||
+      sender.isDestroyed() ||
+      sender.getURL() !== invocation.frameUrl ||
+      sender.getURL() !== invocation.senderUrl
+    )
+      throw Error('Team queue owner unavailable.')
     const existing = this.owners.get(senderId)
     if (existing) {
       if (existing.sender !== sender) throw Error('Team queue owner changed.')
       return existing
     }
     // The document that enqueued its fresh records is gone (or moved): they are carried over, never deleted.
-    const carryOver = () => { for (const id of owner.fresh) if (this.fresh.get(id) === senderId) this.fresh.delete(id); owner.fresh.clear() }
+    const carryOver = () => {
+      for (const id of owner.fresh) if (this.fresh.get(id) === senderId) this.fresh.delete(id)
+      owner.fresh.clear()
+    }
     const endClaims = () => {
       for (const id of owner.leases) {
         this.leases.delete(id)
-        try { this.opener.open(false)?.closeClaim(id) } catch { console.warn('[TeamQueue] A claim stays open until the next start of the app.') }
+        try {
+          this.opener.open(false)?.closeClaim(id)
+        } catch {
+          console.warn('[TeamQueue] A claim stays open until the next start of the app.')
+        }
       }
       owner.leases.clear()
     }
-    const end = () => { carryOver(); endClaims(); owner.detach(); this.owners.delete(senderId) }
-    const navigation = (details: NavigationDetails, _url?: string, inPlace?: boolean, legacyMainFrame?: boolean) => {
+    const end = () => {
+      carryOver()
+      endClaims()
+      owner.detach()
+      this.owners.delete(senderId)
+    }
+    const navigation = (
+      details: NavigationDetails,
+      _url?: string,
+      inPlace?: boolean,
+      legacyMainFrame?: boolean
+    ) => {
       if ((details?.isMainFrame ?? legacyMainFrame) === false) return
       // Same document: the page and its dispatcher still live, so their claims stay.
       if ((details?.isSameDocument ?? inPlace) === true) carryOver()
       else end()
     }
-    const owner: Owner = { sender, fresh: new Set(), leases: new Set(), detach: () => {
-      sender.removeListener('did-start-navigation', navigation); sender.removeListener('render-process-gone', end); sender.removeListener('destroyed', end)
-    } }
-    sender.on('did-start-navigation', navigation); sender.on('render-process-gone', end); sender.on('destroyed', end)
+    const owner: Owner = {
+      sender,
+      fresh: new Set(),
+      leases: new Set(),
+      detach: () => {
+        sender.removeListener('did-start-navigation', navigation)
+        sender.removeListener('render-process-gone', end)
+        sender.removeListener('destroyed', end)
+      }
+    }
+    sender.on('did-start-navigation', navigation)
+    sender.on('render-process-gone', end)
+    sender.on('destroyed', end)
     this.owners.set(senderId, owner)
     return owner
   }
@@ -126,55 +191,133 @@ export class AgentTeamMessageQueue {
   private view(entry: TeamMessageEntry, lease?: string): AgentTeamMessageIntent {
     const { intent } = entry
     return {
-      id: intent.id, source: { ...intent.source }, kind: intent.kind, hop: intent.hop, ...(intent.recipient === undefined ? {} : { recipient: intent.recipient }), text: intent.text,
-      ...(this.fresh.has(intent.id) ? {} : { carriedOver: true as const }), ...(lease === undefined ? {} : { lease })
+      id: intent.id,
+      source: { ...intent.source },
+      kind: intent.kind,
+      hop: intent.hop,
+      ...(intent.recipient === undefined ? {} : { recipient: intent.recipient }),
+      text: intent.text,
+      ...(this.fresh.has(intent.id) ? {} : { carriedOver: true as const }),
+      ...(lease === undefined ? {} : { lease })
     }
   }
 
   /** Visible to this sender: same route, storage scope and lead; a fresh record only to its own webContents. */
-  private visible(entry: TeamMessageEntry, senderId: number, routeKey: string, scope: { storageScope: string; conversationId: string }): boolean {
+  private visible(
+    entry: TeamMessageEntry,
+    senderId: number,
+    routeKey: string,
+    scope: { storageScope: string; conversationId: string }
+  ): boolean {
     const owner = this.fresh.get(entry.intent.id)
-    return entry.state.status === 'queued' && entry.intent.routeKey === routeKey && entry.intent.source.scope === scope.storageScope && entry.intent.source.lead === scope.conversationId && (owner === undefined || owner === senderId)
+    return (
+      entry.state.status === 'queued' &&
+      entry.intent.routeKey === routeKey &&
+      entry.intent.source.scope === scope.storageScope &&
+      entry.intent.source.lead === scope.conversationId &&
+      (owner === undefined || owner === senderId)
+    )
   }
 
-  enqueue(intent: TeamMessageIntent, options: { invocation: ServiceInvocationContext; route: AgentThreadInteractionScope['route']; lease: { assertLive(): void }; signal?: AbortSignal }): { requestId: string } {
-    options.signal?.throwIfAborted(); options.lease.assertLive()
+  enqueue(
+    intent: TeamMessageIntent,
+    options: {
+      invocation: ServiceInvocationContext
+      route: AgentThreadInteractionScope['route']
+      lease: { assertLive(): void }
+      signal?: AbortSignal
+    }
+  ): { requestId: string } {
+    options.signal?.throwIfAborted()
+    options.lease.assertLive()
     const source = intent?.source
-    if (!source || ![source.scope, source.thread, source.lead, source.member].every(valid) || source.member === source.lead || (intent.hop !== 1 && intent.hop !== 2) || typeof intent.text !== 'string' || !intent.text.trim() || intent.text.length > 4000 || !['message', 'channel'].includes(intent.kind) || (intent.kind === 'message' ? typeof intent.recipient !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(intent.recipient) || intent.recipient === source.member : intent.recipient !== undefined)) throw Error('Invalid team message intent.')
+    if (
+      !source ||
+      ![source.scope, source.thread, source.lead, source.member].every(valid) ||
+      source.member === source.lead ||
+      (intent.hop !== 1 && intent.hop !== 2) ||
+      typeof intent.text !== 'string' ||
+      !intent.text.trim() ||
+      intent.text.length > 4000 ||
+      !['message', 'channel'].includes(intent.kind) ||
+      (intent.kind === 'message'
+        ? typeof intent.recipient !== 'string' ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(intent.recipient) ||
+          intent.recipient === source.member
+        : intent.recipient !== undefined)
+    )
+      throw Error('Invalid team message intent.')
     const route = normalizeAgentRoute(options.route)
     if (source.thread !== route.threadId) throw Error('Team queue route mismatch.')
-    if (!['svcLLMProxy.chat', 'svcLLMProxy.chatStream'].includes(options.invocation.methodName)) throw Error('Invalid team queue source invocation.')
-    const senderId = authorizeAgentThreadScope({ route, conversationId: source.member }, options.invocation, options.invocation.methodName.split('.').at(-1)!)
+    if (!['svcLLMProxy.chat', 'svcLLMProxy.chatStream'].includes(options.invocation.methodName))
+      throw Error('Invalid team queue source invocation.')
+    const senderId = authorizeAgentThreadScope(
+      { route, conversationId: source.member },
+      options.invocation,
+      options.invocation.methodName.split('.').at(-1)!
+    )
     const store = this.opener.open(true)!
     // Only queued records count: claimed and settled ones never fill the queue.
-    if (store.queuedCount(source) >= TEAM_CAPACITY || store.queuedCount() >= TOTAL_CAPACITY) throw Error('Team queue capacity reached.')
-    options.signal?.throwIfAborted(); options.lease.assertLive()
+    if (store.queuedCount(source) >= TEAM_CAPACITY || store.queuedCount() >= TOTAL_CAPACITY)
+      throw Error('Team queue capacity reached.')
+    options.signal?.throwIfAborted()
+    options.lease.assertLive()
     const owner = this.owner(senderId, options.invocation)
     // The request ID is returned only after the message and its state are committed.
-    const { intent: stored } = store.append({ source, routeKey: getAgentSessionKey(route), kind: intent.kind, hop: intent.hop, ...(intent.recipient === undefined ? {} : { recipient: intent.recipient }), text: intent.text })
-    this.fresh.set(stored.id, senderId); owner.fresh.add(stored.id)
+    const { intent: stored } = store.append({
+      source,
+      routeKey: getAgentSessionKey(route),
+      kind: intent.kind,
+      hop: intent.hop,
+      ...(intent.recipient === undefined ? {} : { recipient: intent.recipient }),
+      text: intent.text
+    })
+    this.fresh.set(stored.id, senderId)
+    owner.fresh.add(stored.id)
     return { requestId: stored.id }
   }
 
-  list(scope: AgentThreadInteractionScope & { storageScope: string }, invocation?: ServiceInvocationContext): AgentTeamMessageIntent[] {
+  list(
+    scope: AgentThreadInteractionScope & { storageScope: string },
+    invocation?: ServiceInvocationContext
+  ): AgentTeamMessageIntent[] {
     if (!valid(scope.storageScope)) throw Error('Invalid team queue scope.')
     const senderId = authorizeAgentThreadScope(scope, invocation, 'listAgentTeamMessages')
     let store: TeamMessageStore | undefined
-    try { store = this.opener.open(false) } catch (error) { if (unavailable(error)) return []; throw error }
+    try {
+      store = this.opener.open(false)
+    } catch (error) {
+      if (unavailable(error)) return []
+      throw error
+    }
     if (!store) return []
     const routeKey = getAgentSessionKey(normalizeAgentRoute(scope.route))
     // Memory only: the store keeps its queued records in an index, so a poll does no SQLite work.
-    return store.queued().filter(entry => this.visible(entry, senderId, routeKey, scope)).map(entry => this.view(entry))
+    return store
+      .queued()
+      .filter((entry) => this.visible(entry, senderId, routeKey, scope))
+      .map((entry) => this.view(entry))
   }
 
   /** Durable before it returns; the lease token is given out exactly once. */
-  claim(req: AgentTeamMessageClaim, invocation?: ServiceInvocationContext): AgentTeamMessageIntent | undefined {
+  claim(
+    req: AgentTeamMessageClaim,
+    invocation?: ServiceInvocationContext
+  ): AgentTeamMessageIntent | undefined {
     if (!valid(req.storageScope)) throw Error('Invalid team queue scope.')
     const senderId = authorizeAgentThreadScope(req, invocation, 'claimAgentTeamMessage')
     const store = this.opener.open(false)
     const entry = store?.peek(req.id)
-    if (!store || !invocation || !entry || !this.visible(entry, senderId, getAgentSessionKey(normalizeAgentRoute(req.route)), req)) return undefined
-    try { this.assertTeamActive(entry.intent.source) } catch (error) {
+    if (
+      !store ||
+      !invocation ||
+      !entry ||
+      !this.visible(entry, senderId, getAgentSessionKey(normalizeAgentRoute(req.route)), req)
+    )
+      return undefined
+    try {
+      this.assertTeamActive(entry.intent.source)
+    } catch (error) {
       if (!(error instanceof Error) || error.message !== 'Team has ended.') throw error
       store.endQueued(req.id)
       this.fresh.delete(req.id)
@@ -184,9 +327,13 @@ export class AgentTeamMessageQueue {
     const claimed = store.claim(req.id)
     if (!claimed) return undefined
     const token = randomUUID()
-    this.leases.set(req.id, { token, senderId }); owner.leases.add(req.id)
+    this.leases.set(req.id, { token, senderId })
+    owner.leases.add(req.id)
     const view = this.view(claimed, token)
-    if (this.fresh.get(req.id) === senderId) { this.fresh.delete(req.id); owner.fresh.delete(req.id) }
+    if (this.fresh.get(req.id) === senderId) {
+      this.fresh.delete(req.id)
+      owner.fresh.delete(req.id)
+    }
     return view
   }
 
@@ -202,18 +349,39 @@ export class AgentTeamMessageQueue {
     if (!Object.hasOwn(req, 'teamMessageDelivery')) return req
     const { teamMessageDelivery: delivery, ...admitted } = req
     try {
-      const member = req.teamMember, senderId = invocation?.senderId
-      if (!invocation || !Number.isSafeInteger(senderId) || !['svcLLMProxy.chat', 'svcLLMProxy.chatStream'].includes(invocation.methodName)) throw Error()
-      if (!delivery || typeof delivery !== 'object' || Object.keys(delivery).length !== 2 || !valid(delivery.id) || !valid(delivery.lease)) throw Error()
-      if (!member || ![member.scope, member.thread, member.lead, member.member].every(valid)) throw Error()
+      const member = req.teamMember,
+        senderId = invocation?.senderId
+      if (
+        !invocation ||
+        !Number.isSafeInteger(senderId) ||
+        !['svcLLMProxy.chat', 'svcLLMProxy.chatStream'].includes(invocation.methodName)
+      )
+        throw Error()
+      if (
+        !delivery ||
+        typeof delivery !== 'object' ||
+        Object.keys(delivery).length !== 2 ||
+        !valid(delivery.id) ||
+        !valid(delivery.lease)
+      )
+        throw Error()
+      if (!member || ![member.scope, member.thread, member.lead, member.member].every(valid))
+        throw Error()
       const lease = this.leases.get(delivery.id)
       if (!lease || lease.token !== delivery.lease || lease.senderId !== senderId) throw Error()
       const store = this.opener.open(false)
       const entry = store && (store.peek(delivery.id) ?? store.get(delivery.id))
       if (!store || !entry) throw Error()
       const { intent, state } = entry
-      if (req.teamMessageHop !== intent.hop || member.scope !== state.team.scope || member.thread !== state.team.thread || member.lead !== state.team.lead) throw Error()
-      if (!req.route || getAgentSessionKey(normalizeAgentRoute(req.route)) !== intent.routeKey) throw Error()
+      if (
+        req.teamMessageHop !== intent.hop ||
+        member.scope !== state.team.scope ||
+        member.thread !== state.team.thread ||
+        member.lead !== state.team.lead
+      )
+        throw Error()
+      if (!req.route || getAgentSessionKey(normalizeAgentRoute(req.route)) !== intent.routeKey)
+        throw Error()
       // Durable before the request goes on. The store refuses a claim that is not this boot's and a
       // recipient other than the message's own (or, for a channel, the source member itself).
       store.start(delivery.id, member.member)
@@ -234,7 +402,9 @@ export class AgentTeamMessageQueue {
   /** Stops watching every sender and closes the file. Claims stay as they are (like a process exit). */
   dispose(): void {
     for (const owner of this.owners.values()) owner.detach()
-    this.owners.clear(); this.fresh.clear(); this.leases.clear()
+    this.owners.clear()
+    this.fresh.clear()
+    this.leases.clear()
     this.opener.close()
   }
 }

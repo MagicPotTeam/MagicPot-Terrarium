@@ -6,15 +6,38 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.unmock('node:fs')
 import { _crashTesting } from '../magicAgentPlatform2/persistence/crashHooks'
-import { MagicAgentEventStore, type ResourceMutationInput } from '../magicAgentPlatform2/persistence/eventStore'
+import {
+  MagicAgentEventStore,
+  type ResourceMutationInput
+} from '../magicAgentPlatform2/persistence/eventStore'
 import { instanceLeaseDirectory } from '../magicAgentPlatform2/persistence/writeLock'
-import { TEAM_MESSAGE_KIND, TEAM_MESSAGE_STATE_KIND, TeamMessageStore, type TeamMessageAppend } from './teamMessageStore'
+import {
+  TEAM_MESSAGE_KIND,
+  TEAM_MESSAGE_STATE_KIND,
+  TeamMessageStore,
+  type TeamMessageAppend
+} from './teamMessageStore'
 
 const team = { scope: 'canvas:one', thread: 'thread', lead: 'lead' }
 const source = { ...team, member: 'alice' }
-const direct: TeamMessageAppend = { source, routeKey: 'route', kind: 'message', hop: 1, recipient: 'bob', text: 'hello bob' }
-const channel: TeamMessageAppend = { source, routeKey: 'route', kind: 'channel', hop: 2, text: 'hello team' }
-const directories: string[] = [], databases: MagicAgentEventStore[] = [], children: ChildProcess[] = []
+const direct: TeamMessageAppend = {
+  source,
+  routeKey: 'route',
+  kind: 'message',
+  hop: 1,
+  recipient: 'bob',
+  text: 'hello bob'
+}
+const channel: TeamMessageAppend = {
+  source,
+  routeKey: 'route',
+  kind: 'channel',
+  hop: 2,
+  text: 'hello team'
+}
+const directories: string[] = [],
+  databases: MagicAgentEventStore[] = [],
+  children: ChildProcess[] = []
 
 function file(): string {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'team-messages-'))
@@ -30,7 +53,8 @@ function open(path: string, boot: string): { db: MagicAgentEventStore; store: Te
   const db = database(path)
   return { db, store: new TeamMessageStore(db, boot) }
 }
-const row = (db: MagicAgentEventStore, id: string, kind = TEAM_MESSAGE_STATE_KIND) => db.getResource<Record<string, unknown>>(kind, id)
+const row = (db: MagicAgentEventStore, id: string, kind = TEAM_MESSAGE_STATE_KIND) =>
+  db.getResource<Record<string, unknown>>(kind, id)
 const status = (db: MagicAgentEventStore, id: string) => row(db, id)?.state.status
 const revision = (db: MagicAgentEventStore, id: string) => row(db, id)?.revision
 
@@ -38,7 +62,12 @@ afterEach(async () => {
   _crashTesting.setHook(null)
   vi.restoreAllMocks()
   for (const child of children.splice(0)) child.kill('SIGKILL')
-  for (const db of databases.splice(0)) try { db.close() } catch { /* already closed */ }
+  for (const db of databases.splice(0))
+    try {
+      db.close()
+    } catch {
+      /* already closed */
+    }
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
@@ -46,16 +75,38 @@ describe('durable team message store, real SQLite', () => {
   it('runs every transition once and refuses every transition out of a final state', () => {
     const { db, store } = open(':memory:', 'boot-a')
     const message = store.append(direct).intent.id
-    expect(row(db, message, TEAM_MESSAGE_KIND)?.state).toMatchObject({ v: 1, id: message, source, routeKey: 'route', kind: 'message', hop: 1, recipient: 'bob', text: 'hello bob' })
-    expect(row(db, message)?.state).toEqual({ v: 1, id: message, team, status: 'queued', starts: [] })
+    expect(row(db, message, TEAM_MESSAGE_KIND)?.state).toMatchObject({
+      v: 1,
+      id: message,
+      source,
+      routeKey: 'route',
+      kind: 'message',
+      hop: 1,
+      recipient: 'bob',
+      text: 'hello bob'
+    })
+    expect(row(db, message)?.state).toEqual({
+      v: 1,
+      id: message,
+      team,
+      status: 'queued',
+      starts: []
+    })
     expect(() => store.start(message, 'bob')).toThrow('not claimed')
     expect(store.closeClaim(message)).toBe('queued')
     expect(revision(db, message)).toBe(0)
-    expect(store.claim(message)?.state).toMatchObject({ status: 'claimed', claim: { boot: 'boot-a' } })
+    expect(store.claim(message)?.state).toMatchObject({
+      status: 'claimed',
+      claim: { boot: 'boot-a' }
+    })
     expect(store.claim(message)).toBeUndefined()
     expect(() => store.start(message, 'carol')).toThrow('recipient')
     expect(store.start(message, 'bob')).toBe('started')
-    expect(row(db, message)?.state).toMatchObject({ status: 'closed', claim: { boot: 'boot-a' }, starts: [{ recipient: 'bob' }] })
+    expect(row(db, message)?.state).toMatchObject({
+      status: 'closed',
+      claim: { boot: 'boot-a' },
+      starts: [{ recipient: 'bob' }]
+    })
     const closed = revision(db, message)
     expect(store.start(message, 'bob')).toBe('already')
     expect(() => store.start(message, 'carol')).toThrow()
@@ -72,10 +123,16 @@ describe('durable team message store, real SQLite', () => {
     expect(store.start(broadcast, 'bob')).toBe('already')
     expect(revision(db, broadcast)).toBe(once)
     expect(store.start(broadcast, 'carol')).toBe('started')
-    expect(row(db, broadcast)?.state).toMatchObject({ status: 'claimed', starts: [{ recipient: 'bob' }, { recipient: 'carol' }] })
+    expect(row(db, broadcast)?.state).toMatchObject({
+      status: 'claimed',
+      starts: [{ recipient: 'bob' }, { recipient: 'carol' }]
+    })
     expect(store.closeClaim(broadcast)).toBe('closed')
     expect(() => store.start(broadcast, 'dave')).toThrow()
-    expect(row(db, broadcast)?.state).toMatchObject({ status: 'closed', starts: [{ recipient: 'bob' }, { recipient: 'carol' }] })
+    expect(row(db, broadcast)?.state).toMatchObject({
+      status: 'closed',
+      starts: [{ recipient: 'bob' }, { recipient: 'carol' }]
+    })
 
     const silent = store.append(channel).intent.id
     store.claim(silent)
@@ -109,7 +166,8 @@ describe('durable team message store, real SQLite', () => {
   })
 
   it('lets only one of two claims of one id win', () => {
-    const path = file(), db = database(path)
+    const path = file(),
+      db = database(path)
     const first = new TeamMessageStore(db, 'boot-a')
     const id = first.append(direct).intent.id
     const second = new TeamMessageStore(db, 'boot-a')
@@ -121,18 +179,27 @@ describe('durable team message store, real SQLite', () => {
   })
 
   it('appends the text record and its state record together or not at all', () => {
-    const path = file(), { db, store } = open(path, 'boot-a')
+    const path = file(),
+      { db, store } = open(path, 'boot-a')
     const original = db.mutateResourcesBatch.bind(db)
     vi.spyOn(db, 'mutateResourcesBatch').mockImplementation((inputs, fence) => {
       // A crash just before COMMIT of any write that carries a state record.
-      if (inputs.some(input => input.kind === TEAM_MESSAGE_STATE_KIND)) _crashTesting.setHook(stage => { if (stage === 'resource.before-commit') throw new Error('crash') })
-      try { return original(inputs, fence) } finally { _crashTesting.setHook(null) }
+      if (inputs.some((input) => input.kind === TEAM_MESSAGE_STATE_KIND))
+        _crashTesting.setHook((stage) => {
+          if (stage === 'resource.before-commit') throw new Error('crash')
+        })
+      try {
+        return original(inputs, fence)
+      } finally {
+        _crashTesting.setHook(null)
+      }
     })
     expect(() => store.append(direct)).toThrow('crash')
     expect(db.countResources({ kind: TEAM_MESSAGE_KIND })).toBe(0)
     expect(db.countResources({ kind: TEAM_MESSAGE_STATE_KIND })).toBe(0)
     expect(store.queued()).toEqual([])
-    vi.restoreAllMocks(); db.close()
+    vi.restoreAllMocks()
+    db.close()
     expect(open(path, 'boot-b').store.queued()).toEqual([])
   })
 
@@ -146,22 +213,38 @@ describe('durable team message store, real SQLite', () => {
     const ended = store.append({ ...direct, source: { ...source, lead: 'other-lead' } }).intent.id
     const unknown = store.append(channel).intent.id
     store.claim(claimed)
-    store.claim(started); store.start(started, 'bob')
-    store.claim(closed); store.start(closed, 'bob')
+    store.claim(started)
+    store.start(started, 'bob')
+    store.claim(closed)
+    store.start(closed, 'bob')
     store.endTeam({ ...team, lead: 'other-lead' })
-    store.claim(unknown); store.closeClaim(unknown)
-    const finals = [closed, ended, unknown].map(id => [id, revision(db, id)])
+    store.claim(unknown)
+    store.closeClaim(unknown)
+    const finals = [closed, ended, unknown].map((id) => [id, revision(db, id)])
     db.close()
 
     ;({ db, store } = open(path, 'boot-b'))
     expect(row(db, queued)?.state).toMatchObject({ status: 'queued', starts: [] })
-    expect(store.queued().map(entry => entry.intent)).toEqual([expect.objectContaining({ id: queued, text: 'hello bob', recipient: 'bob' })])
-    expect(row(db, claimed)?.state).toMatchObject({ status: 'unknown', claim: { boot: 'boot-a' }, starts: [] })
-    expect(row(db, started)?.state).toMatchObject({ status: 'closed', claim: { boot: 'boot-a' }, starts: [{ recipient: 'bob' }] })
+    expect(store.queued().map((entry) => entry.intent)).toEqual([
+      expect.objectContaining({ id: queued, text: 'hello bob', recipient: 'bob' })
+    ])
+    expect(row(db, claimed)?.state).toMatchObject({
+      status: 'unknown',
+      claim: { boot: 'boot-a' },
+      starts: []
+    })
+    expect(row(db, started)?.state).toMatchObject({
+      status: 'closed',
+      claim: { boot: 'boot-a' },
+      starts: [{ recipient: 'bob' }]
+    })
     for (const [id, before] of finals) expect(revision(db, id as string)).toBe(before)
     expect(() => store.start(claimed, 'bob')).toThrow()
     expect(store.claim(claimed)).toBeUndefined()
-    const settled = [queued, claimed, started, closed, ended, unknown].map(id => [id, revision(db, id)])
+    const settled = [queued, claimed, started, closed, ended, unknown].map((id) => [
+      id,
+      revision(db, id)
+    ])
     db.close()
 
     ;({ db } = open(path, 'boot-c'))
@@ -185,7 +268,8 @@ describe('durable team message store, real SQLite', () => {
     const path = file()
     const first = open(path, 'boot-a')
     const id = first.store.append(direct).intent.id
-    first.store.claim(id); first.store.start(id, 'bob')
+    first.store.claim(id)
+    first.store.start(id, 'bob')
     first.db.close()
     const { db, store } = open(path, 'boot-b')
     expect(() => store.start(id, 'bob')).toThrow('not claimed')
@@ -195,7 +279,9 @@ describe('durable team message store, real SQLite', () => {
   it('converges when a recovery fails in the middle and runs again', () => {
     const path = file()
     let { db, store } = open(path, 'boot-a')
-    const ids = [store.append(direct), store.append(channel), store.append(direct)].map(entry => entry.intent.id)
+    const ids = [store.append(direct), store.append(channel), store.append(direct)].map(
+      (entry) => entry.intent.id
+    )
     for (const id of ids) store.claim(id)
     store.start(ids[1], 'bob')
     db.close()
@@ -208,38 +294,86 @@ describe('durable team message store, real SQLite', () => {
       return original(inputs, fence)
     })
     expect(() => new TeamMessageStore(db, 'boot-b')).toThrow('disk full')
-    expect(ids.map(id => status(db, id)).filter(value => value === 'claimed')).toHaveLength(2)
-    vi.restoreAllMocks(); db.close()
+    expect(ids.map((id) => status(db, id)).filter((value) => value === 'claimed')).toHaveLength(2)
+    vi.restoreAllMocks()
+    db.close()
 
     ;({ db, store } = open(path, 'boot-c'))
-    expect(ids.map(id => status(db, id))).toEqual(['unknown', 'closed', 'unknown'])
-    const settled = ids.map(id => revision(db, id))
+    expect(ids.map((id) => status(db, id))).toEqual(['unknown', 'closed', 'unknown'])
+    const settled = ids.map((id) => revision(db, id))
     db.close()
     ;({ db } = open(path, 'boot-d'))
-    expect(ids.map(id => revision(db, id))).toEqual(settled)
+    expect(ids.map((id) => revision(db, id))).toEqual(settled)
   })
 
   it('skips a record of another version or an unknown status and never rewrites it', () => {
     const path = file()
     let { db, store } = open(path, 'boot-a')
     const normal = store.append(direct).intent.id
-    const write = (kind: string, id: string, state: Record<string, unknown>, sequence = 0): ResourceMutationInput => {
+    const write = (
+      kind: string,
+      id: string,
+      state: Record<string, unknown>,
+      sequence = 0
+    ): ResourceMutationInput => {
       const eventId = randomUUID()
-      return { operation: 'create', kind, id, idempotencyKey: `fixture:${eventId}`, state, createdAt: Date.now(), event: { protocolVersion: '2.0.0', id: eventId, type: 'fixture', createdAt: Date.now(), payload: {}, envelopeKind: 'event', streamId: `fixture:${kind}:${id}`, sequence } }
+      return {
+        operation: 'create',
+        kind,
+        id,
+        idempotencyKey: `fixture:${eventId}`,
+        state,
+        createdAt: Date.now(),
+        event: {
+          protocolVersion: '2.0.0',
+          id: eventId,
+          type: 'fixture',
+          createdAt: Date.now(),
+          payload: {},
+          envelopeKind: 'event',
+          streamId: `fixture:${kind}:${id}`,
+          sequence
+        }
+      }
     }
-    const text = (id: string, v = 1) => ({ v, id, source, routeKey: 'route', kind: 'message', hop: 1, recipient: 'bob', text: 'fixture', createdAt: 1 })
-    const future = randomUUID(), strange = randomUUID(), newer = randomUUID()
+    const text = (id: string, v = 1) => ({
+      v,
+      id,
+      source,
+      routeKey: 'route',
+      kind: 'message',
+      hop: 1,
+      recipient: 'bob',
+      text: 'fixture',
+      createdAt: 1
+    })
+    const future = randomUUID(),
+      strange = randomUUID(),
+      newer = randomUUID()
     db.mutateResourcesBatch([
       write(TEAM_MESSAGE_KIND, future, text(future, 2)),
-      write(TEAM_MESSAGE_STATE_KIND, future, { v: 2, id: future, team, status: 'claimed', claim: { boot: 'boot-old', at: 1 }, starts: [] }),
+      write(TEAM_MESSAGE_STATE_KIND, future, {
+        v: 2,
+        id: future,
+        team,
+        status: 'claimed',
+        claim: { boot: 'boot-old', at: 1 },
+        starts: []
+      }),
       write(TEAM_MESSAGE_KIND, strange, text(strange)),
-      write(TEAM_MESSAGE_STATE_KIND, strange, { v: 1, id: strange, team, status: 'future', starts: [] }),
+      write(TEAM_MESSAGE_STATE_KIND, strange, {
+        v: 1,
+        id: strange,
+        team,
+        status: 'future',
+        starts: []
+      }),
       write(TEAM_MESSAGE_KIND, newer, text(newer, 2)),
       write(TEAM_MESSAGE_STATE_KIND, newer, { v: 1, id: newer, team, status: 'queued', starts: [] })
     ])
     db.close()
     ;({ db, store } = open(path, 'boot-b'))
-    expect(store.queued().map(entry => entry.intent.id)).toEqual([normal])
+    expect(store.queued().map((entry) => entry.intent.id)).toEqual([normal])
     for (const id of [future, strange, newer]) {
       expect(revision(db, id)).toBe(0)
       expect(store.get(id)).toBeUndefined()
@@ -253,12 +387,19 @@ describe('durable team message store, real SQLite', () => {
   it('ends only the queued messages of its own team', () => {
     const { db, store } = open(':memory:', 'boot-a')
     const other = { ...team, thread: 'other-thread' }
-    const a1 = store.append(direct).intent.id, a2 = store.append(channel).intent.id, a3 = store.append(direct).intent.id
+    const a1 = store.append(direct).intent.id,
+      a2 = store.append(channel).intent.id,
+      a3 = store.append(direct).intent.id
     const b1 = store.append({ ...direct, source: { ...other, member: 'alice' } }).intent.id
     store.claim(a3)
     expect(store.queuedCount(team)).toBe(2)
     expect(store.endTeam(team)).toBe(2)
-    expect([a1, a2, a3, b1].map(id => status(db, id))).toEqual(['ended', 'ended', 'claimed', 'queued'])
+    expect([a1, a2, a3, b1].map((id) => status(db, id))).toEqual([
+      'ended',
+      'ended',
+      'claimed',
+      'queued'
+    ])
     expect(store.queuedCount()).toBe(1)
     expect(store.start(a3, 'bob')).toBe('started')
   })
@@ -270,9 +411,17 @@ describe('durable team message store, real SQLite', () => {
     const claimed = store.append(direct).intent.id
     store.claim(claimed)
     db.close()
-    const child = spawn(process.execPath, ['-e', "process.stdout.write('READY\\n'); setInterval(() => {}, 1000)"], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'ignore'] })
+    const child = spawn(
+      process.execPath,
+      ['-e', "process.stdout.write('READY\\n'); setInterval(() => {}, 1000)"],
+      { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'ignore'] }
+    )
     children.push(child)
-    await new Promise<void>(resolve => child.stdout!.on('data', chunk => { if (String(chunk).includes('READY')) resolve() }))
+    await new Promise<void>((resolve) =>
+      child.stdout!.on('data', (chunk) => {
+        if (String(chunk).includes('READY')) resolve()
+      })
+    )
     // The lease another process's MagicAgentEventStore holds while it has this file open.
     writeFileSync(join(instanceLeaseDirectory(path), `${child.pid}-${randomUUID()}.lease`), '{}')
 
@@ -287,21 +436,24 @@ describe('durable team message store, real SQLite', () => {
     db.close()
 
     child.kill('SIGKILL')
-    await new Promise(resolve => child.once('exit', resolve))
+    await new Promise((resolve) => child.once('exit', resolve))
     ;({ db, store } = open(path, 'boot-c'))
     expect(store.unavailable).toBe(false)
     expect(status(db, claimed)).toBe('unknown')
-    expect(store.queued().map(entry => entry.intent.id)).toEqual([queued])
+    expect(store.queued().map((entry) => entry.intent.id)).toEqual([queued])
   })
 
   it('fails closed on a failed write and never deletes, truncates or replaces the file', () => {
-    const path = file(), { db, store } = open(path, 'boot-a')
+    const path = file(),
+      { db, store } = open(path, 'boot-a')
     const id = store.append(direct).intent.id
     const before = statSync(path)
-    vi.spyOn(db, 'mutateResourcesBatch').mockImplementation(() => { throw new Error('write failed') })
+    vi.spyOn(db, 'mutateResourcesBatch').mockImplementation(() => {
+      throw new Error('write failed')
+    })
     expect(() => store.append(direct)).toThrow('write failed')
     expect(() => store.claim(id)).toThrow('write failed')
-    expect(store.queued().map(entry => entry.intent.id)).toEqual([id])
+    expect(store.queued().map((entry) => entry.intent.id)).toEqual([id])
     expect(status(db, id)).toBe('queued')
     vi.restoreAllMocks()
     const after = statSync(path)
@@ -322,28 +474,84 @@ describe('durable team message store, real SQLite', () => {
     const path = file()
     let { db, store } = open(path, 'boot-a')
     // The exact mutations the store writes for append, claim and start, batched only to build the fixture fast.
-    const build = (store as unknown as { mutation(operation: 'create' | 'update', kind: string, id: string, state: unknown, createdAt: number, expectedRevision?: number): ResourceMutationInput }).mutation.bind(store)
+    const build = (
+      store as unknown as {
+        mutation(
+          operation: 'create' | 'update',
+          kind: string,
+          id: string,
+          state: unknown,
+          createdAt: number,
+          expectedRevision?: number
+        ): ResourceMutationInput
+      }
+    ).mutation.bind(store)
     for (let batch = 0; batch < 20; batch++) {
       const inputs: ResourceMutationInput[] = []
       for (let i = 0; i < 250; i++) {
-        const id = randomUUID(), at = Date.now()
+        const id = randomUUID(),
+          at = Date.now()
         const queued = { v: 1, id, team, status: 'queued', starts: [] }
-        inputs.push(build('create', TEAM_MESSAGE_KIND, id, { v: 1, id, source, routeKey: 'route', kind: 'message', hop: 1, recipient: 'bob', text: 'x'.repeat(4000), createdAt: at }, at))
+        inputs.push(
+          build(
+            'create',
+            TEAM_MESSAGE_KIND,
+            id,
+            {
+              v: 1,
+              id,
+              source,
+              routeKey: 'route',
+              kind: 'message',
+              hop: 1,
+              recipient: 'bob',
+              text: 'x'.repeat(4000),
+              createdAt: at
+            },
+            at
+          )
+        )
         inputs.push(build('create', TEAM_MESSAGE_STATE_KIND, id, queued, at))
-        inputs.push(build('update', TEAM_MESSAGE_STATE_KIND, id, { ...queued, status: 'claimed', claim: { boot: 'boot-a', at } }, at, 0))
-        inputs.push(build('update', TEAM_MESSAGE_STATE_KIND, id, { ...queued, status: 'closed', claim: { boot: 'boot-a', at }, starts: [{ recipient: 'bob', at }] }, at, 1))
+        inputs.push(
+          build(
+            'update',
+            TEAM_MESSAGE_STATE_KIND,
+            id,
+            { ...queued, status: 'claimed', claim: { boot: 'boot-a', at } },
+            at,
+            0
+          )
+        )
+        inputs.push(
+          build(
+            'update',
+            TEAM_MESSAGE_STATE_KIND,
+            id,
+            {
+              ...queued,
+              status: 'closed',
+              claim: { boot: 'boot-a', at },
+              starts: [{ recipient: 'bob', at }]
+            },
+            at,
+            1
+          )
+        )
       }
       db.mutateResourcesBatch(inputs)
     }
     db.checkpoint('TRUNCATE')
     db.close()
-    const size = statSync(path).size + (existsSync(`${path}-wal`) ? statSync(`${path}-wal`).size : 0)
+    const size =
+      statSync(path).size + (existsSync(`${path}-wal`) ? statSync(`${path}-wal`).size : 0)
     const started = performance.now()
     db = database(path)
     const audited = performance.now() - started
     store = new TeamMessageStore(db, 'boot-b')
     const opened = performance.now() - started
-    process.stdout.write(`[B13 measure] 5000 settled messages of 4000 characters: open ${opened.toFixed(0)} ms (event store audit ${audited.toFixed(0)} ms), file ${(size / 1024 / 1024).toFixed(1)} MiB\n`)
+    process.stdout.write(
+      `[B13 measure] 5000 settled messages of 4000 characters: open ${opened.toFixed(0)} ms (event store audit ${audited.toFixed(0)} ms), file ${(size / 1024 / 1024).toFixed(1)} MiB\n`
+    )
     expect(store.queued()).toEqual([])
     expect(db.countResources({ kind: TEAM_MESSAGE_STATE_KIND })).toBe(5000)
   }, 120_000)
