@@ -369,7 +369,8 @@ type LocalMediaPathPrecheck = {
  */
 function precheckLocalMediaPath(
   filePath: string,
-  networkRoots: readonly string[] = []
+  networkRoots: readonly string[] = [],
+  grants = true
 ): LocalMediaPathPrecheck | null {
   const trimmed = String(filePath || '').trim()
   // Only Windows has network (UNC) paths. On POSIX `//dir/file` is the local file `/dir/file`,
@@ -386,7 +387,7 @@ function precheckLocalMediaPath(
   // Before any filesystem call: an unsolicited network path never makes main contact its host
   // (an NT namespace spelling never counts as scoped).
   if (process.platform === 'win32' && isWindowsNtNamespaceLocalMediaPath(trimmed)) return null
-  if (!isNetworkPath || isWindowsNetworkPathScoped(trimmed)) {
+  if (!isNetworkPath || (grants && isWindowsNetworkPathScoped(trimmed))) {
     return { trimmed, isNetworkPath, viaNetworkRoot: false }
   }
   const resolved = path.resolve(trimmed)
@@ -439,6 +440,11 @@ export type LocalMediaPathAuthorizationOptions = {
    * the local-media protocol never serves an unscoped network path.
    */
   allowNetworkRoots?: boolean
+  /**
+   * Whether the user's grants (picked or dropped files and folders) count besides the roots
+   * (default true). Off for a read that only ever names files under the roots.
+   */
+  grants?: boolean
 }
 
 /**
@@ -470,7 +476,8 @@ export async function authorizeLocalMediaPathAsync(
   allowedRoots: readonly LocalMediaRoot[],
   {
     realpath = (value: string) => fs.promises.realpath(value),
-    allowNetworkRoots = false
+    allowNetworkRoots = false,
+    grants = true
   }: LocalMediaPathAuthorizationOptions = {}
 ): Promise<LocalMediaPathAuthorization> {
   const refused = (reason: LocalMediaPathRefusalReason): LocalMediaPathAuthorization => ({
@@ -479,7 +486,10 @@ export async function authorizeLocalMediaPathAsync(
   })
   const checked = precheckLocalMediaPath(
     filePath,
-    allowNetworkRoots ? allowedRoots.filter((root): root is string => typeof root === 'string') : []
+    allowNetworkRoots
+      ? allowedRoots.filter((root): root is string => typeof root === 'string')
+      : [],
+    grants
   )
   if (!checked) return refused('refused')
 
@@ -489,7 +499,7 @@ export async function authorizeLocalMediaPathAsync(
   } catch (error) {
     return refused(isMissingPathError(error) ? 'missing' : 'unavailable')
   }
-  if (isScopedCanonicalLocalMediaPath(canonical)) return { canonicalPath: canonical }
+  if (grants && isScopedCanonicalLocalMediaPath(canonical)) return { canonicalPath: canonical }
   if (checked.isNetworkPath && !checked.viaNetworkRoot) return refused('refused')
 
   const resolved = path.resolve(checked.trimmed)
@@ -538,16 +548,18 @@ export async function resolveAuthorizedLocalMediaPathAsync(
  */
 export function isLexicallyCoveredLocalMediaPath(
   filePath: string,
-  allowedRoots: readonly LocalMediaRoot[]
+  allowedRoots: readonly LocalMediaRoot[],
+  { grants = true }: { grants?: boolean } = {}
 ): boolean {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return false
   const resolved = path.resolve(trimmed)
   return (
-    scopedLocalMediaPaths.has(comparisonKey(resolved)) ||
-    Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
-      isSameOrInside(directory, resolved)
-    ) ||
+    (grants &&
+      (scopedLocalMediaPaths.has(comparisonKey(resolved)) ||
+        Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
+          isSameOrInside(directory, resolved)
+        ))) ||
     allowedRoots.some((root) =>
       isSameOrInside(
         typeof root === 'string' ? path.resolve(root) : root.pinnedCanonicalPath,

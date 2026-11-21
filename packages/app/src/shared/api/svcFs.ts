@@ -82,6 +82,13 @@ export type ReadTextFileResp = {
   filename: string
 }
 
+/** A file a skill names as one of its resources (see FsSvc.readSkillResourceFile). */
+export type ReadSkillResourceFileReq = {
+  fullPath: string
+}
+
+export type ReadSkillResourceFileResp = ReadTextFileResp
+
 /**
  * The mark of a read of a path the renderer named whose answer main does not know now: the
  * filesystem did not answer in time or failed, or every slot was held by calls that did not.
@@ -465,6 +472,11 @@ export type FsSvc = {
   saveQAppInputImage(req: SaveQAppInputImageReq): Promise<SaveQAppInputImageResp>
   readImageFromPath(req: ReadImageFromPathReq): Promise<ReadImageFromPathResp>
   readTextFile(req: ReadTextFileReq): Promise<ReadTextFileResp>
+  /**
+   * A skill resource: only under the custom skill folder of the app's data, or a file the user
+   * granted; never the app's other data (its config, grants, chats) nor a skill definition.
+   */
+  readSkillResourceFile(req: ReadSkillResourceFileReq): Promise<ReadSkillResourceFileResp>
   readFileFromPath(req: ReadFileFromPathReq): Promise<ReadFileFromPathResp>
   readFileSlice(req: ReadFileSliceReq): Promise<ReadFileSliceResp>
   writeTextFile(req: WriteTextFileReq): Promise<WriteTextFileResp>
@@ -503,6 +515,10 @@ export const fsSvcDef: ServiceDefSheet<FsSvc> = {
   readTextFile: {
     type: 'unary',
     request: validatePathReq<ReadTextFileReq>('readTextFile')
+  },
+  readSkillResourceFile: {
+    type: 'unary',
+    request: validatePathReq<ReadSkillResourceFileReq>('readSkillResourceFile')
   },
   readFileFromPath: {
     type: 'unary',

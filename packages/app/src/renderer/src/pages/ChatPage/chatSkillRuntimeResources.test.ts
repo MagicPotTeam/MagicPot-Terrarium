@@ -417,4 +417,39 @@ describe('chatSkillRuntimeResources', () => {
     )
     expect(resources[0]?.content).not.toContain('mcp.other')
   })
+
+  it('reads a skill resource file through the skill resource read, never the general text read', async () => {
+    const config = createMinimalConfig()
+    const runtime = resolveSkillRuntimeSpec(
+      {
+        id: 'imported-skill',
+        category: 'Imported',
+        skillName: 'Imported Skill',
+        prompt: '',
+        type: 'normal',
+        resources: ['C:\\Users\\me\\AppData\\Roaming\\MagicPot\\customSkills\\guide.md']
+      },
+      config
+    )
+    const readTextFile = vi.fn(async () => ({ content: 'general read', filename: 'guide.md' }))
+    const readSkillResourceFile = vi.fn(async () => ({ content: '# Guide', filename: 'guide.md' }))
+    const previousApi = window.api
+    window.api = { svcFs: { readTextFile, readSkillResourceFile } } as unknown as typeof window.api
+    try {
+      const resources = await resolveSkillRuntimeResourceEntries({
+        runtime,
+        config,
+        runtimeApps: []
+      })
+      expect(resources).toEqual([
+        expect.objectContaining({ content: '# Guide', status: 'resolved', resolutionKind: 'file' })
+      ])
+      expect(readSkillResourceFile).toHaveBeenCalledWith({
+        fullPath: 'C:\\Users\\me\\AppData\\Roaming\\MagicPot\\customSkills\\guide.md'
+      })
+      expect(readTextFile).not.toHaveBeenCalled()
+    } finally {
+      window.api = previousApi
+    }
+  })
 })

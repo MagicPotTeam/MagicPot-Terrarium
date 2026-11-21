@@ -298,4 +298,45 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
       NOT_AUTHORIZED
     )
   })
+
+  it('reads a skill resource only in the custom skill folder or where the user granted', async () => {
+    const userData = p('electron-userData')
+    const resource = write(path.join(userData, 'customSkills', 'Writing', 'guide.md'), '# guide')
+    const definition = write(
+      path.join(userData, 'customSkills', 'Writing', 'other.skill.json'),
+      '{"apiKey":"sk-other-skill"}'
+    )
+    const config = write(path.join(userData, 'config.json'), '{"api_key":"sk-secret"}')
+    const grants = write(path.join(userData, 'local-media-grants.json'), '{"version":1}')
+    const chat = write(path.join(userData, 'chat-history', 'thread.json'), '{"messages":[]}')
+    const picked = write(p('Desktop', 'notes', 'rules.md'), '# picked')
+
+    await expect(service.readSkillResourceFile({ fullPath: resource })).resolves.toEqual({
+      content: '# guide',
+      filename: 'guide.md'
+    })
+    // Outside the skill folder (or a skill definition in it): not a place it may read at all.
+    for (const fullPath of [config, grants, chat, definition, p('home', '.ssh', 'id_rsa')]) {
+      await expect(service.readSkillResourceFile({ fullPath })).rejects.toThrow(NOT_AUTHORIZED)
+    }
+    // A file the user picked is a resource they chose.
+    expect(authorizeScopedLocalMediaPath(picked)).toBe(true)
+    await expect(service.readSkillResourceFile({ fullPath: picked })).resolves.toMatchObject({
+      content: '# picked'
+    })
+    // Even a grant of a folder that holds the app's data does not open its config.
+    expect(authorizeScopedLocalMediaDirectory(base)).toBe(true)
+    for (const fullPath of [config, grants, chat, definition]) {
+      await expect(service.readSkillResourceFile({ fullPath })).rejects.toThrow(
+        /not found|not authorized/
+      )
+    }
+    // A link in the skill folder that points at the config is refused too.
+    fs.symlinkSync(config, path.join(userData, 'customSkills', 'Writing', 'config.md'))
+    await expect(
+      service.readSkillResourceFile({
+        fullPath: path.join(userData, 'customSkills', 'Writing', 'config.md')
+      })
+    ).rejects.toThrow(/not found|not authorized/)
+  })
 })
