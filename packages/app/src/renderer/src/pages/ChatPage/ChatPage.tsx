@@ -1229,6 +1229,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
 }) => {
   const queueResumeNoticeId = React.useId()
   // The model and reasoning selectors sit inside the composer, also in the Agent column (owner's request).
+  // Keep it off until the header pill has what the composer menu gives a member: the re-pick of a
+  // model that can no longer be used and the "继承组长" row (see ChatPrimarySelection headerPill).
   const modelInHeader = false
   const teamVisibilityRef = useRef({ active, epoch: 0 })
   if (teamVisibilityRef.current.active !== active)

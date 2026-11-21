@@ -2250,6 +2250,34 @@ describe('real ChatPage member model on the real composer selector', () => {
     await page.finish()
   }, 30000)
 
+  it('gives a member its re-pick and inherit row in the composer, and shows no header pill', async () => {
+    // ChatPage keeps modelInHeader off: the header pill (ChatPrimarySelection headerPill) has no
+    // re-pick for a member whose model is gone and no inherit row. Turning it on fails here.
+    const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+    const page = await mountTeam({
+      profiles: [A, C],
+      beforePage: (idb) => {
+        const row = structuredClone(rawRow(idb, 'designer')!)
+        row.memberModelChoice = { version: 1, profileId: B.id }
+        idb.seedRows(SESSION_STORE, [{ key: storageKey('designer'), value: row }])
+      }
+    })
+    const unavailable = await openConversation(page, 'designer', 'Member model unavailable')
+    expect(unavailable).toBeEnabled()
+    expect(screen.queryByTestId('chat-model-pill')).toBeNull()
+    expect(within(pillHost).getByTestId('agent-header-team-actions')).toBeInTheDocument()
+    const menu = await openMenu(unavailable)
+    expect(rowNames(menu)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-c'
+    ])
+    expect(pillHost.contains(menu)).toBe(false)
+    expect(overlayHost.childElementCount).toBe(0)
+    await closeMenu()
+    await page.finish()
+  }, 30000)
+
   it('stores a member pick, routes that member only, and leaves the lead and the other member alone', async () => {
     const page = await mountTeam()
     const inherited = await openConversation(page, 'designer', INHERITED)

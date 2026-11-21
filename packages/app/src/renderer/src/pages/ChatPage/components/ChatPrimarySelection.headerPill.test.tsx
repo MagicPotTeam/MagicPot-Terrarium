@@ -173,15 +173,20 @@ describe('ChatPrimarySelection header pill', () => {
     expect(within(sheet).queryAllByRole('radio')).toHaveLength(0)
     await user.clear(search)
     await user.type(search, 'example')
-    expect(within(sheet).getAllByRole('radio').map((row) => row.textContent)).toEqual([
-      'qwen-maxllm.example.test'
-    ])
+    expect(
+      within(sheet)
+        .getAllByRole('radio')
+        .map((row) => row.textContent)
+    ).toEqual(['qwen-maxllm.example.test'])
   })
 
   it('makes the model list one Tab stop whose arrow keys choose a row', async () => {
     const user = userEvent.setup()
     renderPill({
-      availableProfiles: [...profiles, { id: 'third', model_name: 'third-model', provider: 'gemini' }]
+      availableProfiles: [
+        ...profiles,
+        { id: 'third', model_name: 'third-model', provider: 'gemini' }
+      ]
     })
     await user.click(pill())
     const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
@@ -192,7 +197,11 @@ describe('ChatPrimarySelection header pill', () => {
     expect(rows()[0]).toHaveFocus()
     await user.keyboard('{ArrowDown}')
     expect(rows()[1]).toHaveFocus()
-    expect(rows().map((row) => row.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false'])
+    expect(rows().map((row) => row.getAttribute('aria-checked'))).toEqual([
+      'false',
+      'true',
+      'false'
+    ])
     expect(within(sheet).getByRole('button', { name: 'Switch' })).toBeEnabled()
     await user.keyboard('{ArrowUp}{ArrowUp}')
     expect(rows()[2]).toHaveFocus()
@@ -377,6 +386,59 @@ describe('ChatPrimarySelection header pill', () => {
     )
     expect(pill()).toBeDisabled()
     expect(pill()).toHaveAttribute('aria-busy', 'true')
+  })
+
+  // Dormant: ChatPage keeps modelInHeader off because this pill lacks what the composer menu gives
+  // a member. Porting either one changes this test; turning the pill on without them is caught by
+  // the channel bed (ChatPage.channel.realPage.test.tsx, member model cases).
+  it('offers a member neither the re-pick of an unusable model nor the inherit row', async () => {
+    const user = userEvent.setup()
+    const member = vi.fn()
+    const inherit = vi.fn()
+    const inheritLead = {
+      profileId: 'sonnet',
+      modelName: 'anthropic/claude-sonnet',
+      onSelect: inherit
+    }
+    const { rerender, props } = renderPill({
+      memberModel: {
+        state: 'unavailable',
+        onSelectProfile: member,
+        selectableProfileIds: ['sonnet', 'gpt'],
+        inheritLead
+      }
+    })
+    // The composer menu would offer a pick here; the pill stays shut.
+    expect(pill()).toHaveTextContent(/^Member model unavailable$/)
+    expect(pill()).toBeDisabled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+
+    rerender(
+      <ThemeProvider theme={theme}>
+        <ChatPrimarySelection
+          {...props}
+          memberModel={{
+            state: 'selected',
+            label: 'openai/gpt-5.5',
+            profileId: 'gpt',
+            onSelectProfile: member,
+            selectableProfileIds: ['sonnet', 'gpt'],
+            inheritLead
+          }}
+        />
+      </ThemeProvider>
+    )
+    await user.click(pill())
+    const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    // Only the models: no row clears the member's own choice.
+    expect(
+      within(sheet)
+        .getAllByRole('radio')
+        .map((row) => row.textContent)
+    ).toEqual(['anthropic/claude-sonnetclaude', 'openai/gpt-5.5openai'])
+    expect(within(sheet).queryByText('Inherit lead')).toBeNull()
+    expect(member).not.toHaveBeenCalled()
+    expect(inherit).not.toHaveBeenCalled()
   })
 
   it('shows nothing for an agent skill, which brings its own model', () => {

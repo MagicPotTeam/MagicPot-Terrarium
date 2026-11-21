@@ -206,6 +206,11 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   if (headerPill) {
     if (!memberModel && isAgentSkillSelected) return null
     const tokens = getAgentColumnTokens(theme)
+    // Dormant for members: ChatPage keeps modelInHeader off, so members use the composer menu
+    // below. This pill has neither the re-pick of a member whose model can no longer be used
+    // (memberUsable excludes 'unavailable') nor the "inherit the lead" row (inheritLead is
+    // ignored here). Port both before the pill carries a member again; the headerPill tests and
+    // the channel bed's member model cases pin this.
     const memberUsable =
       Boolean(memberModel) &&
       active &&
