@@ -116,6 +116,7 @@ import {
   setSessionDeleteTombstone,
   writeSessionDraftBackup,
   writeSessionQueuedSendsBackup,
+  type ChatDraftQueuedSend,
   type ChatSession,
   type ChatSessionDraft
 } from './chatStorage'
@@ -438,9 +439,11 @@ import {
 } from './chatQueuedSends'
 import ChatQueueStrip, { type ChatQueueStripItem } from './components/ChatQueueStrip'
 import {
+  adoptStoredQueuedAttachments,
   isUnavailableQueuedAttachment,
   restoreQueuedSends,
-  serializeQueuedSends
+  serializeQueuedSends,
+  type QueuedSendStoredAttachments
 } from './chatQueuedSendPersistence'
 import { hasDelegatedWork } from './agentTeamDelegatedWork'
 import AgentTeamTargetSelect from './components/AgentTeamTargetSelect'
@@ -608,6 +611,8 @@ type QueuedSessionSend = {
   /** Identity of a user item in the draft record; stable across reloads. */
   persistId?: string
   queuedAt?: number
+  /** Its attachments imported into managed media, stored in their place until adopted. */
+  storedAttachments?: QueuedSendStoredAttachments
 }
 
 type ExternalInitialChatMessage = {
@@ -2452,6 +2457,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const queuedSendDraftSyncRef = useRef<(options: { updateSessions: boolean }) => void>(
     () => undefined
   )
+  // Takes a queued item's imported attachments into use once a stored copy holds them (assigned
+  // below, once its dependencies exist; see makeQueuedSendImagesDurable).
+  const adoptStoredQueuedImagesRef = useRef<
+    (updates: ReadonlyArray<readonly [string, readonly ChatDraftQueuedSend[]]>) => void
+  >(() => undefined)
   const updateQueuedSessionSends = useCallback((next: Map<string, QueuedSessionSend[]>) => {
     queuedSessionSendsRef.current = next
     setQueuedSessionSends(next)
@@ -3745,6 +3755,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       setQueuedSessionSends(queues)
     }
 
+    // Stored copies of queues whose items wait to take their imported attachments into use.
+    const storedCopies: Array<readonly [string, readonly ChatDraftQueuedSend[]]> = []
     // Store every restored session whose queue changed: accepted and removed items leave the record.
     const sessionUpdates = new Map<
       string,
@@ -3780,6 +3792,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
           ...(stored ? {} : { backupFailed: true, attemptedAt: now })
         }
         queuedSendDraftStateRef.current.set(key, state)
+        if (stored && queue?.some((item) => item.storedAttachments)) {
+          storedCopies.push([session.id, queuedSends])
+        }
+      }
+      const persistedQueue = persistedSessionsRef.current.get(session.id)?.draft?.queuedSends
+      if (persistedQueue?.length && queue?.some((item) => item.storedAttachments)) {
+        storedCopies.push([session.id, persistedQueue])
       }
       const sessionQueue = readDraftQueuedSends(session.draft)
       // The session record must carry the state the backup could not hold, an empty queue included.
@@ -3792,6 +3811,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionUpdates.set(session.id, { queuedSends, updatedAt: state.updatedAt })
       }
     }
+    if (storedCopies.length) adoptStoredQueuedImagesRef.current(storedCopies)
     if (!sessionUpdates.size) return
     setSessions((previous) =>
       previous.map((session) => {
@@ -9867,6 +9887,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // FIX-PLAN item 4: a queued image is stored in a form that survives a reload. A blob: image (it
   // dies with this renderer) and an oversized inline image are imported into managed media once
   // the item is queued, so the stored queue keeps a reference instead of an unavailable tile.
+  // The item keeps its own images for sending until a stored copy of the queue holds the
+  // references (adoptStoredQueuedImagesRef): only then can the reference scanner see them.
   // Only items the stored queue keeps (the person's own); other items resolve their images when
   // they are sent, as before.
   const makeQueuedSendImagesDurable = useCallback(
@@ -9894,13 +9916,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
       ) {
         return
       }
-      const overrides = current.overrides
       const nextQueues = new Map(queues)
       nextQueues.set(
         sessionId,
         queue.map((queued, position) =>
           position === index
-            ? { ...queued, overrides: { ...overrides, attachments: [...durable] } }
+            ? { ...queued, storedAttachments: { source: attachments, attachments: [...durable] } }
             : queued
         )
       )
@@ -13116,6 +13137,23 @@ const ChatPage: React.FC<ChatPageProps> = ({
       isChatAttachmentUrlInUseBy(url, pendingAttachmentsRef.current, excludeIndex),
     [isChatAttachmentUrlInUseBy]
   )
+  adoptStoredQueuedImagesRef.current = (updates) => {
+    let queues = queuedSessionSendsRef.current
+    const released: string[] = []
+    for (const [sessionId, stored] of updates) {
+      const adopted = adoptStoredQueuedAttachments(queues.get(sessionId) ?? [], stored)
+      if (!adopted) continue
+      if (queues === queuedSessionSendsRef.current) queues = new Map(queues)
+      queues.set(sessionId, adopted.queue)
+      released.push(...adopted.released)
+    }
+    if (queues === queuedSessionSendsRef.current) return
+    updateQueuedSessionSends(queues)
+    // A stored copy holds the references now: the blob: URLs they replace go with their last user.
+    for (const url of new Set(released)) {
+      if (!isChatAttachmentUrlInUseBy(url, pendingAttachmentsRef.current, -1)) revokeBlobUrl(url)
+    }
+  }
 
   const removeAttachment = (index: number) => {
     setPendingAttachments((prev) => {

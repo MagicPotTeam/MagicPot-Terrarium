@@ -686,6 +686,9 @@ describe('ChatPage queued images (FIX-PLAN item 4, part 3)', () => {
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'queue-images')
     // The first reply never arrives, so the next message is queued behind it.
     fixture.ipcChat.mockImplementation(() => new Promise(() => undefined))
+    const revoked: string[] = []
+    const revokeObjectURL = vi.fn((url: string) => revoked.push(url))
+    vi.stubGlobal('URL', Object.assign(URL, { revokeObjectURL }))
 
     renderPage()
     await waitFor(() => expect(readSessionFromUi()?.id).toBe('queue-images'))
@@ -713,5 +716,84 @@ describe('ChatPage queued images (FIX-PLAN item 4, part 3)', () => {
     expect(localStorage.getItem(backupKey)).not.toContain('blob:')
     expect(localStorage.getItem(backupKey)).not.toContain('queuedAttachmentUnavailable')
     expect(fixture.importBytes).toHaveBeenCalledTimes(1)
+    // The item kept its blob: URL until the backup held the reference; then the blob is released.
+    await waitFor(() => expect(revoked).toContain(blobUrl))
+  })
+
+  it('keeps the blob: URL of a queued image while no stored copy holds its reference', async () => {
+    const blobUrl = 'blob:file:///queued-unstored-image'
+    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13])
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url !== blobUrl) throw new Error(`unexpected fetch ${url}`)
+        return { ok: true, blob: async () => new Blob([pngBytes], { type: 'image/png' }) }
+      })
+    )
+    await seed({
+      id: 'queue-unstored',
+      title: 'Queue unstored',
+      profileId: 'inline-vision-fixture',
+      messages: [],
+      draft: {
+        inputValue: '',
+        pendingAttachments: [
+          { type: 'image', url: blobUrl, fileName: 'pasted.png', mimeType: 'image/png' }
+        ],
+        pendingHiddenContext: '',
+        updatedAt: 1
+      }
+    })
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'queue-unstored')
+    fixture.ipcChat.mockImplementation(() => new Promise(() => undefined))
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { revokeObjectURL }))
+    // Neither stored copy can hold the queue: the backup is refused and the record is held by
+    // another writer.
+    const backupKey = `magicpot-chat-draft:${SCOPE}:queue-unstored`
+    const setItem = Storage.prototype.setItem
+    const refuse = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string
+    ) {
+      if (key === backupKey && value.includes('local-media:')) throw new Error('quota exceeded')
+      return setItem.call(this, key, value)
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      renderPage()
+      await waitFor(() => expect(readSessionFromUi()?.id).toBe('queue-unstored'))
+      const stores = activeFakeDb!.state.stores
+      for (const store of stores.values()) {
+        for (const [key, value] of store) {
+          if ((value as ChatSession).id === 'queue-unstored') {
+            store.set(key, { ...(value as ChatSession), title: 'Renamed in another window' })
+          }
+        }
+      }
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: { targetScope: SCOPE, autoSend: true, requestId: 'busy', text: 'first, slow' }
+          })
+        )
+      })
+      await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(1))
+      await sendComposer('queued, nowhere stored')
+      await waitFor(() => expect(fixture.importBytes).toHaveBeenCalledTimes(1))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 800))
+      })
+      const record = (await loadAllSessions(SCOPE)).find(
+        (session) => session.id === 'queue-unstored'
+      )
+      expect(JSON.stringify(record ?? null)).not.toContain('local-media:')
+      expect(localStorage.getItem(backupKey) ?? '').not.toContain('local-media:')
+      expect(revokeObjectURL).not.toHaveBeenCalledWith(blobUrl)
+    } finally {
+      warn.mockRestore()
+      refuse.mockRestore()
+    }
   })
 })
