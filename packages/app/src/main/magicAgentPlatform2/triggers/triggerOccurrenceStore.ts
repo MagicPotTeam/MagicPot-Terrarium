@@ -44,19 +44,52 @@ export const TRIGGER_OCCURRENCE_ARCHIVE_ABOVE = 128
 export const TRIGGER_OCCURRENCE_ARCHIVE_DOWN_TO = 64
 /**
  * Most writes of one poll's archive and dead-letter transaction: an archive is one write, a
- * dead-letter two (the final state, then its archive).
+ * dead-letter two (the final state, then its archive). The first poll adds the queue marker.
  */
 export const TRIGGER_OCCURRENCE_ARCHIVE_BATCH = 100
 /**
- * A pending occurrence due this long and never claimed is stale. A due occurrence is normally
- * claimed within a poll, so a stale one was stranded (an older build claimed only within its
- * oldest 1000 records), belongs to a disabled or deleted trigger, or waited out a sleep. As for a
- * cron catch-up, only the newest maxCatchUpRuns stale occurrences of a trigger still run; older
- * ones are dead-lettered (final in every build) and archived without running.
+ * A cron or calendar occurrence due this long and never claimed is stale: a missed instant of its
+ * schedule (the app slept or was closed, runs fell behind, or the trigger is disabled or deleted).
+ * As for a cron catch-up, only the newest maxCatchUpRuns stale instants of a trigger still run;
+ * older ones are dead-lettered (final in every build) and archived without running. Any other
+ * occurrence is a separate event and never goes stale with age: of those, only the ones an older
+ * build stranded are treated so (see TriggerOccurrenceQueueMarker).
  */
 export const TRIGGER_OCCURRENCE_STALE_AFTER_MS = 10 * 60_000
+/** Sources whose occurrences are instants of a schedule, which a catch-up may coalesce. */
+export const TRIGGER_OCCURRENCE_SCHEDULE_SOURCES: ReadonlySet<TriggerOccurrenceSource> = new Set([
+  'cron',
+  'calendar'
+])
+/**
+ * One record of its own kind, written by the first poll of a build that claims beyond the oldest
+ * 1000 records. Older builds claimed only within their oldest 1000 unarchived records, so once a
+ * store held more, a never-claimed record past them was never reached. A store that held at most
+ * 1000 holds no stranded record. Older builds never read this kind.
+ */
+export const MAGIC_AGENT_TRIGGER_OCCURRENCE_QUEUE_RESOURCE_KIND = 'trigger-occurrence-queue'
+export const TRIGGER_OCCURRENCE_QUEUE_MARKER_ID = 'marker'
+/** How many of the oldest unarchived records an older build claimed within. */
+const LEGACY_CLAIM_WINDOW = 1000
+export type TriggerOccurrenceQueueMarker = Readonly<{
+  schemaVersion: 1
+  /** When the store was first polled by a build that claims every record. */
+  firstPollAt: number
+  /**
+   * Set when more than LEGACY_CLAIM_WINDOW records were unarchived at that poll: a never-claimed
+   * record both due and last written before this time may be one an older build stranded. It is
+   * the stale horizon before that poll, so nothing enqueued shortly before counts.
+   */
+  strandedBefore?: number
+}>
 /** Rows of the old part of the live index one poll reads; see TriggerOccurrenceStore.poll. */
 const SCAN_PAGE_SIZE = 500
+/**
+ * Polls in a row whose archive and dead-letter batch failed before the pass moves past the page
+ * without it. A batch that keeps failing must not hold the pass on one page: the old records past
+ * it would never be read again, so never claimed. The next pass tries those writes again.
+ */
+const PASS_FAILED_BATCH_LIMIT = 3
 export type TriggerOccurrenceClaim = Readonly<{
   owner: string
   claimedAt: number
@@ -101,16 +134,23 @@ const finite = (value: number, name: string) => {
 const required = (value: string, name: string) => {
   if (!value.trim()) throw new Error(`${name} is required.`)
 }
-const event = (id: string, type: string, at: number, payload: unknown, revision: number) => ({
+const event = (
+  id: string,
+  type: string,
+  at: number,
+  payload: unknown,
+  revision: number,
+  kind = MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND
+) => ({
   protocolVersion: '2.0.0',
   id: `${id}:${type}:${revision}`,
   type,
   createdAt: at,
   payload,
   envelopeKind: 'event' as const,
-  streamId: `${MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND}:${id}`,
+  streamId: `${kind}:${id}`,
   sequence: revision,
-  resource: { kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND, id },
+  resource: { kind, id },
   revision
 })
 
@@ -138,6 +178,7 @@ const outcomeUnknown = (state: TriggerOccurrenceState, now: number): TriggerOccu
 
 const ARCHIVED_EVENT = 'occurrence.archived'
 const DEAD_LETTERED_EVENT = 'occurrence.dead-lettered'
+const QUEUE_MARKED_EVENT = 'occurrence-queue.marked'
 const STALE_ERROR = Object.freeze({
   name: 'TriggerOccurrenceStale',
   message: 'Trigger occurrence went stale before it was claimed.'
@@ -163,13 +204,29 @@ const orderKey = (item: Occurrence): OrderKey => ({
 const keyOrder = (a: OrderKey, b: OrderKey) =>
   a.scheduledAt - b.scheduledAt || a.requestedAt - b.requestedAt || a.id.localeCompare(b.id)
 const claimOrder = (a: Occurrence, b: Occurrence) => keyOrder(orderKey(a), orderKey(b))
-// Never claimed, and both due and last written before `staleBefore`.
-const isStale = (item: Occurrence, staleBefore: number) =>
+// Never claimed, and both due and last written before `before`.
+const unclaimedBefore = (item: Occurrence, before: number) =>
   item.state.status === 'pending' &&
   item.state.attempt === 0 &&
   item.state.permit === undefined &&
-  item.updatedAt < staleBefore &&
-  item.state.scheduledAt < staleBefore
+  item.updatedAt < before &&
+  item.state.scheduledAt < before
+// A stale record runs only if it is among the newest `catchUpRuns` stale ones of its trigger: a
+// cron or calendar instant unclaimed past the horizon, or another occurrence an older build
+// stranded. Within min(...) a stranded record is always in the old part of the live index.
+const isStale = (item: Occurrence, staleBefore: number, strandedBefore: number | undefined) =>
+  TRIGGER_OCCURRENCE_SCHEDULE_SOURCES.has(item.state.source)
+    ? unclaimedBefore(item, staleBefore)
+    : strandedBefore !== undefined && unclaimedBefore(item, Math.min(staleBefore, strandedBefore))
+// The bound a stored marker sets; a marker this build cannot read marks nothing as stranded.
+const strandedBeforeOf = (state: unknown): number | undefined => {
+  const { schemaVersion, strandedBefore } = (state ?? {}) as Record<string, unknown>
+  return schemaVersion === 1 &&
+    typeof strandedBefore === 'number' &&
+    Number.isFinite(strandedBefore)
+    ? strandedBefore
+    : undefined
+}
 const cursorOf = (item: Occurrence): ResourceCursor => ({
   updatedAt: item.updatedAt,
   resourceKind: item.kind,
@@ -198,6 +255,8 @@ export type TriggerOccurrencePollResult = Readonly<{
   claimed?: StoredResource<TriggerOccurrenceState>
   /** This poll archived or dead-lettered records and more are left: poll again soon. */
   backlog: boolean
+  /** Stale records this poll dead-lettered: they will not run. */
+  deadLettered: number
   /** Archiving or dead-lettering failed and rolled back; the claim still ran. */
   maintenanceError?: unknown
 }>
@@ -242,6 +301,52 @@ export class TriggerOccurrenceStore {
   // newer ones, so it is dead-lettered.
   private keptStale: ReadonlySet<string> = new Set()
   private staleFloor: ReadonlyMap<string, Readonly<{ key: OrderKey; quota: number }>> = new Map()
+  // The marker's bound, once this store has read or written the marker. Until then polls go by
+  // the marker this store's first poll proposed, and each writes it with its batch.
+  private markerKnown = false
+  private strandedBefore: number | undefined
+  private proposedMarker: TriggerOccurrenceQueueMarker | undefined
+  // Batches that failed in a row; see PASS_FAILED_BATCH_LIMIT.
+  private failedBatches = 0
+  /** The marker this poll must write, if none is stored yet; sets `strandedBefore` either way. */
+  private markerToWrite(now: number, live: number): TriggerOccurrenceQueueMarker | undefined {
+    if (this.markerKnown) return undefined
+    const stored = this.eventStore.getResource(
+      MAGIC_AGENT_TRIGGER_OCCURRENCE_QUEUE_RESOURCE_KIND,
+      TRIGGER_OCCURRENCE_QUEUE_MARKER_ID,
+      { includeDeleted: true }
+    )
+    if (stored) {
+      this.markerKnown = true
+      this.strandedBefore = strandedBeforeOf(stored.state)
+      return undefined
+    }
+    this.proposedMarker ??= {
+      schemaVersion: 1,
+      firstPollAt: now,
+      ...(live > LEGACY_CLAIM_WINDOW
+        ? { strandedBefore: now - TRIGGER_OCCURRENCE_STALE_AFTER_MS }
+        : {})
+    }
+    this.strandedBefore = this.proposedMarker.strandedBefore
+    return this.proposedMarker
+  }
+  // Committed with the poll's batch, so no record is dead-lettered as stranded unless the marker
+  // that says so is stored. A concurrent writer's marker makes the create conflict; the next poll
+  // reads that one.
+  private markerMutation(marker: TriggerOccurrenceQueueMarker) {
+    const kind = MAGIC_AGENT_TRIGGER_OCCURRENCE_QUEUE_RESOURCE_KIND
+    const id = TRIGGER_OCCURRENCE_QUEUE_MARKER_ID
+    return {
+      operation: 'create' as const,
+      kind,
+      id,
+      idempotencyKey: `${kind}:${id}:${QUEUE_MARKED_EVENT}`,
+      state: marker,
+      createdAt: marker.firstPollAt,
+      event: event(id, QUEUE_MARKED_EVENT, marker.firstPollAt, marker, 0, kind)
+    }
+  }
   private page(after: ResourceCursor | undefined): readonly Occurrence[] {
     return this.eventStore.listResources({
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
@@ -439,12 +544,16 @@ export class TriggerOccurrenceStore {
    * live index plus its recent part (see readPoll), one transaction of at most ARCHIVE_BATCH
    * writes, two sweeps and the claim.
    * - Terminal records beyond the retained tail are archived, oldest first.
-   * - Stale records are dead-lettered and archived, except the newest `catchUpRuns` of each
-   *   trigger. Those still run, but only once a poll has read the whole old part or a pass over
-   *   it has ended, so that they are known to be the newest; none runs while a long backlog drains.
+   * - Stale records (missed cron and calendar instants, and records an older build stranded; see
+   *   isStale) are dead-lettered and archived, except the newest `catchUpRuns` of each trigger.
+   *   Those still run, but only once a poll has read the whole old part or a pass over it has
+   *   ended, so that they are known to be the newest; none runs while a long backlog drains.
+   *   Every other record runs, however long it waited.
    * - While a pass spans polls, an old record is claimable only in the poll that reads it; recent
    *   records are read by every poll, so a fresh occurrence is claimed at once.
-   * - A failed batch rolls back whole and is reported; the claim still runs.
+   * - A failed batch rolls back whole and is reported; the claim still runs. After
+   *   PASS_FAILED_BATCH_LIMIT failures in a row the pass moves past the page without it.
+   * - The first poll also writes the queue marker (see TriggerOccurrenceQueueMarker).
    */
   poll(input: TriggerOccurrencePollInput): TriggerOccurrencePollResult {
     const { now, owner, leaseMs, maxAttempts = 3, eligible, mutable } = input
@@ -468,13 +577,15 @@ export class TriggerOccurrenceStore {
     const live = this.eventStore.countResources({
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND
     })
+    const marker = this.markerToWrite(now, live)
+    const strandedBefore = this.strandedBefore
     // A poll that reads the old part from its start to its end sees every stale record, so its
     // own count of the newest per trigger is exact, whatever it manages to write.
     const fromStart = this.pass.after === undefined
     const { old, recent, passEnds } = this.readPoll(staleBefore)
     const seesAllStale = fromStart && passEnds
     const stale = (item: Occurrence) =>
-      isStale(item, staleBefore) && (mutable === undefined || mutable(item.state))
+      isStale(item, staleBefore, strandedBefore) && (mutable === undefined || mutable(item.state))
     // A stale record goes once its trigger has at least `quota` newer stale ones, in this page or
     // as the last finished pass found. That never removes one of the newest `quota`.
     const doomed = new Set<string>()
@@ -531,6 +642,7 @@ export class TriggerOccurrenceStore {
         room -= 1
       }
     const writes = [
+      ...(marker ? [this.markerMutation(marker)] : []),
       ...deadLetter.flatMap((item) => this.deadLetterStale(item, now)),
       ...archive.map((item) => this.archiveMutation(item, item.revision, now))
     ]
@@ -548,7 +660,16 @@ export class TriggerOccurrenceStore {
         ))
           maintenanceError = error
       }
+    this.failedBatches = committed ? 0 : this.failedBatches + 1
+    if (committed && marker) this.markerKnown = true
     if (committed) this.advancePass(old[processed - 1], passDone, kept, quota)
+    else if (this.failedBatches >= PASS_FAILED_BATCH_LIMIT) {
+      // Past the whole page, still counting the stale records it holds among the newest.
+      for (const item of old.slice(processed))
+        if (stale(item) && !doomed.has(item.id)) kept.push(item)
+      this.failedBatches = 0
+      this.advancePass(old.at(-1), passEnds, kept, quota)
+    }
     // One pass over the records read: the sweep targets are never candidates (marked, or out of
     // attempts), so the pre-sweep candidate is the post-sweep one.
     const removed = new Set(archive.map((item) => item.id))
@@ -597,8 +718,10 @@ export class TriggerOccurrenceStore {
         DEAD_LETTERED_EVENT
       )
     }
+    const maintained = deadLetter.length + archive.length > 0
     const report = {
-      backlog: committed && writes.length > 0 && (full || !passDone),
+      backlog: committed && maintained && (full || !passDone),
+      deadLettered: committed ? deadLetter.length : 0,
       ...(maintenanceError === undefined ? {} : { maintenanceError })
     }
     if (!candidate) return report

@@ -317,12 +317,53 @@ describe('TriggerOccurrenceStore archiving', () => {
         throw new ResourceRevisionConflictError(KIND, 'old-0')
       })
       // A lost race is not a failure to report: the batch rolled back, the next poll retries.
-      expect(store.poll({ now: 5, owner: 'archiver', leaseMs: 1 })).toEqual({ backlog: false })
+      expect(store.poll({ now: 5, owner: 'archiver', leaseMs: 1 })).toEqual({
+        backlog: false,
+        deadLettered: 0
+      })
       expect(unarchived(eventStore)).toBe(200)
       batch.mockRestore()
       expect(drain(eventStore, store, 5)).toBe(TRIGGER_OCCURRENCE_ARCHIVE_BATCH)
       expect(store.get('old-0')).toMatchObject({ deleted: true, updatedAt: 10_000 })
       expect(store.get('old-0')?.state.status).toBe('completed')
+    } finally {
+      eventStore.close()
+    }
+  })
+
+  it('moves past a page whose batch keeps failing, so the records after it are still claimed', () => {
+    const { eventStore, store } = open()
+    try {
+      // More terminal records than one page, then a due manual fire past that page.
+      seedTerminal(eventStore, 600)
+      enqueue(store, 'behind', 1_000)
+      const failure = new Error('/home/user/private/events.db: disk I/O error')
+      failure.name = 'SqliteError'
+      const writeBatch = eventStore.mutateResourcesBatch.bind(eventStore)
+      // Every archive transaction fails; a claim, a single write, still commits.
+      const batch = vi
+        .spyOn(eventStore, 'mutateResourcesBatch')
+        .mockImplementation((inputs, fence) => {
+          if (inputs.some((input) => input.event.type === 'occurrence.archived')) throw failure
+          return writeBatch(inputs, fence)
+        })
+      const now = 1_000 + 24 * 60 * 60_000
+      const claimed: (string | undefined)[] = []
+      for (let poll = 0; poll < 5; poll += 1) {
+        const result = store.poll({ now: now + poll, owner: `poll-${poll}`, leaseMs: 60_000 })
+        expect(result).toMatchObject({ backlog: false, maintenanceError: failure })
+        claimed.push(result.claimed?.id)
+      }
+      // Three tries on the first page, then the pass reads on and finds the fire.
+      expect(claimed).toEqual([undefined, undefined, undefined, 'behind', undefined])
+      expect(unarchived(eventStore)).toBe(601)
+      batch.mockRestore()
+      // Later passes archive what the failing batches left, the skipped first page included.
+      for (let poll = 0; poll < 6; poll += 1)
+        store.poll({ now: now + 10 + poll, owner: 'archiver', leaseMs: 1, eligible: () => false })
+      expect(unarchived(eventStore)).toBeLessThanOrEqual(TRIGGER_OCCURRENCE_ARCHIVE_ABOVE)
+      expect(store.get('old-0')).toMatchObject({ deleted: true })
+      expect(store.get('behind')?.state.status).toBe('claimed')
     } finally {
       eventStore.close()
     }

@@ -46,7 +46,8 @@ const stores = (claimed = occurrence) => {
         input.maxAttempts ?? 3,
         input.eligible
       ),
-      backlog: false
+      backlog: false,
+      deadLettered: 0
     })),
     complete: vi.fn(),
     fail: vi.fn()
@@ -255,7 +256,7 @@ describe('TriggerOccurrenceScheduler settlement failures', () => {
       let draining = 3
       store.poll.mockImplementation((input: TriggerOccurrencePollInput) => {
         store.claimNext(input.now, input.owner, input.leaseMs, 3, input.eligible)
-        return { claimed: undefined as never, backlog: draining-- > 0 }
+        return { claimed: undefined as never, backlog: draining-- > 0, deadLettered: 0 }
       })
       const scheduler = new TriggerOccurrenceScheduler({
         occurrences: store as never,
@@ -278,6 +279,43 @@ describe('TriggerOccurrenceScheduler settlement failures', () => {
       await scheduler.stop()
       expect(unhandled).toEqual([])
     })
+  })
+
+  it('logs how many occurrences polls dead-lettered, once a drain ends or the scheduler stops', async () => {
+    const store = stores()
+    store.claimNext.mockImplementation(() => undefined as never)
+    // Each entry is what one poll reports: [dead-lettered, backlog].
+    const polls: Array<[number, boolean]> = [
+      [40, true],
+      [50, true],
+      [9, false],
+      [0, false],
+      [2, false],
+      [5, true]
+    ]
+    store.poll.mockImplementation(() => {
+      const [deadLettered, backlog] = polls.shift()!
+      return { claimed: undefined as never, backlog, deadLettered }
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const scheduler = new TriggerOccurrenceScheduler({
+      occurrences: store as never,
+      triggers: triggers() as never,
+      execute: vi.fn(async () => undefined)
+    })
+    try {
+      const lines: number[] = []
+      for (let poll = 0; poll < 6; poll += 1) {
+        await scheduler.runOnce()
+        lines.push(warn.mock.calls.length)
+      }
+      expect(lines).toEqual([0, 0, 1, 1, 2, 2])
+      await scheduler.stop()
+      const counts = warn.mock.calls.map(([line]) => /Dead-lettered (\d+) /.exec(String(line))?.[1])
+      expect(counts).toEqual(['99', '2', '5'])
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('logs only the error name of failing polls, rate-limited, and once on recovery', async () => {
