@@ -708,6 +708,45 @@ const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => 
   }
 }
 
+/**
+ * A draft backup record longer than this (in JSON characters) is not written to localStorage
+ * (FIX-PLAN item 4). The backup is the synchronous safety net next to the session record, which
+ * keeps the whole draft; localStorage holds about 5 M characters for the whole app, and a write
+ * above its quota fails after the whole string was built.
+ */
+export const CHAT_DRAFT_BACKUP_MAX_CHARS = 256 * 1024
+
+const attachmentsChars = (attachments: readonly ChatAttachment[] | undefined): number =>
+  (attachments ?? []).reduce(
+    (total, attachment) =>
+      total + (typeof attachment?.url === 'string' ? attachment.url.length : 0),
+    0
+  )
+
+/** A lower bound of a backup record's JSON length, from its strings: no JSON is built for it. */
+const estimateDraftBackupChars = (record: ChatSessionDraftBackupRecord): number => {
+  const draft = record.draft
+  let total = draft
+    ? draft.inputValue.length +
+      draft.pendingHiddenContext.length +
+      attachmentsChars(draft.pendingAttachments)
+    : 0
+  for (const item of record.queuedSends ?? []) {
+    total +=
+      item.content.length +
+      (item.originalComposerHiddenContext?.length ?? 0) +
+      attachmentsChars(item.attachments)
+  }
+  return total
+}
+
+/** The record as JSON, or null when it is over CHAT_DRAFT_BACKUP_MAX_CHARS. */
+const serializeDraftBackupWithinCap = (record: ChatSessionDraftBackupRecord): string | null => {
+  if (estimateDraftBackupChars(record) > CHAT_DRAFT_BACKUP_MAX_CHARS) return null
+  const json = JSON.stringify(record)
+  return json.length > CHAT_DRAFT_BACKUP_MAX_CHARS ? null : json
+}
+
 const getDraftBackupStorageKey = (sessionId: string, scope?: string): string =>
   `${DRAFT_BACKUP_STORAGE_KEY_PREFIX}:${normalizeScope(scope)}:${sessionId}`
 
@@ -848,7 +887,11 @@ export function writeSessionDraftBackup(
       return
     }
 
-    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), JSON.stringify(nextRecord))
+    // Over the cap the older backup stays as it is: the session record keeps the whole draft, and
+    // the newer draft must not be replaced by part of it.
+    const json = serializeDraftBackupWithinCap(nextRecord)
+    if (json === null) return
+    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), json)
   } catch (error) {
     console.warn('[ChatStorage] Failed to write session draft backup:', error)
   }
@@ -877,7 +920,11 @@ export function writeSessionQueuedSendsBackup(
       queuedSendsUpdatedAt
     })
     if (!nextRecord) return false
-    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), JSON.stringify(nextRecord))
+    const json = serializeDraftBackupWithinCap(nextRecord)
+    // Over the cap the queue is handled as a failed write: the session record carries it, and an
+    // emptied queue still takes the older one out of the backup.
+    if (json === null) throw new Error('The queued sends backup is over its size cap')
+    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), json)
     return true
   } catch (error) {
     console.warn('[ChatStorage] Failed to write the queued sends backup:', error)

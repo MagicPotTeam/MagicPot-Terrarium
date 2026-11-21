@@ -266,6 +266,18 @@ export class ChatInlineAttachmentGuard {
   }
 
   /**
+   * One attachment in its managed form when it is an oversized inline image that could be
+   * imported; otherwise (or when its import fails) `attachment` itself. Never rejects.
+   */
+  async importInlineImage(attachment: ChatAttachment): Promise<ChatAttachment> {
+    if (!isOversizedInlineImageAttachment(attachment) || !this.shouldTry(attachment.url)) {
+      return attachment
+    }
+    const replacement = await this.importOne(attachment.url, attachment)
+    return replacement ? { ...attachment, ...replacement } : attachment
+  }
+
+  /**
    * The stored form of `session`: references in place of the oversized inline images that could
    * be imported, every other value as it is. Resolves to the same object when nothing was
    * replaced. Never rejects.

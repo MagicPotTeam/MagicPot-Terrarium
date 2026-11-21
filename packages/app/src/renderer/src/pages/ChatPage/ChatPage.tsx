@@ -93,13 +93,7 @@ import { shouldUseOpenAIImageGeneration } from '@shared/llm/openaiResponses'
 import type { AgentRouteLike } from '@shared/agent'
 import type { ProjectTraceEventStatus } from '@shared/projectTrace'
 import { startScopedChatPageRun } from '@shared/chatPageRunLifecycle'
-import {
-  selectFile,
-  fileToBlobUrl,
-  fileToDataUrl,
-  checkFileSize,
-  formatFileSize
-} from '@renderer/utils/fileUtils'
+import { selectFile, fileToBlobUrl, checkFileSize, formatFileSize } from '@renderer/utils/fileUtils'
 import {
   getChatScopeRevision,
   loadAllSessions,
@@ -137,6 +131,7 @@ import {
   ChatInlineAttachmentGuard,
   type InlineAttachmentReplacement
 } from './chatInlineAttachmentGuard'
+import { importQueuedImages, serializeDraftAttachments } from './chatDraftAttachments'
 import {
   isBenignSaveSupersede,
   isPermanentSaveConflict,
@@ -746,43 +741,6 @@ const getFriendlyHy3dRuntimeError = (error: unknown): string => {
     return '当前运行中的主进程还是旧版本，Hy3D 本地上传能力尚未加载。请完全退出应用后重新启动一次。'
   }
   return message || 'Hy3D 模型链接处理失败'
-}
-
-const serializeDraftAttachment = async (
-  attachment: ChatAttachment
-): Promise<ChatAttachment | null> => {
-  if (!attachment.url.startsWith('blob:')) {
-    return cloneChatAttachment(attachment)
-  }
-
-  try {
-    const response = await fetch(attachment.url)
-    if (!response.ok) throw new Error('Draft attachment could not be read')
-    const blob = await response.blob()
-    const file = new File([blob], attachment.fileName || 'attachment', {
-      type: attachment.mimeType || blob.type || 'application/octet-stream'
-    })
-    const dataUrl = await fileToDataUrl(file)
-    return {
-      ...attachment,
-      url: dataUrl,
-      mimeType: attachment.mimeType || blob.type || undefined
-    }
-  } catch (error) {
-    console.warn('[ChatPage] Failed to serialize draft attachment:', error)
-    return null
-  }
-}
-
-const serializeDraftAttachments = async (
-  attachments: ChatAttachment[]
-): Promise<ChatAttachment[]> => {
-  const serialized: ChatAttachment[] = []
-  for (const attachment of attachments) {
-    const result = await serializeDraftAttachment(attachment)
-    if (result) serialized.push(result)
-  }
-  return serialized
 }
 
 const resolvePreferredSessionDraft = (
@@ -9800,6 +9758,48 @@ const ChatPage: React.FC<ChatPageProps> = ({
     ]
   )
 
+  // FIX-PLAN item 4: a queued image is stored in a form that survives a reload. A blob: image (it
+  // dies with this renderer) and an oversized inline image are imported into managed media once
+  // the item is queued, so the stored queue keeps a reference instead of an unavailable tile.
+  const makeQueuedSendImagesDurable = useCallback(
+    async (sessionId: string, itemId: number): Promise<void> => {
+      const item = queuedSessionSendsRef.current
+        .get(sessionId)
+        ?.find((queued) => queued.id === itemId)
+      const attachments = item?.overrides?.attachments
+      if (!attachments?.length) return
+      const guard = inlineAttachmentGuardRef.current
+      const durable = await importQueuedImages(attachments, (attachment) =>
+        guard ? guard.importInlineImage(attachment) : Promise.resolve(attachment)
+      )
+      if (durable === attachments) return
+      const queues = queuedSessionSendsRef.current
+      const queue = queues.get(sessionId) ?? []
+      const index = queue.findIndex((queued) => queued.id === itemId)
+      const current = index >= 0 ? queue[index] : undefined
+      // Only the same item, with the same attachments, not taken for sending or edited meanwhile.
+      if (
+        !current?.overrides ||
+        current.inFlight ||
+        current.overrides.attachments !== attachments
+      ) {
+        return
+      }
+      const overrides = current.overrides
+      const nextQueues = new Map(queues)
+      nextQueues.set(
+        sessionId,
+        queue.map((queued, position) =>
+          position === index
+            ? { ...queued, overrides: { ...overrides, attachments: [...durable] } }
+            : queued
+        )
+      )
+      updateQueuedSessionSends(nextQueues)
+    },
+    [updateQueuedSessionSends]
+  )
+
   const sendMessage = useCallback(
     async (overrides?: SendMessageOverrides): Promise<void> => {
       const targetSessionId = overrides?.targetSessionId ?? currentSessionIdRef.current
@@ -9872,10 +9872,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
           return
         }
         if (queueKey) pendingSessionSendKeysRef.current.add(queueKey)
+        const queuedId = ++queuedSessionSendIdRef.current
         const queue = [
           ...(queuedSessionSendsRef.current.get(targetSessionId) ?? []),
           {
-            id: ++queuedSessionSendIdRef.current,
+            id: queuedId,
             overrides: queuedOverrides,
             queueKey,
             fromComposer,
@@ -9889,6 +9890,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         const nextQueues = new Map(queuedSessionSendsRef.current)
         nextQueues.set(targetSessionId, queue)
         updateQueuedSessionSends(nextQueues)
+        void makeQueuedSendImagesDurable(targetSessionId, queuedId)
         if (fromComposer) {
           inputValueRef.current = ''
           setInputValue('')
@@ -9925,6 +9927,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [
       executeSendMessage,
       isSessionBusy,
+      makeQueuedSendImagesDurable,
       storageScope,
       notifyError,
       notifyWarning,
