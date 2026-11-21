@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { MagicAgentEventStore, type ResourceMutationInput } from '../persistence/eventStore'
 import { TriggerOccurrenceScheduler } from './triggerOccurrenceScheduler'
 import {
+  MAGIC_AGENT_TRIGGER_OCCURRENCE_QUEUE_RESOURCE_KIND as QUEUE_KIND,
   MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND as KIND,
   TRIGGER_OCCURRENCE_ARCHIVE_ABOVE,
+  TRIGGER_OCCURRENCE_QUEUE_MARKER_ID,
   TRIGGER_OCCURRENCE_STALE_AFTER_MS,
   TriggerOccurrenceStore,
+  type TriggerOccurrenceSource,
   type TriggerOccurrenceState,
   type TriggerOccurrenceStatus
 } from './triggerOccurrenceStore'
@@ -23,7 +26,8 @@ const seed = (
     prefix,
     triggerId = 'trigger-1',
     step = MINUTE,
-    scheduledAt
+    scheduledAt,
+    source = 'cron'
   }: {
     from: number
     status: TriggerOccurrenceStatus
@@ -31,6 +35,7 @@ const seed = (
     triggerId?: string
     step?: number
     scheduledAt?: number
+    source?: TriggerOccurrenceSource
   }
 ) => {
   for (let start = 0; start < count; start += 1000) {
@@ -42,7 +47,7 @@ const seed = (
         schemaVersion: 1,
         occurrenceId: id,
         triggerId,
-        source: 'cron',
+        source,
         scheduledAt: scheduledAt ?? at,
         requestedAt: at,
         status,
@@ -89,10 +94,14 @@ const countRowsRead = (eventStore: MagicAgentEventStore) => {
   return counter
 }
 type TriggerConfig = Readonly<{ enabled?: boolean; maxCatchUpRuns?: number }>
-// The production executor denies an occurrence without a trigger permit; it throws the same way.
-const harness = (eventStore: MagicAgentEventStore, triggers: Record<string, TriggerConfig>) => {
+// The production executor denies an occurrence without a trigger permit; by default it throws the
+// same way. `runFor` instead lets each run succeed after that long on the clock.
+const harness = (
+  eventStore: MagicAgentEventStore,
+  triggers: Record<string, TriggerConfig>,
+  { runFor, clock = { now: 0 } }: { runFor?: number; clock?: { now: number } } = {}
+) => {
   const store = new TriggerOccurrenceStore(eventStore)
-  const clock = { now: 0 }
   const executed: string[] = []
   const scheduler = new TriggerOccurrenceScheduler({
     occurrences: store,
@@ -107,12 +116,23 @@ const harness = (eventStore: MagicAgentEventStore, triggers: Record<string, Trig
     } as never,
     execute: async (_trigger, occurrence) => {
       executed.push(occurrence.occurrenceId)
-      throw new Error('denied')
+      if (runFor === undefined) throw new Error('denied')
+      clock.now += runFor
     },
-    now: () => clock.now
+    now: () => clock.now,
+    leaseMs: Math.max(30_000, 2 * (runFor ?? 0))
   })
   return { store, clock, executed, scheduler }
 }
+// The counts the scheduler logged for dead-lettered occurrences; the lines name no occurrence.
+const deadLetterCounts = (warn: { mock: { calls: unknown[][] } }) =>
+  warn.mock.calls
+    .map(([line]) => String(line))
+    .filter((line) => line.startsWith('[triggers] Dead-lettered'))
+    .map((line) => {
+      expect(line).not.toMatch(/stranded-|cron:|msg-/)
+      return Number(/Dead-lettered (\d+) /.exec(line)?.[1])
+    })
 const fresh = (store: TriggerOccurrenceStore, at: number, triggerId = 'trigger-1') =>
   store.enqueue({
     occurrenceId: `cron:${at}:${triggerId}`,
@@ -125,60 +145,73 @@ const fresh = (store: TriggerOccurrenceStore, at: number, triggerId = 'trigger-1
 
 describe('TriggerOccurrenceScheduler after an upgrade with a stranded backlog', () => {
   // On an older build, once about 1000 records existed every later occurrence stayed pending for
-  // good while cron kept enqueueing one per minute. An upgraded store holds those 1000 terminal
-  // records plus a week of stranded, due, never-claimed occurrences.
-  it('claims a fresh occurrence at once, keeps every poll bounded and replays one stale instant', async () => {
-    const eventStore = new MagicAgentEventStore(':memory:')
-    try {
-      const stranded = 10_000
-      seed(eventStore, 1_000, { from: 1_000_000, status: 'dead-letter', prefix: 'done' })
-      seed(eventStore, stranded, { from: 1_000_000_000, status: 'pending', prefix: 'stranded' })
-      const { store, clock, executed, scheduler } = harness(eventStore, { 'trigger-1': {} })
-      clock.now = 1_000_000_000 + stranded * MINUTE + DAY
-      const first = fresh(store, clock.now)
-      const reads = countRowsRead(eventStore)
-      const polls: { rows: number; ms: number }[] = []
-      let freshPoll: number | undefined
-      while (live(eventStore) > TRIGGER_OCCURRENCE_ARCHIVE_ABOVE && polls.length < 300) {
-        reads.rows = 0
-        // Main-thread time as CPU time of this file's own process, so a busy machine adds nothing.
-        const started = process.cpuUsage()
-        await scheduler.runOnce()
-        const used = process.cpuUsage(started)
-        polls.push({ rows: reads.rows, ms: (used.user + used.system) / 1000 })
-        // Fail fast: one poll over the whole backlog is the defect.
-        expect(polls.at(-1)!.rows).toBeLessThanOrEqual(600)
-        if (freshPoll === undefined && executed.includes(first.id)) freshPoll = polls.length
-        clock.now += 1_000
+  // good while its sources kept enqueueing (cron one per minute). An upgraded store holds those
+  // 1000 terminal records plus a week of stranded, due, never-claimed occurrences, of any source.
+  it.each(['cron', 'channel-message'] as const)(
+    'claims a fresh occurrence at once, keeps every poll bounded and runs one stranded %s occurrence',
+    async (source) => {
+      const eventStore = new MagicAgentEventStore(':memory:')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        const stranded = 10_000
+        seed(eventStore, 1_000, { from: 1_000_000, status: 'dead-letter', prefix: 'done' })
+        seed(eventStore, stranded, {
+          from: 1_000_000_000,
+          status: 'pending',
+          prefix: 'stranded',
+          source
+        })
+        const { store, clock, executed, scheduler } = harness(eventStore, { 'trigger-1': {} })
+        clock.now = 1_000_000_000 + stranded * MINUTE + DAY
+        const first = fresh(store, clock.now)
+        const reads = countRowsRead(eventStore)
+        const polls: { rows: number; ms: number }[] = []
+        let freshPoll: number | undefined
+        while (live(eventStore) > TRIGGER_OCCURRENCE_ARCHIVE_ABOVE && polls.length < 300) {
+          reads.rows = 0
+          // Main-thread time as CPU time of this file's own process, so a busy machine adds nothing.
+          const started = process.cpuUsage()
+          await scheduler.runOnce()
+          const used = process.cpuUsage(started)
+          polls.push({ rows: reads.rows, ms: (used.user + used.system) / 1000 })
+          // Fail fast: one poll over the whole backlog is the defect.
+          expect(polls.at(-1)!.rows).toBeLessThanOrEqual(600)
+          if (freshPoll === undefined && executed.includes(first.id)) freshPoll = polls.length
+          clock.now += 1_000
+        }
+        expect(freshPoll).toBeDefined()
+        expect(freshPoll!).toBeLessThanOrEqual(2)
+        // Bounded chunks: 1000 archives and 10k dead-letters at 100 writes a poll, in about 210
+        // polls, none long. Before, every poll read the backlog twice: ~500 ms, 21k rows.
+        expect(polls.length).toBeLessThanOrEqual(250)
+        expect(Math.max(...polls.map((poll) => poll.ms))).toBeLessThan(250)
+        // Draining done, later polls see only the small live set.
+        for (let poll = 0; poll < 20; poll += 1) {
+          reads.rows = 0
+          await scheduler.runOnce()
+          expect(reads.rows).toBeLessThanOrEqual(TRIGGER_OCCURRENCE_ARCHIVE_ABOVE + 2)
+          clock.now += 1_000
+        }
+        // maxCatchUpRuns defaults to 1: of a week of stranded records only the newest runs.
+        const replayed = new Set(executed.filter((id) => id.startsWith('stranded-')))
+        expect([...replayed]).toEqual([`stranded-${String(stranded - 1).padStart(6, '0')}`])
+        const oldest = store.get('stranded-000000')
+        expect(oldest).toMatchObject({ deleted: true })
+        expect(oldest?.state).toMatchObject({
+          status: 'dead-letter',
+          attempt: 0,
+          lastError: { name: 'TriggerOccurrenceStale' }
+        })
+        expect(live(eventStore)).toBeLessThanOrEqual(TRIGGER_OCCURRENCE_ARCHIVE_ABOVE)
+        // Logged as counts only, once a drain ends.
+        expect(deadLetterCounts(warn).reduce((sum, count) => sum + count, 0)).toBe(stranded - 1)
+      } finally {
+        warn.mockRestore()
+        eventStore.close()
       }
-      expect(freshPoll).toBeDefined()
-      expect(freshPoll!).toBeLessThanOrEqual(2)
-      // Bounded chunks: 1000 archives and 10k dead-letters at 100 writes a poll, in about 210
-      // polls, none long. Before, every poll read the backlog twice: ~500 ms, 21k rows.
-      expect(polls.length).toBeLessThanOrEqual(250)
-      expect(Math.max(...polls.map((poll) => poll.ms))).toBeLessThan(250)
-      // Draining done, later polls see only the small live set.
-      for (let poll = 0; poll < 20; poll += 1) {
-        reads.rows = 0
-        await scheduler.runOnce()
-        expect(reads.rows).toBeLessThanOrEqual(TRIGGER_OCCURRENCE_ARCHIVE_ABOVE + 2)
-        clock.now += 1_000
-      }
-      // maxCatchUpRuns defaults to 1: of a week of missed instants only the newest runs.
-      const replayed = new Set(executed.filter((id) => id.startsWith('stranded-')))
-      expect([...replayed]).toEqual([`stranded-${String(stranded - 1).padStart(6, '0')}`])
-      const oldest = store.get('stranded-000000')
-      expect(oldest).toMatchObject({ deleted: true })
-      expect(oldest?.state).toMatchObject({
-        status: 'dead-letter',
-        attempt: 0,
-        lastError: { name: 'TriggerOccurrenceStale' }
-      })
-      expect(live(eventStore)).toBeLessThanOrEqual(TRIGGER_OCCURRENCE_ARCHIVE_ABOVE)
-    } finally {
-      eventStore.close()
-    }
-  }, 120_000)
+    },
+    120_000
+  )
 
   it('keeps the newest maxCatchUpRuns stale occurrences per trigger and never runs a disabled one', async () => {
     const eventStore = new MagicAgentEventStore(':memory:')
@@ -212,6 +245,156 @@ describe('TriggerOccurrenceScheduler after an upgrade with a stranded backlog', 
       eventStore.close()
     }
   }, 60_000)
+})
+
+describe('TriggerOccurrenceScheduler with events that waited', () => {
+  const message = (store: TriggerOccurrenceStore, id: string, at: number) =>
+    store.enqueue({
+      occurrenceId: id,
+      triggerId: 'chat',
+      source: 'channel-message',
+      scheduledAt: at,
+      requestedAt: at,
+      idempotencyKey: id
+    })
+  const statuses = (store: TriggerOccurrenceStore, ids: readonly string[]) =>
+    ids.map((id) => store.get(id)?.state.status)
+  const messages = ['msg-1', 'msg-2', 'msg-3']
+
+  it('runs every event queued before a sleep and coalesces only the missed cron instants', async () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const { store, clock, executed, scheduler } = harness(
+        eventStore,
+        { chat: {}, tick: {} },
+        { runFor: 1_000 }
+      )
+      const asleepAt = 5_000_000
+      clock.now = asleepAt - 5 * MINUTE
+      await expect(scheduler.runOnce()).resolves.toBe(false)
+      // Three cron instants and three channel messages are queued, then the machine sleeps.
+      const instants = [2, 1, 0].map((ago) => fresh(store, asleepAt - ago * MINUTE, 'tick').id)
+      messages.forEach((id, index) => message(store, id, asleepAt + index + 1))
+      clock.now = asleepAt + 15 * MINUTE
+      for (let poll = 0; poll < 6; poll += 1) {
+        await scheduler.runOnce()
+        clock.now += 1_000
+      }
+      // Each message is its own event; of the instants only the newest runs (maxCatchUpRuns 1).
+      expect(executed).toEqual([instants[2], ...messages])
+      expect(statuses(store, messages)).toEqual(['completed', 'completed', 'completed'])
+      for (const id of instants.slice(0, 2))
+        expect(store.get(id)?.state).toMatchObject({
+          status: 'dead-letter',
+          lastError: { name: 'TriggerOccurrenceStale' }
+        })
+      expect(deadLetterCounts(warn)).toEqual([2])
+    } finally {
+      warn.mockRestore()
+      eventStore.close()
+    }
+  })
+
+  it('runs every event queued behind slow runs', async () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    try {
+      const { store, clock, executed, scheduler } = harness(
+        eventStore,
+        { chat: {} },
+        { runFor: 4 * MINUTE }
+      )
+      clock.now = 9_000_000
+      const events = [1, 2, 3, 4, 5].map(
+        (index) => message(store, `ev-${index}`, clock.now + index).id
+      )
+      // Each run takes 4 minutes, so the last events wait well past the stale horizon.
+      for (let poll = 0; poll < 8; poll += 1) {
+        await scheduler.runOnce()
+        clock.now += 1_000
+      }
+      expect(executed).toEqual(events)
+      expect(new Set(statuses(store, events))).toEqual(new Set(['completed']))
+    } finally {
+      eventStore.close()
+    }
+  })
+
+  it('runs the events an older build queued in a store it never stalled', async () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    try {
+      // Closed on an older build with three messages queued, upgraded a day later.
+      seed(eventStore, 3, {
+        from: 1_000_000,
+        status: 'pending',
+        prefix: 'msg',
+        triggerId: 'chat',
+        source: 'channel-message'
+      })
+      const { store, clock, executed, scheduler } = harness(eventStore, { chat: {} }, { runFor: 1 })
+      clock.now = 1_000_000 + DAY
+      for (let poll = 0; poll < 4; poll += 1) {
+        await scheduler.runOnce()
+        clock.now += 1_000
+      }
+      expect(executed).toEqual(['msg-000000', 'msg-000001', 'msg-000002'])
+      expect(eventStore.getResource(QUEUE_KIND, TRIGGER_OCCURRENCE_QUEUE_MARKER_ID)?.state).toEqual(
+        { schemaVersion: 1, firstPollAt: 1_000_000 + DAY }
+      )
+      expect(store.get('msg-000000')?.state.status).toBe('completed')
+    } finally {
+      eventStore.close()
+    }
+  })
+
+  it('treats only records from before the first poll as stranded, across restarts', async () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    try {
+      // A store an older build stalled: 1000 terminal records, then three stranded messages.
+      seed(eventStore, 1_000, { from: 1_000_000, status: 'completed', prefix: 'done' })
+      seed(eventStore, 3, {
+        from: 1_000_000_000,
+        status: 'pending',
+        prefix: 'stranded',
+        triggerId: 'chat',
+        source: 'channel-message'
+      })
+      const clock = { now: 1_000_000_000 + DAY }
+      const firstPollAt = clock.now
+      const before = harness(eventStore, { chat: {} }, { runFor: 1, clock })
+      for (let poll = 0; poll < 15; poll += 1) {
+        await before.scheduler.runOnce()
+        clock.now += 1_000
+      }
+      expect(before.executed).toEqual(['stranded-000002'])
+      expect(before.store.get('stranded-000001')?.state.lastError?.name).toBe(
+        'TriggerOccurrenceStale'
+      )
+      const marker = {
+        schemaVersion: 1,
+        firstPollAt,
+        strandedBefore: firstPollAt - TRIGGER_OCCURRENCE_STALE_AFTER_MS
+      }
+      expect(eventStore.getResource(QUEUE_KIND, TRIGGER_OCCURRENCE_QUEUE_MARKER_ID)?.state).toEqual(
+        marker
+      )
+      // Messages arrive, the app is closed for an hour, and a new process polls the store.
+      messages.forEach((id, index) => message(before.store, id, clock.now + index))
+      clock.now += 60 * MINUTE
+      const after = harness(eventStore, { chat: {} }, { runFor: 1, clock })
+      for (let poll = 0; poll < 4; poll += 1) {
+        await after.scheduler.runOnce()
+        clock.now += 1_000
+      }
+      expect(after.executed).toEqual(messages)
+      expect(eventStore.getResource(QUEUE_KIND, TRIGGER_OCCURRENCE_QUEUE_MARKER_ID)).toMatchObject({
+        revision: 0,
+        state: marker
+      })
+    } finally {
+      eventStore.close()
+    }
+  })
 })
 
 describe('TriggerOccurrenceStore stale occurrences', () => {

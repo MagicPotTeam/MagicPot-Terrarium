@@ -317,7 +317,10 @@ describe('TriggerOccurrenceStore archiving', () => {
         throw new ResourceRevisionConflictError(KIND, 'old-0')
       })
       // A lost race is not a failure to report: the batch rolled back, the next poll retries.
-      expect(store.poll({ now: 5, owner: 'archiver', leaseMs: 1 })).toEqual({ backlog: false })
+      expect(store.poll({ now: 5, owner: 'archiver', leaseMs: 1 })).toEqual({
+        backlog: false,
+        deadLettered: 0
+      })
       expect(unarchived(eventStore)).toBe(200)
       batch.mockRestore()
       expect(drain(eventStore, store, 5)).toBe(TRIGGER_OCCURRENCE_ARCHIVE_BATCH)

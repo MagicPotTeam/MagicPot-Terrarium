@@ -31,6 +31,8 @@ export class TriggerOccurrenceScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined
   private pollFailure: Readonly<{ name: string; loggedAt: number }> | undefined
   private archiveFailureLoggedAt: number | undefined
+  // Stale occurrences dead-lettered by the polls of a drain not yet logged.
+  private deadLettered = 0
   private running = false
   // The last poll archived or dead-lettered records and more are left: the next one comes soon.
   private backlog = false
@@ -68,6 +70,7 @@ export class TriggerOccurrenceScheduler {
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
     await this.inFlight
+    this.logDeadLettered()
   }
 
   async runOnce(): Promise<boolean> {
@@ -115,6 +118,15 @@ export class TriggerOccurrenceScheduler {
     console.warn('[triggers] Occurrence polls recovered.')
   }
 
+  // A count only, once a drain ends (or the scheduler stops), so an upgrade backlog is one line.
+  private logDeadLettered(): void {
+    if (this.deadLettered === 0) return
+    console.warn(
+      `[triggers] Dead-lettered ${this.deadLettered} stale occurrence(s) without running them: missed cron or calendar instants beyond maxCatchUpRuns, or ones an older version left unclaimed.`
+    )
+    this.deadLettered = 0
+  }
+
   // Content-free, at most once per ten minutes: a failing archive only costs claim-scan time.
   private noteArchiveFailed(error: unknown): void {
     const at = this.now()
@@ -145,6 +157,8 @@ export class TriggerOccurrenceScheduler {
       catchUpRuns: (triggerId) => catchUpRunsOf(triggerOf(triggerId))
     })
     this.backlog = poll.backlog
+    this.deadLettered += poll.deadLettered
+    if (!poll.backlog) this.logDeadLettered()
     if (poll.maintenanceError !== undefined) this.noteArchiveFailed(poll.maintenanceError)
     const claimed = poll.claimed
     if (!claimed) return false
