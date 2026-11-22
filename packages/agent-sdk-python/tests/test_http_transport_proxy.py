@@ -14,6 +14,7 @@ import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 from magicpot_agent_sdk import AsyncMagicAgentClient, GraphRunRequest, HttpAgentTransport
 from magicpot_agent_sdk.http_transport import _is_loopback_host
@@ -235,7 +236,7 @@ class RedirectTest(unittest.TestCase):
 
     def test_a_remote_redirect_does_not_carry_the_token_to_the_new_host(self):
         self.proxy.redirect_to = lambda target: (
-            "http://elsewhere.example.test/collect" if target.startswith("http://magicpot.example.test") else None
+            "http://elsewhere.example.test/collect" if urlsplit(target).hostname == "magicpot.example.test" else None
         )
         for headers, token in (({}, TOKEN), ({"Authorization": f"Bearer {TOKEN}"}, None)):
             with self.subTest(custom_header=bool(headers)):

@@ -2620,7 +2620,7 @@ describe('MagicAgentApprovalCenter leaves no blank padding unmarked', () => {
           nodeId: 'node\\u{2066}'
         })
       )
-      expect(dialog.textContent!.replace(/<[^>]*>/g, '')).not.toMatch(/[\u200b\u202e\u2066]/)
+      expect(dialog.textContent).not.toMatch(/[\u200b\u202e\u2066]/)
     } finally {
       view.unmount()
     }
