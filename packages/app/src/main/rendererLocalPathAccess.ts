@@ -113,14 +113,16 @@ const pathDepth = (value: string): number => segmentCount(value)
 
 /**
  * The fewest segments a closed folder of the root `key` may have: the mount itself for a share
- * or a mount under a mount parent; for a drive letter or a first directory (/Users), a folder
- * two levels below it (C:\Users\x, /Users/x/Pictures), so that a home folder never closes.
- * The folder of a single stalled call is never the root itself either.
+ * or a mount under a mount parent; for a first directory (/Users) a folder two levels below it
+ * (/Users/x/Pictures), and for a drive letter, whose own segment counts, three
+ * (C:\Users\x\Pictures), so that a home folder never closes. The folder of a single
+ * stalled call is never the root itself either.
  */
 function closedDepths(key: string): { merged: number; single: number } {
   const depth = segmentCount(key)
   const isMount = key.startsWith('//') || (key.startsWith('/') && depth >= 2)
-  const merged = isMount ? depth : depth + 2
+  const isDrive = /^[a-z]:$/u.test(key)
+  const merged = isMount ? depth : depth + (isDrive ? 3 : 2)
   return { merged, single: Math.max(merged, depth + 1) }
 }
 

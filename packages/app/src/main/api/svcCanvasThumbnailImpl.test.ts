@@ -85,7 +85,7 @@ function createManifest({
   sourcePath: string
   src?: string
 }): CanvasThumbnailManifest {
-  const canonicalPath = fs.realpathSync.native(sourcePath)
+  const canonicalPath = path.resolve(fs.realpathSync.native(sourcePath))
   const stats = fs.statSync(canonicalPath)
   const sourceSizeBytes = Math.floor(stats.size)
   const sourceLastModifiedMs = Math.floor(stats.mtimeMs)
@@ -248,7 +248,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     const metadata = await service.getSourceFileMetadata({ fullPath: sourcePath })
 
     expect(metadata.exists).toBe(true)
-    expect(metadata.canonicalPath).toBe(fs.realpathSync.native(sourcePath))
+    expect(metadata.canonicalPath).toBe(path.resolve(fs.realpathSync.native(sourcePath)))
     expect(metadata.sizeBytes).toBe(4)
     expect(metadata.lastModifiedMs).toBe(stats.mtimeMs)
 
@@ -422,7 +422,7 @@ describe('CanvasThumbnailSvcImpl', () => {
 
     await expect(service.getSourceFileMetadata({ fullPath: managedPath })).resolves.toMatchObject({
       exists: true,
-      canonicalPath: fs.realpathSync.native(managedPath),
+      canonicalPath: path.resolve(fs.realpathSync.native(managedPath)),
       sizeBytes: 3
     })
   })
@@ -656,7 +656,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     expect(sidecarCalls).toHaveLength(1)
     expect(sidecarCalls[0]).toMatchObject({
       cacheRoot: fs.realpathSync.native(cacheRoot),
-      items: [{ id: manifest.cacheKey, path: fs.realpathSync.native(sourcePath) }],
+      items: [{ id: manifest.cacheKey, path: path.resolve(fs.realpathSync.native(sourcePath)) }],
       thumbnail: { levels: [128, 256], format: 'webp', allowUpscale: false },
       maxConcurrency: 3,
       maxDecodedPixels: 123456,
@@ -784,7 +784,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     })
 
     expect(electronMock.createFromPath).toHaveBeenCalledWith(
-      fs.realpathSync.native(authorizedSourcePath)
+      path.resolve(fs.realpathSync.native(authorizedSourcePath))
     )
     expect(response).toMatchObject({
       sourceWidth: 640,
@@ -891,7 +891,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     })
 
     expect(electronMock.createThumbnailFromPath).toHaveBeenCalledWith(
-      fs.realpathSync.native(sourcePath),
+      path.resolve(fs.realpathSync.native(sourcePath)),
       {
         width: 128,
         height: 128

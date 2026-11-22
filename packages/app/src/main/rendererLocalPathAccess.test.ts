@@ -83,7 +83,7 @@ describe('authorizeRendererLocalPath', () => {
     try {
       for (const gate of [null, undefined]) {
         await expect(authorizeRendererLocalPath(inside, [root], { gate })).resolves.toBe(
-          fs.realpathSync.native(inside)
+          path.resolve(fs.realpathSync.native(inside))
         )
         await expect(authorizeRendererLocalPath(outside, [root], { gate })).resolves.toBeNull()
       }
@@ -122,7 +122,9 @@ describe('checkRendererLocalPath: why a path was refused', () => {
         const breaker = createLocalPathBreaker()
         const check = (filePath: string, options = {}) =>
           checkRendererLocalPath(filePath, [root], { gate, breaker, ...options })
-        await expect(check(inside)).resolves.toEqual({ canonicalPath: fs.realpathSync(inside) })
+        await expect(check(inside)).resolves.toEqual({
+          canonicalPath: path.resolve(fs.realpathSync(inside))
+        })
         await expect(check(path.join(root, 'media', 'gone.png'))).resolves.toEqual({
           canonicalPath: null,
           reason: 'missing'
@@ -186,7 +188,7 @@ describe('createLocalPathBreaker', () => {
       )
     )
     expect(results.filter((value) => value === null)).toEqual([])
-    expect(results[999]).toBe(fs.realpathSync.native(files[999]))
+    expect(results[999]).toBe(path.resolve(fs.realpathSync.native(files[999])))
     // Every check is a realpath of the image and of the root, two at a time on this root.
     expect(mostRunning).toBeLessThanOrEqual(2)
     expect(performance.now() - started).toBeLessThan(10_000)
@@ -345,58 +347,91 @@ describe('createLocalPathBreaker', () => {
     }
   })
 
-  it('keeps a stall in or just below a first directory from closing it, or a home folder', async () => {
-    vi.useFakeTimers()
-    try {
-      const breaker = createLocalPathBreaker()
-      const never = () => new Promise<never>(() => undefined)
-      void breaker.run('/Users/x.png', never, 15_000)
-      void breaker.run('/Users/y/link-to-dead-share.png', never, 15_000)
-      await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
-      const operation = vi.fn(async () => 'value')
-      // Only the stalled files are closed.
-      await expect(breaker.run('/Users/x.png', operation, 15_000)).resolves.toBeNull()
-      await expect(
-        breaker.run('/Users/y/link-to-dead-share.png', operation, 15_000)
-      ).resolves.toBeNull()
-      expect(operation).not.toHaveBeenCalled()
-      for (const file of [
-        '/Users/victim/Library/a.png',
-        '/Users/y/Pictures/b.png',
-        '/Users/y/c.png'
-      ]) {
-        await expect(breaker.run(file, operation, 15_000)).resolves.toEqual({ value: 'value' })
+  // The POSIX spellings below resolve onto the current drive on Windows: see the drive case.
+  it.runIf(process.platform === 'win32')(
+    'never closes a drive, its first folder or a home folder on Windows, only the stalled files',
+    async () => {
+      vi.useFakeTimers()
+      try {
+        const breaker = createLocalPathBreaker()
+        const never = () => new Promise<never>(() => undefined)
+        void breaker.run('C:\\Users\\me\\a\\x.png', never, 15_000)
+        void breaker.run('C:\\Users\\me\\b\\link-to-dead-share.png', never, 15_000)
+        await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
+        const operation = vi.fn(async () => 'value')
+        await expect(breaker.run('C:\\Users\\me\\a\\x.png', operation, 15_000)).resolves.toBeNull()
+        expect(operation).not.toHaveBeenCalled()
+        for (const file of [
+          'C:\\Users\\me\\Pictures\\c.png',
+          'C:\\Users\\me\\d.png',
+          'C:\\Users\\other\\e.png'
+        ]) {
+          await expect(breaker.run(file, operation, 15_000)).resolves.toEqual({ value: 'value' })
+        }
+      } finally {
+        vi.useRealTimers()
       }
-    } finally {
-      vi.useRealTimers()
     }
-  })
+  )
 
-  it('closes a dead mount as a whole once two of its places stalled, never for one', async () => {
-    vi.useFakeTimers()
-    try {
-      const breaker = createLocalPathBreaker()
-      const never = () => new Promise<never>(() => undefined)
-      void breaker.run('/Volumes/nas/b.png', never, 15_000)
-      await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
-      const quick = vi.fn(async () => 'value')
-      await expect(breaker.run('/Volumes/nas/b.png', quick, 15_000)).resolves.toBeNull()
-      await expect(breaker.run('/Volumes/nas/c.png', quick, 15_000)).resolves.toEqual({
-        value: 'value'
-      })
-      // A second place of the mount stalls too: the whole mount is closed.
-      void breaker.run('/Volumes/nas/a/1.png', never, 15_000)
-      await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
-      const operation = vi.fn(async () => 'value')
-      await expect(breaker.run('/Volumes/nas/c/d/2.png', operation, 15_000)).resolves.toBeNull()
-      expect(operation).not.toHaveBeenCalled()
-      await expect(breaker.run('/Volumes/other/3.png', operation, 15_000)).resolves.toEqual({
-        value: 'value'
-      })
-    } finally {
-      vi.useRealTimers()
+  it.skipIf(process.platform === 'win32')(
+    'keeps a stall in or just below a first directory from closing it, or a home folder',
+    async () => {
+      vi.useFakeTimers()
+      try {
+        const breaker = createLocalPathBreaker()
+        const never = () => new Promise<never>(() => undefined)
+        void breaker.run('/Users/x.png', never, 15_000)
+        void breaker.run('/Users/y/link-to-dead-share.png', never, 15_000)
+        await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
+        const operation = vi.fn(async () => 'value')
+        // Only the stalled files are closed.
+        await expect(breaker.run('/Users/x.png', operation, 15_000)).resolves.toBeNull()
+        await expect(
+          breaker.run('/Users/y/link-to-dead-share.png', operation, 15_000)
+        ).resolves.toBeNull()
+        expect(operation).not.toHaveBeenCalled()
+        for (const file of [
+          '/Users/victim/Library/a.png',
+          '/Users/y/Pictures/b.png',
+          '/Users/y/c.png'
+        ]) {
+          await expect(breaker.run(file, operation, 15_000)).resolves.toEqual({ value: 'value' })
+        }
+      } finally {
+        vi.useRealTimers()
+      }
     }
-  })
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'closes a dead mount as a whole once two of its places stalled, never for one',
+    async () => {
+      vi.useFakeTimers()
+      try {
+        const breaker = createLocalPathBreaker()
+        const never = () => new Promise<never>(() => undefined)
+        void breaker.run('/Volumes/nas/b.png', never, 15_000)
+        await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
+        const quick = vi.fn(async () => 'value')
+        await expect(breaker.run('/Volumes/nas/b.png', quick, 15_000)).resolves.toBeNull()
+        await expect(breaker.run('/Volumes/nas/c.png', quick, 15_000)).resolves.toEqual({
+          value: 'value'
+        })
+        // A second place of the mount stalls too: the whole mount is closed.
+        void breaker.run('/Volumes/nas/a/1.png', never, 15_000)
+        await vi.advanceTimersByTimeAsync(LOCAL_PATH_BREAKER_SLOW_MS + 100)
+        const operation = vi.fn(async () => 'value')
+        await expect(breaker.run('/Volumes/nas/c/d/2.png', operation, 15_000)).resolves.toBeNull()
+        expect(operation).not.toHaveBeenCalled()
+        await expect(breaker.run('/Volumes/other/3.png', operation, 15_000)).resolves.toEqual({
+          value: 'value'
+        })
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
 
   it('counts a call as slow from when it started, never while it waited for its turn', async () => {
     vi.useFakeTimers()
