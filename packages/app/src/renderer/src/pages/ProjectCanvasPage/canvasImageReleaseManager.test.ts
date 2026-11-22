@@ -225,7 +225,11 @@ describe('canvasImageReleaseManager', () => {
     expect(metrics.activeObjectUrlCount).toBe(0)
     expect(metrics.revokedObjectUrlCount).toBe(0)
     expect(metrics.releaseErrors).toHaveLength(2)
-    expect(metrics.releaseErrors.map((error) => error.id)).toEqual(['url-6', 'url-7'])
+    // Only the two most recent errors are kept, whatever the number of release reasons.
+    expect(metrics.releaseErrors.map((error) => error.id)).toEqual([
+      `url-${CANVAS_IMAGE_RELEASE_REASONS.length - 2}`,
+      `url-${CANVAS_IMAGE_RELEASE_REASONS.length - 1}`
+    ])
     expect(Object.values(metrics.releaseReasons).reduce((total, count) => total + count, 0)).toBe(
       CANVAS_IMAGE_RELEASE_REASONS.length
     )

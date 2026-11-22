@@ -1,3 +1,5 @@
+import { AssistantToolResultError, forwardReportedFileEditFailure } from '../assistantRuntime/toolFailure'
+import { isCanvasApprovalToolInvocation } from '../api/canvasAgentTools'
 import type { AssistantSessionStore } from '../assistantRuntime/sessionStore'
 import type {
   AssistantToolCallResult,
@@ -173,17 +175,50 @@ export const syncAssistantToolsWithAgentKernel = (toolRegistry: AssistantToolReg
         }
 
         throwIfAborted(request.signal)
-        const result = await toolRegistry.callTool(request.toolName, request.args, {
-          ...toolContext,
-          signal: request.signal
-        })
-        return {
-          ok: true,
-          content: result.content,
-          metadata: result.metadata
+        try {
+          const result = await toolRegistry.callTool(request.toolName, request.args, {
+            ...toolContext,
+            signal: request.signal
+          })
+          return { ok: true, content: result.content, metadata: result.metadata }
+        } catch (error) {
+          if (!(error instanceof AssistantToolResultError)) throw error
+          // A reported result may accompany failure. Keep ok:false for kernel
+          // consumers; a receipt is data, never permission to retry the effect.
+          const failed = {
+            ok: false,
+            content: error.toolResult.content,
+            metadata: error.toolResult.metadata,
+            error: { message: error.message, ...(error.code === undefined ? {} : { code: error.code }) }
+          }
+          forwardReportedFileEditFailure(error, failed)
+          return failed
         }
       }
     })
+  }
+}
+
+const PRIVATE_READ_TOOLS = new Set(['files.read', 'files.tree', 'files.glob', 'files.grep', 'files.json.read'])
+/** Main-only user-side gateway: same platform authorization, no parent action journal or raw-error audit. */
+export async function invokePrivateSideRead(options: { toolRegistry: AssistantToolRegistry; toolName: string; args: Record<string, unknown>; context: KernelBackedToolContext; signal: AbortSignal }): Promise<AssistantToolCallResult> {
+  const name = normalizeMagicPotToolName(options.toolName), target = toToolCapabilityId(name)
+  if (name !== options.toolName || !PRIVATE_READ_TOOLS.has(name) || !isCanvasApprovalToolInvocation(options.context.route, name)) throw new Error('Private side read admission required.')
+  throwIfAborted(options.signal)
+  syncAssistantToolsWithAgentKernel(options.toolRegistry)
+  const session = getAgentKernel().registerSession(options.context.route, { source: 'assistant' }), actor = `assistant:${session.sessionKey}`
+  if (isMagicAgentPlatformDeniedToolName(name) || isMagicAgentPlatformDeniedToolName(target)) throw new Error('Private side read denied by platform policy.')
+  const permission = authorizeMagicPotMcpToolInvocation({ actor, action: 'tool.invoke', target, transport: 'stdio', metadata: { route: session.route } })
+  if (!permission.allowed) throw new Error('Private side read denied by platform policy.')
+  try {
+    // Exact readonly dispatch only. No execution-adapter result journal and no implicit MCP transport sync.
+    const result = await options.toolRegistry.callTool(name, options.args, { ...options.context, signal: options.signal })
+    throwIfAborted(options.signal)
+    appendMagicPotMcpAudit({ actor, action: 'tool.invoke', target, decision: 'allow', metadata: { route: session.route, audience: 'private-side', policyId: permission.policyId } })
+    return result
+  } catch {
+    appendMagicPotMcpAudit({ actor, action: 'tool.invoke', target, decision: 'observe', reason: 'Private side read failed or was cancelled.', metadata: { route: session.route, audience: 'private-side' } })
+    throw new Error('Private side read failed or was cancelled.')
   }
 }
 
@@ -274,7 +309,13 @@ export const invokeAssistantToolViaKernel = async (options: {
     })
 
     if (!result.ok) {
-      throw new Error(result.error?.message || `Tool "${options.toolName}" failed.`)
+      const failure = { message: result.error?.message || `Tool "${options.toolName}" failed.`, ...(result.error?.code === undefined ? {} : { code: result.error.code }) }
+      if (result.content !== undefined || result.metadata !== undefined) {
+        const error = new AssistantToolResultError(failure, { content: result.content ?? '', metadata: result.metadata })
+        forwardReportedFileEditFailure(result, error)
+        throw error
+      }
+      throw Object.assign(new Error(failure.message), result.error?.code === undefined ? {} : { code: result.error.code })
     }
 
     return {

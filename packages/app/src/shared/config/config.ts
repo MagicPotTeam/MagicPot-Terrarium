@@ -1,5 +1,8 @@
 // shared/config/config.ts
 
+import type { StudioWorkspace } from '@shared/studioWorkspace'
+import type { AgentSkillPreferenceRecord } from '@shared/api/agentThreadSkillSession'
+import type { ProceduralSkillOptions, ProceduralSkillPackage } from '@shared/api/agentThreadSkill'
 import type { JsonValue } from '@shared/utils/utilTypes'
 import type { ComfyBatchProfile } from '@shared/api/svcComfyBatch'
 import {
@@ -40,6 +43,10 @@ export type LLMAPIProfile = {
   auth_account_email?: string
   auth_connected_at?: string
   codex_fast_mode?: boolean
+  /** Explicit Agent image_gen backend link; absence uses only an eligible selected text profile itself. Never inferred or followed transitively. */
+  codex_image_profile_id?: string
+  /** Explicit source text-profile opt-in for Agent image_gen GIF output. Default off; never inherited from a linked backend. */
+  codex_image_gif_enabled?: boolean
   context_window_tokens?: number
   context_budget_tokens?: number
   /** Only enable when the provider request path actually consumes and returns a continuation id/url. */
@@ -176,6 +183,7 @@ export type SkillFallbackBehavior = {
 export type SkillRuntimeDefinition = {
   metadata: SkillMetadata
   instructions: SkillInstructions
+  procedural?: ProceduralSkillOptions
   execution?: SkillExecutionPolicy
   referenceAttachments?: SkillReferenceAttachment[]
   resources?: string[]
@@ -200,6 +208,7 @@ export type CustomSkill = {
   version?: number
   builtinOrigin?: string
   instructions?: CustomSkillInstructions
+  procedural?: ProceduralSkillOptions
   execution?: CustomSkillExecutionPolicy
   referenceAttachments?: SkillReferenceAttachment[]
   resources?: string[]
@@ -233,6 +242,7 @@ export function toSkillRuntimeDefinition(skill: CustomSkill): SkillRuntimeDefini
       type: skill.type
     },
     instructions: normalizeSkillInstructions(skill),
+    ...(skill.procedural ? { procedural: skill.procedural } : {}),
     execution: skill.execution,
     referenceAttachments: skill.referenceAttachments,
     resources: skill.resources,
@@ -273,6 +283,7 @@ export function fromSkillRuntimeDefinition(skill: SkillRuntimeDefinition): Custo
     version: skill.metadata.version,
     builtinOrigin: skill.metadata.builtinOrigin,
     instructions: skill.instructions,
+    ...(skill.procedural ? { procedural: skill.procedural } : {}),
     execution,
     referenceAttachments: skill.referenceAttachments,
     resources: skill.resources,
@@ -315,6 +326,12 @@ export type McpExternalServerConfig = {
   toolPrefix?: string
   startupTimeoutMs?: number
   requestTimeoutMs?: number
+  /** Explicit local-thread disclosure/call grant; absent means off. Does not change existing skill bindings. */
+  agentThreadAccess?: 'off' | 'discover' | 'call'
+  /** Separate permission to request a formal service connect/disconnect approval. */
+  agentThreadManage?: boolean
+  /** Legacy default true. False prevents eager host sync from starting this service. */
+  autoConnect?: boolean
 }
 
 export type MagicPotMcpServerConfig = {
@@ -342,6 +359,18 @@ export type ChatConfig = {
 export type ProjectTraceConfig = {
   enable_agent_reranker: boolean
   enable_agent_terminal: boolean
+  enable_agent_python_notebook?: boolean
+  /** Non-secret run-ledger epoch anchor. Never clear/reset to recover unknown jobs. */
+  agent_html_storage_epoch?: string
+  enable_agent_html_save?: boolean
+  enable_agent_html_apps?: boolean
+  /** Explicit shell execution, independent of read-only terminal and Python. */
+  enable_agent_shell?: boolean
+  agent_shell_executable?: string
+  agent_shell_backend?: 'local' | 'docker' | 'ssh'
+  agent_ssh_config?: { host: string; port?: number; user: string; key_filename?: string; password?: string; known_hosts_policy?: 'auto_add' | 'reject' | 'warn'; keep_alive_seconds?: number; default_timeout_seconds?: number; max_result_size_chars?: number }
+  agent_docker_config?: { image?: string; volumes?: string[]; working_dir?: string; env?: Record<string, string>; network_mode?: string; auto_remove?: boolean; name_prefix?: string; default_timeout_seconds?: number; max_result_size_chars?: number; socketPath?: string }
+  agent_shell_kind?: 'bash' | 'powershell'
 }
 
 /** Explicit opt-in only; id is referenced as local-comfy-rembg:<id>, never an image LLM slot. */
@@ -397,6 +426,12 @@ type ConfigShape = {
 
   use_remote_llm: boolean
 
+  magic_agent_platform_config?: {
+    enabled: boolean
+  }
+  /** Local Studio authoring metadata only; not runtime instances, credentials or grants. */
+  studio_workspace?: StudioWorkspace
+
   magic_agent_sdk_server_config: {
     enable_server: boolean
     port: number
@@ -436,6 +471,12 @@ type ConfigShape = {
     api_profiles: LLMAPIProfile[]
     customSkills?: CustomSkill[]
     customSkillCategories?: string[]
+    /** Explicit user-registered Markdown directories only; absence means none. */
+    proceduralSkillPackages?: ProceduralSkillPackage[]
+    /** Separate disclosure opt-ins: metadata only; no skill body/resource injection. */
+    proceduralSkillContext?: { index: boolean; paths: boolean }
+    /** Bounded per-conversation deny lists; no body, tools or authority. */
+    proceduralSkillSessions?: AgentSkillPreferenceRecord[]
     usePromptOptimization: boolean
     promptOptimizationQAppKey: string
     promptOptimizationDefaultWidth: number
@@ -562,6 +603,7 @@ export const DEFAULT_CONFIG: Config = {
     auto_check_interval_minutes: 15
   },
   use_remote_llm: false,
+  magic_agent_platform_config: { enabled: false },
   magic_agent_sdk_server_config: {
     enable_server: false,
     port: 0,
@@ -586,7 +628,13 @@ export const DEFAULT_CONFIG: Config = {
   },
   project_trace_config: {
     enable_agent_reranker: false,
-    enable_agent_terminal: false
+    enable_agent_terminal: false,
+    enable_agent_python_notebook: false,
+    enable_agent_html_save: false,
+    enable_agent_html_apps: false,
+    enable_agent_shell: false,
+    agent_shell_executable: '',
+    agent_shell_kind: 'powershell'
   },
   remote_llm_server_config: {
     server_origin: 'http://127.0.0.1:3721',

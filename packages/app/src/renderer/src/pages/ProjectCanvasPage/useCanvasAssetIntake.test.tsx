@@ -17,7 +17,10 @@ import {
   canvasThumbnailManifestFromSet,
   createCanvasThumbnailSet
 } from './canvasThumbnailCache'
-import type { CanvasImageSourceInput } from './canvasAssetIntakeHelpers'
+import {
+  isCanvasImagePendingPixelsAsset,
+  type CanvasImageSourceInput
+} from './canvasAssetIntakeHelpers'
 import { buildProjectCanvasRenderableItems } from './projectCanvasRenderBoundary'
 import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import type { CanvasGroup, CanvasImageItem, CanvasItem } from './types'
@@ -1043,6 +1046,7 @@ describe('useCanvasAssetIntake', () => {
           onComplete={onComplete}
           options={{
             fileName: 'small-warm-cache.png',
+            teamImageLabel: '设计师·图1',
             sizeBytes: 512 * 1024,
             sourceWidthHint: 640,
             sourceHeightHint: 320,
@@ -1064,6 +1068,7 @@ describe('useCanvasAssetIntake', () => {
       expect(result).toBeTruthy()
       expect(imageItem?.thumbnailSet).toEqual(thumbnailSet)
       expect(imageItem?.sourceWidth).toBe(640)
+      expect(imageItem?.teamImageLabel).toBe('设计师·图1')
       expect(imageItem?.sourceHeight).toBe(320)
       expect(imageItem?.width).toBe(640)
       expect(imageItem?.height).toBe(320)
@@ -1429,7 +1434,7 @@ describe('useCanvasAssetIntake', () => {
     expect((maxBottom - minY) / (maxRight - minX)).toBeLessThan(1.2)
   })
 
-  it('streams an anchored large image paste and centers the final arranged group at the anchor', async () => {
+  it('commits an anchored large image paste once at its final position and streams the pixels afterwards', async () => {
     const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
       src: `https://example.invalid/anchored-large-paste-${index}.png`,
       fileName: `anchored-large-paste-${index}.png`,
@@ -1440,7 +1445,6 @@ describe('useCanvasAssetIntake', () => {
     const onComplete = vi.fn()
     const onProgress = vi.fn()
     const itemUpdates: CanvasItem[][] = []
-    const renderableCounts: number[] = []
     const hiddenImageCounts: number[] = []
     const historyCommits: CanvasItem[][] = []
     const pasteOptions = { clientX: 640, clientY: 360 }
@@ -1453,7 +1457,6 @@ describe('useCanvasAssetIntake', () => {
         onProgress={onProgress}
         onItemsUpdate={(items) => {
           itemUpdates.push(items)
-          renderableCounts.push(buildProjectCanvasRenderableItems(items).length)
           hiddenImageCounts.push(
             items.filter((item) => item.type === 'image' && isCanvasItemTransientlyHidden(item.id))
               .length
@@ -1474,22 +1477,33 @@ describe('useCanvasAssetIntake', () => {
     const progressEvents = onProgress.mock.calls.map(
       ([progress]) => progress as CanvasImageBatchImportProgress
     )
+    const rectOf = (item: CanvasItem) => [item.id, item.x, item.y, item.width, item.height]
 
     expect(result).toHaveLength(sources.length)
     expect(imageItems).toHaveLength(sources.length)
     expect(progressEvents.some((event) => event.phase === 'committing')).toBe(true)
+    // Every frame is there from the first update, in the import's only history entry, ...
     expect(itemUpdates.length).toBeGreaterThan(1)
-    expect(hiddenImageCounts.slice(0, -1).every((count) => count > 0)).toBe(true)
-    expect(renderableCounts.slice(0, -1).every((count) => count === 0)).toBe(true)
-    expect(imageItems.every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
-    expect(buildProjectCanvasRenderableItems(items)).toHaveLength(sources.length)
+    expect(itemUpdates[0]).toHaveLength(sources.length)
     expect(historyCommits).toHaveLength(1)
-    expect(historyCommits[0].every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
+    expect(historyCommits[0]).toHaveLength(sources.length)
+    expect(buildProjectCanvasRenderableItems(itemUpdates[0])).toHaveLength(sources.length)
+    expect(
+      itemUpdates[0].every(
+        (item) => item.type === 'image' && isCanvasImagePendingPixelsAsset(item.image)
+      )
+    ).toBe(true)
+    // ... nothing is hidden while the pixels arrive, and no frame moves afterwards.
+    expect(hiddenImageCounts.every((count) => count === 0)).toBe(true)
+    for (const update of itemUpdates) {
+      expect(update.map(rectOf)).toEqual(itemUpdates[0].map(rectOf))
+    }
+    expect(imageItems.every((item) => !isCanvasImagePendingPixelsAsset(item.image))).toBe(true)
     expect((minX + maxX) / 2).toBe(pasteOptions.clientX)
     expect((minY + maxY) / 2).toBe(pasteOptions.clientY)
   })
 
-  it('reveals transiently hidden anchored items when the intake owner unmounts', async () => {
+  it('stops handing over pixels when the intake owner unmounts during the stream', async () => {
     const sources: CanvasImageSourceInput[] = Array.from({ length: 48 }, (_, index) => ({
       src: `https://example.invalid/unmounted-anchor-${index}.png`,
       fileName: `unmounted-anchor-${index}.png`,
@@ -1497,7 +1511,7 @@ describe('useCanvasAssetIntake', () => {
       sourceWidthHint: 120,
       sourceHeightHint: 90
     }))
-    const hiddenItemIds: string[] = []
+    const itemUpdates: CanvasItem[][] = []
     let unmountHarness: () => void = () => undefined
 
     const rendered = render(
@@ -1506,11 +1520,8 @@ describe('useCanvasAssetIntake', () => {
         pasteOptions={{ clientX: 640, clientY: 360 }}
         onComplete={vi.fn()}
         onItemsUpdate={(items) => {
-          const hiddenItems = items.filter(
-            (item) => item.type === 'image' && isCanvasItemTransientlyHidden(item.id)
-          )
-          if (hiddenItems.length > 0 && hiddenItemIds.length === 0) {
-            hiddenItemIds.push(...hiddenItems.map((item) => item.id))
+          itemUpdates.push(items)
+          if (itemUpdates.length === 1) {
             queueMicrotask(() => unmountHarness())
           }
         }}
@@ -1518,8 +1529,19 @@ describe('useCanvasAssetIntake', () => {
     )
     unmountHarness = rendered.unmount
 
-    await waitFor(() => expect(hiddenItemIds.length).toBeGreaterThan(0), { timeout: 5000 })
-    expect(hiddenItemIds.every((itemId) => !isCanvasItemTransientlyHidden(itemId))).toBe(true)
+    await waitFor(() => expect(itemUpdates.length).toBeGreaterThan(0), { timeout: 5000 })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    expect(itemUpdates).toHaveLength(1)
+    expect(itemUpdates[0]).toHaveLength(sources.length)
+    // That one update is the frames, before any pixels were handed over ...
+    expect(
+      itemUpdates[0].every(
+        (item) => item.type === 'image' && isCanvasImagePendingPixelsAsset(item.image)
+      )
+    ).toBe(true)
+    // ... and nothing was handed over after the unmount.
+    expect(itemUpdates[0].every((item) => !isCanvasItemTransientlyHidden(item.id))).toBe(true)
   })
 
   it('reports progress while streaming large image batches into the canvas', async () => {
@@ -1593,6 +1615,17 @@ describe('useCanvasAssetIntake', () => {
     expect(selectionChanges.at(-1)).toEqual(new Set())
   })
 
+  it('preserves the team label in the deferred single-image branch', async () => {
+    const onComplete = vi.fn()
+    thumbnailOverride.mockResolvedValue({ image: document.createElement('img') })
+    const sourceIdentity = buildCanvasImageSourceIdentity({ canonicalPath: 'C:/fixture/large.png', sizeBytes: 100 * 1024 * 1024, lastModifiedMs: 1 })!
+    render(<SingleImageHarness src="local-media:///C:/fixture/large.png" onComplete={onComplete} options={{ sourceIdentity, sizeBytes: 100 * 1024 * 1024, sourceWidthHint: 100, sourceHeightHint: 100, teamImageLabel: '设计师·图3' }} />)
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+    const [items, result] = onComplete.mock.calls[0] as [CanvasItem[], CanvasImageItem | null]
+    expect(result?.teamImageLabel).toBe('设计师·图3')
+    expect(items.find(item => item.type === 'image')).toMatchObject({ teamImageLabel: '设计师·图3' })
+  })
+
   it('uses decoded image dimensions when external source hints do not match the decoded aspect ratio', async () => {
     const originalImageCtor = window.Image
     window.Image = function MockImage() {
@@ -1619,6 +1652,7 @@ describe('useCanvasAssetIntake', () => {
           onComplete={onComplete}
           options={{
             fileName: 'qapp-result.png',
+            teamImageLabel: '设计师·图2',
             sourceWidthHint: 3136,
             sourceHeightHint: 2624
           }}
@@ -1638,6 +1672,7 @@ describe('useCanvasAssetIntake', () => {
       expect(result).toBeTruthy()
       expect(imageItem).toBeTruthy()
       expect(imageItem?.sourceWidth).toBe(3136)
+      expect(imageItem?.teamImageLabel).toBe('设计师·图2')
       expect(imageItem?.sourceHeight).toBe(1568)
       expect(imageItem?.width).toBe(3136)
       expect(imageItem?.height).toBe(1568)

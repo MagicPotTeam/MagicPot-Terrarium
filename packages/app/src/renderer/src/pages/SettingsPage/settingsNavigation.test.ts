@@ -30,7 +30,7 @@ describe('settingsNavigation', () => {
   })
 
   it.each([undefined, null, {}, { tab: 'unknown' }, { tab: 3 }, { tab: null }, 'llm', []])(
-    'uses the query when state is not a valid legacy link: %j',
+    'uses the query when state is not a valid legacy link case %# : %j',
     (state) => {
       expect(getSettingsTab({ state, search: '?tab=plugin' })).toBe('plugin')
     }

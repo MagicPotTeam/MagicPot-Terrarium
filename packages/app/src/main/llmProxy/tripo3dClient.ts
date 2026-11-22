@@ -1,7 +1,6 @@
-import * as fs from 'node:fs/promises'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type { ChatAttachment, ChatMessage } from '@shared/api/svcLLMProxy'
+import { readLocalAttachmentSource } from './localAttachmentSource'
 
 const DEFAULT_TRIPO_BASE_URL = 'https://api.tripo3d.ai/v2/openapi'
 const DEFAULT_POLL_INTERVAL_MS = 5000
@@ -208,16 +207,6 @@ const parseDataUrl = (url: string): { buffer: Buffer; mimeType: string } => {
     buffer: isBase64 ? Buffer.from(payload, 'base64') : Buffer.from(decodeURIComponent(payload)),
     mimeType: normalizeMimeType(metadata)
   }
-}
-
-const normalizeLocalPath = (url: string): string => {
-  if (url.startsWith('local-media:///')) {
-    return decodeURIComponent(url.replace('local-media:///', ''))
-  }
-  if (url.startsWith('file://')) {
-    return fileURLToPath(url)
-  }
-  return url
 }
 
 const isRemoteHttpUrl = (value: string): boolean => /^https?:\/\//i.test(value)
@@ -921,9 +910,13 @@ export class Tripo3DClient {
       buffer = parsed.buffer
       mimeType = mimeType || parsed.mimeType
     } else if (isLocalFileSource(attachment.url)) {
-      const filePath = normalizeLocalPath(attachment.url)
-      buffer = await fs.readFile(filePath)
-      sourceName = sourceName || path.basename(filePath)
+      // Only a file the local-media protocol serves: an attachment can name any path.
+      const source = await readLocalAttachmentSource(attachment.url, {
+        maxBytes: TRIPO_UPLOAD_IMAGE_MAX_BYTES,
+        label: '[Tripo3D]'
+      })
+      buffer = source.buffer
+      sourceName = sourceName || path.basename(source.filePath)
     } else {
       throw new Error(
         '[Tripo3D] Unsupported image source. Use a local image, data URL, or HTTP URL.'

@@ -36,6 +36,21 @@ export type TriggerPermitConsumedHook = (
   }>
 ) => void | Promise<void>
 
+/**
+ * Awaited write-ahead step, called once after the request is authorized and immediately before
+ * the permit is consumed. When it throws, nothing is consumed and the error propagates as is.
+ */
+export type TriggerPermitAuthorizedHook = (
+  input: Readonly<{
+    request: PolicyRequest
+    authorizationId: string
+    requestDigest: string
+  }>
+) => void | Promise<void>
+
+export const triggerAuthorizationId = (requestDigest: string): string =>
+  `trigger-authorization:${requestDigest}`
+
 export type TriggerPolicyExecutionResult<TResult> =
   | Readonly<{
       status: 'executed'
@@ -88,7 +103,8 @@ export class TriggerPolicyExecutionBoundary<TResult = void> {
     private readonly grantProvider: TriggerPolicyGrantProvider,
     private readonly executeTrigger: TriggerPolicyExecutor<TResult>,
     private readonly now: () => number = Date.now,
-    private readonly onPermitConsumed?: TriggerPermitConsumedHook
+    private readonly onPermitConsumed?: TriggerPermitConsumedHook,
+    private readonly beforePermitConsumption?: TriggerPermitAuthorizedHook
   ) {}
 
   async execute(
@@ -96,7 +112,7 @@ export class TriggerPolicyExecutionBoundary<TResult = void> {
   ): Promise<TriggerPolicyExecutionResult<TResult>> {
     const request = this.stabilizeRequest(createTriggerPolicyRequest(input))
     const requestDigest = digestPolicyRequest(request)
-    const authorizationId = `trigger-authorization:${requestDigest}`
+    const authorizationId = triggerAuthorizationId(requestDigest)
     const authorizationKey = `trigger:${requestDigest}`
     let authorization = this.authorizationService.authorize({
       authorizationId,
@@ -118,6 +134,8 @@ export class TriggerPolicyExecutionBoundary<TResult = void> {
     if (authorization.status !== 'authorized') {
       return { status: authorization.status, request, authorization }
     }
+    if (this.beforePermitConsumption)
+      await this.beforePermitConsumption({ request, authorizationId, requestDigest })
 
     let consumed: Readonly<{ authorizationId: string; auditRevision: number }>
     try {

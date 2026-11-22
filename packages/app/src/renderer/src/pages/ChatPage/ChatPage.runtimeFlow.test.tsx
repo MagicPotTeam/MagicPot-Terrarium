@@ -1,18 +1,32 @@
 import React from 'react'
+import MagicAgentApprovalCenter from '../../components/MagicAgentApprovalCenter'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type {
   ChatAttachment,
   ChatMessage
 } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
-import type { ChatSession, ChatSessionDraft } from './chatStorage'
+import {
+  createTeamMemberInDB,
+  saveSessionToDB,
+  setTeamMemberModelChoiceInDB,
+  type ChatSession,
+  type ChatSessionDraft
+} from './chatStorage'
 import type { ChatLoadingStatus } from './chatLoadingStatus'
 import ChatPage from './ChatPage'
+import { TeamMessageDispatcher } from './teamMessageDispatcher'
+import {
+  ChatPathlessAttachmentTooLargeError,
+  describeChatAttachmentImportFailure
+} from './chatManagedMediaAttachments'
+import { CHAT_IMAGE_HEADER_READ_BYTES } from './chatImageHeaderDimensions'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
   BUILT_IN_PROMPT_TRANSLATION_SKILL_ID,
@@ -22,6 +36,7 @@ import {
   buildChatWorkspaceControlsPortalId,
   CHAT_SESSION_LOADING_STATE_EVENT,
   readScopedActiveLoadingSessionIds,
+  readScopedChatRun,
   scopedStorageKey,
   STORAGE_KEY_CURRENT_SESSION_ID,
   STORAGE_KEY_LOADING_IDS,
@@ -58,21 +73,92 @@ const hoisted = vi.hoisted(() => ({
       supports_session_continuation?: boolean
     }>
   },
+  fileExistsBatchMock: vi.fn(async (paths: string[]) => paths.map(() => true)),
   storedSessions: { value: [] as ChatSession[] },
+  /** Pins getChatScopeRevision; null uses the real marker (the mocked writers never move it). */
+  scopeRevision: { value: null as number | null },
+  scopedTestSessions: { value: null as Record<string, ChatSession[]> | null },
   draftBackups: {
     value: {} as Record<string, { updatedAt: number; draft?: ChatSessionDraft }>
   },
   saveSessionToDBGate: { value: null as Promise<void> | null },
+  saveSessionToDBGateStarted: { value: null as string | null },
+  selectiveSaveGate: {
+    value: null as null | { id: string; gate: Promise<void>; started: boolean }
+  },
+  failTaskResponseSave: { value: null as string | null },
+  listPendingApprovalsMock: vi.fn(),
+  resolvePendingApprovalMock: vi.fn(),
+  teamPostCommitGate: { value: null as Promise<void> | null },
+  teamPostCommitSnapshot: { value: null as ChatSession | null },
+  latestSaveCallback: {
+    value: null as null | ((id: string, scope: string) => Promise<ChatSession | null>)
+  },
+  saveSuccessCount: { value: 0 },
+  saveCallbackGate: { value: null as Promise<void> | null },
+  saveCallbackGateStarted: { value: null as string | null },
   migrationCommitGate: { value: null as Promise<void> | null },
+  compareCommitResultGate: { value: null as Promise<void> | null },
+  compareCommitted: { value: null as ChatSession | null },
   migrationStarted: { value: false },
+  skipMigrationOnce: { value: false },
   deleteTombstones: { value: new Set<string>() },
   debouncedSaveAllSessionsGate: { value: null as Promise<void> | null },
   loadAllSessionsMock: vi.fn(),
   saveAllSessionsMock: vi.fn(),
+  teamPreprocessingFails: { value: false },
+  teamBeforeDispatchGate: { value: null as null | { gate: Promise<void>; entered: boolean } },
+  teamPreflightReadGate: { value: null as null | { gate: Promise<void>; entered: boolean } },
   requestChatCompletionMock: vi.fn(),
   requestChatCompletionStreamMock: vi.fn(),
+  listAgentInteractionsMock: vi.fn(),
+  listAgentTeamMessagesMock: vi.fn(),
+  claimAgentTeamMessageMock: vi.fn(),
+  resolveAgentInteractionMock: vi.fn(),
+  saveAgentHtmlAppMock: vi.fn(),
+  listSavedAgentHtmlAppsMock: vi.fn(),
+  restoreAgentHtmlAppMock: vi.fn(),
+  deleteSavedAgentHtmlAppMock: vi.fn(),
+  setAgentHtmlScopeMock: vi.fn(),
+  agentHtmlStorageStatusMock: vi.fn(),
+  initializeAgentHtmlStorageMock: vi.fn(),
+  listAgentHtmlAppsMock: vi.fn(),
+  openAgentHtmlAppMock: vi.fn(),
+  closeAgentHtmlAppMock: vi.fn(),
+  listAgentSidesMock: vi.fn(),
+  openAgentSideMock: vi.fn(),
+  startAgentSideMock: vi.fn(),
+  continueAgentSideMock: vi.fn(),
+  stopAgentSideMock: vi.fn(),
+  deleteAgentSideMock: vi.fn(),
+  listAgentProcessesMock: vi.fn(),
+  readAgentProcessMock: vi.fn(),
+  stopAgentProcessMock: vi.fn(),
+  endTeamMock: vi.fn(async () => ({ ended: true })),
+  listAgentJobsMock: vi.fn(),
+  readAgentJobMock: vi.fn(),
+  stopAgentJobMock: vi.fn(),
+  listAgentArchiveQueriesMock: vi.fn(),
+  resolveAgentArchiveQueryMock: vi.fn(),
+  prepareAgentGoalProgressMock: vi.fn(),
+  agentGoalScopeRevisionMock: vi.fn(),
+  setAgentGoalScopeMock: vi.fn(),
+  listAgentGoalDispatchesMock: vi.fn(),
+  listAgentGoalsMock: vi.fn(),
+  mutateAgentGoalMock: vi.fn(),
+  managedFirstRunPaneRevisionMock: vi.fn(),
+  setManagedFirstRunPaneScopeMock: vi.fn(),
+  agentSkillScopeRevisionMock: vi.fn(),
+  setAgentSkillScopeMock: vi.fn(),
+  listAgentSessionSkillsMock: vi.fn(),
+  showAgentSessionSkillMock: vi.fn(),
+  setAgentSkillPreferenceMock: vi.fn(),
+  getAgentNotesMock: vi.fn(),
+  mutateAgentNoteMock: vi.fn(),
+  resolveSkillRuntimeResourceEntriesMock: vi.fn(),
   resolveAttachmentBatchCapabilityMock: vi.fn(),
   supportsStreamingChatCompletionMock: vi.fn(),
+  preflightFailure: { value: false },
   selectFileMock: vi.fn(),
   agentLocalFilesService: {
     setScope: vi.fn(),
@@ -86,6 +172,7 @@ const hoisted = vi.hoisted(() => ({
   fileToDataUrlMock: vi.fn(async () => 'data:application/octet-stream;base64,QUJD'),
   importManagedFileMock: vi.fn(),
   importManagedDataUrlMock: vi.fn(),
+  importManagedBytesMock: vi.fn(),
   importManagedUrlMock: vi.fn(),
   readTextFileMock: vi.fn(),
   saveImageToDirMock: vi.fn(),
@@ -142,13 +229,25 @@ const createConfig = (): Config => ({
   }
 })
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' },
-    t: (key: string, options?: { defaultValue?: string; error?: string }) =>
-      options?.defaultValue || options?.error || key
-  })
-}))
+// The approval center's copy comes from the zh-CN locale; every other key stays raw.
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('../../testUtils/localeTranslator')
+  const translate = scopedLocaleTranslator(
+    'zh-CN',
+    ['agent_workspace.approval.'],
+    (key, options) =>
+      (options?.defaultValue as string | undefined) ||
+      (options?.error as string | undefined) ||
+      zhLocaleText(key)
+  )
+  return {
+    useTranslation: () => ({
+      i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' },
+      t: (key: string, options?: { defaultValue?: string; error?: string }) =>
+        translate(key, options)
+    })
+  }
+})
 
 vi.mock('@renderer/hooks/useConfig', () => ({
   useConfig: () => ({
@@ -181,14 +280,71 @@ vi.mock('@renderer/hooks/useMessage', () => ({
   })
 }))
 
+const { purgeDeletedConversationMock } = vi.hoisted(() => ({
+  purgeDeletedConversationMock: vi.fn()
+}))
+vi.mock('./reportBundlePurge', () => ({
+  purgeReportBundlesOfDeletedConversation: purgeDeletedConversationMock,
+  purgeReportBundlesOfDeletedProject: vi.fn()
+}))
+
 vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
+    svcMagicAgentPlatform: {
+      listPendingApprovals: hoisted.listPendingApprovalsMock,
+      resolvePendingApproval: hoisted.resolvePendingApprovalMock
+    },
+    svcShell: { fileExistsBatch: hoisted.fileExistsBatchMock },
     svcAgentLocalFiles: hoisted.agentLocalFilesService,
     svcFs: {
       readTextFile: hoisted.readTextFileMock
     },
     svcLLMProxy: {
-      signHy3DModel: vi.fn()
+      endTeam: hoisted.endTeamMock,
+      signHy3DModel: vi.fn(),
+      listAgentInteractions: hoisted.listAgentInteractionsMock,
+      listAgentTeamMessages: hoisted.listAgentTeamMessagesMock,
+      claimAgentTeamMessage: hoisted.claimAgentTeamMessageMock,
+      resolveAgentInteraction: hoisted.resolveAgentInteractionMock,
+      saveAgentHtmlApp: hoisted.saveAgentHtmlAppMock,
+      listSavedAgentHtmlApps: hoisted.listSavedAgentHtmlAppsMock,
+      restoreAgentHtmlApp: hoisted.restoreAgentHtmlAppMock,
+      deleteSavedAgentHtmlApp: hoisted.deleteSavedAgentHtmlAppMock,
+      setAgentHtmlScope: hoisted.setAgentHtmlScopeMock,
+      agentHtmlStorageStatus: hoisted.agentHtmlStorageStatusMock,
+      initializeAgentHtmlStorage: hoisted.initializeAgentHtmlStorageMock,
+      listAgentHtmlApps: hoisted.listAgentHtmlAppsMock,
+      openAgentHtmlApp: hoisted.openAgentHtmlAppMock,
+      closeAgentHtmlApp: hoisted.closeAgentHtmlAppMock,
+      listAgentSides: hoisted.listAgentSidesMock,
+      openAgentSide: hoisted.openAgentSideMock,
+      startAgentSide: hoisted.startAgentSideMock,
+      continueAgentSide: hoisted.continueAgentSideMock,
+      stopAgentSide: hoisted.stopAgentSideMock,
+      deleteAgentSide: hoisted.deleteAgentSideMock,
+      listAgentProcesses: hoisted.listAgentProcessesMock,
+      readAgentProcess: hoisted.readAgentProcessMock,
+      stopAgentProcess: hoisted.stopAgentProcessMock,
+      listAgentJobs: hoisted.listAgentJobsMock,
+      readAgentJob: hoisted.readAgentJobMock,
+      stopAgentJob: hoisted.stopAgentJobMock,
+      listAgentArchiveQueries: hoisted.listAgentArchiveQueriesMock,
+      resolveAgentArchiveQuery: hoisted.resolveAgentArchiveQueryMock,
+      prepareAgentGoalProgress: hoisted.prepareAgentGoalProgressMock,
+      agentGoalScopeRevision: hoisted.agentGoalScopeRevisionMock,
+      setAgentGoalScope: hoisted.setAgentGoalScopeMock,
+      listAgentGoalDispatches: hoisted.listAgentGoalDispatchesMock,
+      listAgentGoals: hoisted.listAgentGoalsMock,
+      mutateAgentGoal: hoisted.mutateAgentGoalMock,
+      managedFirstRunPaneRevision: hoisted.managedFirstRunPaneRevisionMock,
+      setManagedFirstRunPaneScope: hoisted.setManagedFirstRunPaneScopeMock,
+      agentSkillScopeRevision: hoisted.agentSkillScopeRevisionMock,
+      setAgentSkillScope: hoisted.setAgentSkillScopeMock,
+      listAgentSessionSkills: hoisted.listAgentSessionSkillsMock,
+      showAgentSessionSkill: hoisted.showAgentSessionSkillMock,
+      setAgentSkillPreference: hoisted.setAgentSkillPreferenceMock,
+      getAgentNotes: hoisted.getAgentNotesMock,
+      mutateAgentNote: hoisted.mutateAgentNoteMock
     },
     svcHyper: {
       saveImageToDir: hoisted.saveImageToDirMock
@@ -196,6 +352,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     svcManagedMedia: {
       importFile: hoisted.importManagedFileMock,
       importDataUrl: hoisted.importManagedDataUrlMock,
+      importBytes: hoisted.importManagedBytesMock,
       importUrl: hoisted.importManagedUrlMock
     }
   })
@@ -242,143 +399,376 @@ vi.mock('./hooks/useSpeechRecognition', () => ({
   })
 }))
 
-vi.mock('./chatStorage', () => ({
-  loadAllSessions: (...args: unknown[]) => hoisted.loadAllSessionsMock(...args),
-  saveAllSessions: (...args: unknown[]) => hoisted.saveAllSessionsMock(...args),
-  compareAndUpdateSessionInDB: vi.fn(
-    async (
-      sessionId: string,
-      scope: string,
-      options: {
-        expectedSession: ChatSession
-        shouldUpdate?: (currentSession: ChatSession) => boolean
-        update: (currentSession: ChatSession) => ChatSession
+vi.mock('./chatStorage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./chatStorage')>()
+  return {
+    ...actual,
+    createTeamMemberInDB: vi.fn(
+      async (input: {
+        scope: string
+        expectedLead: ChatSession
+        member: ChatSession
+        shouldUpdate?: () => boolean
+      }) => {
+        if (hoisted.saveSessionToDBGate.value) await hoisted.saveSessionToDBGate.value
+        const lead = hoisted.storedSessions.value.find(
+          (session) => session.id === input.expectedLead.id
+        )
+        if (
+          !lead ||
+          lead.teamEnded ||
+          input.shouldUpdate?.() === false ||
+          JSON.stringify(lead) !== JSON.stringify(input.expectedLead)
+        )
+          throw new Error('Team changed')
+        const members = hoisted.storedSessions.value.filter(
+          (session) =>
+            session.teamLeadId === lead.id &&
+            !session.archived &&
+            (session.teamMemberGeneration ?? 0) === (lead.teamGeneration ?? 0)
+        )
+        if (
+          members.length >= (lead.teamSettings?.maxMembers ?? 6) ||
+          members.some((session) => session.teamMemberName === input.member.teamMemberName)
+        )
+          throw new Error('Team full')
+        const member = { ...input.member, teamMemberGeneration: lead.teamGeneration ?? 0 }
+        hoisted.storedSessions.value = [...hoisted.storedSessions.value, cloneValue(member)]
+        return { lead: cloneValue(lead), member: cloneValue(member) }
       }
-    ) => {
-      hoisted.migrationStarted.value = true
-      const gate = hoisted.migrationCommitGate.value
+    ),
+    setTeamMemberModelChoiceInDB: vi.fn(
+      async (input: {
+        scope: string
+        expectedLead: ChatSession
+        expectedMember: ChatSession
+        profileId: string | null
+        shouldUpdate?: () => boolean
+      }) => {
+        const records =
+          hoisted.scopedTestSessions.value?.[input.scope] ?? hoisted.storedSessions.value
+        const lead = records.find((session) => session.id === input.expectedLead.id)
+        const member = records.find((session) => session.id === input.expectedMember.id)
+        if (
+          !lead ||
+          !member ||
+          lead.teamEnded ||
+          lead.archived ||
+          member.archived ||
+          member.teamLeadId !== lead.id ||
+          (member.teamMemberGeneration ?? 0) !== (lead.teamGeneration ?? 0) ||
+          input.shouldUpdate?.() === false ||
+          !actual.normalizedSessionsEqual(lead, input.expectedLead, input.scope) ||
+          !actual.normalizedSessionsEqual(member, input.expectedMember, input.scope)
+        )
+          throw new Error('Team changed')
+        // As the real call: a clear of a member with no choice writes nothing and hands the
+        // stored records back as they are.
+        if (input.profileId === null && !Object.hasOwn(member, 'memberModelChoice'))
+          return { lead: cloneValue(lead), member: cloneValue(member) }
+        // As the real call: a clear removes the property (never `memberModelChoice: undefined`).
+        const { memberModelChoice: _replaced, ...current } = member
+        const updated: ChatSession = {
+          ...current,
+          ...(input.profileId === null
+            ? {}
+            : { memberModelChoice: { version: 1 as const, profileId: input.profileId } }),
+          sessionUrl: undefined,
+          sessionProfileId: undefined,
+          sessionRouteFingerprint: undefined
+        }
+        const next = records.map((session) =>
+          session.id === member.id ? cloneValue(updated) : session
+        )
+        if (hoisted.scopedTestSessions.value) hoisted.scopedTestSessions.value[input.scope] = next
+        else hoisted.storedSessions.value = next
+        return { lead: cloneValue(lead), member: cloneValue(updated) }
+      }
+    ),
+    endTeamInDB: vi.fn(
+      async (input: { scope: string; expectedLead: ChatSession; shouldUpdate?: () => boolean }) => {
+        const lead = hoisted.storedSessions.value.find(
+          (session) => session.id === input.expectedLead.id
+        )
+        if (!lead || input.shouldUpdate?.() === false) throw new Error('Team changed')
+        const updatedLead = {
+          ...lead,
+          teamEnded: true,
+          teamGeneration: (lead.teamGeneration ?? 0) + 1,
+          teamLifecycleRevision: (lead.teamLifecycleRevision ?? 0) + 1
+        }
+        const members = hoisted.storedSessions.value
+          .filter((session) => session.teamLeadId === lead.id && !session.archived)
+          .map((session) => ({
+            ...session,
+            teamLifecycleRevision: (session.teamLifecycleRevision ?? 0) + 1,
+            ...(lead.teamSettings?.autoCleanup ? { archived: true } : {})
+          }))
+        hoisted.storedSessions.value = hoisted.storedSessions.value.map((session) =>
+          session.id === lead.id
+            ? updatedLead
+            : (members.find((member) => member.id === session.id) ?? session)
+        )
+        return { lead: updatedLead, members }
+      }
+    ),
+    loadSessionFromDB: vi.fn(async (id: string) => {
+      const gate = hoisted.teamPreflightReadGate.value
       if (gate) {
-        await gate
+        gate.entered = true
+        await gate.gate
       }
-      const existingIndex = hoisted.storedSessions.value.findIndex((item) => item.id === sessionId)
-      if (existingIndex < 0 || hoisted.deleteTombstones.value.has(`${scope}:${sessionId}`))
-        return null
-      const currentSession = cloneValue(hoisted.storedSessions.value[existingIndex])
-      if (
-        JSON.stringify(currentSession) !== JSON.stringify(options.expectedSession) ||
-        (options.shouldUpdate && !options.shouldUpdate(currentSession))
-      ) {
-        return null
+      return cloneValue(hoisted.storedSessions.value.find((session) => session.id === id) ?? null)
+    }),
+    loadAllSessions: (...args: unknown[]) => hoisted.loadAllSessionsMock(...args),
+    getChatScopeRevision: (scope?: string) =>
+      hoisted.scopeRevision.value ?? actual.getChatScopeRevision(scope),
+    saveAllSessions: (...args: unknown[]) => hoisted.saveAllSessionsMock(...args),
+    compareAndUpdateSessionInDB: vi.fn(
+      async (
+        sessionId: string,
+        scope: string,
+        options: {
+          expectedSession: ChatSession
+          shouldUpdate?: (currentSession: ChatSession) => boolean
+          update: (currentSession: ChatSession) => ChatSession
+        }
+      ) => {
+        hoisted.migrationStarted.value = true
+        if (hoisted.skipMigrationOnce.value) {
+          hoisted.skipMigrationOnce.value = false
+          return null
+        }
+        const gate = hoisted.migrationCommitGate.value
+        if (gate) {
+          await gate
+        }
+        const stored = hoisted.scopedTestSessions.value?.[scope] ?? hoisted.storedSessions.value
+        const existingIndex = stored.findIndex((item) => item.id === sessionId)
+        if (existingIndex < 0 || hoisted.deleteTombstones.value.has(`${scope}:${sessionId}`))
+          return null
+        const currentSession = cloneValue(stored[existingIndex])
+        if (
+          JSON.stringify(currentSession) !== JSON.stringify(options.expectedSession) ||
+          (options.shouldUpdate && !options.shouldUpdate(currentSession))
+        ) {
+          return null
+        }
+        const updatedSession = cloneValue(options.update(currentSession))
+        const nextSessions = cloneValue(stored)
+        nextSessions[existingIndex] = updatedSession
+        if (hoisted.scopedTestSessions.value) hoisted.scopedTestSessions.value[scope] = nextSessions
+        else hoisted.storedSessions.value = nextSessions
+        const resultGate = hoisted.compareCommitResultGate.value
+        if (resultGate) {
+          hoisted.compareCommitted.value = cloneValue(updatedSession)
+          await resultGate
+        }
+        return updatedSession
       }
-      const updatedSession = cloneValue(options.update(currentSession))
-      const nextSessions = cloneValue(hoisted.storedSessions.value)
-      nextSessions[existingIndex] = updatedSession
-      hoisted.storedSessions.value = nextSessions
-      return updatedSession
-    }
-  ),
-  saveSessionToDB: vi.fn(async (session: ChatSession) => {
-    if (hoisted.saveSessionToDBGate.value) {
-      await hoisted.saveSessionToDBGate.value
-    }
-    const nextSessions = cloneValue(hoisted.storedSessions.value)
-    const existingIndex = nextSessions.findIndex((item) => item.id === session.id)
-    if (existingIndex >= 0) {
-      nextSessions[existingIndex] = cloneValue(session)
-    } else {
-      nextSessions.unshift(cloneValue(session))
-    }
-    hoisted.storedSessions.value = nextSessions
-  }),
-  deleteSessionFromDB: vi.fn(async (sessionId: string) => {
-    hoisted.storedSessions.value = hoisted.storedSessions.value.filter(
-      (session) => session.id !== sessionId
-    )
-  }),
-  readSessionDraftBackup: vi.fn((sessionId: string, scope = 'default') => {
-    const record = hoisted.draftBackups.value[`${scope}:${sessionId}`]
-    return record ? cloneValue(record) : undefined
-  }),
-  writeSessionDraftBackup: vi.fn(
-    (
-      sessionId: string,
-      updatedAt: number,
-      draft: ChatSessionDraft | undefined,
-      scope = 'default'
-    ) => {
-      const key = `${scope}:${sessionId}`
-      const existingRecord = hoisted.draftBackups.value[key]
-      if (existingRecord && existingRecord.updatedAt > updatedAt) {
-        return
+    ),
+    saveSessionToDB: vi.fn(
+      async (
+        session: ChatSession,
+        scope = 'default',
+        options?: { expectedSession?: ChatSession | null; shouldUpdate?: () => boolean }
+      ) => {
+        const selective = hoisted.selectiveSaveGate.value
+        if (selective?.id === session.id) {
+          selective.started = true
+          await selective.gate
+        }
+        if (hoisted.saveSessionToDBGate.value) {
+          hoisted.saveSessionToDBGateStarted.value = session.id
+          await hoisted.saveSessionToDBGate.value
+        }
+        if (
+          hoisted.failTaskResponseSave.value === session.id &&
+          session.messages.some(
+            (message) => message.role === 'assistant' && message.content === '结果已返回但未保存'
+          )
+        )
+          throw new Error('fixture response save failure')
+        const nextSessions = cloneValue(
+          hoisted.scopedTestSessions.value?.[scope] ?? hoisted.storedSessions.value
+        )
+        const existingIndex = nextSessions.findIndex((item) => item.id === session.id)
+        const existing = nextSessions[existingIndex]
+        if (existing && !actual.sameTeamLifecycle(existing, session))
+          throw new Error('Session lifecycle changed')
+        let matchesExpected = false
+        if (options && Object.prototype.hasOwnProperty.call(options, 'expectedSession')) {
+          matchesExpected =
+            options.expectedSession === null
+              ? !existing
+              : !!existing &&
+                !!options.expectedSession &&
+                actual.normalizedSessionsEqual(existing, options.expectedSession, scope)
+          const alreadySaved =
+            !!existing && actual.normalizedSessionsEqual(existing, session, scope)
+          if (!matchesExpected && !alreadySaved) throw new Error('Session save conflict')
+          if (options.shouldUpdate && !options.shouldUpdate()) {
+            if (matchesExpected) throw new actual.ChatSessionSaveSupersededError()
+            throw new Error('Session save conflict')
+          }
+          if (alreadySaved) return
+        } else if (options?.shouldUpdate && !options.shouldUpdate())
+          throw new Error('Session changed before save')
+        if (existingIndex >= 0) {
+          nextSessions[existingIndex] = cloneValue(session)
+        } else {
+          nextSessions.unshift(cloneValue(session))
+        }
+        if (hoisted.scopedTestSessions.value) hoisted.scopedTestSessions.value[scope] = nextSessions
+        else hoisted.storedSessions.value = nextSessions
+        if (
+          hoisted.teamPostCommitGate.value &&
+          session.teamTasks?.some((task) => task.title === 'scope A task')
+        ) {
+          hoisted.teamPostCommitSnapshot.value = cloneValue(session)
+          await hoisted.teamPostCommitGate.value
+        }
       }
+    ),
+    deleteSessionFromDB: vi.fn(async (sessionId: string) => {
+      hoisted.storedSessions.value = hoisted.storedSessions.value.filter(
+        (session) => session.id !== sessionId
+      )
+    }),
+    readSessionDraftBackup: vi.fn((sessionId: string, scope = 'default') => {
+      const record = hoisted.draftBackups.value[`${scope}:${sessionId}`]
+      return record ? cloneValue(record) : undefined
+    }),
+    writeSessionDraftBackup: vi.fn(
+      (
+        sessionId: string,
+        updatedAt: number,
+        draft: ChatSessionDraft | undefined,
+        scope = 'default'
+      ) => {
+        const key = `${scope}:${sessionId}`
+        const existingRecord = hoisted.draftBackups.value[key]
+        if (existingRecord && existingRecord.updatedAt > updatedAt) {
+          return
+        }
 
-      hoisted.draftBackups.value = {
-        ...hoisted.draftBackups.value,
-        [key]: draft ? { updatedAt, draft: cloneValue(draft) } : { updatedAt }
+        hoisted.draftBackups.value = {
+          ...hoisted.draftBackups.value,
+          [key]: draft ? { updatedAt, draft: cloneValue(draft) } : { updatedAt }
+        }
       }
-    }
-  ),
-  deleteSessionDraftBackup: vi.fn((sessionId: string, scope = 'default') => {
-    const key = `${scope}:${sessionId}`
-    const nextBackups = { ...hoisted.draftBackups.value }
-    delete nextBackups[key]
-    hoisted.draftBackups.value = nextBackups
-  }),
-  migrateFromLocalStorage: vi.fn(async () => null),
-  hasSessionDeleteTombstone: vi.fn((sessionId: string, scope = 'default') =>
-    hoisted.deleteTombstones.value.has(`${scope}:${sessionId}`)
-  ),
-  readSessionDeleteTombstones: vi.fn(() =>
-    [...hoisted.deleteTombstones.value].map((key) => {
-      const separatorIndex = key.indexOf(':')
-      return { scope: key.slice(0, separatorIndex), sessionId: key.slice(separatorIndex + 1) }
-    })
-  ),
-  setSessionDeleteTombstone: vi.fn((sessionId: string, scope = 'default', deleted = true) => {
-    const next = new Set(hoisted.deleteTombstones.value)
-    const key = `${scope}:${sessionId}`
-    if (deleted) next.add(key)
-    else next.delete(key)
-    hoisted.deleteTombstones.value = next
-  }),
-  cancelDebouncedSessionSave: vi.fn(),
-  debouncedSaveSessions: vi.fn(
-    (
-      sessions: ChatSession[],
-      _delayMs: number,
-      _scope: string,
-      options?: { onSuccess?: (sessions: ChatSession[]) => void }
-    ) => {
-      const changedSessions = cloneValue(sessions)
-      const persistChangedSessions = () => {
-        const nextSessions = cloneValue(hoisted.storedSessions.value)
-        for (const session of changedSessions) {
-          const existingIndex = nextSessions.findIndex((item) => item.id === session.id)
-          if (existingIndex >= 0) {
-            nextSessions[existingIndex] = session
-          } else {
-            nextSessions.unshift(session)
+    ),
+    deleteSessionDraftBackup: vi.fn((sessionId: string, scope = 'default') => {
+      const key = `${scope}:${sessionId}`
+      const nextBackups = { ...hoisted.draftBackups.value }
+      delete nextBackups[key]
+      hoisted.draftBackups.value = nextBackups
+    }),
+    migrateFromLocalStorage: vi.fn(async () => null),
+    hasSessionDeleteTombstone: vi.fn((sessionId: string, scope = 'default') =>
+      hoisted.deleteTombstones.value.has(`${scope}:${sessionId}`)
+    ),
+    readSessionDeleteTombstones: vi.fn(() =>
+      [...hoisted.deleteTombstones.value].map((key) => {
+        const separatorIndex = key.indexOf(':')
+        return { scope: key.slice(0, separatorIndex), sessionId: key.slice(separatorIndex + 1) }
+      })
+    ),
+    setSessionDeleteTombstone: vi.fn((sessionId: string, scope = 'default', deleted = true) => {
+      const next = new Set(hoisted.deleteTombstones.value)
+      const key = `${scope}:${sessionId}`
+      if (deleted) next.add(key)
+      else next.delete(key)
+      hoisted.deleteTombstones.value = next
+    }),
+    cancelDebouncedSessionSave: vi.fn(),
+    debouncedSaveSessions: vi.fn(
+      (
+        sessions: ChatSession[],
+        _delayMs: number,
+        _scope: string,
+        options?: {
+          onSuccess?: (sessions: ChatSession[]) => void
+          onError?: (error: unknown, sessions: ChatSession[]) => void
+          saveLatest?: (id: string, scope: string) => Promise<ChatSession | null>
+        }
+      ) => {
+        // Exercise the same execution-time resolver as production; an old scheduled batch must not
+        // bypass the current-state writer by directly copying its registration-time snapshots.
+        if (options?.saveLatest) hoisted.latestSaveCallback.value = options.saveLatest
+        const persistChangedSessions = async () => {
+          for (const session of sessions) {
+            try {
+              if (!options?.saveLatest) continue
+              const saved = await options.saveLatest(session.id, _scope)
+              if (saved) {
+                const callbackGate = hoisted.saveCallbackGate.value
+                if (callbackGate) {
+                  hoisted.saveCallbackGateStarted.value = session.id
+                  await callbackGate
+                }
+                options.onSuccess?.([saved])
+                hoisted.saveSuccessCount.value += 1
+              }
+            } catch (error) {
+              options?.onError?.(error, [session])
+            }
           }
         }
-        hoisted.storedSessions.value = nextSessions
-        options?.onSuccess?.(sessions)
+        if (hoisted.debouncedSaveAllSessionsGate.value) {
+          void hoisted.debouncedSaveAllSessionsGate.value.then(persistChangedSessions)
+          return
+        }
+        void persistChangedSessions()
       }
-
-      if (hoisted.debouncedSaveAllSessionsGate.value) {
-        void hoisted.debouncedSaveAllSessionsGate.value.then(persistChangedSessions)
-        return
-      }
-      persistChangedSessions()
-    }
-  )
-}))
+    )
+  }
+})
 
 vi.mock('./chatRequestUtils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./chatRequestUtils')>()
   return {
     ...actual,
-    requestChatCompletion: hoisted.requestChatCompletionMock,
-    requestChatCompletionStream: hoisted.requestChatCompletionStreamMock,
+    requestChatCompletion: async (input: {
+      beforeLocalDispatch?: () => void | Promise<void>
+      onLocalDispatch?: () => void
+      signal?: AbortSignal
+    }) => {
+      if (hoisted.teamPreprocessingFails.value && input.onLocalDispatch)
+        throw new Error('fixture preprocessing failed')
+      const dispatchGate = hoisted.teamBeforeDispatchGate.value
+      if (dispatchGate && input.beforeLocalDispatch) {
+        dispatchGate.entered = true
+        await dispatchGate.gate
+      }
+      if (input.beforeLocalDispatch) await input.beforeLocalDispatch()
+      if (input.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      const result = hoisted.requestChatCompletionMock(input)
+      input.onLocalDispatch?.()
+      return result
+    },
+    requestChatCompletionStream: async (input: {
+      beforeLocalDispatch?: () => void | Promise<void>
+      onLocalDispatch?: () => void
+      signal?: AbortSignal
+    }) => {
+      if (hoisted.teamPreprocessingFails.value && input.onLocalDispatch)
+        throw new Error('fixture preprocessing failed')
+      const dispatchGate = hoisted.teamBeforeDispatchGate.value
+      if (dispatchGate && input.beforeLocalDispatch) {
+        dispatchGate.entered = true
+        await dispatchGate.gate
+      }
+      if (input.beforeLocalDispatch) await input.beforeLocalDispatch()
+      if (input.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      const result = hoisted.requestChatCompletionStreamMock(input)
+      input.onLocalDispatch?.()
+      return result
+    },
+    preflightChatRequestImages: (...args: Parameters<typeof actual.preflightChatRequestImages>) => {
+      if (hoisted.preflightFailure.value) throw new Error('fixture preflight failed')
+      return actual.preflightChatRequestImages(...args)
+    },
     resolveAttachmentBatchCapability: hoisted.resolveAttachmentBatchCapabilityMock,
     supportsStreamingChatCompletion: hoisted.supportsStreamingChatCompletionMock
   }
@@ -419,62 +809,140 @@ vi.mock('./components/SessionHistoryDialog', () => ({
   default: () => <div data-testid="session-history-dialog-mock" />
 }))
 
+vi.mock('./chatSkillRuntimeResources', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./chatSkillRuntimeResources')>()
+  hoisted.resolveSkillRuntimeResourceEntriesMock.mockImplementation(
+    original.resolveSkillRuntimeResourceEntries
+  )
+  return {
+    ...original,
+    resolveSkillRuntimeResourceEntries: hoisted.resolveSkillRuntimeResourceEntriesMock
+  }
+})
+
 vi.mock('./components/ChatPrimarySelection', () => ({
   default: ({
     selectedProfileId,
     selectedReasoningEffort,
+    memberModel,
+    memberReasoningEffort,
+    onSelectMemberReasoningEffort,
     onSelectProfile,
     onSelectReasoningEffort
   }: {
     selectedProfileId?: string | null
     selectedReasoningEffort?: string | null
+    memberModel?: (
+      | {
+          state: 'inherited' | 'selected'
+          label: string
+        }
+      | { state: 'unavailable' }
+    ) & {
+      onSelectProfile?: (id: string) => void
+      selectableProfileIds?: readonly string[]
+      disabled?: boolean
+      inheritLead?: { profileId: string; modelName: string; onSelect?: () => void }
+    }
+    memberReasoningEffort?: string | null
+    onSelectMemberReasoningEffort?: (effort: 'medium' | 'high' | 'xhigh') => void
     onSelectProfile: (profileId: string | null) => void
     onSelectReasoningEffort?: (effort: 'medium' | 'high' | 'xhigh') => void
-  }) => (
-    <div data-testid="chat-primary-selection-mock">
-      <button
-        type="button"
-        data-testid="select-base-model"
-        onClick={() => onSelectProfile('base-model')}
-      >
-        select-base-model
-      </button>
-      <button
-        type="button"
-        data-testid="select-vision-model"
-        onClick={() => onSelectProfile('vision-model')}
-      >
-        select-vision-model
-      </button>
-      <span data-testid="chat-primary-selection-value">{selectedProfileId || 'none'}</span>
-      <button
-        type="button"
-        data-testid="select-reasoning-medium"
-        onClick={() => onSelectReasoningEffort?.('medium')}
-      >
-        select-reasoning-medium
-      </button>
-      <button
-        type="button"
-        data-testid="select-reasoning-high"
-        onClick={() => onSelectReasoningEffort?.('high')}
-      >
-        select-reasoning-high
-      </button>
-      <button
-        type="button"
-        data-testid="select-reasoning-xhigh"
-        onClick={() => onSelectReasoningEffort?.('xhigh')}
-      >
-        select-reasoning-xhigh
-      </button>
-      <span data-testid="chat-reasoning-value">{selectedReasoningEffort || 'none'}</span>
-    </div>
-  )
-}))
-
-vi.mock('./components/ChatSkillPicker', () => ({
-  default: () => <div data-testid="chat-skill-picker-mock" />
+  }) =>
+    memberModel ? (
+      <div data-testid="chat-member-model-mock">
+        <span>
+          {memberModel.state === 'unavailable'
+            ? 'unavailable'
+            : `${memberModel.state}:${memberModel.label}`}
+        </span>
+        {(memberModel.state !== 'unavailable' || memberModel.onSelectProfile) && (
+          <>
+            <span data-testid="selectable-member-profile-ids">
+              {JSON.stringify(memberModel.selectableProfileIds)}
+            </span>
+            <button
+              type="button"
+              data-testid="forge-member-3d-model"
+              onClick={() => memberModel.onSelectProfile?.('hunyuan3d-pro')}
+            >
+              Attempt unsupported member model
+            </button>
+          </>
+        )}
+        {memberModel.disabled ? <span data-testid="member-model-disabled" /> : null}
+        {memberModel.inheritLead?.onSelect ? (
+          <button
+            type="button"
+            data-testid="inherit-member-lead"
+            onClick={() => memberModel.inheritLead?.onSelect?.()}
+          >
+            {`Inherit ${memberModel.inheritLead.modelName}`}
+          </button>
+        ) : null}
+        {memberModel.onSelectProfile ? (
+          <button
+            type="button"
+            data-testid="select-member-vision-model"
+            onClick={() => memberModel.onSelectProfile?.('vision-model')}
+          >
+            Select member model
+          </button>
+        ) : null}
+        {onSelectMemberReasoningEffort ? (
+          <>
+            <span data-testid="member-reasoning-value">{memberReasoningEffort || 'none'}</span>
+            <button
+              type="button"
+              data-testid="select-member-reasoning-high"
+              onClick={() => onSelectMemberReasoningEffort('high')}
+            >
+              Select member reasoning
+            </button>
+          </>
+        ) : null}
+      </div>
+    ) : (
+      <div data-testid="chat-primary-selection-mock">
+        <button
+          type="button"
+          data-testid="select-base-model"
+          onClick={() => onSelectProfile('base-model')}
+        >
+          select-base-model
+        </button>
+        <button
+          type="button"
+          data-testid="select-vision-model"
+          onClick={() => onSelectProfile('vision-model')}
+        >
+          select-vision-model
+        </button>
+        <span data-testid="chat-primary-selection-value">{selectedProfileId || 'none'}</span>
+        <button
+          type="button"
+          data-testid="select-reasoning-medium"
+          onClick={() => onSelectReasoningEffort?.('medium')}
+        >
+          select-reasoning-medium
+        </button>
+        <button
+          type="button"
+          data-testid="select-reasoning-high"
+          onClick={() => onSelectReasoningEffort?.('high')}
+        >
+          select-reasoning-high
+        </button>
+        <button
+          type="button"
+          data-testid="select-reasoning-xhigh"
+          onClick={() => onSelectReasoningEffort?.('xhigh')}
+        >
+          select-reasoning-xhigh
+        </button>
+        <span data-testid="chat-reasoning-value">{selectedReasoningEffort || 'none'}</span>
+      </div>
+    )
 }))
 
 vi.mock('./components/ImagePreviewOverlay', () => ({
@@ -492,8 +960,10 @@ vi.mock('./components/ChatComposer', () => ({
     onSend,
     onUploadFile,
     pendingAttachments,
+    onRemoveAttachment,
     selectedSkillName,
     modelSelectorSlot,
+    statusSlot,
     inputSyncKey,
     isLoading,
     onStopGenerating,
@@ -507,8 +977,10 @@ vi.mock('./components/ChatComposer', () => ({
     onSend: () => void
     onUploadFile: () => void
     pendingAttachments: ChatAttachment[]
+    onRemoveAttachment: (index: number) => void
     selectedSkillName?: string
     modelSelectorSlot?: React.ReactNode
+    statusSlot?: React.ReactNode
     inputSyncKey?: string
     isLoading: boolean
     onStopGenerating: () => void
@@ -577,14 +1049,55 @@ vi.mock('./components/ChatComposer', () => ({
           </button>
         ) : null}
         <div data-testid="chat-composer-attachment-count">{pendingAttachments.length}</div>
+        {pendingAttachments.map((attachment, index) => (
+          <button
+            type="button"
+            key={`${attachment.url}-${index}`}
+            data-testid={`chat-composer-remove-${index}`}
+            onClick={() => onRemoveAttachment(index)}
+          >
+            remove
+          </button>
+        ))}
         <div data-testid="chat-composer-attachment-names">
           {pendingAttachments.map((attachment) => attachment.fileName || attachment.url).join('|')}
         </div>
         {modelSelectorSlot}
+        {statusSlot}
       </div>
     )
   }
 }))
+
+/**
+ * Fails a test fast when ChatPage re-renders in an endless effect loop. Such a loop never yields a
+ * macrotask (act() keeps flushing the updates synchronously), so neither waitFor nor the test
+ * timeout can stop it and the worker fills its heap. Any real test yields between renders long
+ * before this many: the count is reset by the first macrotask after a render, and also by the
+ * top-level beforeEach (resetRenderLoopGuard), so a test that installs fake timers and never runs
+ * the pending reset cannot carry a stale count into the tests after it.
+ */
+const RENDER_LOOP_LIMIT = 1000
+let rendersWithoutMacrotask = 0
+let renderLoopResetScheduled = false
+const guardRenderLoop = (): void => {
+  rendersWithoutMacrotask += 1
+  if (!renderLoopResetScheduled) {
+    renderLoopResetScheduled = true
+    setTimeout(() => {
+      rendersWithoutMacrotask = 0
+      renderLoopResetScheduled = false
+    }, 0)
+  }
+  if (rendersWithoutMacrotask > RENDER_LOOP_LIMIT)
+    throw new Error(
+      `ChatPage rendered ${rendersWithoutMacrotask} times without yielding: endless effect loop`
+    )
+}
+const resetRenderLoopGuard = (): void => {
+  rendersWithoutMacrotask = 0
+  renderLoopResetScheduled = false
+}
 
 vi.mock('./components/ChatMessageList', () => ({
   default: (props: {
@@ -598,13 +1111,25 @@ vi.mock('./components/ChatMessageList', () => ({
       cancelLabel: string
     } | null
     onResolvePendingConfirmation?: (requestId: string, confirmed: boolean) => void
+    /** Agent column: the command cards that follow the last message. */
+    tail?: React.ReactNode
+    /** Agent column: the host of the member approval cards, after the tail. */
+    tailEnd?: React.ReactNode
+    /** Agent column: the command cards that stay after an older message. */
+    anchoredTail?: readonly { after: number; node: React.ReactNode }[]
   }) => {
     hoisted.chatMessageListMock(props)
+    guardRenderLoop()
     return (
       <>
         <pre data-testid="chat-session-state">
           {JSON.stringify(props.currentSession ?? null, null, 2)}
         </pre>
+        {props.anchoredTail?.map((group) => (
+          <React.Fragment key={group.after}>{group.node}</React.Fragment>
+        ))}
+        {props.tail}
+        {props.tailEnd}
         {props.pendingConfirmation ? (
           <div data-testid="chat-pending-confirmation-mock">
             <span>{props.pendingConfirmation.prompt}</span>
@@ -687,9 +1212,148 @@ const createExpiredContinuationError = (): Error & { status: number; body: strin
   return error
 }
 
+/** Picks one entry of the composer "+" menu; the mock composer renders the real addMenuSlot. */
+const chooseAddMenuEntry = (
+  testId: 'chat-composer-menu-add-member' | 'chat-composer-menu-team'
+): void => {
+  // The team actions sit above the conversation (the composer has no "+" menu any more).
+  fireEvent.click(
+    screen.getByTestId(
+      testId === 'chat-composer-menu-add-member' ? 'agent-header-add-member' : 'agent-header-team'
+    )
+  )
+}
+
+/**
+ * The Agent column has no skills button: "/skills" typed into the composer adds the thread
+ * skills card to the transcript. The command replaces whatever draft the composer held, and it
+ * is only accepted once the thread's skill scope is bound, hence the retry.
+ */
+const openSkillsCard = async (root: HTMLElement = document.body): Promise<HTMLElement> => {
+  await waitFor(() => {
+    fireEvent.change(within(root).getByTestId('chat-composer-input-mock'), {
+      target: { value: '/skills' }
+    })
+    fireEvent.click(within(root).getByTestId('chat-composer-send-mock'))
+    expect(within(root).getByTestId('chat-command-card')).toHaveAttribute('data-command', '/skills')
+  })
+  return within(root).getByTestId('chat-command-card')
+}
+
+/**
+ * Stands in for AgentWorkspace's open thread list: gives ChatPage the host that its sub-rows
+ * (main + side conversations) render into.
+ */
+function WithThreadSubRows({
+  children
+}: {
+  children: (host: HTMLElement | null) => React.ReactNode
+}): React.ReactElement {
+  const [host, setHost] = React.useState<HTMLElement | null>(null)
+  return (
+    <>
+      <div data-testid="thread-sub-rows" ref={setHost} />
+      {children(host)}
+    </>
+  )
+}
+
+/** The column has no "+" for side conversations: a bare "/btw" opens the new-side form. */
+const openNewSideForm = (): void => {
+  fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '/btw' } })
+  fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+}
+
+// The Agent column's thread list: a page rendered with `rows` lists its lead and members here.
+const teamRowsHost = document.createElement('div')
+teamRowsHost.setAttribute('data-testid', 'team-rows-host')
+const teamRows = () => within(teamRowsHost)
+
+/** The states of the delegated-agent lines at the end of the open transcript. */
+const delegatedLineStates = () =>
+  screen
+    .queryAllByTestId('team-delegated-row')
+    .map((row) => row.getAttribute('data-chat-delegated-line'))
+
+/**
+ * Records the team message dispatchers a rendered page uses. The lead view no longer lists
+ * channel and member-to-member messages (99dc5e79 removed the member details and their
+ * "用户 → Bob · 排队中" activity lines); the dispatcher still records every delivery's state
+ * (queued, request_started, response_received, unavailable, unknown), so tests read it there.
+ * The prototype spies are restored when the test finishes (onTestFinished), whatever its
+ * finally block does, so they never leak into later tests.
+ */
+const watchTeamDispatch = () => {
+  const dispatchers: TeamMessageDispatcher[] = []
+  const track = (dispatcher: TeamMessageDispatcher) => {
+    if (!dispatchers.includes(dispatcher)) dispatchers.push(dispatcher)
+  }
+  const enqueue = TeamMessageDispatcher.prototype.enqueue
+  const pump = TeamMessageDispatcher.prototype.pump
+  const spies = [
+    vi.spyOn(TeamMessageDispatcher.prototype, 'enqueue').mockImplementation(function (
+      this: TeamMessageDispatcher,
+      input
+    ) {
+      track(this)
+      return enqueue.call(this, input)
+    }),
+    vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (
+      this: TeamMessageDispatcher,
+      recipient
+    ) {
+      track(this)
+      return pump.call(this, recipient)
+    })
+  ]
+  onTestFinished(() => {
+    for (const spy of spies) spy.mockRestore()
+  })
+  /** The records of messages from `source` ('user' or a member id) to `recipient`, oldest first. */
+  const records = (source: string, recipient: string) =>
+    dispatchers
+      .flatMap((dispatcher) => dispatcher.entries())
+      .filter(
+        (entry) =>
+          entry.recipient === recipient &&
+          (source === 'user'
+            ? entry.intent.source.kind === 'user'
+            : entry.intent.source.kind === 'member' && entry.intent.source.member === source)
+      )
+  return {
+    dispatchers,
+    records,
+    /** The state of the latest such message, optionally only one whose text contains `text`. */
+    status: (source: string, recipient: string, text?: string) =>
+      records(source, recipient)
+        .filter((entry) => text === undefined || entry.intent.text.includes(text))
+        .at(-1)?.status
+  }
+}
+
+/**
+ * What the member form (AgentTeamMemberForm, opened from "+" > 添加成员 since a0384d0a, in the
+ * column overlay since 83165777) says when a create fails: the create may have committed, so it
+ * is reported as unconfirmed, not as refused.
+ */
+const MEMBER_CREATE_UNCONFIRMED =
+  '创建结果未确认；请先核对原团队成员列表。没有记录不代表未创建；未确认前请勿重复创建。'
+
+const storedMessages = (id: string) =>
+  hoisted.storedSessions.value.find((session) => session.id === id)?.messages ?? []
+
 const renderChatPage = (
-  storageScopeOrProps: string | { acceptExternalInput?: boolean; active?: boolean } = 'runtime-flow'
+  storageScopeOrProps:
+    | string
+    | {
+        acceptExternalInput?: boolean
+        active?: boolean
+        team?: boolean
+        rows?: boolean
+      } = 'runtime-flow'
 ) => {
+  const rows = typeof storageScopeOrProps !== 'string' && storageScopeOrProps.rows
+  if (rows && !teamRowsHost.isConnected) document.body.appendChild(teamRowsHost)
   const storageScope =
     typeof storageScopeOrProps === 'string' ? storageScopeOrProps : 'runtime-flow'
   const acceptExternalInput =
@@ -702,6 +1366,17 @@ const renderChatPage = (
       storageScope={storageScope}
       acceptExternalInput={acceptExternalInput}
       active={active}
+      route={
+        typeof storageScopeOrProps !== 'string' && storageScopeOrProps.team
+          ? {
+              channel: 'canvas',
+              scopeType: 'thread',
+              scopeId: 'runtime-project',
+              threadId: 'runtime-pane'
+            }
+          : undefined
+      }
+      threadSubRowsHost={rows ? teamRowsHost : undefined}
     />
   )
 }
@@ -742,12 +1417,33 @@ const dispatchSwitchSession = async (sessionId: string, scope = 'runtime-flow') 
   })
 }
 
+// Electron 42 has no File.path: the path of a file on disk comes from the preload's
+// webUtils.getPathForFile, stubbed per test in beforeEach (window.electronFile).
+// Only those files are granted: no other local path is authorised.
+const localFilePaths = new WeakMap<File, string>()
+const grantedLocalFilePaths = new Set<string>()
+const stubLocalFileBridge = () => {
+  grantedLocalFilePaths.clear()
+  vi.stubGlobal('electronFile', {
+    getPathForFile: (file: File) => localFilePaths.get(file) ?? '',
+    authorizeLocalMediaFile: async (file: File) => {
+      const filePath = localFilePaths.get(file) ?? ''
+      if (filePath) grantedLocalFilePaths.add(filePath)
+      return filePath
+    },
+    // The composer's one-use import grant (main returns the canonical path, or why not).
+    authorizeLocalMediaFileForImport: async (file: File) => {
+      const filePath = localFilePaths.get(file) ?? ''
+      if (filePath) grantedLocalFilePaths.add(filePath)
+      return filePath ? { path: filePath } : { refused: 'denied' as const }
+    },
+    resolveAuthorizedLocalMediaPath: async (filePath: string) =>
+      grantedLocalFilePaths.has(filePath) ? filePath : ''
+  })
+}
 const createLocalFile = (name: string, type: string, path: string): File => {
   const file = new File(['mock-file'], name, { type })
-  Object.defineProperty(file, 'path', {
-    configurable: true,
-    value: path
-  })
+  localFilePaths.set(file, path)
   return file
 }
 
@@ -775,7 +1471,8 @@ const readLatestMessageListProps = (): {
 }
 
 describe('ChatPage runtime workflow integration', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    resetRenderLoopGuard()
     hoisted.currentConfig.value = createConfig()
     hoisted.runtimeMcpStatus.value = null
     hoisted.buildDataDir.value = 'C:/MagicPot/Data'
@@ -790,12 +1487,26 @@ describe('ChatPage runtime workflow integration', () => {
       { id: 'translation-model', model_name: 'Translation Model', model_use: 'chat' as const }
     ]
     hoisted.storedSessions.value = []
+    hoisted.scopedTestSessions.value = null
     hoisted.draftBackups.value = {}
     hoisted.saveSessionToDBGate.value = null
+    hoisted.saveSessionToDBGateStarted.value = null
+    hoisted.selectiveSaveGate.value = null
+    hoisted.failTaskResponseSave.value = null
+    hoisted.teamPostCommitGate.value = null
+    hoisted.teamPostCommitSnapshot.value = null
+    hoisted.latestSaveCallback.value = null
+    hoisted.saveSuccessCount.value = 0
+    hoisted.saveCallbackGate.value = null
+    hoisted.saveCallbackGateStarted.value = null
     hoisted.migrationCommitGate.value = null
+    hoisted.compareCommitResultGate.value = null
+    hoisted.compareCommitted.value = null
     hoisted.migrationStarted.value = false
+    hoisted.skipMigrationOnce.value = false
     hoisted.deleteTombstones.value = new Set()
     hoisted.debouncedSaveAllSessionsGate.value = null
+    hoisted.scopeRevision.value = null
     hoisted.loadAllSessionsMock.mockReset()
     hoisted.loadAllSessionsMock.mockImplementation(async () =>
       cloneValue(hoisted.storedSessions.value)
@@ -811,6 +1522,8 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.agentLocalFilesService.list.mockResolvedValue({ entries: [], truncated: false })
     hoisted.agentLocalFilesService.revoke.mockResolvedValue(undefined)
     hoisted.agentLocalFilesService.cancel.mockResolvedValue(undefined)
+    hoisted.fileExistsBatchMock.mockReset()
+    hoisted.fileExistsBatchMock.mockImplementation(async (paths: string[]) => paths.map(() => true))
     hoisted.saveImageToDirMock.mockReset()
     hoisted.saveImageToDirMock.mockResolvedValue({
       savedPath: 'C:/MagicPot/AutoSave/Agent/chat_upload.png'
@@ -820,16 +1533,134 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.notifyErrorMock.mockReset()
     hoisted.notifyWarningMock.mockReset()
     hoisted.notifyInfoMock.mockReset()
+    hoisted.resolveSkillRuntimeResourceEntriesMock.mockReset()
+    const resources = await vi.importActual<typeof import('./chatSkillRuntimeResources')>(
+      './chatSkillRuntimeResources'
+    )
+    hoisted.resolveSkillRuntimeResourceEntriesMock.mockImplementation(
+      resources.resolveSkillRuntimeResourceEntries
+    )
     hoisted.resolveAttachmentBatchCapabilityMock.mockReset()
     hoisted.resolveAttachmentBatchCapabilityMock.mockResolvedValue(1)
+    hoisted.teamPreprocessingFails.value = false
+    hoisted.preflightFailure.value = false
+    hoisted.teamBeforeDispatchGate.value = null
+    hoisted.teamPreflightReadGate.value = null
     hoisted.requestChatCompletionMock.mockReset()
     hoisted.requestChatCompletionStreamMock.mockReset()
+    hoisted.listAgentInteractionsMock.mockReset()
+    hoisted.listAgentTeamMessagesMock.mockReset()
+    hoisted.listAgentTeamMessagesMock.mockResolvedValue({ intents: [] })
+    hoisted.claimAgentTeamMessageMock.mockReset()
+    hoisted.claimAgentTeamMessageMock.mockResolvedValue({})
+    hoisted.listAgentInteractionsMock.mockResolvedValue({ interactions: [] })
+    hoisted.resolveAgentInteractionMock.mockReset()
+    hoisted.resolveAgentInteractionMock.mockResolvedValue(undefined)
+    hoisted.saveAgentHtmlAppMock.mockReset()
+    hoisted.listSavedAgentHtmlAppsMock.mockReset()
+    hoisted.listSavedAgentHtmlAppsMock.mockResolvedValue({ apps: [] })
+    hoisted.restoreAgentHtmlAppMock.mockReset()
+    hoisted.deleteSavedAgentHtmlAppMock.mockReset()
+    hoisted.setAgentHtmlScopeMock.mockReset()
+    hoisted.setAgentHtmlScopeMock.mockResolvedValue({ documentToken: 'document-token' })
+    hoisted.agentHtmlStorageStatusMock.mockReset()
+    hoisted.agentHtmlStorageStatusMock.mockResolvedValue({
+      enabled: false,
+      initialized: true,
+      available: true,
+      unconfirmedRuns: 0,
+      canInitialize: false,
+      saveEnabled: false
+    })
+    hoisted.initializeAgentHtmlStorageMock.mockReset()
+    hoisted.listAgentHtmlAppsMock.mockReset()
+    hoisted.listAgentHtmlAppsMock.mockResolvedValue({ apps: [] })
+    hoisted.openAgentHtmlAppMock.mockReset()
+    hoisted.closeAgentHtmlAppMock.mockReset()
+    hoisted.listAgentSidesMock.mockReset()
+    hoisted.listAgentSidesMock.mockResolvedValue({ branches: [] })
+    hoisted.openAgentSideMock.mockReset()
+    hoisted.startAgentSideMock.mockReset()
+    hoisted.continueAgentSideMock.mockReset()
+    hoisted.stopAgentSideMock.mockReset()
+    hoisted.deleteAgentSideMock.mockReset()
+    hoisted.listAgentProcessesMock.mockReset()
+    hoisted.listAgentProcessesMock.mockResolvedValue({ jobs: [] })
+    hoisted.readAgentProcessMock.mockReset()
+    hoisted.stopAgentProcessMock.mockReset()
+    hoisted.listAgentJobsMock.mockReset()
+    hoisted.listAgentJobsMock.mockResolvedValue({ jobs: [] })
+    hoisted.readAgentJobMock.mockReset()
+    hoisted.stopAgentJobMock.mockReset()
+    hoisted.listAgentArchiveQueriesMock.mockReset()
+    hoisted.listAgentArchiveQueriesMock.mockResolvedValue({ queries: [] })
+    hoisted.resolveAgentArchiveQueryMock.mockReset()
+    hoisted.resolveAgentArchiveQueryMock.mockResolvedValue(undefined)
+    hoisted.prepareAgentGoalProgressMock.mockReset()
+    hoisted.prepareAgentGoalProgressMock.mockImplementation(async (req) => ({
+      token: 'goal-once',
+      goalId: req.goalId,
+      generation: req.expectedGeneration,
+      profileId: req.profileId,
+      expiresAt: Date.now() + 120000,
+      mode: 'progress-only',
+      budgetsEnforced: false,
+      grantsPermission: false
+    }))
+    hoisted.agentGoalScopeRevisionMock.mockReset()
+    hoisted.agentGoalScopeRevisionMock.mockResolvedValue({ revision: 0 })
+    hoisted.setAgentGoalScopeMock.mockReset()
+    hoisted.setAgentGoalScopeMock.mockResolvedValue({ documentToken: 'goal-document' })
+    hoisted.listAgentGoalDispatchesMock.mockReset()
+    hoisted.listAgentGoalDispatchesMock.mockResolvedValue({
+      revision: 0,
+      runs: [],
+      limits: { runs: 4, attemptsPerRun: 32, retainedReceipts: 264 },
+      scopeBlocked: false,
+      orphaned: false,
+      mutationBlocked: false,
+      mode: 'data-only',
+      budgetsEnforced: false,
+      grantsPermission: false
+    })
+    hoisted.listAgentGoalsMock.mockReset()
+    hoisted.listAgentGoalsMock.mockResolvedValue({
+      revision: 0,
+      goals: [],
+      grantsPermission: false,
+      untrustedData: true
+    })
+    hoisted.mutateAgentGoalMock.mockReset()
+    hoisted.managedFirstRunPaneRevisionMock.mockReset()
+    hoisted.managedFirstRunPaneRevisionMock.mockResolvedValue({ revision: 50 })
+    hoisted.setManagedFirstRunPaneScopeMock.mockReset()
+    hoisted.setManagedFirstRunPaneScopeMock.mockImplementation(async (req) =>
+      req.active ? { documentToken: `pane-${req.lifecycleRevision}` } : {}
+    )
+    hoisted.agentSkillScopeRevisionMock.mockReset()
+    hoisted.agentSkillScopeRevisionMock.mockResolvedValue({ revision: 0 })
+    hoisted.setAgentSkillScopeMock.mockReset()
+    hoisted.setAgentSkillScopeMock.mockResolvedValue({ documentToken: 'skill-document' })
+    hoisted.listAgentSessionSkillsMock.mockReset()
+    hoisted.listAgentSessionSkillsMock.mockResolvedValue({
+      revision: 0,
+      skills: [],
+      staleDisabledIds: [],
+      truncated: false,
+      grantsPermission: false
+    })
+    hoisted.showAgentSessionSkillMock.mockReset()
+    hoisted.setAgentSkillPreferenceMock.mockReset()
+    hoisted.getAgentNotesMock.mockReset()
+    hoisted.getAgentNotesMock.mockResolvedValue({ revision: 0, notes: [] })
+    hoisted.mutateAgentNoteMock.mockReset()
     hoisted.supportsStreamingChatCompletionMock.mockReset()
     hoisted.supportsStreamingChatCompletionMock.mockReturnValue(false)
     hoisted.selectFileMock.mockReset()
     hoisted.selectFileMock.mockResolvedValue(null)
     hoisted.fileToBlobUrlMock.mockClear()
     hoisted.fileToDataUrlMock.mockClear()
+    stubLocalFileBridge()
     const managedResponse = {
       version: 1 as const,
       reference: {
@@ -850,6 +1681,8 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.importManagedFileMock.mockResolvedValue(managedResponse)
     hoisted.importManagedDataUrlMock.mockReset()
     hoisted.importManagedDataUrlMock.mockResolvedValue(managedResponse)
+    hoisted.importManagedBytesMock.mockReset()
+    hoisted.importManagedBytesMock.mockResolvedValue(managedResponse)
     hoisted.importManagedUrlMock.mockReset()
     hoisted.importManagedUrlMock.mockResolvedValue(managedResponse)
     hoisted.requestChatCompletionMock.mockImplementation(
@@ -884,7 +1717,6 @@ describe('ChatPage runtime workflow integration', () => {
     localStorage.clear()
     sessionStorage.clear()
     document.body.innerHTML = [
-      '<div id="agent-workspace-skill-portal"></div>',
       `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow')}"></div>`,
       `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow-a')}"></div>`,
       `<div id="${buildChatWorkspaceControlsPortalId('runtime-flow-b')}"></div>`
@@ -1016,6 +1848,755 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('offline process area creates members from the conversation header and keeps navigation and management available', async () => {
+    const fetchGuard = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('network forbidden'))
+    try {
+      const lead: ChatSession = {
+        id: 'process-area-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      hoisted.storedSessions.value = [lead]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      renderChatPage({ team: true, rows: true })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '团队管理' })).not.toBeInTheDocument()
+      // No banner above the transcript: a lead without a team offers only "add member" in the "+" menu.
+      expect(screen.queryByTestId('team-conversation-actions')).not.toBeInTheDocument()
+      expect(screen.getByTestId('agent-header-add-member')).toBeInTheDocument()
+      expect(screen.queryByTestId('agent-header-team')).not.toBeInTheDocument()
+      chooseAddMenuEntry('chat-composer-menu-add-member')
+      fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Alice' } })
+      fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Alice' } })
+      fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
+      // The members are rows of the thread list, after the lead's row; the process area lists none.
+      const alice = await teamRows().findByRole('button', { name: 'Alice' })
+      expect(alice.textContent).toBe('Alice')
+      expect(
+        teamRows()
+          .getAllByRole('button')
+          .map((row) => row.textContent)
+      ).toEqual(['Lead', 'Alice'])
+      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
+      chooseAddMenuEntry('chat-composer-menu-add-member')
+      fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Bob' } })
+      fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Writer' } })
+      fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
+      expect(await teamRows().findByRole('button', { name: 'Bob' })).toHaveTextContent(/^Bob$/)
+      expect(teamRows().getByRole('button', { name: 'Lead' })).toHaveAttribute(
+        'aria-current',
+        'true'
+      )
+      fireEvent.click(alice)
+      await waitFor(() => expect(readCurrentSessionState()?.teamMemberName).toBe('Alice'))
+      await waitFor(() =>
+        expect(teamRows().getByRole('button', { name: 'Alice' })).toHaveAttribute(
+          'aria-current',
+          'true'
+        )
+      )
+      expect(teamRows().getByRole('button', { name: 'Lead' })).not.toHaveAttribute('aria-current')
+      // There is no "return to lead" button: the lead's row opens the lead again.
+      expect(screen.queryByRole('button', { name: /返回组长/ })).not.toBeInTheDocument()
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
+      expect(fetchGuard).not.toHaveBeenCalled()
+    } finally {
+      fetchGuard.mockRestore()
+    }
+  })
+
+  it('stops a running member from its conversation and keeps its row', async () => {
+    const fetchGuard = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('network forbidden'))
+    try {
+      const lead: ChatSession = {
+        id: 'process-running-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const member: ChatSession = {
+        id: 'process-running-member',
+        title: 'Alice',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Alice'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      let release!: (value: { content: string }) => void
+      hoisted.requestChatCompletionMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = resolve
+          })
+      )
+      renderChatPage({ team: true, rows: true })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Alice run' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      fireEvent.click(await teamRows().findByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      fireEvent.click(await screen.findByTestId('chat-composer-stop-mock'))
+      await act(async () => release({ content: 'late fixture response' }))
+      await waitFor(() =>
+        expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      )
+      expect(
+        readCurrentSessionState()?.messages.some(
+          (message) => message.content === 'late fixture response'
+        )
+      ).toBe(false)
+      expect(teamRows().getByRole('button', { name: 'Alice' })).toHaveAttribute(
+        'aria-current',
+        'true'
+      )
+      expect(fetchGuard).not.toHaveBeenCalled()
+    } finally {
+      fetchGuard.mockRestore()
+    }
+  })
+
+  it('keeps a member row after the member answered', async () => {
+    const fetchGuard = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('network forbidden'))
+    try {
+      const lead: ChatSession = {
+        id: 'process-complete-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const member: ChatSession = {
+        id: 'process-complete-member',
+        title: 'Alice',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Alice'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'fixture completed' })
+      renderChatPage({ team: true, rows: true })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Alice run' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value
+            .find((session) => session.id === member.id)
+            ?.messages.some((message) => message.content === 'fixture completed')
+        ).toBe(true)
+      )
+      expect(teamRows().getByRole('button', { name: 'Alice' })).toBeVisible()
+      // The lead's transcript shows the member's work as a delegated line that opens to the reply.
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['completed']))
+      const line = screen.getByTestId('team-delegated-row')
+      expect(line).toHaveTextContent('run')
+      fireEvent.click(within(line).getByRole('button'))
+      expect(within(line).getByTestId('chat-delegated-result')).toHaveTextContent(
+        'fixture completed'
+      )
+      expect(
+        readCurrentSessionState()?.messages.some(
+          (message) => message.content === 'fixture completed'
+        )
+      ).toBe(false)
+      // Nothing runs any more: the composer offers no stop.
+      await waitFor(() =>
+        expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      )
+      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
+      expect(fetchGuard).not.toHaveBeenCalled()
+    } finally {
+      fetchGuard.mockRestore()
+    }
+  })
+
+  it.each(['jobs', 'processes'] as const)(
+    'marks a finished background %s entry with a divider at the end of the transcript, and a stopped one without',
+    async (kind) => {
+      const lead: ChatSession = {
+        id: `finished-${kind}`,
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      hoisted.storedSessions.value = [lead]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      const now = Date.now()
+      const running =
+        kind === 'jobs'
+          ? {
+              id: 'finished-helper',
+              kind: 'explore',
+              task: 'synthetic',
+              status: 'running',
+              createdAt: now,
+              expiresAt: now + 60000
+            }
+          : {
+              id: 'finished-process',
+              kind: 'python',
+              status: 'running',
+              createdAt: now,
+              expiresAt: now + 60000,
+              outcome: 'known',
+              stdoutBytes: 0,
+              stderrBytes: 0,
+              truncated: false,
+              operationSettled: false,
+              cancellationRequested: false
+            }
+      const completed = {
+        ...running,
+        status: 'completed',
+        ...(kind === 'processes' ? { operationSettled: true, exitCode: 0 } : {})
+      }
+      const old = { ...completed, id: 'finished-before' }
+      // Stopped while it ran: it has no result, so it leaves no divider.
+      const stoppable = { ...running, id: 'stopped-entry' }
+      const stopped = {
+        ...stoppable,
+        status: kind === 'jobs' ? 'cancelled' : 'stopped',
+        ...(kind === 'processes' ? { operationSettled: true } : {})
+      }
+      let release!: () => void
+      const finished = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      let polls = 0
+      const list = kind === 'jobs' ? hoisted.listAgentJobsMock : hoisted.listAgentProcessesMock
+      // The first poll sees it running (an entry that had already finished is not announced),
+      // the next polls see it finished once released.
+      list.mockImplementation(async () => {
+        polls++
+        if (polls === 1) return { jobs: [running, stoppable, old] }
+        await finished
+        return { jobs: [completed, stopped, old] }
+      })
+      const page = renderChatPage({ team: true })
+      try {
+        await waitFor(() => expect(polls).toBeGreaterThanOrEqual(2), { timeout: 3500 })
+        // No process area above the transcript, and nothing announced while it runs.
+        expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
+        expect(screen.queryByTestId('chat-background-result')).not.toBeInTheDocument()
+        await act(async () => release())
+        const divider = await screen.findByTestId('chat-background-result', {}, { timeout: 3500 })
+        expect(divider).toHaveTextContent('chat.delegated.background_result')
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 1200))
+        })
+        expect(screen.getAllByTestId('chat-background-result')).toHaveLength(1)
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        release()
+        page.unmount()
+      }
+    }
+  )
+
+  it.each(['text-delta', 'tool-status'] as const)(
+    'does not apply an old scope stream %s to a different scope with the same session id',
+    async (kind) => {
+      const a = 'scope-stream-a',
+        b = 'scope-stream-b',
+        sessionId = 'same-stream-id'
+      const sessionA: ChatSession = {
+        id: sessionId,
+        title: 'Scope A',
+        profileId: 'base-model',
+        messages: []
+      }
+      const sessionB: ChatSession = {
+        id: sessionId,
+        title: 'Scope B',
+        profileId: 'base-model',
+        messages: [
+          { role: 'user', content: 'B question' },
+          { role: 'assistant', content: 'B answer' }
+        ]
+      }
+      hoisted.scopedTestSessions.value = { [a]: [sessionA], [b]: [sessionB] }
+      hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) =>
+        cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
+      )
+      for (const scope of [a, b])
+        localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), sessionId)
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+      let oldRequest!: { onEvent: (event: unknown) => void; signal: AbortSignal }
+      let finish!: (value: unknown) => void
+      hoisted.requestChatCompletionStreamMock.mockImplementationOnce((request) => {
+        oldRequest = request
+        return new Promise((resolve) => {
+          finish = resolve
+        })
+      })
+      const ui = (scope: string) => (
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage compact storageScope={scope} />
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+      const page = render(ui(a))
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Scope A'))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: 'A pending request' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(oldRequest).toBeDefined())
+        page.rerender(ui(b))
+        expect(oldRequest.signal.aborted).toBe(true)
+        expect(readScopedActiveLoadingSessionIds(a)).not.toContain(sessionId)
+        expect(readScopedChatRun(a, sessionId).status).toBe('interrupted')
+        await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Scope B'))
+        const tool = {
+          runId: 'old-scope-run',
+          toolCallId: 'old-scope-call',
+          toolName: 'files.write',
+          args: { path: 'OLD_SCOPE_TOOL' },
+          status: 'running' as const
+        }
+        await act(async () =>
+          oldRequest.onEvent(
+            kind === 'text-delta'
+              ? { type: 'text-delta', delta: 'OLD_SCOPE_TEXT' }
+              : { type: 'tool-status', toolStatus: tool, toolHistory: [tool] }
+          )
+        )
+        expect(readCurrentSessionState()?.messages.at(-1)).toEqual({
+          role: 'assistant',
+          content: 'B answer'
+        })
+        expect(JSON.stringify(hoisted.scopedTestSessions.value?.[b])).not.toContain('OLD_SCOPE_')
+      } finally {
+        page.unmount()
+        if (finish)
+          await act(async () =>
+            finish({ result: { content: 'old complete' }, response: 'old complete' })
+          )
+      }
+    }
+  )
+
+  it('pauses a composer queue across A-B-A without auto-sending, and requires editing to restore it', async () => {
+    const a = 'scope-owner-a',
+      b = 'scope-owner-b',
+      sessionId = 'scope-owner-same-id'
+    const makeSession = (title: string): ChatSession => ({
+      id: sessionId,
+      title,
+      profileId: 'base-model',
+      messages: []
+    })
+    hoisted.scopedTestSessions.value = {
+      [a]: [makeSession('Owner A')],
+      [b]: [makeSession('Owner B')]
+    }
+    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) =>
+      cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
+    )
+    for (const scope of [a, b])
+      localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), sessionId)
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    const requests: Array<{ onEvent: (event: unknown) => void; signal: AbortSignal }> = []
+    const finishes: Array<(value: unknown) => void> = []
+    hoisted.requestChatCompletionStreamMock.mockImplementation(
+      (input: (typeof requests)[number]) => {
+        requests.push(input)
+        return new Promise((resolve) => {
+          finishes.push(resolve)
+        })
+      }
+    )
+    const ui = (scope: string) => (
+      <React.StrictMode>
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage compact storageScope={scope} />
+          </ThemeProvider>
+        </MemoryRouter>
+      </React.StrictMode>
+    )
+    const send = (text: string) => {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: text } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    }
+    const page = render(ui(a))
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Owner A'))
+      send('old A request')
+      await waitFor(() => expect(requests).toHaveLength(1))
+      send('old A queued')
+      expect(screen.getByTestId('chat-queue-panel')).toHaveTextContent('old A queued')
+      expect(requests).toHaveLength(1)
+      page.rerender(ui(b))
+      expect(requests[0].signal.aborted).toBe(true)
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Owner B'))
+      expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
+      send('new B request')
+      await waitFor(() => expect(requests).toHaveLength(2))
+      await act(async () => requests[1].onEvent({ type: 'text-delta', delta: 'B live' }))
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('B live')
+      page.rerender(ui(a))
+      expect(requests[1].signal.aborted).toBe(true)
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('old A request'))
+      expect(screen.getByTestId('chat-queue-panel')).toHaveTextContent('old A queued')
+      expect(screen.getByTestId('chat-queue-panel')).toHaveTextContent('chat.queue_status_paused')
+      expect(requests).toHaveLength(2)
+      send('new A request')
+      await waitFor(() => expect(requests).toHaveLength(3))
+      await act(async () => {
+        requests[0].onEvent({ type: 'text-delta', delta: 'STALE_A_TEXT' })
+        requests[1].onEvent({ type: 'text-delta', delta: 'STALE_B_TEXT' })
+        finishes[0]({ result: { content: 'STALE_A_FINAL' }, response: 'STALE_A_FINAL' })
+        finishes[1]({ result: { content: 'STALE_B_FINAL' }, response: 'STALE_B_FINAL' })
+      })
+      expect(requests).toHaveLength(3)
+      expect(requests[2].signal.aborted).toBe(false)
+      expect(readScopedActiveLoadingSessionIds(a)).toContain(sessionId)
+      expect(JSON.stringify(readCurrentSessionState())).not.toContain('STALE_')
+      expect(JSON.stringify(hoisted.scopedTestSessions.value?.[b])).not.toContain('STALE_')
+      await act(async () => {
+        requests[2].onEvent({ type: 'text-delta', delta: 'new A live' })
+        finishes[2]({ result: { content: 'new A final' }, response: 'new A final' })
+      })
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new A final')
+      )
+      expect(requests).toHaveLength(3)
+      expect(screen.getByTestId('chat-queue-panel')).toHaveTextContent('old A queued')
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'new unsent draft' }
+      })
+      fireEvent.click(
+        within(screen.getByTestId('chat-queue-panel')).getByRole('button', {
+          name: 'chat.queue_edit'
+        })
+      )
+      // The edit opens in the row; the composer keeps the newer draft.
+      const editor = screen.getByRole('textbox', { name: 'chat.queue_edit_field' })
+      expect(editor).toHaveValue('old A queued')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new unsent draft')
+      // Saving edits the item where it stands: the composer and its newer draft are not touched.
+      fireEvent.change(editor, { target: { value: 'old A queued, edited' } })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith('请先处理当前输入，再编辑排队消息')
+      // The paused item resumes only through this edit: it is sent now, in place.
+      await waitFor(() => expect(requests).toHaveLength(4))
+      expect(JSON.stringify(requests[3])).toContain('old A queued, edited')
+      expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new unsent draft')
+    } finally {
+      for (const finish of finishes) finish({ result: { content: 'cleanup' }, response: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('does not retire a live scope run for an uncommitted suspended scope render', async () => {
+    const a = 'scope-suspended-a',
+      b = 'scope-suspended-b',
+      sessionId = 'scope-suspended-id'
+    const session: ChatSession = {
+      id: sessionId,
+      title: 'Suspended A',
+      profileId: 'base-model',
+      messages: []
+    }
+    hoisted.scopedTestSessions.value = {
+      [a]: [session],
+      [b]: [{ ...session, title: 'Suspended B' }]
+    }
+    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) =>
+      cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
+    )
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, a), sessionId)
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let request!: { onEvent: (event: unknown) => void; signal: AbortSignal }
+    let finish!: (value: unknown) => void
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      request = input
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const attempted = vi.fn(),
+      never = new Promise<void>(() => {})
+    function Blocker({ pending }: { pending: boolean }) {
+      if (pending) {
+        attempted()
+        throw never
+      }
+      return null
+    }
+    const ui = (pending: boolean) => (
+      <React.StrictMode>
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <React.Suspense fallback={<div>pending scope</div>}>
+              <ChatPage compact storageScope={pending ? b : a} />
+              <Blocker pending={pending} />
+            </React.Suspense>
+          </ThemeProvider>
+        </MemoryRouter>
+      </React.StrictMode>
+    )
+    const page = render(ui(false))
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Suspended A'))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'current scope question' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(request).toBeDefined())
+      await act(async () => {
+        React.startTransition(() => page.rerender(ui(true)))
+      })
+      expect(attempted).toHaveBeenCalled()
+      expect(screen.queryByText('pending scope')).not.toBeInTheDocument()
+      expect(request.signal.aborted).toBe(false)
+      await act(async () => request.onEvent({ type: 'text-delta', delta: 'still A' }))
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('still A')
+      await act(async () => finish({ result: { content: 'A final' }, response: 'A final' }))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('A final')
+      )
+    } finally {
+      if (finish) finish({ result: { content: 'cleanup' }, response: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('offline helper stream keeps its parent request through a same-scope reload', async () => {
+    const session: ChatSession = {
+      id: 'helper-reload',
+      title: 'Reload',
+      messages: [],
+      profileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let request!: { onEvent: (event: unknown) => void; signal: AbortSignal }
+    let finish!: (value: unknown) => void
+    hoisted.requestChatCompletionStreamMock.mockImplementation((input: typeof request) => {
+      request = input
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const page = renderChatPage()
+    const originalNotify = hoisted.notifyErrorMock
+    const event = (status: string) => ({
+      type: 'tool-status',
+      toolStatus: { runId: 'reload-run', toolCallId: 'reload-call', toolName: 'explore', status }
+    })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'fixture request' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(request).toBeDefined())
+      await act(async () => request.onEvent(event('running')))
+      let reloadStarted = false
+      hoisted.loadAllSessionsMock.mockImplementationOnce(async () => {
+        reloadStarted = true
+        return cloneValue(hoisted.storedSessions.value)
+      })
+      hoisted.notifyErrorMock = vi.fn()
+      page.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage compact storageScope="runtime-flow" />
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+      await waitFor(() => expect(reloadStarted).toBe(true))
+      expect(request.signal.aborted).toBe(false)
+      await act(async () => request.onEvent(event('completed')))
+      expect(request.signal.aborted).toBe(false)
+      await act(async () => finish({ result: { content: 'done' }, response: 'done' }))
+    } finally {
+      hoisted.notifyErrorMock = originalNotify
+      page.unmount()
+    }
+  })
+
+  it.fails(
+    'P6 pending: abort-ignoring stream mock blocks a second send before old promise settles',
+    async () => {
+      const session: ChatSession = {
+        id: 'strict-helper-session',
+        title: 'Helper',
+        messages: [],
+        profileId: 'base-model'
+      }
+      hoisted.storedSessions.value = [session]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        session.id
+      )
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+      const requests: Array<{ onEvent: (event: unknown) => void; signal: AbortSignal }> = []
+      const finishes: Array<(value: unknown) => void> = []
+      hoisted.requestChatCompletionStreamMock.mockImplementation(
+        (input: (typeof requests)[number]) => {
+          requests.push(input)
+          return new Promise((resolve) => {
+            finishes.push(resolve)
+          })
+        }
+      )
+      const ui = () => (
+        <React.StrictMode>
+          <MemoryRouter>
+            <ThemeProvider theme={theme}>
+              <ChatPage compact storageScope="runtime-flow" />
+            </ThemeProvider>
+          </MemoryRouter>
+        </React.StrictMode>
+      )
+      const page = render(ui())
+      const originalNotify = hoisted.notifyErrorMock
+      const event = (status: string) => ({
+        type: 'tool-status',
+        toolStatus: { runId: 'same-run', toolCallId: 'same-call', toolName: 'explore', status }
+      })
+      const send = (text: string) => {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: text }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      }
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+        send('first fixture')
+        await waitFor(() => expect(requests).toHaveLength(1))
+        await act(async () => requests[0].onEvent(event('running')))
+        let reloaded = false
+        hoisted.loadAllSessionsMock.mockImplementationOnce(async () => {
+          reloaded = true
+          return cloneValue(hoisted.storedSessions.value)
+        })
+        hoisted.notifyErrorMock = vi.fn()
+        page.rerender(ui())
+        await waitFor(() => expect(reloaded).toBe(true))
+        expect(requests[0].signal.aborted).toBe(false)
+        fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+        await waitFor(() => expect(requests[0].signal.aborted).toBe(true))
+        send('second fixture')
+        await waitFor(() => expect(requests).toHaveLength(2))
+        await act(async () => requests[1].onEvent(event('running')))
+        await act(async () => {
+          requests[0].onEvent(event('completed'))
+          finishes[0]({ result: { content: 'old' }, response: 'old' })
+        })
+        await act(async () => requests[1].onEvent(event('completed')))
+        await act(async () => finishes[1]({ result: { content: 'new' }, response: 'new' }))
+      } finally {
+        for (const finish of finishes)
+          finish({ result: { content: 'cleanup' }, response: 'cleanup' })
+        hoisted.notifyErrorMock = originalNotify
+        page.unmount()
+      }
+    }
+  )
+
+  it('a helper stream of a stopped and settled request does not disturb the next request', async () => {
+    const session: ChatSession = {
+      id: 'strict-helper-settled',
+      title: 'Helper',
+      messages: [],
+      profileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    const requests: Array<{ onEvent: (event: unknown) => void; signal: AbortSignal }> = []
+    const finishes: Array<(value: unknown) => void> = []
+    hoisted.requestChatCompletionStreamMock.mockImplementation(
+      (input: (typeof requests)[number]) => {
+        requests.push(input)
+        return new Promise((resolve) => {
+          finishes.push(resolve)
+        })
+      }
+    )
+    const page = render(
+      <React.StrictMode>
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage compact storageScope="runtime-flow" />
+          </ThemeProvider>
+        </MemoryRouter>
+      </React.StrictMode>
+    )
+    const event = (status: string) => ({
+      type: 'tool-status',
+      toolStatus: { runId: 'same-run', toolCallId: 'same-call', toolName: 'explore', status }
+    })
+    const send = (text: string) => {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: text } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    }
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      send('first fixture')
+      await waitFor(() => expect(requests).toHaveLength(1))
+      await act(async () => requests[0].onEvent(event('running')))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() => expect(requests[0].signal.aborted).toBe(true))
+      await act(async () => finishes[0]({ result: { content: 'old' }, response: 'old' }))
+      await waitFor(() =>
+        expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      )
+      send('second fixture')
+      await waitFor(() => expect(requests).toHaveLength(2))
+      await act(async () => requests[1].onEvent(event('running')))
+      await act(async () => requests[0].onEvent(event('completed')))
+      await act(async () => requests[1].onEvent(event('completed')))
+      await act(async () => finishes[1]({ result: { content: 'new' }, response: 'new' }))
+    } finally {
+      for (const finish of finishes) finish({ result: { content: 'cleanup' }, response: 'cleanup' })
+      page.unmount()
+    }
+  })
+
   it('keeps a user-entered local file path as plain message text without choosing or reading a local file', async () => {
     const route = {
       channel: 'canvas' as const,
@@ -1105,6 +2686,22 @@ describe('ChatPage runtime workflow integration', () => {
     )
   })
 
+  it('keeps the chat composer without a diagnostics panel or entry', async () => {
+    renderChatPage()
+
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    expect(screen.getByTestId('chat-composer-input-mock')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-composer-send-mock')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', {
+        name: /诊断与调用记录|Diagnostics and receipts|chat\.agent_diagnostics\.open/i
+      })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('dialog', { name: /当前线程诊断|Current thread diagnostics/i })
+    ).not.toBeInTheDocument()
+  })
+
   it('restores the last selected model when bootstrapping the initial session', async () => {
     localStorage.setItem(
       scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
@@ -1117,6 +2714,118 @@ describe('ChatPage runtime workflow integration', () => {
       const currentSession = readCurrentSessionState()
       expect(currentSession?.profileId).toBe('vision-model')
     })
+  })
+
+  it('recovers from an initial storage read failure through the real Retry button', async () => {
+    const session: ChatSession = {
+      id: 'initial-retry',
+      title: 'Retry',
+      profileId: 'base-model',
+      messages: [{ role: 'user', content: 'retained after retry' }],
+      createdAt: 299
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.loadAllSessionsMock.mockRejectedValueOnce(new Error('temporary read failure'))
+    renderChatPage()
+    expect(
+      await screen.findByText(/Failed to load chat sessions: temporary read failure/)
+    ).toBeVisible()
+    expect(
+      readCurrentSessionState()?.messages.some(
+        (message) => message.content === 'retained after retry'
+      )
+    ).not.toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    expect(
+      readCurrentSessionState()?.messages.some(
+        (message) => message.content === 'retained after retry'
+      )
+    ).toBe(true)
+    expect(
+      screen.queryByText(/Failed to load chat sessions: temporary read failure/)
+    ).not.toBeInTheDocument()
+    expect(hoisted.storedSessions.value[0]?.messages).toEqual(session.messages)
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+
+  it('in the Agent column shows a load error as the status line and recovers through the toolbar Refresh', async () => {
+    const session: ChatSession = {
+      id: 'column-retry',
+      title: 'Retry',
+      profileId: 'base-model',
+      messages: [{ role: 'user', content: 'back after refresh' }],
+      createdAt: 299
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.loadAllSessionsMock.mockRejectedValueOnce(new Error('temporary read failure'))
+    const statusLineHost = document.createElement('div')
+    document.body.appendChild(statusLineHost)
+    let reload: (() => void) | null = null
+    const register = vi.fn((next: (() => void) | null) => {
+      reload = next
+    })
+    const view = renderWithProviders(
+      <ChatPage
+        compact
+        storageScope="runtime-flow"
+        statusLineHost={statusLineHost}
+        onRegisterReload={register}
+      />
+    )
+    try {
+      const line = await within(statusLineHost).findByRole('alert')
+      expect(line).toHaveTextContent(/Failed to load chat sessions: temporary read failure/)
+      // Text only: no Alert with a Retry button in the pane.
+      expect(line.querySelector('button')).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+      expect(register).toHaveBeenCalledWith(expect.any(Function))
+      await act(async () => {
+        reload!()
+      })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      expect(
+        readCurrentSessionState()?.messages.some(
+          (message) => message.content === 'back after refresh'
+        )
+      ).toBe(true)
+      await waitFor(() => expect(statusLineHost).toBeEmptyDOMElement())
+    } finally {
+      view.unmount()
+      statusLineHost.remove()
+    }
+    expect(register).toHaveBeenLastCalledWith(null)
+  })
+
+  it('in the Agent column without a model shows the status line, the empty transcript and the placeholder line', async () => {
+    hoisted.availableProfiles.value = []
+    const statusLineHost = document.createElement('div')
+    document.body.appendChild(statusLineHost)
+    const view = renderWithProviders(
+      <ChatPage compact storageScope="runtime-flow" statusLineHost={statusLineHost} />
+    )
+    try {
+      const line = await within(statusLineHost).findByRole('alert')
+      expect(line).toHaveTextContent('chat.no_model_status')
+      expect(screen.getByTestId('chat-empty-state')).toBeInTheDocument()
+      expect(screen.getByTestId('chat-no-model-composer')).toHaveTextContent(
+        'agent_workspace.no_thread_composer'
+      )
+      expect(screen.queryByText('chat.no_llm_config')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('chat-composer-input-mock')).not.toBeInTheDocument()
+      expect(view.container.querySelector('button')).toBeNull()
+    } finally {
+      view.unmount()
+      statusLineHost.remove()
+    }
   })
 
   it('does not let a delayed storage refresh overwrite a newer in-memory response', async () => {
@@ -1176,10 +2885,324 @@ describe('ChatPage runtime workflow integration', () => {
     expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new graph output')
   })
 
+  it('keeps a confirmed draft and recovers through Retry when the same-scope initial reload read is stale', async () => {
+    const session: ChatSession = {
+      id: 'initial-read-draft-ack',
+      title: 'Draft reload race',
+      profileId: 'base-model',
+      messages: [{ role: 'user', content: 'existing history' }],
+      createdAt: 299
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    const page = renderChatPage()
+    let releaseSave!: () => void
+    let releaseRead!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'confirmed draft' }
+      })
+      hoisted.saveSessionToDBGateStarted.value = null
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        releaseSave = resolve
+      })
+      await act(async () => {
+        window.dispatchEvent(new Event('blur'))
+      })
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(session.id))
+      expect(hoisted.storedSessions.value[0]?.draft?.inputValue).not.toBe('confirmed draft')
+
+      let readStarted = false
+      hoisted.loadAllSessionsMock.mockImplementationOnce(async () => {
+        const snapshot = cloneValue(hoisted.storedSessions.value)
+        readStarted = true
+        await new Promise<void>((resolve) => {
+          releaseRead = resolve
+        })
+        return snapshot
+      })
+      // A real initial-load effect can rerun within the same scope when a dependency changes.
+      // Keep the same component instance and vary only the notification callback identity.
+      const originalNotify = hoisted.notifyErrorMock
+      hoisted.notifyErrorMock = vi.fn()
+      try {
+        page.rerender(
+          <MemoryRouter>
+            <ThemeProvider theme={theme}>
+              <ChatPage compact storageScope="runtime-flow" />
+            </ThemeProvider>
+          </MemoryRouter>
+        )
+        await waitFor(() => expect(readStarted).toBe(true))
+        await act(async () => {
+          hoisted.saveSessionToDBGate.value = null
+          releaseSave()
+        })
+        await waitFor(() =>
+          expect(hoisted.storedSessions.value[0]?.draft?.inputValue).toBe('confirmed draft')
+        )
+        await act(async () => releaseRead())
+        expect(await screen.findByRole('alert')).toHaveTextContent('Chat changed while loading')
+        expect(readCurrentSessionState()?.draft?.inputValue).toBe('confirmed draft')
+        fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+        await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+        expect(readCurrentSessionState()?.draft?.inputValue).toBe('confirmed draft')
+        expect(hoisted.storedSessions.value[0]?.draft?.inputValue).toBe('confirmed draft')
+      } finally {
+        hoisted.notifyErrorMock = originalNotify
+      }
+    } finally {
+      releaseRead?.()
+      releaseSave?.()
+      hoisted.saveSessionToDBGate.value = null
+      page.unmount()
+    }
+  })
+
+  it('preserves a confirmed reply when an old refresh returns during a same-session pending save', async () => {
+    const session: ChatSession = {
+      id: 'refresh-confirmed-reply-race',
+      title: 'Refresh race',
+      profileId: 'base-model',
+      messages: [{ role: 'user', content: 'initial' }],
+      createdAt: 300
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+
+    let releaseRefresh!: () => void
+    let releaseFirstSave!: () => void
+    let releaseSecondSave!: () => void
+    let snapshotRead = false
+    hoisted.latestSaveCallback.value = null
+    const successCount = hoisted.saveSuccessCount.value
+    hoisted.saveSessionToDBGateStarted.value = null
+    hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+      releaseFirstSave = resolve
+    })
+    const append = async (content: string) =>
+      act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: { scope: 'runtime-flow', sessionId: session.id, role: 'assistant', content }
+          })
+        )
+      )
+    try {
+      await append('confirmed reply v1')
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(session.id))
+      expect(
+        hoisted.storedSessions.value[0]?.messages.some((m) => m.content === 'confirmed reply v1')
+      ).toBe(false)
+      hoisted.loadAllSessionsMock.mockImplementationOnce(async () => {
+        const snapshot = cloneValue(hoisted.storedSessions.value)
+        snapshotRead = true
+        await new Promise<void>((resolve) => {
+          releaseRefresh = resolve
+        })
+        return snapshot
+      })
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', {
+            detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+          })
+        )
+      )
+      await waitFor(() => expect(snapshotRead).toBe(true))
+      await act(async () => {
+        hoisted.saveSessionToDBGate.value = null
+        releaseFirstSave()
+      })
+      await waitFor(() => expect(hoisted.saveSuccessCount.value).toBeGreaterThan(successCount))
+      expect(
+        hoisted.storedSessions.value[0]?.messages.some((m) => m.content === 'confirmed reply v1')
+      ).toBe(true)
+      expect(hoisted.latestSaveCallback.value).not.toBeNull()
+      hoisted.saveSessionToDBGateStarted.value = null
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        releaseSecondSave = resolve
+      })
+      // Simulate another already-registered debounce callback without mutating sessions.
+      const pending = hoisted.latestSaveCallback.value!(session.id, 'runtime-flow').catch(
+        () => null
+      )
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(session.id))
+      await act(async () => releaseRefresh())
+      expect(
+        readCurrentSessionState()?.messages.some((m) => m.content === 'confirmed reply v1')
+      ).toBe(true)
+      await append('later edit')
+      await act(async () => {
+        hoisted.saveSessionToDBGate.value = null
+        releaseSecondSave()
+        await pending
+      })
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value[0]?.messages.some((m) => m.content === 'later edit')
+        ).toBe(true)
+      )
+      expect(
+        hoisted.storedSessions.value[0]?.messages.some((m) => m.content === 'confirmed reply v1')
+      ).toBe(true)
+    } finally {
+      releaseRefresh?.()
+      releaseFirstSave?.()
+      releaseSecondSave?.()
+      hoisted.saveSessionToDBGate.value = null
+    }
+  })
+
+  it('rejects a frozen refresh when a same-session save commits before its delayed batch callback', async () => {
+    const session: ChatSession = {
+      id: 'refresh-ack-before-callback',
+      title: 'Ack ordering',
+      profileId: 'base-model',
+      messages: [{ role: 'user', content: 'initial' }],
+      createdAt: 301
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    const page = renderChatPage()
+    let releaseSave!: () => void
+    let releaseRead!: () => void
+    let releaseCallback!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        releaseSave = resolve
+      })
+      hoisted.saveCallbackGate.value = new Promise<void>((resolve) => {
+        releaseCallback = resolve
+      })
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: {
+              scope: 'runtime-flow',
+              sessionId: session.id,
+              role: 'assistant',
+              content: 'confirmed before callback'
+            }
+          })
+        )
+      )
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(session.id))
+      let readStarted = false
+      hoisted.loadAllSessionsMock.mockImplementationOnce(async () => {
+        const snapshot = cloneValue(hoisted.storedSessions.value)
+        readStarted = true
+        await new Promise<void>((resolve) => {
+          releaseRead = resolve
+        })
+        return snapshot
+      })
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', {
+            detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+          })
+        )
+      )
+      await waitFor(() => expect(readStarted).toBe(true))
+      await act(async () => {
+        hoisted.saveSessionToDBGate.value = null
+        releaseSave()
+      })
+      await waitFor(() => expect(hoisted.saveCallbackGateStarted.value).toBe(session.id))
+      expect(hoisted.saveSuccessCount.value).toBe(0)
+      expect(
+        hoisted.storedSessions.value[0]?.messages.some(
+          (message) => message.content === 'confirmed before callback'
+        )
+      ).toBe(true)
+      // A second same-key write keeps adoptLoaded from rebasing while the v0 read is pending.
+      hoisted.saveSessionToDBGateStarted.value = null
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        releaseSave = resolve
+      })
+      const pending = hoisted.latestSaveCallback.value!(session.id, 'runtime-flow').catch(
+        () => null
+      )
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(session.id))
+      await act(async () => releaseRead())
+      expect(
+        readCurrentSessionState()?.messages.some(
+          (message) => message.content === 'confirmed before callback'
+        )
+      ).toBe(true)
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: {
+              scope: 'runtime-flow',
+              sessionId: session.id,
+              role: 'assistant',
+              content: 'later edit'
+            }
+          })
+        )
+      )
+      await act(async () => {
+        hoisted.saveSessionToDBGate.value = null
+        releaseSave()
+        await pending
+      })
+      await act(async () => {
+        hoisted.saveCallbackGate.value = null
+        releaseCallback()
+      })
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value[0]?.messages.some(
+            (message) => message.content === 'later edit'
+          )
+        ).toBe(true)
+      )
+      expect(
+        hoisted.storedSessions.value[0]?.messages.some(
+          (message) => message.content === 'confirmed before callback'
+        )
+      ).toBe(true)
+    } finally {
+      releaseSave?.()
+      releaseRead?.()
+      releaseCallback?.()
+      hoisted.saveSessionToDBGate.value = null
+      hoisted.saveCallbackGate.value = null
+      page.unmount()
+    }
+  })
+
   it('re-roots legacy chat media URLs on load and persists the migrated session', async () => {
     const session: ChatSession = {
       id: 'legacy-chat-media-session',
       title: 'Legacy chat media',
+      compactedMessages: [
+        {
+          role: 'user',
+          content: 'Retained original with legacy image.',
+          attachments: [
+            {
+              type: 'image',
+              url: 'file:///C:/OldMagicPot/Data/.chat_media/retained/old%20original.png'
+            }
+          ]
+        }
+      ],
       messages: [
         {
           role: 'user',
@@ -1225,7 +3248,12 @@ describe('ChatPage runtime workflow integration', () => {
     const expectedUrl =
       'local-media:///C:/MagicPot/Data/.chat_media/assistant-images/old%20image.png'
     const expectedReplayUrl = 'local-media:///C:/MagicPot/Data/.chat_media/replay/old%20replay.png'
+    const expectedRetainedUrl =
+      'local-media:///C:/MagicPot/Data/.chat_media/retained/old%20original.png'
     await waitFor(() => {
+      expect(readCurrentSessionState()?.compactedMessages?.[0]?.attachments?.[0]?.url).toBe(
+        expectedRetainedUrl
+      )
       expect(readCurrentSessionState()?.messages[0]?.attachments?.[0]?.url).toBe(expectedUrl)
       expect(
         readCurrentSessionState()?.contextCompression?.replayImageMessages?.[0]?.attachments?.[0]
@@ -1233,6 +3261,9 @@ describe('ChatPage runtime workflow integration', () => {
       ).toBe(expectedReplayUrl)
     })
     await waitFor(() => {
+      expect(hoisted.storedSessions.value[0]?.compactedMessages?.[0]?.attachments?.[0]?.url).toBe(
+        expectedRetainedUrl
+      )
       expect(hoisted.storedSessions.value[0]?.messages[0]?.attachments?.[0]?.url).toBe(expectedUrl)
       expect(
         hoisted.storedSessions.value[0]?.contextCompression?.replayImageMessages?.[0]
@@ -1241,7 +3272,7 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
-  it('does not overwrite a local session edit when legacy media migration persistence is delayed', async () => {
+  it('preserves external attachment and local edit with a conflict when legacy media migration is delayed', async () => {
     const session: ChatSession = {
       id: 'legacy-chat-media-edit-race',
       title: 'Legacy media edit race',
@@ -1307,10 +3338,102 @@ describe('ChatPage runtime workflow integration', () => {
       hoisted.migrationCommitGate.value = null
     })
 
-    await waitFor(() =>
-      expect(hoisted.storedSessions.value[0]?.messages.at(-1)?.content).toBe('new local edit')
+    expect(await screen.findByRole('alert')).toHaveTextContent(/session save conflict/i)
+    expect(hoisted.storedSessions.value[0]?.messages[0]?.attachments).toEqual(
+      legacyStoredSession.messages[0].attachments
     )
+    expect(
+      hoisted.storedSessions.value[0]?.messages.some(
+        (message) => message.content === 'new local edit'
+      )
+    ).toBe(false)
     expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new local edit')
+    // Retry must not replace the out-of-band attachment with the local draft or adopt it as a
+    // new baseline. A failed retry retains the local edit and surfaces the conflict again.
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() =>
+      expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+        expect.stringMatching(/session save conflict/i)
+      )
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(/session save conflict/i)
+    expect(hoisted.storedSessions.value[0]?.messages[0]?.attachments).toEqual(
+      legacyStoredSession.messages[0].attachments
+    )
+    expect(
+      hoisted.storedSessions.value[0]?.messages.some(
+        (message) => message.content === 'new local edit'
+      )
+    ).toBe(false)
+    expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('new local edit')
+  })
+
+  it('preserves existing attachments and local edit during single-window legacy media migration', async () => {
+    const legacyUrl = 'file:///C:/OldMagicPot/Data/.chat_media/assistant-images/old%20image.png'
+    const session: ChatSession = {
+      id: 'legacy-single-window-edit-race',
+      title: 'Single window race',
+      profileId: 'base-model',
+      createdAt: 300,
+      messages: [
+        { role: 'user', content: 'before edit', attachments: [{ type: 'image', url: legacyUrl }] }
+      ]
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.skipMigrationOnce.value = true
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    let releaseMigration!: () => void
+    hoisted.migrationStarted.value = false
+    hoisted.migrationCommitGate.value = new Promise<void>((resolve) => {
+      releaseMigration = resolve
+    })
+    try {
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', {
+            detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+          })
+        )
+      )
+      await waitFor(() => expect(hoisted.migrationStarted.value).toBe(true))
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: {
+              scope: 'runtime-flow',
+              sessionId: session.id,
+              role: 'assistant',
+              content: 'local single-window edit'
+            }
+          })
+        )
+      )
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('local single-window edit')
+      )
+      await act(async () => {
+        hoisted.migrationCommitGate.value = null
+        releaseMigration()
+      })
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value[0]?.messages.some(
+            (m) => m.content === 'local single-window edit'
+          )
+        ).toBe(true)
+      )
+      expect(hoisted.storedSessions.value[0]?.messages[0]?.attachments).toEqual([
+        expect.objectContaining({ type: 'image', url: legacyUrl })
+      ])
+    } finally {
+      releaseMigration?.()
+      hoisted.migrationCommitGate.value = null
+    }
   })
 
   it('does not resurrect a session deleted while legacy media migration persistence is delayed', async () => {
@@ -1413,6 +3536,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(readLatestMessageListProps().loadingStatus).toEqual(
         expect.objectContaining({
           label: '等待模型响应',
+          presentation: 'routine',
           step: 3,
           totalSteps: 4
         })
@@ -1434,6 +3558,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(latestProps.loadingStatus).toEqual(
         expect.objectContaining({
           label: '等待模型响应',
+          presentation: 'routine',
           step: 3,
           totalSteps: 4
         })
@@ -1488,6 +3613,163 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('preserves the original baseline when a local placeholder wins a storage refresh merge', async () => {
+    const old: ChatSession = {
+      id: 'preserved-placeholder',
+      title: 'Old',
+      profileId: 'base-model',
+      messages: [
+        { role: 'user', content: 'old question' },
+        { role: 'assistant', content: 'old reply' },
+        { role: 'assistant', content: '' }
+      ]
+    }
+    hoisted.storedSessions.value = [old]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), old.id)
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.messages).toHaveLength(3))
+    let release!: () => void
+    hoisted.debouncedSaveAllSessionsGate.value = new Promise((resolve) => {
+      release = resolve
+    })
+    const replacement: ChatSession = {
+      ...old,
+      messages: [{ role: 'user', content: 'remote replacement' }]
+    }
+    hoisted.storedSessions.value = [replacement]
+    await act(async () =>
+      window.dispatchEvent(
+        new CustomEvent('chat:preview-refresh', {
+          detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+        })
+      )
+    )
+    await waitFor(() => expect(readCurrentSessionState()?.messages).toHaveLength(3))
+    expect(hoisted.storedSessions.value[0].messages).toEqual(replacement.messages)
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    // This UI test's deliberately simplistic debounce mock does not implement real CAS.
+    // The actual old-baseline/no-overwrite assertion is exercised in chatSaveBaseline.test.
+    hoisted.debouncedSaveAllSessionsGate.value = null
+    void release
+  })
+
+  it('polls a running task without reading the scope again until something was saved', async () => {
+    let finishRequest!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRequest = resolve
+        })
+    )
+    hoisted.scopeRevision.value = 7
+    const loadingIds = (): string[] =>
+      JSON.parse(
+        localStorage.getItem(scopedStorageKey(STORAGE_KEY_LOADING_IDS, 'runtime-flow')) || '[]'
+      )
+    const ui = (active: boolean) => (
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage compact active={active} storageScope="runtime-flow" />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const page = render(ui(true))
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await dispatchNewSession({ profileId: 'vision-model', initialMessage: 'Keep working.' })
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(loadingIds()).toHaveLength(1))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700))
+    })
+
+    // Leaving the thread and coming back starts the 2 second poll for the running task.
+    page.rerender(ui(false))
+    page.rerender(ui(true))
+    await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    hoisted.loadAllSessionsMock.mockClear()
+
+    // The first tick reads; the next two find the scope unwritten and read nothing.
+    await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(1), {
+      timeout: 4000
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 4300))
+    })
+    expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(1)
+    expect(loadingIds()).toHaveLength(1)
+
+    // The task saved something: the following tick reads again, once.
+    hoisted.scopeRevision.value = 8
+    await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(2), {
+      timeout: 4000
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2300))
+    })
+    expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(2)
+
+    // When the task ends the poll does its final reload and the reply is on screen.
+    await act(async () => finishRequest({ content: 'finished in the background' }))
+    await waitFor(() => expect(loadingIds()).toHaveLength(0))
+    await waitFor(() =>
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('finished in the background')
+    )
+  }, 30000)
+
+  it('does not read its scope back after its own save but still does for another writer', async () => {
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalled())
+    const storageUpdates: Array<{ source?: object }> = []
+    const onRefresh = (event: Event): void => {
+      const detail = (event as CustomEvent<{ scope?: string; reason?: string; source?: object }>)
+        .detail
+      if (detail?.scope === 'runtime-flow' && detail.reason === 'storage-updated')
+        storageUpdates.push(detail)
+    }
+    window.addEventListener('chat:preview-refresh', onRefresh)
+    try {
+      hoisted.loadAllSessionsMock.mockClear()
+      await dispatchNewSession({ title: 'Saved by this page' })
+      // The save still announces itself (the thread list listens), tagged with its sender.
+      await waitFor(() => expect(storageUpdates).toHaveLength(1))
+      expect(storageUpdates[0].source).toBeTruthy()
+      expect(
+        hoisted.storedSessions.value.some((session) => session.title === 'Saved by this page')
+      ).toBe(true)
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(hoisted.loadAllSessionsMock).not.toHaveBeenCalled()
+      expect(readCurrentSessionState()?.title).toBe('Saved by this page')
+
+      // The same event from any other sender of this scope is still answered with a read.
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', {
+            detail: { scope: 'runtime-flow', reason: 'storage-updated', source: {} }
+          })
+        )
+      )
+      await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(1))
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', {
+            detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+          })
+        )
+      )
+      await waitFor(() => expect(hoisted.loadAllSessionsMock).toHaveBeenCalledTimes(2))
+      expect(hoisted.loadAllSessionsMock).toHaveBeenCalledWith('runtime-flow')
+    } finally {
+      window.removeEventListener('chat:preview-refresh', onRefresh)
+    }
+  })
+
   it('does not reload deleted sessions back into the body for preview-only refreshes', async () => {
     const deletedSession: ChatSession = {
       id: 'deleted-preview-only-session',
@@ -1536,8 +3818,65 @@ describe('ChatPage runtime workflow integration', () => {
     expect(readCurrentSessionState()?.id).toBe(remainingSession.id)
   })
 
-  it('does not rerender the message list synchronously while typing in the composer', async () => {
+  it('purges MAIN report-bundle records of a conversation once its deletion is stored', async () => {
+    const doomed: ChatSession = {
+      id: 'purge-on-delete-session',
+      title: 'Doomed',
+      messages: [{ role: 'user', content: 'delete me' }],
+      createdAt: 300
+    }
+    const kept: ChatSession = {
+      id: 'purge-on-delete-kept',
+      title: 'Kept',
+      messages: [{ role: 'user', content: 'keep me' }],
+      createdAt: 200
+    }
+    hoisted.storedSessions.value = [doomed, kept]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      doomed.id
+    )
+    const storage = await import('./chatStorage')
+    let finishDelete: () => void = () => undefined
+    vi.mocked(storage.deleteSessionFromDB).mockImplementationOnce(
+      (sessionId: string) =>
+        new Promise<void>((resolve) => {
+          finishDelete = () => {
+            hoisted.storedSessions.value = hoisted.storedSessions.value.filter(
+              (session) => session.id !== sessionId
+            )
+            resolve()
+          }
+        })
+    )
+    purgeDeletedConversationMock.mockClear()
+
     renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(doomed.id))
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:deleteSession', {
+          detail: { scope: 'runtime-flow', sessionId: doomed.id }
+        })
+      )
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(kept.id))
+    // Not before the deletion is stored.
+    expect(purgeDeletedConversationMock).not.toHaveBeenCalled()
+    await act(async () => finishDelete())
+    await waitFor(() =>
+      expect(purgeDeletedConversationMock).toHaveBeenCalledWith(doomed.id, 'runtime-flow')
+    )
+    expect(purgeDeletedConversationMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not rerender the message list synchronously while typing in the composer', async () => {
+    // Flush this immediate-storage fixture's initial session/key synchronization
+    // before measuring typing. Message-list session ID alone is not composer
+    // passive-effect readiness; keep the synchronous typing assertions below.
+    await act(async () => {
+      renderChatPage()
+    })
 
     await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
     await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
@@ -1869,6 +4208,2150 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
+  it('keeps a broken stream in its message with partial text and media, without a toast or a retry', async () => {
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    const image = createImageAttachment('partial.png')
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce(async (input) => {
+      input.onEvent({ type: 'text-delta', delta: 'Already received' })
+      input.onEvent({ type: 'attachment', attachment: image })
+      throw Object.assign(
+        new Error('incomplete-stream: the IPC stream ended before a terminal done event.'),
+        { code: 'INCOMPLETE_CHAT_STREAM' }
+      )
+    })
+    const view = renderChatPage()
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'test interruption' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)).toMatchObject({
+          role: 'assistant',
+          content: 'Already received',
+          attachments: [image],
+          responseInterrupted: true
+        })
+      )
+      expect(hoisted.notifyErrorMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).toHaveBeenCalledTimes(1)
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('shows connection retry progress without sending a second Agent turn', async () => {
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let pendingInput: { onEvent: (event: unknown) => void } | undefined
+    let settle!: (value: unknown) => void
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pendingInput = input
+      return new Promise((resolve) => {
+        settle = resolve
+      })
+    })
+    let view!: ReturnType<typeof renderChatPage>
+    await act(async () => {
+      view = renderChatPage()
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'continue the same request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(pendingInput).toBeDefined())
+    try {
+      const retry = {
+        reason: 'connection-error',
+        attempt: 1,
+        delayMs: 2000,
+        nextRetryAt: Date.now() + 2000
+      }
+      await act(async () => {
+        pendingInput!.onEvent({ type: 'retry', retry })
+      })
+      await waitFor(() => {
+        const props = hoisted.chatMessageListMock.mock.calls.at(-1)?.[0] as {
+          isLoading?: boolean
+          loadingStatus?: ChatLoadingStatus
+        }
+        expect(props.isLoading).toBe(true)
+        expect(props.loadingStatus?.retry).toEqual(retry)
+        expect(props.loadingStatus?.label).toBe('chat.loading_connection_retry')
+      })
+      expect(hoisted.requestChatCompletionStreamMock).toHaveBeenCalledOnce()
+      expect(hoisted.notifyErrorMock).not.toHaveBeenCalled()
+    } finally {
+      await act(async () => {
+        settle({ result: { content: 'recovered' }, response: 'recovered' })
+      })
+      view.unmount()
+    }
+  })
+
+  it('preserves compacted originals and resolves search from the real current ChatPage archive, not the compressed request', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'memory-project',
+      threadId: 'pane'
+    } as const
+    const session: ChatSession = {
+      id: 'memory-compact-session',
+      title: 'Original archive',
+      profileId: 'base-model',
+      createdAt: 2,
+      messages: Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: index === 0 ? 'ARCHIVE_COMPACT_ONLY_VALUE 原始🌱' : `visible turn ${index}`,
+        ...(index === 0
+          ? {
+              hiddenContext: 'ARCHIVE_HIDDEN_SECRET',
+              attachments: [{ type: 'file' as const, url: 'ARCHIVE_ATTACHMENT_SECRET' }]
+            }
+          : {})
+      }))
+    }
+    const sibling: ChatSession = {
+      id: 'sibling-archive',
+      title: 'Sibling',
+      createdAt: 1,
+      messages: [{ role: 'user', content: 'ARCHIVE_SIBLING_SECRET' }]
+    }
+    hoisted.storedSessions.value = [session, sibling]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    let settle!: (result: unknown) => void
+    hoisted.requestChatCompletionMock
+      .mockResolvedValueOnce({ content: 'Only a summary; original launch detail omitted.' })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve
+          })
+      )
+    const page = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.click(screen.getByTestId('chat-composer-compress-context-mock'))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.contextCompression?.summary).toContain('Only a summary')
+      )
+      expect(readCurrentSessionState()).toMatchObject({
+        compactedMessages: session.messages.slice(0, 6),
+        messages: session.messages.slice(6)
+      })
+      await waitFor(() =>
+        expect(hoisted.storedSessions.value.find((item) => item.id === session.id)).toMatchObject({
+          compactedMessages: session.messages.slice(0, 6)
+        })
+      )
+      expect(hoisted.storedSessions.value.find((item) => item.id === sibling.id)).toEqual(sibling)
+      const scope = { route, conversationId: session.id }
+      hoisted.listAgentArchiveQueriesMock.mockImplementation(async (request) => ({
+        queries:
+          request.conversationId === session.id
+            ? [
+                {
+                  id: 'owned-original-query',
+                  expiresAt: Date.now() + 10000,
+                  search: {
+                    query: 'ARCHIVE_COMPACT_ONLY_VALUE',
+                    mode: 'literal',
+                    source: 'messages',
+                    limit: 5
+                  }
+                }
+              ]
+            : []
+      }))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Find the earlier launch detail after compaction.' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      expect(
+        JSON.stringify(hoisted.requestChatCompletionMock.mock.calls[1][0].messages)
+      ).not.toContain('ARCHIVE_COMPACT_ONLY_VALUE')
+      await waitFor(() =>
+        expect(hoisted.resolveAgentArchiveQueryMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            ...scope,
+            queryId: 'owned-original-query',
+            result: expect.objectContaining({
+              source: 'session_archive',
+              matches: [
+                { messageIndex: 0, role: 'user', excerpt: 'ARCHIVE_COMPACT_ONLY_VALUE 原始🌱' }
+              ],
+              untrustedData: true
+            })
+          })
+        )
+      )
+      const reply = JSON.stringify(hoisted.resolveAgentArchiveQueryMock.mock.calls)
+      for (const secret of [
+        'ARCHIVE_HIDDEN_SECRET',
+        'ARCHIVE_ATTACHMENT_SECRET',
+        'ARCHIVE_SIBLING_SECRET'
+      ])
+        expect(reply).not.toContain(secret)
+      expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
+      expect(hoisted.mutateAgentNoteMock).not.toHaveBeenCalled()
+      expect(readCurrentSessionState()).toMatchObject({
+        compactedMessages: session.messages.slice(0, 6)
+      })
+    } finally {
+      if (settle)
+        await act(async () => {
+          settle({ content: 'Recovered detail.' })
+        })
+      page.unmount()
+    }
+  })
+
+  it.each(['literal', 'lexical', 'bm25'])(
+    'resolves restored archive queries during a pending local model turn without touching notes (%s)',
+    async (mode) => {
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'memory-project',
+        threadId: 'pane'
+      } as const
+      let settle!: (result: unknown) => void
+      hoisted.requestChatCompletionMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve
+          })
+      )
+      hoisted.listAgentArchiveQueriesMock.mockResolvedValue({
+        queries: [
+          {
+            id: 'owned-query',
+            expiresAt: Date.now() + 10000,
+            search: { query: 'Ordinary question', mode }
+          }
+        ]
+      })
+      const page = renderWithProviders(
+        <ChatPage compact storageScope="runtime-flow" route={route} />
+      )
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+        expect(hoisted.listAgentArchiveQueriesMock).not.toHaveBeenCalled()
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: 'Ordinary question' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+        await waitFor(() =>
+          expect(hoisted.resolveAgentArchiveQueryMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+              route,
+              conversationId: readCurrentSessionState()!.id,
+              queryId: 'owned-query',
+              result: expect.objectContaining({
+                mode,
+                matches: [expect.objectContaining({ role: 'user', excerpt: 'Ordinary question' })],
+                untrustedData: true
+              })
+            })
+          )
+        )
+        expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
+        expect(hoisted.mutateAgentNoteMock).not.toHaveBeenCalled()
+      } finally {
+        await act(async () => {
+          settle({ content: 'Ordinary answer' })
+        })
+        page.unmount()
+      }
+    }
+  )
+
+  it('opens and stops isolated HTML from actual ChatPage without injecting HTML or a parent model turn', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'html-project',
+      threadId: 'pane'
+    } as const
+    const app = {
+      id: 'owned-html',
+      title: '<script>HTML_TITLE</script>',
+      revision: 1,
+      sha256: 'hash',
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60000,
+      status: 'ready',
+      surface: 'canvas'
+    }
+    hoisted.agentHtmlStorageStatusMock.mockResolvedValue({
+      enabled: true,
+      initialized: true,
+      available: true,
+      unconfirmedRuns: 0,
+      canInitialize: false,
+      saveEnabled: false
+    })
+    hoisted.listAgentHtmlAppsMock.mockResolvedValue({ apps: [app] })
+    hoisted.openAgentHtmlAppMock.mockResolvedValue({ app: { ...app, status: 'open' } })
+    hoisted.closeAgentHtmlAppMock.mockResolvedValue({ app: { ...app, status: 'closed' } })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      const open = await screen.findByRole('button', { name: 'chat.agent_html.open' })
+      // In the column the app is a launcher card at the end of the transcript, not a panel under it.
+      expect(screen.getByTestId('agent-html-app-host')).toContainElement(open)
+      fireEvent.click(open)
+      await waitFor(() => expect(hoisted.openAgentHtmlAppMock).toHaveBeenCalledOnce())
+      expect(hoisted.openAgentHtmlAppMock).toHaveBeenCalledWith({
+        route,
+        conversationId: readCurrentSessionState()!.id,
+        appId: app.id,
+        expectedRevision: 1
+      })
+      expect(view.container.querySelector('iframe,script')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_html.close' }))
+      await waitFor(() => expect(hoisted.closeAgentHtmlAppMock).toHaveBeenCalledOnce())
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('saves and restores an HTML ready card from actual ChatPage without running it or adding a model turn', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'html-snapshots',
+      threadId: 'pane'
+    } as const
+    const app = {
+      id: '11111111-1111-4111-8111-111111111111',
+      title: 'Snapshot card',
+      revision: 3,
+      sha256: 'hash',
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60000,
+      status: 'ready',
+      surface: 'canvas'
+    }
+    const saved = {
+      id: app.id,
+      title: 'Encrypted saved card',
+      storageRevision: 1,
+      documentRevision: 3,
+      createdAt: 1,
+      updatedAt: 2,
+      sha256: 'hash',
+      htmlBytes: 30,
+      surface: 'canvas'
+    }
+    hoisted.agentHtmlStorageStatusMock.mockResolvedValue({
+      enabled: true,
+      initialized: true,
+      available: true,
+      unconfirmedRuns: 0,
+      canInitialize: false,
+      saveEnabled: true
+    })
+    hoisted.listAgentHtmlAppsMock.mockResolvedValue({ apps: [app] })
+    hoisted.saveAgentHtmlAppMock.mockImplementation(async () => {
+      hoisted.listAgentHtmlAppsMock.mockResolvedValue({
+        apps: [{ ...app, savedId: saved.id, savedRevision: 1 }]
+      })
+      hoisted.listSavedAgentHtmlAppsMock.mockResolvedValue({ apps: [saved] })
+      return { app, saved }
+    })
+    hoisted.restoreAgentHtmlAppMock.mockResolvedValue({
+      app: { ...app, id: 'fresh-card', savedId: saved.id, savedRevision: 1 }
+    })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      fireEvent.click(await screen.findByRole('button', { name: 'chat.agent_html.save_snapshot' }))
+      await waitFor(() => expect(hoisted.saveAgentHtmlAppMock).toHaveBeenCalledOnce())
+      expect(hoisted.saveAgentHtmlAppMock.mock.calls[0][0]).toEqual({
+        route,
+        conversationId: readCurrentSessionState()!.id,
+        documentToken: 'document-token',
+        appId: app.id,
+        expectedRevision: 3,
+        expectedStorageRevision: 0,
+        operationId: expect.any(String)
+      })
+      // The saved snapshot appears as a line in the app card's body after the save, without a request.
+      const savedCard = await screen.findByTestId('agent-html-saved-item')
+      expect(screen.getByTestId('agent-html-app-host')).toContainElement(savedCard)
+      expect(savedCard.closest('[data-testid="agent-html-app"]')).not.toBeNull()
+      fireEvent.click(within(savedCard).getByRole('button', { name: 'chat.agent_html.restore' }))
+      await waitFor(() => expect(hoisted.restoreAgentHtmlAppMock).toHaveBeenCalledOnce())
+      expect(hoisted.restoreAgentHtmlAppMock.mock.calls[0][0]).toMatchObject({
+        route,
+        conversationId: readCurrentSessionState()!.id,
+        documentToken: 'document-token',
+        savedId: saved.id,
+        expectedStorageRevision: 1
+      })
+      expect(hoisted.openAgentHtmlAppMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+      expect(view.container.querySelector('iframe,script')).toBeNull()
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('has no notes/search/counter or duplicate goal/skill entry in the current thread', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'clean-thread',
+      threadId: 'pane'
+    } as const
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      for (const key of [
+        'agent_memory.open',
+        'agent_memory.search_notice',
+        'agent_goal.open',
+        'agent_goal.dispatch_open',
+        'agent_goal.cap_label',
+        'agent_skill_session.open',
+        'agent_skill_session.command_usage'
+      ]) {
+        expect(screen.queryByText(`chat.${key}`)).not.toBeInTheDocument()
+      }
+      expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
+      expect(hoisted.mutateAgentNoteMock).not.toHaveBeenCalled()
+      expect(hoisted.listAgentArchiveQueriesMock).not.toHaveBeenCalled()
+      expect(hoisted.resolveAgentArchiveQueryMock).not.toHaveBeenCalled()
+      expect(hoisted.listAgentGoalDispatchesMock).not.toHaveBeenCalled()
+      expect(hoisted.listAgentGoalsMock).not.toHaveBeenCalled()
+      expect(hoisted.prepareAgentGoalProgressMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('views /env and /system_prompt locally without parent messages or model requests', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'inspection-command',
+      threadId: 'pane'
+    } as const
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      for (const command of ['/env', '/system_prompt']) {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: command }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() =>
+          expect(screen.getAllByTestId('chat-command-card').at(-1)).toHaveAttribute(
+            'data-command',
+            command
+          )
+        )
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+      }
+      // The column shows each result as a card of the transcript; nothing opens above it.
+      expect(screen.queryByTestId('agent-inspection-view')).toBeNull()
+      expect(screen.getAllByTestId('chat-command-card')).toHaveLength(2)
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/env set secret' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+        'Use /env or /system_prompt without arguments.'
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('/env set secret')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('shows plugin/module configuration handoffs without changing settings or sending parent requests', async () => {
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      for (const command of ['/plugin', '/module configure']) {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: command }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() =>
+          expect(screen.getAllByTestId('chat-command-card').at(-1)).toHaveAttribute(
+            'data-command',
+            command.split(' ')[0]
+          )
+        )
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        if (command === '/plugin')
+          expect(screen.getByRole('button', { name: 'Open plugin center' })).toBeVisible()
+        else {
+          expect(
+            screen.getByRole('button', { name: 'Open tool environment settings' })
+          ).toBeVisible()
+          expect(screen.getByRole('button', { name: 'Open MCP client settings' })).toBeVisible()
+        }
+      }
+      expect(screen.queryByTestId('agent-configuration-view')).toBeNull()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/module enable bash' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+        'Use /plugin [configure] or /module [configure]. Change switches and parameters in the existing editor.'
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('/module enable bash')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('does not publish a late jobs refresh into a reopened panel', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'jobs-late',
+      threadId: 'pane'
+    } as const
+    // The full-page chat keeps the panel with its refresh and close buttons; the Agent column
+    // shows a card per "/jobs" instead (ChatPage.commandCards.test.tsx).
+    const view = renderWithProviders(<ChatPage storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const command = () => {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: '/jobs' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      }
+      command()
+      let release!: (value: { jobs: [] }) => void
+      hoisted.listAgentJobsMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = resolve
+          })
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh thread jobs' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Close command panel' }))
+      command()
+      await act(async () => release({ jobs: [] }))
+      expect(screen.queryByText('No helper jobs.')).toBeNull()
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('shows local status and the jobs list as cards without model calls; an empty conversation has nothing to compact', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'basic-commands',
+      threadId: 'pane'
+    } as const
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/status' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-command-card')).toHaveTextContent('"messages"')
+      )
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/jobs' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(await screen.findByText('chat.command_card.no_jobs')).toBeVisible()
+      expect(
+        screen.getAllByTestId('chat-command-card').map((card) => card.getAttribute('data-command'))
+      ).toEqual(['/status', '/jobs'])
+      expect(screen.queryByRole('button', { name: 'Refresh thread jobs' })).toBeNull()
+      expect(hoisted.listAgentJobsMock).toHaveBeenCalledWith({
+        route,
+        conversationId: readCurrentSessionState()!.id
+      })
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/compact' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      // "/compact" asks nothing and adds no card: the summary banner of the transcript is its result.
+      expect(screen.queryByTestId('agent-basic-command-view')).toBeNull()
+      expect(screen.getAllByTestId('chat-command-card')).toHaveLength(2)
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/compact now' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+        'Use /status, /jobs or /compact without arguments.'
+      )
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('confirms missing references without changing original images, then projects placeholders into the next request', async () => {
+    const session: ChatSession = {
+      id: 'repair-positive',
+      title: 'Repair',
+      createdAt: 100,
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Historical answer',
+          attachments: [{ type: 'image', url: 'local-media:///missing-history.png' }]
+        }
+      ]
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.fileExistsBatchMock.mockResolvedValue([false])
+    hoisted.requestChatCompletionMock.mockResolvedValue({ content: 'Done' })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/repair-images' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      const card = await screen.findByTestId('chat-command-confirm-card')
+      expect(card).toHaveTextContent('Message 1, image 1')
+      expect(screen.queryByTestId('image-repair-view')).toBeNull()
+      expect(readCurrentSessionState()?.messages[0].attachments?.[0].url).toBe(
+        'local-media:///missing-history.png'
+      )
+      fireEvent.click(within(card).getByRole('button', { name: 'chat.command_card.confirm' }))
+      expect(card).toHaveAttribute('data-resolved', 'true')
+      expect(card).toHaveTextContent('→ chat.command_card.confirm')
+      expect(within(card).queryByRole('button')).toBeNull()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Continue without that image' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(
+          hoisted.requestChatCompletionMock.mock.calls.length +
+            hoisted.requestChatCompletionStreamMock.mock.calls.length
+        ).toBeGreaterThan(0)
+      )
+      const request =
+        hoisted.requestChatCompletionMock.mock.calls[0]?.[0] ??
+        hoisted.requestChatCompletionStreamMock.mock.calls[0]?.[0]
+      expect(JSON.stringify(request?.messages)).toContain(
+        '[Missing local image omitted from this branch context]'
+      )
+      expect(JSON.stringify(request?.messages)).not.toContain('missing-history.png')
+      expect(readCurrentSessionState()?.messages[0].attachments?.[0].url).toBe(
+        'local-media:///missing-history.png'
+      )
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('lists image repair results only on explicit command without mutating original history', async () => {
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      expect(hoisted.fileExistsBatchMock).not.toHaveBeenCalled()
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/repair-images' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-command-card')).toHaveTextContent(
+          'No missing local images found'
+        )
+      )
+      // Nothing is missing, so there is nothing to confirm: the result is a plain card.
+      expect(screen.getByTestId('chat-command-card')).toHaveAttribute(
+        'data-command',
+        '/repair-images'
+      )
+      expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
+      expect(screen.queryByTestId('image-repair-view')).toBeNull()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+      expect(hoisted.fileExistsBatchMock).not.toHaveBeenCalled()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/repair-images all' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+        'Use /repair-images without arguments.'
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('views /scratchpad and /pad explicitly without a parent message, model, mutation or automatic notes read', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'scratchpad-command',
+      threadId: 'pane'
+    } as const
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
+      hoisted.getAgentNotesMock.mockResolvedValue({
+        revision: 4,
+        notes: [
+          {
+            key: 'retained',
+            value: '<script>NOT_EXECUTABLE</script>\nSAVED_WORKING_NOTE',
+            updatedAt: 1
+          }
+        ]
+      })
+      const before = JSON.stringify(readCurrentSessionState()?.messages),
+        id = readCurrentSessionState()!.id
+      for (const [index, command] of ['/scratchpad', '/pad'].entries()) {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: command }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        // Each read is its own card at the end of the transcript; there is nothing to close.
+        await waitFor(() =>
+          expect(screen.getAllByText(/SAVED_WORKING_NOTE/)).toHaveLength(index + 1)
+        )
+        expect(screen.getAllByTestId('chat-command-card').at(-1)).toHaveAttribute(
+          'data-command',
+          command
+        )
+        expect(hoisted.getAgentNotesMock).toHaveBeenLastCalledWith({ route, conversationId: id })
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(document.querySelector('script')).toBeNull()
+      }
+      expect(screen.queryByTestId('agent-scratchpad-view')).toBeNull()
+      expect(hoisted.getAgentNotesMock).toHaveBeenCalledTimes(2)
+      expect(hoisted.mutateAgentNoteMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+    } finally {
+      view.unmount()
+    }
+  })
+  it('intercepts invalid /scratchpad write/clear arguments without parent fallback or draft clearing', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'scratchpad-invalid',
+      threadId: 'pane'
+    } as const
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      for (const command of ['/scratchpad clear', '/pad set x y']) {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: command }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+          'chat.agent_scratchpad.command_usage'
+        )
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(command)
+      }
+      expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
+      expect(hoisted.mutateAgentNoteMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+  it('keeps /pad outside the busy parent queue without aborting or changing its messages', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'scratchpad-busy',
+      threadId: 'pane'
+    } as const
+    let finish!: (result: unknown) => void, signal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce((input) => {
+      signal = input.signal
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    hoisted.getAgentNotesMock.mockResolvedValue({ revision: 0, notes: [] })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'PARENT_RUNNING' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/pad' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.getAgentNotesMock).toHaveBeenCalledOnce())
+      expect(signal?.aborted).toBe(false)
+      expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+      await act(async () => {
+        finish({ content: 'PARENT_FINISHED' })
+      })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).not.toContain('/pad')
+    } finally {
+      view.unmount()
+    }
+  })
+  it.each(['ordinary', 'remote', 'inactive', 'hidden-context'] as const)(
+    'never falls back to parent chat for unavailable /scratchpad (%s)',
+    async (mode) => {
+      if (mode === 'remote') hoisted.currentConfig.value!.use_remote_llm = true
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'scratchpad-unavailable',
+        threadId: 'pane'
+      } as const
+      const view = renderWithProviders(
+        <ChatPage
+          compact
+          storageScope="runtime-flow"
+          route={mode === 'ordinary' ? undefined : route}
+          active={mode !== 'inactive'}
+        />
+      )
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+        if (mode === 'hidden-context')
+          await act(async () => {
+            window.dispatchEvent(
+              new CustomEvent('send-to-agent', {
+                detail: {
+                  text: '/scratchpad',
+                  hiddenText: 'PRIVATE_EXTRA',
+                  targetScope: 'runtime-flow'
+                }
+              })
+            )
+          })
+        else
+          fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+            target: { value: '/scratchpad' }
+          })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+          'chat.agent_scratchpad.command_unavailable'
+        )
+        expect(hoisted.getAgentNotesMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        view.unmount()
+      }
+    }
+  )
+
+  it('submits literal /btw start/open/continue/stop only to the private side APIs without a parent message or model', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'side-command',
+      threadId: 'pane'
+    } as const
+    const branch = {
+      id: '11111111-1111-4111-8111-111111111111',
+      revision: 5,
+      generation: 1,
+      status: 'completed',
+      title: 'Private side',
+      createdAt: 1,
+      updatedAt: 2,
+      turns: 1,
+      modelSteps: 1,
+      toolCalls: 0,
+      snapshotTruncated: true,
+      profileId: 'chat-model',
+      modelLabel: 'Model',
+      busy: false,
+      canContinue: true
+    }
+    const session: ChatSession = {
+      id: 'command-parent',
+      title: 'Parent',
+      messages: [
+        { role: 'user', content: 'VISIBLE_PARENT', hiddenContext: 'HIDDEN_PARENT' },
+        {
+          role: 'assistant',
+          content: 'PARENT_ANSWER',
+          toolHistory: [
+            {
+              runId: 'old',
+              toolCallId: 'old',
+              toolName: 'files.read',
+              args: {},
+              status: 'completed',
+              content: 'PRIVATE_TOOL_HISTORY'
+            }
+          ]
+        }
+      ]
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    hoisted.startAgentSideMock.mockResolvedValue({ branch })
+    hoisted.continueAgentSideMock.mockResolvedValue({ branch })
+    hoisted.stopAgentSideMock.mockResolvedValue({ branch })
+    hoisted.openAgentSideMock.mockResolvedValue({
+      branch,
+      messages: [{ role: 'assistant', kind: 'answer', content: 'PRIVATE_COMMAND_ANSWER' }],
+      snapshotCharacters: 12,
+      untrustedData: true
+    })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      const submit = async (command: string) => {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: command }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(''))
+      }
+      await submit('/btw PRIVATE_COMMAND_QUESTION')
+      await waitFor(() => expect(hoisted.startAgentSideMock).toHaveBeenCalledOnce())
+      expect(hoisted.startAgentSideMock.mock.calls[0][0]).toMatchObject({
+        route,
+        conversationId: session.id,
+        question: 'PRIVATE_COMMAND_QUESTION',
+        snapshot: [
+          { role: 'user', content: 'VISIBLE_PARENT' },
+          { role: 'assistant', content: 'PARENT_ANSWER' }
+        ]
+      })
+      expect(JSON.stringify(hoisted.startAgentSideMock.mock.calls)).not.toMatch(
+        /HIDDEN_PARENT|PRIVATE_TOOL_HISTORY/
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.close' }))
+      await submit(`/btw --open ${branch.id}`)
+      expect(await screen.findByText('PRIVATE_COMMAND_ANSWER')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.close' }))
+      await submit(`/btw --continue ${branch.id} PRIVATE_FOLLOWUP`)
+      await waitFor(() => expect(hoisted.continueAgentSideMock).toHaveBeenCalledOnce())
+      expect(hoisted.continueAgentSideMock.mock.calls[0][0]).toMatchObject({
+        route,
+        conversationId: session.id,
+        branchId: branch.id,
+        expectedRevision: 5,
+        question: 'PRIVATE_FOLLOWUP'
+      })
+      expect(hoisted.continueAgentSideMock.mock.calls[0][0]).not.toHaveProperty('snapshot')
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.close' }))
+      await submit(`/btw --stop ${branch.id}`)
+      await waitFor(() =>
+        expect(hoisted.stopAgentSideMock).toHaveBeenCalledWith({
+          route,
+          conversationId: session.id,
+          branchId: branch.id,
+          expectedRevision: 5
+        })
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+    } finally {
+      view.unmount()
+    }
+  })
+  it('does not restore an accepted /btw command as a draft after remounting the same conversation', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'side-draft',
+      threadId: 'pane'
+    } as const
+    const branch = {
+      id: '11111111-1111-4111-8111-111111111111',
+      revision: 1,
+      canContinue: true,
+      busy: false
+    }
+    hoisted.startAgentSideMock.mockResolvedValue({ branch })
+    hoisted.openAgentSideMock.mockResolvedValue({ branch, messages: [] })
+    const renderSideChat = () =>
+      renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    const first = renderSideChat()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const id = readCurrentSessionState()!.id
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/btw PRIVATE_ACCEPTED_DRAFT' }
+    })
+    await waitFor(() =>
+      expect(hoisted.draftBackups.value[`runtime-flow:${id}`]?.draft?.inputValue).toBe(
+        '/btw PRIVATE_ACCEPTED_DRAFT'
+      )
+    )
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.startAgentSideMock).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(''))
+    first.unmount()
+    const second = renderSideChat()
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(id))
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+      expect(hoisted.startAgentSideMock).toHaveBeenCalledOnce()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      second.unmount()
+    }
+  })
+  it('clears an accepted /skill draft synchronously but preserves a newer unsent draft after remount', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'skill-draft',
+      threadId: 'pane'
+    } as const
+    const first = renderWithProviders(
+      <ChatPage compact storageScope="runtime-flow" route={route} />
+    )
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    await waitFor(() =>
+      expect(hoisted.setAgentSkillScopeMock.mock.calls.some(([req]) => req.active)).toBe(true)
+    )
+    const id = readCurrentSessionState()!.id,
+      key = `runtime-flow:${id}`
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/skills list' }
+    })
+    await waitFor(() =>
+      expect(hoisted.draftBackups.value[key]?.draft?.inputValue).toBe('/skills list')
+    )
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    expect(hoisted.draftBackups.value[key]?.draft).toBeUndefined()
+    await waitFor(() => expect(hoisted.listAgentSessionSkillsMock).toHaveBeenCalledOnce())
+    // The skills card stays in the transcript; the composer is free for the next draft.
+    expect(screen.getByTestId('chat-command-card')).toHaveAttribute('data-command', '/skills')
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'NEW_UNSENT_DRAFT' }
+    })
+    await waitFor(() =>
+      expect(hoisted.draftBackups.value[key]?.draft?.inputValue).toBe('NEW_UNSENT_DRAFT')
+    )
+    first.unmount()
+    const second = renderWithProviders(
+      <ChatPage compact storageScope="runtime-flow" route={route} />
+    )
+    try {
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('NEW_UNSENT_DRAFT')
+      )
+      expect(hoisted.listAgentSessionSkillsMock).toHaveBeenCalledOnce()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(readCurrentSessionState()?.messages).toEqual([])
+    } finally {
+      second.unmount()
+    }
+  })
+  it('keeps /btw outside the busy parent queue and does not stop or append to its active request', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'busy-side',
+      threadId: 'pane'
+    } as const
+    const branch = {
+      id: '11111111-1111-4111-8111-111111111111',
+      revision: 1,
+      generation: 1,
+      status: 'running',
+      title: 'Side',
+      createdAt: 1,
+      updatedAt: 2,
+      turns: 1,
+      modelSteps: 0,
+      toolCalls: 0,
+      snapshotTruncated: true,
+      profileId: 'chat-model',
+      modelLabel: 'Model',
+      busy: true,
+      canContinue: false
+    }
+    hoisted.startAgentSideMock.mockResolvedValue({ branch })
+    hoisted.openAgentSideMock.mockResolvedValue({
+      branch,
+      messages: [],
+      snapshotCharacters: 0,
+      untrustedData: true
+    })
+    let finish!: (result: unknown) => void, signal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce((input) => {
+      signal = input.signal
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'PARENT_RUNNING' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/btw BUSY_PRIVATE_QUESTION' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.startAgentSideMock).toHaveBeenCalledOnce())
+      expect(signal?.aborted).toBe(false)
+      expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+      await act(async () => {
+        finish({ content: 'PARENT_FINISHED' })
+      })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).not.toMatch(
+        /BUSY_PRIVATE_QUESTION|\/btw/
+      )
+    } finally {
+      view.unmount()
+    }
+  })
+  it('intercepts malformed/unavailable /btw and rejects attachments without parent fallback', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'side-refusal',
+      threadId: 'pane'
+    } as const
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/btw --open ../../other' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.agent_side.command_usage')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('/btw --open ../../other')
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              text: '/btw ATTACHED',
+              attachment: createImageAttachment('private.png'),
+              targetScope: 'runtime-flow'
+            }
+          })
+        )
+      })
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+      )
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+        'chat.agent_side.command_unavailable'
+      )
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+      expect(hoisted.startAgentSideMock).not.toHaveBeenCalled()
+      expect(hoisted.openAgentSideMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+  it.each(['ordinary', 'remote', 'inactive', 'hidden-context'] as const)(
+    'does not fall back to parent chat for /btw when %s is unavailable',
+    async (mode) => {
+      if (mode === 'remote') hoisted.currentConfig.value!.use_remote_llm = true
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'side-unavailable',
+        threadId: 'pane'
+      } as const
+      const view = renderWithProviders(
+        <ChatPage
+          compact
+          storageScope="runtime-flow"
+          route={mode === 'ordinary' ? undefined : route}
+          active={mode !== 'inactive'}
+        />
+      )
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+        if (mode === 'hidden-context')
+          await act(async () => {
+            window.dispatchEvent(
+              new CustomEvent('send-to-agent', {
+                detail: {
+                  text: '/btw PRIVATE_HIDDEN',
+                  hiddenText: 'PRIVATE_EXTRA',
+                  targetScope: 'runtime-flow'
+                }
+              })
+            )
+          })
+        else
+          fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+            target: { value: '/btw PRIVATE_UNAVAILABLE' }
+          })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+          'chat.agent_side.command_unavailable'
+        )
+        expect(hoisted.startAgentSideMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        view.unmount()
+      }
+    }
+  )
+  it('drops a delayed /btw continuation after actual ChatPage session switching', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'side-switch',
+      threadId: 'pane'
+    } as const
+    const a: ChatSession = { id: 'command-a', title: 'A', messages: [] },
+      b: ChatSession = { id: 'command-b', title: 'B', messages: [] }
+    hoisted.storedSessions.value = [a, b]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), a.id)
+    let finish!: (value: unknown) => void
+    hoisted.openAgentSideMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          })
+      )
+      .mockResolvedValue({
+        branch: {
+          id: '11111111-1111-4111-8111-111111111111',
+          revision: 4,
+          canContinue: true,
+          busy: false
+        },
+        messages: [],
+        untrustedData: true,
+        snapshotCharacters: 0
+      })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(a.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: {
+          value: '/btw --continue 11111111-1111-4111-8111-111111111111 PRIVATE_OLD_FOLLOWUP'
+        }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.openAgentSideMock).toHaveBeenCalled())
+      await dispatchSwitchSession(b.id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(b.id))
+      await act(async () => {
+        finish({
+          branch: {
+            id: '11111111-1111-4111-8111-111111111111',
+            revision: 4,
+            canContinue: true,
+            busy: false
+          },
+          messages: [{ role: 'assistant', content: 'OLD_PRIVATE_ANSWER' }]
+        })
+      })
+      expect(hoisted.continueAgentSideMock).not.toHaveBeenCalled()
+      expect(screen.queryByText('OLD_PRIVATE_ANSWER')).not.toBeInTheDocument()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(readCurrentSessionState()?.messages).toEqual([])
+    } finally {
+      view.unmount()
+    }
+  })
+  it('revokes a delayed /btw continuation when local command eligibility changes during actual ChatPage open', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'side-mode-change',
+      threadId: 'pane'
+    } as const
+    let finish!: (value: unknown) => void
+    hoisted.openAgentSideMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          })
+      )
+      .mockResolvedValue({
+        branch: {
+          id: '11111111-1111-4111-8111-111111111111',
+          revision: 4,
+          canContinue: true,
+          busy: false
+        },
+        messages: [],
+        untrustedData: true,
+        snapshotCharacters: 0
+      })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/btw --continue 11111111-1111-4111-8111-111111111111 OLD_MODE_QUESTION' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.openAgentSideMock).toHaveBeenCalled())
+      hoisted.currentConfig.value = { ...hoisted.currentConfig.value!, use_remote_llm: true }
+      view.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage compact storageScope="runtime-flow" route={route} />
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+      await act(async () => {
+        finish({
+          branch: {
+            id: '11111111-1111-4111-8111-111111111111',
+            revision: 4,
+            canContinue: true,
+            busy: false
+          },
+          messages: []
+        })
+      })
+      expect(hoisted.continueAgentSideMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+  it('does not interpret an external auto-send as a privileged /btw command', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'external-side',
+      threadId: 'pane'
+    } as const
+    hoisted.requestChatCompletionMock.mockResolvedValue({
+      content: 'Ordinary parent text received'
+    })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: { text: '/btw EXTERNAL_TEXT', autoSend: true, targetScope: 'runtime-flow' }
+          })
+        )
+      })
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      expect(hoisted.startAgentSideMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock.mock.calls[0][0].messages.at(-1).content).toBe(
+        '/btw EXTERNAL_TEXT'
+      )
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('lists the main and side conversations as thread sub-rows and restores the parent draft', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'side-nav',
+      threadId: 'pane'
+    } as const
+    const branch = {
+      id: '11111111-1111-4111-8111-111111111111',
+      revision: 3,
+      title: 'A private branch',
+      status: 'completed',
+      busy: false,
+      canContinue: true
+    }
+    hoisted.listAgentSidesMock.mockResolvedValue({ branches: [branch] })
+    hoisted.openAgentSideMock.mockResolvedValue({
+      branch,
+      messages: [{ role: 'assistant', kind: 'answer', content: 'SIDE_NAV_ANSWER' }]
+    })
+    const subRowChange = vi.fn()
+    const page = renderWithProviders(
+      <WithThreadSubRows>
+        {(host) => (
+          <ChatPage
+            compact
+            storageScope="runtime-flow"
+            route={route}
+            threadSubRowsHost={host}
+            onThreadSubRowChange={subRowChange}
+          />
+        )}
+      </WithThreadSubRows>
+    )
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const input = screen.getByTestId('chat-composer-input-mock')
+      fireEvent.change(input, { target: { value: 'PARENT_DRAFT_RETAINED' } })
+      // No permanent row or "+" above the transcript: the rows live in the thread list host.
+      expect(
+        screen.queryByRole('button', { name: 'chat.agent_side.navigation' })
+      ).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'chat.agent_side.new' })).not.toBeInTheDocument()
+      const rows = within(screen.getByTestId('thread-sub-rows'))
+      const side = await rows.findByRole('button', { name: /A private branch/ })
+      const main = rows.getByRole('button', { name: 'chat.agent_side.main' })
+      expect(rows.getAllByRole('button')).toEqual([main, side])
+      expect(main).toHaveAttribute('aria-current', 'true')
+      expect(side).not.toHaveAttribute('aria-current')
+      fireEvent.click(side)
+      expect(await screen.findByText('SIDE_NAV_ANSWER')).toBeVisible()
+      expect(input).not.toBeVisible()
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(side).toHaveAttribute('aria-current', 'true')
+      expect(main).not.toHaveAttribute('aria-current')
+      expect(subRowChange).toHaveBeenLastCalledWith('A private branch')
+      fireEvent.click(main)
+      expect(input).toBeVisible()
+      expect(input).toHaveValue('PARENT_DRAFT_RETAINED')
+      expect(screen.queryByText('SIDE_NAV_ANSWER')).not.toBeInTheDocument()
+      expect(subRowChange).toHaveBeenLastCalledWith(null)
+      expect(hoisted.stopAgentSideMock).not.toHaveBeenCalled()
+      expect(hoisted.startAgentSideMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally {
+      page.unmount()
+    }
+  })
+  it('changes per-conversation skill availability through the actual ChatPage without sending body or a parent model turn', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'skill-session',
+      threadId: 'pane'
+    } as const
+    const skill = {
+      id: 'registered-skill',
+      name: 'Current procedure',
+      description: 'Metadata only',
+      paths: ['*.ts'],
+      hidden: false,
+      enabled: true
+    }
+    hoisted.listAgentSessionSkillsMock.mockResolvedValue({
+      revision: 3,
+      skills: [skill],
+      staleDisabledIds: [],
+      truncated: false,
+      grantsPermission: false
+    })
+    hoisted.setAgentSkillPreferenceMock.mockResolvedValue({
+      revision: 4,
+      skills: [{ ...skill, enabled: false }],
+      staleDisabledIds: [],
+      truncated: false,
+      grantsPermission: false
+    })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      await waitFor(() =>
+        expect(hoisted.setAgentSkillScopeMock.mock.calls.some(([req]) => req.active)).toBe(true)
+      )
+      const before = JSON.stringify(readCurrentSessionState()?.messages),
+        conversationId = readCurrentSessionState()!.id
+      expect(hoisted.listAgentSessionSkillsMock).not.toHaveBeenCalled()
+      expect(hoisted.setAgentSkillPreferenceMock).not.toHaveBeenCalled()
+      expect(screen.queryByRole('button', { name: '技能' })).not.toBeInTheDocument()
+      // "/skills" lists the thread skills in a card of the transcript; the card has no close button.
+      const card = await openSkillsCard()
+      await within(card).findByText('Current procedure · chat.agent_skill_session.enabled')
+      expect(hoisted.listAgentSessionSkillsMock).toHaveBeenCalledWith({
+        route,
+        conversationId,
+        documentToken: 'skill-document'
+      })
+      fireEvent.click(
+        within(card).getByRole('button', { name: 'chat.agent_skill_session.disable' })
+      )
+      await within(card).findByText('Current procedure · chat.agent_skill_session.disabled')
+      expect(hoisted.setAgentSkillPreferenceMock).toHaveBeenCalledWith({
+        route,
+        conversationId,
+        documentToken: 'skill-document',
+        id: skill.id,
+        enabled: false,
+        expectedRevision: 3,
+        operationId: expect.any(String)
+      })
+      expect(screen.queryByRole('button', { name: 'general.close' })).not.toBeInTheDocument()
+      expect(screen.getByTestId('chat-composer-input-mock')).toBeVisible()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('restores the exact uncertain side identity after switching the actual ChatPage away and back', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'side-round-trip',
+      threadId: 'pane'
+    } as const
+    const a: ChatSession = { id: 'side-a', title: 'A', messages: [] },
+      b: ChatSession = { id: 'side-b', title: 'B', messages: [] }
+    hoisted.storedSessions.value = [a, b]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), a.id)
+    hoisted.startAgentSideMock.mockRejectedValueOnce(new Error('Reply lost'))
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(a.id))
+      openNewSideForm()
+      fireEvent.change(screen.getByLabelText('chat.agent_side.question'), {
+        target: { value: 'ORIGINAL_PRIVATE_QUESTION' }
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.start' }))
+      await screen.findByText('chat.agent_side.error')
+      const original = hoisted.startAgentSideMock.mock.calls[0][0]
+      await dispatchSwitchSession(b.id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(b.id))
+      expect(screen.queryByText('chat.agent_side.pending_notice')).not.toBeInTheDocument()
+      await dispatchSwitchSession(a.id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(a.id))
+      expect(screen.getByText('chat.agent_side.pending_notice')).toBeVisible()
+      expect(screen.getByTestId('chat-composer-input-mock')).not.toBeVisible()
+      expect(screen.getByTestId('chat-session-state')).not.toBeVisible()
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.start' }))
+      await waitFor(() => expect(hoisted.startAgentSideMock).toHaveBeenCalledTimes(2))
+      expect(hoisted.startAgentSideMock.mock.calls[1][0]).toEqual(original)
+      expect(readCurrentSessionState()?.messages).toEqual([])
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+  it('routes /skills list, /skill show and preference commands through user services without a parent message or model', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'skill-commands',
+      threadId: 'pane'
+    } as const
+    let enabled = true,
+      revision = 1
+    const entry = () => ({
+      id: 'one',
+      name: 'review-local',
+      description: 'Metadata',
+      paths: [],
+      hidden: false,
+      enabled
+    })
+    const catalog = () => ({
+      revision,
+      skills: [entry()],
+      staleDisabledIds: [],
+      truncated: false,
+      grantsPermission: false
+    })
+    hoisted.listAgentSessionSkillsMock.mockImplementation(async () => catalog())
+    hoisted.setAgentSkillPreferenceMock.mockImplementation(async (input) => {
+      enabled = input.enabled
+      revision++
+      return catalog()
+    })
+    hoisted.showAgentSessionSkillMock.mockImplementation(async () => ({
+      ...entry(),
+      revision,
+      instructions: '<script>USER_ONLY_SKILL_BODY</script>',
+      baseDirectory: 'D:/pack',
+      untrustedData: true,
+      grantsPermission: false,
+      executed: false
+    }))
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      await waitFor(() =>
+        expect(hoisted.setAgentSkillScopeMock.mock.calls.some(([req]) => req.active)).toBe(true)
+      )
+      const before = JSON.stringify(readCurrentSessionState()?.messages),
+        conversationId = readCurrentSessionState()!.id
+      const submit = (text: string) => {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: text }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      }
+      submit('/skills list')
+      await screen.findByText('review-local · chat.agent_skill_session.enabled')
+      expect(hoisted.showAgentSessionSkillMock).not.toHaveBeenCalled()
+      submit('/skill disable review-local')
+      await screen.findByText('review-local · chat.agent_skill_session.disabled')
+      expect(hoisted.setAgentSkillPreferenceMock).toHaveBeenLastCalledWith({
+        route,
+        conversationId,
+        documentToken: 'skill-document',
+        id: 'one',
+        enabled: false,
+        expectedRevision: 1,
+        operationId: expect.any(String)
+      })
+      submit('/skill show review-local')
+      expect(await screen.findByText('<script>USER_ONLY_SKILL_BODY</script>')).toBeInTheDocument()
+      expect(hoisted.showAgentSessionSkillMock).toHaveBeenCalledWith({
+        route,
+        conversationId,
+        documentToken: 'skill-document',
+        name: 'review-local'
+      })
+      expect(view.container.querySelector('script')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_skill_session.close_body' }))
+      submit('/skill enable one')
+      await screen.findByText('review-local · chat.agent_skill_session.enabled')
+      submit('/skill toggle one')
+      await screen.findByText('review-local · chat.agent_skill_session.disabled')
+      expect(
+        hoisted.setAgentSkillPreferenceMock.mock.calls.map(([req]) => req.expectedRevision)
+      ).toEqual([1, 2, 3])
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+    } finally {
+      view.unmount()
+    }
+  })
+  it('keeps a user /skill command out of a busy parent queue and preserves the active parent Stop request', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'skill-busy',
+      threadId: 'pane'
+    } as const
+    let finish!: (result: unknown) => void, signal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce((input) => {
+      signal = input.signal
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      await waitFor(() =>
+        expect(hoisted.setAgentSkillScopeMock.mock.calls.some(([req]) => req.active)).toBe(true)
+      )
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'PARENT_WORK' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/skill list' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.listAgentSessionSkillsMock).toHaveBeenCalledOnce())
+      expect(signal?.aborted).toBe(false)
+      expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
+      expect(screen.getByTestId('chat-composer-stop-mock')).toBeInTheDocument()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+      await act(async () => {
+        finish({ content: 'PARENT_DONE' })
+      })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).not.toContain('/skill')
+    } finally {
+      view.unmount()
+    }
+  })
+  it('does not turn a malformed /skill into parent text or reinterpret external autoSend as a user skill command', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'skill-refused',
+      threadId: 'pane'
+    } as const
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/skill delete one' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
+        'chat.agent_skill_session.command_usage'
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.listAgentSessionSkillsMock).not.toHaveBeenCalled()
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: { text: '/skill show EXTERNAL', autoSend: true, targetScope: 'runtime-flow' }
+          })
+        )
+      })
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      expect(hoisted.showAgentSessionSkillMock).not.toHaveBeenCalled()
+      expect(hoisted.setAgentSkillPreferenceMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+  it.each(['ordinary', 'remote', 'inactive', 'attachments', 'hidden-context'] as const)(
+    'never falls back to a parent model for a recognized user /skill when %s prevents it',
+    async (mode) => {
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'skill-unavailable',
+        threadId: 'pane'
+      } as const
+      if (mode === 'remote') hoisted.currentConfig.value!.use_remote_llm = true
+      const view = renderWithProviders(
+        <ChatPage
+          compact
+          storageScope="runtime-flow"
+          route={mode === 'ordinary' ? undefined : route}
+          active={mode !== 'inactive'}
+        />
+      )
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+        if (mode === 'attachments' || mode === 'hidden-context') {
+          await act(async () => {
+            window.dispatchEvent(
+              new CustomEvent('send-to-agent', {
+                detail: {
+                  text: '/skill show PRIVATE_PROCEDURE',
+                  ...(mode === 'attachments'
+                    ? { attachment: createImageAttachment('private.png') }
+                    : { hiddenText: 'PRIVATE_HIDDEN' }),
+                  targetScope: 'runtime-flow'
+                }
+              })
+            )
+          })
+          if (mode === 'attachments')
+            await waitFor(() =>
+              expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+            )
+        } else
+          fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+            target: { value: '/skill show PRIVATE_PROCEDURE' }
+          })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+          'chat.agent_skill_session.command_unavailable'
+        )
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+          '/skill show PRIVATE_PROCEDURE'
+        )
+        expect(hoisted.showAgentSessionSkillMock).not.toHaveBeenCalled()
+        expect(hoisted.setAgentSkillPreferenceMock).not.toHaveBeenCalled()
+        expect(hoisted.listAgentSessionSkillsMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        view.unmount()
+      }
+    }
+  )
+  it('drops delayed user /skill mutation and body responses when the actual ChatPage switches conversations', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'skill-switch',
+      threadId: 'pane'
+    } as const
+    const a: ChatSession = { id: 'skill-a', title: 'A', messages: [] },
+      b: ChatSession = { id: 'skill-b', title: 'B', messages: [] }
+    hoisted.storedSessions.value = [a, b]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), a.id)
+    let finish!: (result: unknown) => void
+    hoisted.listAgentSessionSkillsMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(a.id))
+      await waitFor(() =>
+        expect(hoisted.setAgentSkillScopeMock.mock.calls.some(([req]) => req.active)).toBe(true)
+      )
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/skill toggle one' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.listAgentSessionSkillsMock).toHaveBeenCalledOnce())
+      await dispatchSwitchSession(b.id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(b.id))
+      await act(async () => {
+        finish({
+          revision: 1,
+          skills: [{ id: 'one', name: 'one', enabled: true }],
+          staleDisabledIds: []
+        })
+      })
+      expect(hoisted.setAgentSkillPreferenceMock).not.toHaveBeenCalled()
+      await waitFor(() =>
+        expect(hoisted.setAgentSkillScopeMock.mock.calls.some(([req]) => req.active)).toBe(true)
+      )
+      hoisted.showAgentSessionSkillMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          })
+      )
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/skill show one' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.showAgentSessionSkillMock).toHaveBeenCalledOnce())
+      await dispatchSwitchSession(a.id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(a.id))
+      await act(async () => {
+        finish({ instructions: 'OLD_SKILL_BODY' })
+      })
+      expect(screen.queryByText('OLD_SKILL_BODY')).not.toBeInTheDocument()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+  it('starts and continues a private side from the actual ChatPage without altering parent messages or calling its model', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'side-project',
+      threadId: 'pane'
+    } as const
+    const branch = {
+      id: 'owned-side',
+      revision: 3,
+      generation: 1,
+      status: 'completed',
+      title: 'Private side',
+      createdAt: 1,
+      updatedAt: 2,
+      turns: 1,
+      modelSteps: 1,
+      toolCalls: 0,
+      snapshotTruncated: true,
+      profileId: 'chat-model',
+      modelLabel: 'Model',
+      busy: false,
+      canContinue: true
+    }
+    hoisted.startAgentSideMock.mockResolvedValue({ branch })
+    hoisted.continueAgentSideMock.mockResolvedValue({ branch: { ...branch, turns: 2 } })
+    hoisted.openAgentSideMock.mockResolvedValue({
+      branch,
+      messages: [{ role: 'assistant', kind: 'answer', content: 'PRIVATE_SIDE_ANSWER' }],
+      snapshotCharacters: 0,
+      untrustedData: true
+    })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const before = JSON.stringify(readCurrentSessionState()?.messages)
+      openNewSideForm()
+      fireEvent.change(screen.getByLabelText('chat.agent_side.question'), {
+        target: { value: 'PRIVATE_SIDE_QUESTION' }
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.start' }))
+      await waitFor(() => expect(hoisted.startAgentSideMock).toHaveBeenCalledOnce())
+      expect(hoisted.startAgentSideMock.mock.calls[0][0]).toMatchObject({
+        route,
+        conversationId: readCurrentSessionState()!.id,
+        question: 'PRIVATE_SIDE_QUESTION'
+      })
+      expect(await screen.findByText('PRIVATE_SIDE_ANSWER')).toBeTruthy()
+      fireEvent.change(screen.getByLabelText('chat.agent_side.question'), {
+        target: { value: 'FOLLOWUP_ONLY' }
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.continue' }))
+      await waitFor(() => expect(hoisted.continueAgentSideMock).toHaveBeenCalledOnce())
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(JSON.stringify(readCurrentSessionState()?.messages)).toBe(before)
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it.each([false, true])(
+    'shows local Agent feedback while the original request waits (stream=%s)',
+    async (stream) => {
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'feedback-project',
+        threadId: 'pane'
+      } as const
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      let settle!: (value: unknown) => void
+      const dispatch = stream
+        ? hoisted.requestChatCompletionStreamMock
+        : hoisted.requestChatCompletionMock
+      dispatch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve
+          })
+      )
+      hoisted.listAgentInteractionsMock.mockResolvedValue({
+        interactions: [
+          {
+            id: 'owned-question',
+            expiresAt: Date.now() + 60000,
+            prompt: { kind: 'ask_user', question: 'Which colour?' }
+          }
+        ]
+      })
+      let view!: ReturnType<typeof renderChatPage>
+      await act(async () => {
+        view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+      })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const sessionId = readCurrentSessionState()!.id
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Ask me' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(screen.getByText('Which colour?')).toBeInTheDocument())
+      try {
+        // In the column the question is a card at the end of the transcript.
+        expect(screen.getByTestId('agent-prompt-host')).toContainElement(
+          screen.getByText('Which colour?')
+        )
+        expect(hoisted.listAgentInteractionsMock).toHaveBeenCalledWith({
+          route,
+          conversationId: sessionId
+        })
+        fireEvent.change(screen.getByRole('textbox', { name: 'chat.agent_interaction.answer' }), {
+          target: { value: 'Blue' }
+        })
+        fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.submit' }))
+        await waitFor(() =>
+          expect(hoisted.resolveAgentInteractionMock).toHaveBeenCalledWith({
+            route,
+            conversationId: sessionId,
+            interactionId: 'owned-question',
+            answer: { status: 'answered', text: 'Blue' }
+          })
+        )
+        expect(dispatch).toHaveBeenCalledOnce()
+        expect(
+          readCurrentSessionState()?.messages.filter((message) => message.role === 'user')
+        ).toHaveLength(1)
+        // The run ends: the answered card stays at the end of the transcript, dimmed with its reply.
+        hoisted.listAgentInteractionsMock.mockResolvedValue({ interactions: [] })
+        await act(async () =>
+          settle(
+            stream
+              ? { result: { content: 'Received Blue' }, response: 'Received Blue' }
+              : { content: 'Received Blue' }
+          )
+        )
+        await waitFor(() =>
+          expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+        )
+        const reply = screen.getByTestId('chat-prompt-card-reply')
+        expect(screen.getByTestId('agent-prompt-host')).toContainElement(reply)
+        expect(reply).toHaveTextContent('Blue')
+        expect(screen.getByTestId('agent-prompt-card')).toHaveAttribute('data-resolved', 'true')
+      } finally {
+        await act(async () =>
+          settle(
+            stream
+              ? { result: { content: 'Received Blue' }, response: 'Received Blue' }
+              : { content: 'Received Blue' }
+          )
+        )
+        view.unmount()
+      }
+    }
+  )
+
+  it('opens a declarative display from the mounted thread and submits feedback without adding a user turn', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'display-project',
+      threadId: 'pane'
+    } as const
+    let settle!: (value: unknown) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve
+        })
+    )
+    hoisted.listAgentInteractionsMock.mockResolvedValue({
+      interactions: [
+        {
+          id: 'owned-display',
+          expiresAt: Date.now() + 60000,
+          prompt: {
+            kind: 'show_app',
+            document: {
+              title: 'Budget comparison',
+              blocks: [{ kind: 'table', columns: ['Plan', 'Cost'], rows: [['A', '10']] }],
+              fields: [{ kind: 'text', id: 'note', label: 'Plan feedback', required: true }]
+            }
+          }
+        }
+      ]
+    })
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" route={route} />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const sessionId = readCurrentSessionState()!.id
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Show plans' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      fireEvent.click(await screen.findByRole('button', { name: 'chat.agent_app.open' }))
+      expect(await screen.findByRole('table')).toHaveTextContent('Cost')
+      fireEvent.change(screen.getByRole('textbox', { name: 'Plan feedback' }), {
+        target: { value: 'Use A' }
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_app.submit' }))
+      await waitFor(() =>
+        expect(hoisted.resolveAgentInteractionMock).toHaveBeenCalledWith({
+          route,
+          conversationId: sessionId,
+          interactionId: 'owned-display',
+          answer: { status: 'answered', values: { note: 'Use A' } }
+        })
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
+      expect(
+        readCurrentSessionState()?.messages.filter((message) => message.role === 'user')
+      ).toHaveLength(1)
+    } finally {
+      await act(async () => {
+        settle?.({ content: 'Received feedback' })
+      })
+      view.unmount()
+    }
+  })
+
+  it('reports real tool activity while the model answer remains pending', async () => {
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let pendingInput: { onEvent: (event: unknown) => void } | undefined
+    let settle!: (value: unknown) => void
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pendingInput = input
+      return new Promise((resolve) => {
+        settle = resolve
+      })
+    })
+    let view!: ReturnType<typeof renderChatPage>
+    await act(async () => {
+      view = renderChatPage()
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'search for documentation' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(pendingInput).toBeDefined())
+    const loading = () =>
+      (
+        hoisted.chatMessageListMock.mock.calls.at(-1)?.[0] as {
+          loadingStatus?: { label: string; detail?: string; step?: number }
+        }
+      )?.loadingStatus
+    try {
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'owned-search-run',
+            toolCallId: 'owned-search-call',
+            toolName: 'web_search',
+            status: 'running'
+          }
+        })
+      })
+      await waitFor(() => expect(loading()?.detail).toBe('web_search'))
+      const runningLabel = loading()?.label
+      expect(runningLabel).toBeTruthy()
+      expect(loading()?.step).toBeUndefined()
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'owned-search-run',
+            toolCallId: 'owned-search-call',
+            toolName: 'web_search',
+            status: 'completed'
+          }
+        })
+      })
+      await waitFor(() => expect(loading()?.label).not.toBe(runningLabel))
+      expect(loading()?.detail).toBe('web_search')
+      expect(readCurrentSessionState()?.messages.at(-1)?.content).toBe('')
+    } finally {
+      await act(async () => settle({ result: { content: 'finished' }, response: 'finished' }))
+      view.unmount()
+    }
+  })
+
   it('persists completed tool evidence before the pending model answer or cancellation', async () => {
     const checkpoint: NonNullable<ChatMessage['toolHistory']> = [
       {
@@ -1898,6 +6381,22 @@ describe('ChatPage runtime workflow integration', () => {
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
     await waitFor(() => expect(pendingInput).toBeDefined())
     try {
+      const running = { ...checkpoint[0], status: 'running' as const, content: undefined }
+      await act(async () => {
+        pendingInput!.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: running.runId,
+            toolCallId: running.toolCallId,
+            toolName: running.toolName,
+            status: 'running'
+          },
+          toolHistory: [running]
+        })
+      })
+      await waitFor(() => {
+        expect(readCurrentSessionState()?.messages.at(-1)?.toolHistory).toEqual([running])
+      })
       await act(async () => {
         pendingInput!.onEvent({
           type: 'tool-status',
@@ -2198,13 +6697,34 @@ describe('ChatPage runtime workflow integration', () => {
     await waitFor(() => expect(readCurrentSessionState()?.sessionUrl).toBeUndefined())
   })
 
-  it('persists duplicate blob image URLs once and uses durable URLs for history and one request', async () => {
+  it('imports auto-sent blob images into managed media and never keeps the blob URL', async () => {
+    // Updated for the canvas hand-off fix: auto-sent blob images used to stay blob: in the
+    // message and were copied to AutoSave by saveImageToDir at send time; they are now
+    // managed media (content-addressed, so the duplicate occurrence shares the reference).
     const fetchMock = vi.fn(async () => ({
+      ok: true,
       blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
     }))
     vi.stubGlobal('fetch', fetchMock)
     const revokeObjectURL = vi.fn()
     vi.stubGlobal('URL', { ...URL, revokeObjectURL })
+    const managedUrl = `local-media:///managed/originals/aa/${'a'.repeat(64)}.png`
+    // blob: images are sent to main as bytes (no data: URL string is built).
+    hoisted.importManagedBytesMock.mockReset()
+    hoisted.importManagedBytesMock.mockImplementation(
+      async ({ originalFileName }: { originalFileName: string }) => ({
+        reference: {
+          version: 1,
+          kind: 'managed',
+          relativePath: `user-output/chat-attachments/originals/aa/${'a'.repeat(64)}.png`,
+          sha256: 'a'.repeat(64),
+          sizeBytes: 3,
+          mimeType: 'image/png',
+          originalFileName
+        },
+        localMediaUrl: managedUrl
+      })
+    )
     hoisted.storedSessions.value = [
       {
         id: 'session-duplicate-blob-user-image',
@@ -2253,29 +6773,44 @@ describe('ChatPage runtime workflow integration', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledWith('blob:duplicate-user-upload')
-    expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(1)
+    expect(hoisted.importManagedBytesMock).toHaveBeenCalledTimes(1)
+    expect(hoisted.importManagedBytesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bytes: new Uint8Array([1, 2, 3]),
+        mimeType: 'image/png',
+        originalFileName: 'first.png'
+      })
+    )
+    expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
+    expect(hoisted.saveImageToDirMock).not.toHaveBeenCalled()
     expect(revokeObjectURL).not.toHaveBeenCalled()
 
-    const durableUrl = 'file://C:/MagicPot/AutoSave/Agent/chat_upload.png'
-    expect(readCurrentSessionState()?.messages[0]?.attachments?.map((item) => item.url)).toEqual([
-      durableUrl,
-      durableUrl
+    const stored = readCurrentSessionState()?.messages[0]?.attachments
+    expect(stored?.map((item) => [item.fileName, item.url])).toEqual([
+      ['first.png', managedUrl],
+      ['second.png', managedUrl]
     ])
+    expect(stored?.every((item) => item.media?.kind === 'managed')).toBe(true)
     for (const call of hoisted.requestChatCompletionMock.mock.calls) {
       const requestMessages = call[0]?.messages as ChatMessage[] | undefined
       const requestAttachments = requestMessages?.at(-1)?.attachments ?? []
       expect(requestAttachments.length).toBeGreaterThan(0)
-      expect(requestAttachments.every((item) => !item.url.startsWith('blob:'))).toBe(true)
-      expect(requestAttachments.every((item) => item.url === durableUrl)).toBe(true)
+      expect(requestAttachments.every((item) => !/^(?:blob|data):/.test(item.url))).toBe(true)
     }
   })
 
-  it('preserves blob image URLs when outgoing persistence fails', async () => {
+  it('does not send an auto-sent blob image whose managed import fails', async () => {
+    // Updated for the canvas hand-off fix: this used to send and store the raw blob: URL.
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({ blob: async () => new Blob(['image'], { type: 'image/png' }) }))
+      vi.fn(async () => ({
+        ok: true,
+        blob: async () => new Blob(['image'], { type: 'image/png' })
+      }))
     )
-    hoisted.saveImageToDirMock.mockResolvedValueOnce({ savedPath: null })
+    hoisted.importManagedBytesMock.mockReset()
+    hoisted.importManagedBytesMock.mockRejectedValue(new Error('managed store unavailable'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
 
     renderChatPage()
     await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
@@ -2299,13 +6834,11 @@ describe('ChatPage runtime workflow integration', () => {
       )
     })
 
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-    expect(readCurrentSessionState()?.messages[0]?.attachments?.[0]?.url).toBe(
-      'blob:failed-user-upload'
-    )
-    const requestMessages = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
-      ?.messages as ChatMessage[]
-    expect(requestMessages.at(-1)?.attachments?.[0]?.url).toBe('blob:failed-user-upload')
+    await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalled())
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(
+      (readCurrentSessionState()?.messages ?? []).flatMap((message) => message.attachments ?? [])
+    ).toEqual([])
   })
 
   it('leaves durable outgoing image URLs unchanged', async () => {
@@ -2341,23 +6874,6682 @@ describe('ChatPage runtime workflow integration', () => {
     expect(requestMessages.at(-1)?.attachments?.[0]?.url).toBe('file://C:/MagicPot/existing.png')
   })
 
-  it('renders model and reasoning controls in the workspace controls portal', async () => {
+  it('offers manual thread goal records through /goal for the current local canvas session without dispatch', async () => {
+    const first: ChatSession = {
+      id: 'goal-session-first',
+      title: 'First',
+      profileId: 'base-model',
+      messages: []
+    }
+    const second: ChatSession = {
+      id: 'goal-session-second',
+      title: 'Second',
+      profileId: 'base-model',
+      messages: []
+    }
+    hoisted.storedSessions.value = [first, second]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), first.id)
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(first.id))
+      expect(hoisted.agentGoalScopeRevisionMock).not.toHaveBeenCalled()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/goal' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(await screen.findByText('No goals yet.')).toBeVisible()
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'runtime-project',
+        threadId: 'runtime-pane'
+      }
+      expect(hoisted.listAgentGoalsMock).toHaveBeenCalledWith({
+        route,
+        conversationId: first.id,
+        documentToken: 'goal-document'
+      })
+      expect(
+        screen.getByText(
+          'Manual records only. Activating a goal does not run a model or grant permissions.'
+        )
+      ).toBeVisible()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      await dispatchSwitchSession(second.id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(second.id))
+      expect(screen.queryByLabelText('Thread goals')).not.toBeInTheDocument()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/goal' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(hoisted.listAgentGoalsMock).toHaveBeenCalledWith({
+          route,
+          conversationId: second.id,
+          documentToken: 'goal-document'
+        })
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it.each(['remote', 'inactive', 'no-route', 'archived'] as const)(
+    'refuses /goal for %s without opening or loading goal records',
+    async (mode) => {
+      if (mode === 'remote') hoisted.currentConfig.value!.use_remote_llm = true
+      const session: ChatSession = {
+        id: 'goal-ineligible',
+        title: 'Ineligible',
+        messages: [],
+        archived: mode === 'archived'
+      }
+      hoisted.storedSessions.value = [session]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        session.id
+      )
+      const route =
+        mode === 'no-route'
+          ? undefined
+          : {
+              channel: 'canvas' as const,
+              scopeType: 'thread' as const,
+              scopeId: 'runtime-project',
+              threadId: 'runtime-pane'
+            }
+      const page = renderWithProviders(
+        <ChatPage compact active={mode !== 'inactive'} storageScope="runtime-flow" route={route} />
+      )
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+        // The 'Goals' button became the /goal command card (4d767b14): ask for it the way a user does.
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: '/goal' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() =>
+          expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
+            'Command unavailable for the current conversation.'
+          )
+        )
+        expect(screen.queryByLabelText('Thread goals')).not.toBeInTheDocument()
+        expect(screen.queryByText('Thread goals')).not.toBeInTheDocument()
+        expect(hoisted.listAgentGoalsMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(screen.queryByRole('menuitem', { name: /local reminder|reminder_open/i })).toBeNull()
+        expect(
+          screen.queryByRole('menuitem', { name: /thread goals|thread_goals_menu/i })
+        ).not.toBeInTheDocument()
+        expect(hoisted.agentGoalScopeRevisionMock).not.toHaveBeenCalled()
+        expect(hoisted.setAgentGoalScopeMock).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    }
+  )
+
+  it('renders one model and reasoning selector in the composer, not the workspace card', async () => {
     renderChatPage()
 
-    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    const composer = await screen.findByTestId('chat-composer-mock')
     const workspaceControlsPortal = document.getElementById(
       buildChatWorkspaceControlsPortalId('runtime-flow')
     )
     expect(workspaceControlsPortal).not.toBeNull()
-    const composer = screen.getByTestId('chat-composer-mock')
-
-    await waitFor(() => {
-      expect(
-        within(workspaceControlsPortal as HTMLElement).getByTestId('chat-primary-selection-mock')
-      ).toBeInTheDocument()
-    })
+    expect(
+      within(workspaceControlsPortal as HTMLElement).queryByTestId('chat-primary-selection-mock')
+    ).toBeNull()
     expect(screen.queryByTestId('chat-top-context-controls')).toBeNull()
-    expect(within(composer).queryByTestId('chat-primary-selection-mock')).toBeNull()
+    expect(within(composer).getByTestId('chat-primary-selection-mock')).toBeInTheDocument()
+    expect(screen.getAllByTestId('chat-primary-selection-mock')).toHaveLength(1)
+  })
+
+  it('shows the effective inherited member model without changing either session on selection', async () => {
+    const lead: ChatSession = {
+      id: 'composer-model-lead',
+      title: 'Lead',
+      profileId: 'base-model',
+      messages: []
+    }
+    const member: ChatSession = {
+      id: 'composer-model-writer',
+      title: '文案',
+      teamLeadId: lead.id,
+      teamMemberName: '文案',
+      teamRole: '文案',
+      profileId: 'vision-model',
+      messages: []
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.click(teamRows().getByRole('button', { name: '文案' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
+      expect(screen.queryByTestId('select-vision-model')).not.toBeInTheDocument()
+      expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.profileId).toBe(
+        'base-model'
+      )
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      expect(screen.getByTestId('chat-primary-selection-value')).toHaveTextContent('base-model')
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('passes only current member-selectable model IDs to the composer in their original order', async () => {
+    const lead: ChatSession = {
+      id: 'selectable-lead',
+      title: 'Lead',
+      profileId: 'base-model',
+      messages: []
+    }
+    const member: ChatSession = {
+      id: 'selectable-writer',
+      title: 'writer',
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      messages: []
+    }
+    hoisted.storedSessions.value = [lead, member]
+    hoisted.availableProfiles.value = [
+      { id: 'base-model', model_name: 'Lead', model_use: 'chat' },
+      { id: 'hunyuan3d-pro', model_name: '3D fixture', model_use: 'chat' },
+      { id: 'vision-model', model_name: 'Member', model_use: 'vision', is_vision_model: true }
+    ]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      expect(
+        JSON.parse(screen.getByTestId('selectable-member-profile-ids').textContent || 'null')
+      ).toEqual(['base-model', 'vision-model'])
+      fireEvent.click(screen.getByTestId('forge-member-3d-model'))
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(
+        hoisted.storedSessions.value.find((item) => item.id === member.id)?.memberModelChoice
+      ).toBeUndefined()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('selects a model for the current member without altering the lead or another member', async () => {
+    const lead: ChatSession = {
+      id: 'choice-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const writer: ChatSession = {
+      id: 'choice-writer',
+      title: '文案',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: '文案',
+      profileId: 'base-model'
+    }
+    const designer: ChatSession = {
+      id: 'choice-designer',
+      title: '设计师',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: '设计师',
+      profileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [lead, writer, designer]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.click(teamRows().getByRole('button', { name: '文案' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(writer.id))
+      fireEvent.click(screen.getByTestId('select-member-vision-model'))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((item) => item.id === writer.id)?.memberModelChoice
+        ).toEqual({ version: 1, profileId: 'vision-model' })
+      )
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+          'selected:Vision Model'
+        )
+      )
+      expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.profileId).toBe(
+        'base-model'
+      )
+      expect(
+        hoisted.storedSessions.value.find((item) => item.id === designer.id)?.memberModelChoice
+      ).toBeUndefined()
+      fireEvent.click(teamRows().getByRole('button', { name: '设计师' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(designer.id))
+      expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
+      fireEvent.click(teamRows().getByRole('button', { name: '文案' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(writer.id))
+      expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+        'selected:Vision Model'
+      )
+    } finally {
+      page.unmount()
+    }
+  })
+
+  describe('re-picking a member model that can no longer be used', () => {
+    const teamRoute = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'runtime-project',
+      threadId: 'runtime-pane'
+    } as const
+    const ui = (active: boolean) => (
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage compact active={active} storageScope="runtime-flow" route={teamRoute} />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const lead = (extra: Partial<ChatSession> = {}): ChatSession => ({
+      id: 'repick-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      ...extra
+    })
+    const writer = (extra: Partial<ChatSession> = {}): ChatSession => ({
+      id: 'repick-writer',
+      title: 'writer',
+      messages: [],
+      teamLeadId: 'repick-lead',
+      teamMemberName: 'writer',
+      ...extra
+    })
+    const stored = (id: string) => hoisted.storedSessions.value.find((item) => item.id === id)
+    const openMember = async (sessions: ChatSession[], active = true) => {
+      hoisted.storedSessions.value = sessions
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        'repick-writer'
+      )
+      vi.mocked(setTeamMemberModelChoiceInDB).mockClear()
+      const page = render(ui(active))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('repick-writer'))
+      return page
+    }
+    const holdStorage = () => {
+      const mock = vi.mocked(setTeamMemberModelChoiceInDB)
+      const original = mock.getMockImplementation()!
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      mock.mockImplementationOnce(async (input) => {
+        await gate
+        return original(input)
+      })
+      return release
+    }
+
+    it('offers a pick for a member whose own model was removed and replaces the stored choice', async () => {
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(
+          JSON.parse(screen.getByTestId('selectable-member-profile-ids').textContent || 'null')
+        ).toEqual(['base-model', 'vision-model', 'translation-model'])
+        expect(screen.queryByTestId('member-model-disabled')).toBeNull()
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() =>
+          expect(stored('repick-writer')?.memberModelChoice).toEqual({
+            version: 1,
+            profileId: 'vision-model'
+          })
+        )
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+            'selected:Vision Model'
+          )
+        )
+        expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1)
+        expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('offers a pick for an inheriting member whose lead has no usable model and keeps the lead', async () => {
+      const page = await openMember([lead({ profileId: 'removed-profile' }), writer()])
+      const leadBefore = structuredClone(stored('repick-lead'))
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+            'selected:Vision Model'
+          )
+        )
+        expect(stored('repick-writer')?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'vision-model'
+        })
+        expect(stored('repick-lead')).toEqual(leadBefore)
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it.each([
+      ['the lead is missing', [writer()]],
+      ['the lead is nested', [lead({ teamLeadId: 'other' }), writer()]],
+      ['the lead is archived', [lead({ archived: true }), writer()]],
+      ['the team ended', [lead({ teamEnded: true }), writer()]],
+      ['the member is archived', [lead(), writer({ archived: true })]],
+      ['the generation changed', [lead({ teamGeneration: 1 }), writer()]],
+      [
+        'the lead holds a legacy team selection',
+        [
+          lead({
+            teamSettings: {
+              maxMembers: 6,
+              defaultModel: null,
+              autoCleanup: false,
+              memberModelSelection: { version: 1, profileId: 'vision-model' }
+            }
+          }),
+          writer()
+        ]
+      ],
+      [
+        'the marker is malformed',
+        [lead(), writer({ memberModelChoice: { version: 1, profileId: ' removed ' } })]
+      ],
+      [
+        'the marker has an unknown version',
+        [
+          lead(),
+          writer({
+            memberModelChoice: { version: 2, profileId: 'vision-model' } as unknown as {
+              version: 1
+              profileId: string
+            }
+          })
+        ]
+      ]
+    ] as const)('offers no pick when %s', async (_reason, sessions) => {
+      const page = await openMember(structuredClone([...sessions]))
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(screen.queryByTestId('select-member-vision-model')).toBeNull()
+        expect(screen.queryByTestId('selectable-member-profile-ids')).toBeNull()
+        expect(setTeamMemberModelChoiceInDB).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('keeps a pick disabled and unwritten in remote mode', async () => {
+      hoisted.currentConfig.value!.use_remote_llm = true
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(screen.getByTestId('member-model-disabled')).toBeInTheDocument()
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        })
+        expect(setTeamMemberModelChoiceInDB).not.toHaveBeenCalled()
+        expect(stored('repick-writer')?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'removed-profile'
+        })
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('answers busy to a second pick and to a send while a pick is pending, then applies it', async () => {
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      const release = holdStorage()
+      try {
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.member_model_save_busy')
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: 'wait for the pick' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledTimes(2)
+        expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith('chat.member_model_save_busy')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('wait for the pick')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1)
+        release()
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+            'selected:Vision Model'
+          )
+        )
+        expect(stored('repick-writer')?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'vision-model'
+        })
+      } finally {
+        release()
+        page.unmount()
+      }
+    })
+
+    it('writes nothing when the pane is hidden before a pending pick is released', async () => {
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      const release = holdStorage()
+      try {
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+        page.rerender(ui(false))
+        release()
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        })
+        expect(stored('repick-writer')?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'removed-profile'
+        })
+      } finally {
+        release()
+        page.unmount()
+      }
+    })
+
+    it('writes nothing and warns nothing when the page unmounts before a pending pick is released', async () => {
+      const page = await openMember([
+        lead(),
+        writer({ memberModelChoice: { version: 1, profileId: 'removed-profile' } })
+      ])
+      const release = holdStorage()
+      fireEvent.click(screen.getByTestId('select-member-vision-model'))
+      await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+      page.unmount()
+      release()
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(stored('repick-writer')?.memberModelChoice).toEqual({
+        version: 1,
+        profileId: 'removed-profile'
+      })
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('a member inheriting the lead again', () => {
+    const lead: ChatSession = {
+      id: 'inherit-lead-session',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const chosen = (id: string, name: string, profileId: string): ChatSession => ({
+      id,
+      title: name,
+      messages: [{ role: 'user', content: `${name} task` }] as ChatSession['messages'],
+      teamLeadId: lead.id,
+      teamMemberName: name,
+      memberModelChoice: { version: 1, profileId }
+    })
+    const stored = (id: string) => hoisted.storedSessions.value.find((item) => item.id === id)
+    const ui = (active: boolean) => (
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage
+            compact
+            active={active}
+            storageScope="runtime-flow"
+            route={{
+              channel: 'canvas',
+              scopeType: 'thread',
+              scopeId: 'runtime-project',
+              threadId: 'runtime-pane'
+            }}
+          />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const openMember = async (sessions: ChatSession[], memberId: string) => {
+      hoisted.storedSessions.value = structuredClone(sessions)
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        memberId
+      )
+      vi.mocked(setTeamMemberModelChoiceInDB).mockClear()
+      const page = render(ui(true))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(memberId))
+      return page
+    }
+    const holdStorage = () => {
+      const mock = vi.mocked(setTeamMemberModelChoiceInDB)
+      const original = mock.getMockImplementation()!
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      mock.mockImplementationOnce(async (input) => {
+        await gate
+        return original(input)
+      })
+      return release
+    }
+
+    it('clears a selected member choice and leaves the lead and the other member alone', async () => {
+      const writer = chosen('inherit-writer', 'writer', 'vision-model')
+      const designer = chosen('inherit-designer', 'designer', 'vision-model')
+      const page = await openMember([lead, writer, designer], writer.id)
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+          'selected:Vision Model'
+        )
+        fireEvent.click(screen.getByTestId('inherit-member-lead'))
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
+        )
+        expect(Object.hasOwn(stored(writer.id)!, 'memberModelChoice')).toBe(false)
+        expect(stored(writer.id)?.messages).toEqual(writer.messages)
+        expect(vi.mocked(setTeamMemberModelChoiceInDB)).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ profileId: null })
+        )
+        expect(stored(lead.id)).toEqual(lead)
+        expect(stored(designer.id)).toEqual(designer)
+        expect(screen.queryByTestId('inherit-member-lead')).toBeNull()
+        expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('offers inheriting to a member whose own model was removed only while the lead model can be used', async () => {
+      const writer = chosen('inherit-writer', 'writer', 'removed-profile')
+      const first = await openMember([lead, writer], writer.id)
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(screen.getByTestId('inherit-member-lead')).toHaveTextContent('Inherit GPT-4o')
+        fireEvent.click(screen.getByTestId('inherit-member-lead'))
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
+        )
+        expect(Object.hasOwn(stored(writer.id)!, 'memberModelChoice')).toBe(false)
+      } finally {
+        first.unmount()
+      }
+      const second = await openMember(
+        [{ ...lead, profileId: 'removed-lead-profile' }, writer],
+        writer.id
+      )
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('unavailable')
+        expect(screen.getByTestId('select-member-vision-model')).toBeInTheDocument()
+        expect(screen.queryByTestId('inherit-member-lead')).toBeNull()
+      } finally {
+        second.unmount()
+      }
+    })
+
+    it('offers no inheriting to a member that already inherits', async () => {
+      const { memberModelChoice: _choice, ...writer } = chosen('inherit-writer', 'writer', 'x')
+      const page = await openMember([lead, writer], writer.id)
+      try {
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent('inherited:GPT-4o')
+        expect(screen.queryByTestId('inherit-member-lead')).toBeNull()
+      } finally {
+        page.unmount()
+      }
+    })
+
+    it('answers busy to inheriting while a pick is pending', async () => {
+      const writer = chosen('inherit-writer', 'writer', 'removed-profile')
+      const page = await openMember([lead, writer], writer.id)
+      const release = holdStorage()
+      try {
+        fireEvent.click(screen.getByTestId('select-member-vision-model'))
+        await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+        fireEvent.click(screen.getByTestId('inherit-member-lead'))
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledExactlyOnceWith(
+          'chat.member_model_save_busy'
+        )
+        expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1)
+        release()
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+            'selected:Vision Model'
+          )
+        )
+        expect(stored(writer.id)?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'vision-model'
+        })
+      } finally {
+        release()
+        page.unmount()
+      }
+    })
+
+    describe('answers busy to inheriting and writes nothing', () => {
+      const writer = chosen('inherit-writer', 'writer', 'vision-model')
+      const clickInherit = () => {
+        hoisted.notifyWarningMock.mockClear()
+        fireEvent.click(screen.getByTestId('inherit-member-lead'))
+      }
+      const expectRefused = () => {
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledExactlyOnceWith(
+          'chat.member_model_save_busy'
+        )
+        expect(setTeamMemberModelChoiceInDB).not.toHaveBeenCalled()
+        expect(stored(writer.id)?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: 'vision-model'
+        })
+        expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+          'selected:Vision Model'
+        )
+      }
+      const externalRun = (loading: boolean) =>
+        act(() => {
+          window.dispatchEvent(
+            new CustomEvent('chat:set-external-loading', {
+              detail: { scope: 'runtime-flow', sessionId: writer.id, loading }
+            })
+          )
+        })
+      const send = (text: string) => {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: text }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      }
+
+      it('while the member is sending', async () => {
+        let release!: () => void
+        const gate = {
+          gate: new Promise<void>((resolve) => {
+            release = resolve
+          }),
+          entered: false
+        }
+        hoisted.teamBeforeDispatchGate.value = gate
+        const page = await openMember([lead, writer], writer.id)
+        try {
+          send('writer task in flight')
+          await waitFor(() => expect(gate.entered).toBe(true))
+          clickInherit()
+          expectRefused()
+        } finally {
+          hoisted.teamBeforeDispatchGate.value = null
+          release()
+          page.unmount()
+        }
+      })
+
+      it('while a Canvas Target run holds the member, and clears once it ended', async () => {
+        const page = await openMember([lead, writer], writer.id)
+        try {
+          await externalRun(true)
+          clickInherit()
+          expectRefused()
+          await externalRun(false)
+          clickInherit()
+          await waitFor(() =>
+            expect(screen.getByTestId('chat-member-model-mock')).toHaveTextContent(
+              'inherited:GPT-4o'
+            )
+          )
+          expect(Object.hasOwn(stored(writer.id)!, 'memberModelChoice')).toBe(false)
+          expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+        } finally {
+          await externalRun(false)
+          page.unmount()
+        }
+      })
+
+      it('while a queued item of the member can still go out by itself, and while it is in flight', async () => {
+        const page = await openMember([lead, writer], writer.id)
+        try {
+          // Queued behind a Canvas Target run, then held only by the open editor: when the run
+          // ends the member is idle, and the item goes out as soon as the edit ends.
+          await externalRun(true)
+          send('queued for the writer')
+          const item = await screen.findByTestId('chat-queue-item')
+          expect(item).toHaveTextContent('queued for the writer')
+          expect(item).toHaveAttribute('data-status', 'queued')
+          fireEvent.click(within(item).getByRole('button', { name: 'chat.queue_edit' }))
+          await screen.findByTestId('chat-queue-editor')
+          await externalRun(false)
+          expect(screen.getByTestId('chat-queue-item')).toHaveAttribute('data-status', 'queued')
+          clickInherit()
+          expectRefused()
+          expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+          expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+          // The edit ends: the item is leased and being prepared, and inheriting is still refused.
+          fireEvent.click(screen.getByRole('button', { name: 'chat.queue_discard' }))
+          expect(screen.getByTestId('chat-queue-item')).toHaveAttribute('data-status', 'preparing')
+          clickInherit()
+          expectRefused()
+          await waitFor(() => expect(screen.queryByTestId('chat-queue-item')).toBeNull())
+        } finally {
+          await externalRun(false)
+          page.unmount()
+        }
+      })
+    })
+
+    it('has a storage stand-in that, as the real call, writes nothing for a clear of a member with no choice', async () => {
+      const { memberModelChoice: _choice, ...writer } = chosen('inherit-writer', 'writer', 'x')
+      hoisted.storedSessions.value = structuredClone([lead, writer])
+      const before = hoisted.storedSessions.value
+      const result = await setTeamMemberModelChoiceInDB({
+        scope: 'runtime-flow',
+        expectedLead: lead,
+        expectedMember: writer,
+        profileId: null
+      })
+      expect(hoisted.storedSessions.value).toBe(before)
+      expect(result).toEqual({ lead, member: writer })
+    })
+
+    it.each(['hidden', 'unmounted'] as const)(
+      'writes nothing when the page is %s before a pending clear is released',
+      async (how) => {
+        const writer = chosen('inherit-writer', 'writer', 'vision-model')
+        const page = await openMember([lead, writer], writer.id)
+        const release = holdStorage()
+        try {
+          fireEvent.click(screen.getByTestId('inherit-member-lead'))
+          await waitFor(() => expect(setTeamMemberModelChoiceInDB).toHaveBeenCalledTimes(1))
+          if (how === 'hidden') page.rerender(ui(false))
+          else page.unmount()
+          release()
+          await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 50))
+          })
+          expect(stored(writer.id)?.memberModelChoice).toEqual({
+            version: 1,
+            profileId: 'vision-model'
+          })
+          if (how === 'unmounted') expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+        } finally {
+          release()
+          if (how === 'hidden') page.unmount()
+        }
+      }
+    )
+  })
+
+  it('requires branch confirmation and preserves original without generation', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const original = readCurrentSessionState()!
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/branch' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-command-confirm-card')).toHaveAttribute(
+        'data-command',
+        '/branch'
+      )
+    )
+    expect(screen.queryByTestId('replay-confirmation')).toBeNull()
+    expect(readCurrentSessionState()?.id).toBe(original.id)
+    fireEvent.click(screen.getByRole('button', { name: 'chat.command_card.new_conversation' }))
+    await waitFor(() => expect(readCurrentSessionState()?.id).not.toBe(original.id))
+    // The card belonged to the conversation that was left.
+    expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
+    expect(readCurrentSessionState()?.messages).toEqual(original.messages)
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+  it('accepts the branch confirmation after the typed command was saved and cleared as a draft', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const original = readCurrentSessionState()!
+    const key = `runtime-flow:${original.id}`
+    // A person types slower than the draft is saved: the session record then carries the command as its draft.
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/branch' }
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.draft?.inputValue).toBe('/branch'))
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    const card = await screen.findByTestId('chat-command-confirm-card')
+    // The accepted command clears the draft, which replaces the session record once more.
+    await waitFor(() => expect(readCurrentSessionState()?.draft).toBeUndefined())
+    expect(hoisted.draftBackups.value[key]?.draft).toBeUndefined()
+    hoisted.notifyWarningMock.mockClear()
+    fireEvent.click(
+      within(card).getByRole('button', { name: 'chat.command_card.new_conversation' })
+    )
+    // Only other messages make the question stale; a saved or cleared draft does not.
+    expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(readCurrentSessionState()?.id).not.toBe(original.id))
+    expect(readCurrentSessionState()?.messages).toEqual(original.messages)
+    expect(readCurrentSessionState()?.draft).toBeUndefined()
+  })
+  it('accepts the full-page branch confirmation after the typed command was saved and cleared as a draft', async () => {
+    // The full-page chat shares the stale check with the Agent column and keeps its own view.
+    const view = renderWithProviders(<ChatPage storageScope="runtime-flow" />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      const original = readCurrentSessionState()!
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/branch' }
+      })
+      await waitFor(() => expect(readCurrentSessionState()?.draft?.inputValue).toBe('/branch'))
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      const confirmation = await screen.findByTestId('replay-confirmation')
+      expect(screen.queryByTestId('chat-command-confirm-card')).toBeNull()
+      await waitFor(() => expect(readCurrentSessionState()?.draft).toBeUndefined())
+      hoisted.notifyWarningMock.mockClear()
+      fireEvent.click(
+        within(confirmation).getByRole('button', { name: 'Create separate conversation' })
+      )
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalled()
+      await waitFor(() => expect(readCurrentSessionState()?.id).not.toBe(original.id))
+      expect(readCurrentSessionState()?.messages).toEqual(original.messages)
+      expect(screen.queryByTestId('replay-confirmation')).toBeNull()
+    } finally {
+      view.unmount()
+    }
+  })
+  it.each([
+    ['/regen', 'original replay text'],
+    ['/edit 1 replacement', 'replacement']
+  ])(
+    'opens %s as an unsent separate draft and preserves original messages',
+    async (command, expectedDraft) => {
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'original replay text' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(
+          readCurrentSessionState()?.messages.some((message) => message.role === 'assistant')
+        ).toBe(true)
+      )
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(''))
+      const original = structuredClone(readCurrentSessionState()!)
+      hoisted.requestChatCompletionMock.mockClear()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: command }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-command-confirm-card')).toHaveAttribute(
+          'data-command',
+          command.split(' ')[0]
+        )
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'chat.command_card.new_conversation' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).not.toBe(original.id))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(expectedDraft)
+      )
+      expect(readCurrentSessionState()?.sessionUrl).toBeUndefined()
+      expect(readCurrentSessionState()?.messages).toHaveLength(0)
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    }
+  )
+  it('cancels edit confirmation without creating a conversation or sending', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'editable original' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(
+        readCurrentSessionState()?.messages.some((message) => message.role === 'assistant')
+      ).toBe(true)
+    )
+    const original = structuredClone(readCurrentSessionState()!)
+    hoisted.requestChatCompletionMock.mockClear()
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/edit 1 replacement' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    const card = await screen.findByTestId('chat-command-confirm-card')
+    fireEvent.click(within(card).getByRole('button', { name: 'chat.command_card.cancel' }))
+    // The answered card stays in the transcript with the reply; its buttons are gone.
+    expect(card).toHaveAttribute('data-resolved', 'true')
+    expect(card).toHaveTextContent('→ chat.command_card.cancel')
+    expect(within(card).queryByRole('button')).toBeNull()
+    expect(readCurrentSessionState()?.id).toBe(original.id)
+    expect(readCurrentSessionState()?.messages).toEqual(original.messages)
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+  it('rejects stale branch confirmation after the source history changes', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const originalId = readCurrentSessionState()!.id
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/branch' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await screen.findByTestId('chat-command-confirm-card')
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'new source turn' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(
+        readCurrentSessionState()?.messages.some((message) => message.role === 'assistant')
+      ).toBe(true)
+    )
+    // The card stayed where the command ran: before the new turn.
+    const card = screen.getByTestId('chat-command-confirm-card')
+    fireEvent.click(
+      within(card).getByRole('button', { name: 'chat.command_card.new_conversation' })
+    )
+    expect(readCurrentSessionState()?.id).toBe(originalId)
+    // The answer came too late: the card says so instead of creating a conversation.
+    expect(card).toHaveAttribute('data-resolved', 'true')
+    expect(card).toHaveTextContent('chat.command_card.expired')
+    expect(within(card).queryByRole('button')).toBeNull()
+  })
+  it.each([
+    { designerName: 'designer', writerName: 'writer' },
+    { designerName: '设计师', writerName: '文案' }
+  ])(
+    'runs a mock two-member team ($designerName / $writerName) through actual chat dispatch, canvas placement and lead summary',
+    async ({ designerName, writerName }) => {
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+        'base-model'
+      )
+      const fetchGuard = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        if (input === 'data:image/png;base64,QQ==')
+          return { blob: async () => new Blob(['A'], { type: 'image/png' }) } as Response
+        throw new Error('network forbidden')
+      })
+      // A prior test may have stubbed fetch with a vi.fn: spyOn can reuse its call history.
+      // Keep the no-network check, but scope it to calls made during this scenario.
+      fetchGuard.mockClear()
+      const placements: Array<{ src: string; projectId: string; generationSessionId: string }> = []
+      const onCanvasImage = (event: Event) => {
+        const detail = (event as CustomEvent).detail
+        placements.push(detail)
+        detail.onAdded({ id: 'fixture-image', type: 'image' })
+      }
+      window.addEventListener('canvas:add-image', onCanvasImage)
+      let approveWriter!: (approved: boolean) => void
+      let writerId = ''
+      let writerReturned = false
+      hoisted.listPendingApprovalsMock.mockReset().mockResolvedValue({ approvals: [] })
+      hoisted.resolvePendingApprovalMock
+        .mockReset()
+        .mockImplementation(async (input: { approved: boolean }) => {
+          hoisted.listPendingApprovalsMock.mockResolvedValue({ approvals: [] })
+          approveWriter(input.approved)
+          return {}
+        })
+      try {
+        hoisted.requestChatCompletionMock.mockImplementation(
+          async ({ messages }: { messages: ChatMessage[] }) => {
+            const text = String(messages.at(-1)?.content ?? '')
+            if (text.includes('设计海报'))
+              return {
+                content: '设计结果',
+                attachments: [
+                  { type: 'image', url: 'data:image/png;base64,QQ==', mimeType: 'image/png' }
+                ]
+              }
+            if (text.includes('撰写文案')) {
+              const allowed = await new Promise<boolean>((resolve) => {
+                approveWriter = resolve
+                hoisted.listPendingApprovalsMock.mockResolvedValue({
+                  approvals: [
+                    {
+                      approvalId: 'writer-tool',
+                      revision: 3,
+                      request: {
+                        request: {
+                          sessionId: writerId,
+                          route: {
+                            channel: 'canvas',
+                            scopeType: 'thread',
+                            scopeId: 'runtime-project',
+                            threadId: 'runtime-pane'
+                          },
+                          target: { id: 'shell.execute' },
+                          input: { command: 'echo fixture' }
+                        }
+                      }
+                    }
+                  ]
+                })
+              })
+              writerReturned = true
+              return { content: allowed ? '文案结果' : '文案已拒绝' }
+            }
+            if (text.includes('汇总团队结果')) return { content: '汇总：设计结果和文案结果' }
+            throw new Error(`Unexpected fixture request: ${text}`)
+          }
+        )
+        localStorage.setItem(
+          scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+          'base-model'
+        )
+        renderChatPage({ team: true, rows: true })
+        await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
+        const lead = readCurrentSessionState()!.id
+        for (const [name, role, count] of [
+          [designerName, '设计师', '1'],
+          [writerName, '文案', '2']
+        ] as const) {
+          chooseAddMenuEntry('chat-composer-menu-add-member')
+          fireEvent.change(screen.getByLabelText('成员名'), { target: { value: name } })
+          fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: role } })
+          fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
+          await waitFor(() =>
+            expect(teamRows().getAllByRole('button')).toHaveLength(Number(count) + 1)
+          )
+        }
+        const designer = hoisted.storedSessions.value.find(
+          (session) => session.teamMemberName === designerName
+        )!
+        const writer = hoisted.storedSessions.value.find(
+          (session) => session.teamMemberName === writerName
+        )!
+        writerId = writer.id
+        expect(designer).toMatchObject({ teamLeadId: lead, teamRole: '设计师', messages: [] })
+        expect(writer).toMatchObject({ teamLeadId: lead, teamRole: '文案', messages: [] })
+        const send = (value: string) => {
+          fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value } })
+          fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        }
+        send(`@${designerName} 设计海报`)
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+        expect(hoisted.requestChatCompletionMock.mock.calls[0][0].teamMember).toEqual({
+          scope: 'runtime-flow',
+          thread: 'runtime-pane',
+          lead,
+          member: designer.id
+        })
+        await waitFor(() =>
+          expect(placements).toEqual([
+            expect.objectContaining({
+              src: 'data:image/png;base64,QQ==',
+              projectId: 'runtime-project',
+              generationSessionId: designer.id
+            })
+          ])
+        )
+        await waitFor(() =>
+          expect(
+            hoisted.storedSessions.value
+              .find((session) => session.id === designer.id)
+              ?.messages.some((message) => message.content === '设计结果')
+          ).toBe(true)
+        )
+        send(`@${writerName} 撰写文案`)
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+        expect(hoisted.requestChatCompletionMock.mock.calls[1][0].teamMember).toEqual({
+          scope: 'runtime-flow',
+          thread: 'runtime-pane',
+          lead,
+          member: writer.id
+        })
+        expect(writerReturned).toBe(false)
+        expect(
+          hoisted.storedSessions.value
+            .find((session) => session.id === writer.id)
+            ?.messages.some((message) => message.content === '文案结果')
+        ).toBe(false)
+        const approvalView = renderWithProviders(<MagicAgentApprovalCenter />)
+        try {
+          expect(await screen.findByText(`${writerName} 请求操作`)).toBeVisible()
+          expect(screen.getByText('shell.execute')).toBeVisible()
+          expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+          const inlineApproval = screen.getByTestId('team-inline-approvals')
+          // In the column the approval host follows the transcript tail, where the lead's
+          // delegated lines say who is done and who waits for the approval.
+          expect(hoisted.chatMessageListMock).toHaveBeenLastCalledWith(
+            expect.objectContaining({ tailEnd: expect.anything() })
+          )
+          expect(within(inlineApproval).getByTestId('team-approval-card')).toBeVisible()
+          await waitFor(() => expect(delegatedLineStates()).toEqual(['completed', 'waiting']))
+          expect(within(inlineApproval).getByRole('button', { name: '批准' })).toBeVisible()
+          expect(within(inlineApproval).getByRole('button', { name: '拒绝' })).toBeVisible()
+          // The waiting member is not listed in a process area; its approval card is the only surface.
+          expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
+          expect(inlineApproval).toBeInTheDocument()
+          expect(
+            fetchGuard.mock.calls
+              .map(([input]) => input)
+              .filter((input) => input !== 'data:image/png;base64,QQ==')
+          ).toEqual([])
+          fireEvent.click(screen.getByRole('button', { name: '批准' }))
+          await waitFor(() =>
+            expect(hoisted.resolvePendingApprovalMock).toHaveBeenCalledWith({
+              approvalId: 'writer-tool',
+              expectedRevision: 3,
+              approved: true
+            })
+          )
+        } finally {
+          approvalView.unmount()
+        }
+        await waitFor(() =>
+          expect(
+            hoisted.storedSessions.value
+              .find((session) => session.id === writer.id)
+              ?.messages.some((message) => message.content === '文案结果')
+          ).toBe(true)
+        )
+        expect(writerReturned).toBe(true)
+        fireEvent.click(teamRows().getByRole('button', { name: designerName }))
+        await waitFor(() =>
+          expect(
+            readCurrentSessionState()?.messages.some((message) => message.content === '设计结果')
+          ).toBe(true)
+        )
+        fireEvent.click(teamRows().getByRole('button', { name: writerName }))
+        await waitFor(() =>
+          expect(
+            readCurrentSessionState()?.messages.some((message) => message.content === '文案结果')
+          ).toBe(true)
+        )
+        fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead))
+        send('汇总团队结果')
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+        const leadMessages = hoisted.requestChatCompletionMock.mock.calls[2][0]
+          .messages as ChatMessage[]
+        expect(hoisted.requestChatCompletionMock.mock.calls[2][0]).not.toHaveProperty('teamMember')
+        const leadRequest = leadMessages.find(
+          (message) => message.role === 'user' && message.content === '汇总团队结果'
+        )
+        expect(leadRequest?.hiddenContext).toContain('设计结果')
+        expect(leadRequest?.hiddenContext).toContain('文案结果')
+        await waitFor(() =>
+          expect(
+            readCurrentSessionState()?.messages.some(
+              (message) => message.content === '汇总：设计结果和文案结果'
+            )
+          ).toBe(true)
+        )
+        await waitFor(() =>
+          expect(
+            hoisted.storedSessions.value
+              .find((session) => session.id === lead)
+              ?.messages.some((message) => message.content === '汇总：设计结果和文案结果')
+          ).toBe(true)
+        )
+        expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3)
+      } finally {
+        fetchGuard.mockRestore()
+        window.removeEventListener('canvas:add-image', onCanvasImage)
+      }
+    }
+  )
+
+  it.each(['member'] as const)(
+    'exposes team %s stop while a queued composer item is in preflight',
+    async (mode) => {
+      const lead: ChatSession = {
+        id: `preflight-stop-${mode}-lead`,
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const member: ChatSession = {
+        id: `preflight-stop-${mode}-member`,
+        title: 'Alice',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Alice'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      const fetchBlocked = vi.fn(async () => {
+        throw new Error('Unexpected network access')
+      })
+      vi.stubGlobal('fetch', fetchBlocked)
+      let finish!: (value: { content: string }) => void
+      let release!: () => void
+      const running = new Promise<{ content: string }>((resolve) => {
+        finish = resolve
+      })
+      const gate = {
+        entered: false,
+        gate: new Promise<void>((resolve) => {
+          release = resolve
+        })
+      }
+      hoisted.requestChatCompletionMock.mockImplementation(() => running)
+      const page = renderChatPage({ team: true, rows: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: '@Alice active request' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+        fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: 'queued preflight text' }
+        })
+        fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued preflight text')
+        )
+        hoisted.teamPreflightReadGate.value = gate
+        await act(async () => finish({ content: 'first synthetic response' }))
+        await waitFor(() => expect(gate.entered).toBe(true), { timeout: 2000 })
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(
+            'chat.queue_status_preparing'
+          )
+        )
+        expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+        // The member's own conversation is open: its composer stop stops it.
+        const stop = screen.getByTestId('chat-composer-stop-mock')
+        expect(stop).toBeVisible()
+        expect(stop).toBeEnabled()
+        fireEvent.click(stop)
+        hoisted.teamPreflightReadGate.value = null
+        await act(async () => release())
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(
+            'chat.queue_status_paused'
+          )
+        )
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued preflight text')
+        expect(
+          readCurrentSessionState()?.messages.some(
+            (message) => message.role === 'user' && message.content === 'queued preflight text'
+          )
+        ).toBe(false)
+        expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+        expect(fetchBlocked).not.toHaveBeenCalled()
+      } finally {
+        hoisted.teamPreflightReadGate.value = null
+        release()
+        finish({ content: 'synthetic cleanup' })
+        page.unmount()
+        vi.unstubAllGlobals()
+      }
+    }
+  )
+
+  it.each(['member'] as const)(
+    'preserves an unstarted ordinary composer queue on team %s stop without overwriting a new draft',
+    async (mode) => {
+      const lead: ChatSession = {
+        id: `safe-stop-${mode}-lead`,
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const member: ChatSession = {
+        id: `safe-stop-${mode}-member`,
+        title: 'Alice',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Alice'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      const fetchBlocked = vi.fn(async () => {
+        throw new Error('Unexpected network access')
+      })
+      vi.stubGlobal('fetch', fetchBlocked)
+      let finish!: (value: { content: string }) => void
+      const running = new Promise<{ content: string }>((resolve) => {
+        finish = resolve
+      })
+      let signal: AbortSignal | undefined
+      hoisted.requestChatCompletionMock.mockImplementation(
+        ({ signal: requestSignal }: { signal: AbortSignal }) => {
+          signal = requestSignal
+          return running
+        }
+      )
+      const page = renderChatPage({ team: true, rows: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: '@Alice running' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(signal).toBeDefined())
+        fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: 'unstarted queued text' }
+        })
+        fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('unstarted queued text')
+        )
+        expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: 'newer unsent draft' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+        expect(signal?.aborted).toBe(true)
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(
+            'chat.queue_status_paused'
+          )
+        )
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('unstarted queued text')
+        expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+        fireEvent.click(
+          within(screen.getByTestId('chat-queue-item')).getByRole('button', {
+            name: 'chat.queue_edit'
+          })
+        )
+        expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue(
+          'unstarted queued text'
+        )
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('newer unsent draft')
+        expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+        // Saving edits the item in its row and resumes it; the newer draft in the composer stays.
+        fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+          target: { value: 'unstarted queued text, edited' }
+        })
+        fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('newer unsent draft')
+        expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(
+          'unstarted queued text, edited'
+        )
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('chat.queue_status_queued')
+        // It waits only for the stopped request to settle, then it is sent.
+        await act(async () => finish({ content: 'stopped request settles' }))
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+        expect(
+          JSON.stringify(hoisted.requestChatCompletionMock.mock.calls[1][0].messages)
+        ).toContain('unstarted queued text, edited')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('newer unsent draft')
+        expect(fetchBlocked).not.toHaveBeenCalled()
+      } finally {
+        finish({ content: 'synthetic cleanup' })
+        page.unmount()
+        vi.unstubAllGlobals()
+      }
+    }
+  )
+
+  // Owner decision 3 (stop and composer queue): a member stop keeps each member's unsent queued
+  // item, paused, instead of dropping it. Re-expressed from '... and drops their queued sends'.
+  it('stops the running members from the lead composer and pauses their unsent queued items', async () => {
+    const lead: ChatSession = {
+      id: 'stop-all-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'stop-all-alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'stop-all-bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const signals = new Map<string, AbortSignal>()
+    hoisted.requestChatCompletionMock.mockImplementation(
+      ({ conversationId, signal }: { conversationId: string; signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          signals.set(conversationId, signal)
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true }
+          )
+        })
+    )
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      for (const name of ['Alice', 'Bob']) {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: `@${name} running` }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(signals.has(name === 'Alice' ? alice.id : bob.id)).toBe(true))
+      }
+      // The lead itself is idle, but its composer offers stop while members run.
+      expect(readCurrentSessionState()?.id).toBe(lead.id)
+      await waitFor(() => expect(screen.getByTestId('chat-composer-stop-mock')).toBeVisible())
+      // The lead's transcript ends with one delegated line per running member.
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['running', 'running']))
+      for (const member of [alice, bob]) {
+        fireEvent.click(teamRows().getByRole('button', { name: member.teamMemberName! }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: `queued for ${member.teamMemberName}` }
+        })
+        fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(
+            `queued for ${member.teamMemberName}`
+          )
+        )
+      }
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      expect(signals.get(alice.id)?.aborted).toBe(true)
+      expect(signals.get(bob.id)?.aborted).toBe(true)
+      await waitFor(() =>
+        expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      )
+      expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
+      // The stopped members say so in the lead's view.
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['cancelled', 'cancelled']))
+      for (const member of [alice, bob]) {
+        fireEvent.click(teamRows().getByRole('button', { name: member.teamMemberName! }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+        // The unsent item stays in the member's queue, paused, and is never sent by the stop.
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent(
+          `queued for ${member.teamMemberName}`
+        )
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('chat.queue_status_paused')
+        expect(
+          readCurrentSessionState()?.messages.some(
+            (message) => message.content === `queued for ${member.teamMemberName}`
+          )
+        ).toBe(false)
+      }
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('stops only the open member from its own conversation, not the lead or another member', async () => {
+    const lead: ChatSession = {
+      id: 'stop-one-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'stop-one-alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'stop-one-bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const signals = new Map<string, AbortSignal>()
+    hoisted.requestChatCompletionMock.mockImplementation(
+      ({ conversationId, signal }: { conversationId: string; signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          signals.set(conversationId, signal)
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true }
+          )
+        })
+    )
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      for (const name of ['Alice', 'Bob']) {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: `@${name} running` }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(signals.has(name === 'Alice' ? alice.id : bob.id)).toBe(true))
+      }
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      expect(signals.get(alice.id)?.aborted).toBe(true)
+      expect(signals.get(bob.id)?.aborted).toBe(false)
+      await waitFor(() =>
+        expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      )
+      // Back in the lead, the stop still covers Bob.
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.click(await screen.findByTestId('chat-composer-stop-mock'))
+      expect(signals.get(bob.id)?.aborted).toBe(true)
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('offers the lead composer stop while a member prepares a queued item, and the stop pauses that item', async () => {
+    const lead: ChatSession = {
+      id: 'lead-preflight-stop-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'lead-preflight-stop-alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const fetchBlocked = vi.fn(async () => {
+      throw new Error('Unexpected network access')
+    })
+    vi.stubGlobal('fetch', fetchBlocked)
+    let finish!: (value: { content: string }) => void
+    let release!: () => void
+    const running = new Promise<{ content: string }>((resolve) => {
+      finish = resolve
+    })
+    const gate = {
+      entered: false,
+      gate: new Promise<void>((resolve) => {
+        release = resolve
+      })
+    }
+    hoisted.requestChatCompletionMock.mockImplementation(() => running)
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Alice active request' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'queued member text' }
+      })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued member text')
+      )
+      hoisted.teamPreflightReadGate.value = gate
+      await act(async () => finish({ content: 'first synthetic response' }))
+      await waitFor(() => expect(gate.entered).toBe(true), { timeout: 2000 })
+      // Alice is not loading but prepares her queued item: the lead's stop covers her and her
+      // delegated line says she runs.
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['running']))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      hoisted.teamPreflightReadGate.value = null
+      await act(async () => release())
+      await waitFor(() =>
+        expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      )
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('chat.queue_status_paused')
+      )
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued member text')
+      expect(
+        readCurrentSessionState()?.messages.some(
+          (message) => message.content === 'queued member text'
+        )
+      ).toBe(false)
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(fetchBlocked).not.toHaveBeenCalled()
+    } finally {
+      hoisted.teamPreflightReadGate.value = null
+      release()
+      finish({ content: 'synthetic cleanup' })
+      page.unmount()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps a member user item paused and drops its team-internal auto-send on a member stop', async () => {
+    const lead: ChatSession = {
+      id: 'mixed-stop-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'mixed-stop-alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    hoisted.storedSessions.value = [lead, alice]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let signal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      ({ signal: requestSignal }: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          signal = requestSignal
+          requestSignal.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true }
+          )
+        })
+    )
+    const page = renderChatPage({ team: true, rows: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Alice running' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(signal).toBeDefined())
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
+      // A canvas auto-send (team-internal: it resolves its attachments itself) and a user item.
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              text: 'internal canvas auto-send',
+              autoSend: true,
+              requestId: 'mixed-stop-request',
+              targetScope: 'runtime-flow'
+            }
+          })
+        )
+      })
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'user queued text' }
+      })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input-mock'), { key: 'Enter' })
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+      fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      expect(signal?.aborted).toBe(true)
+      await waitFor(() =>
+        expect(screen.queryByTestId('chat-composer-stop-mock')).not.toBeInTheDocument()
+      )
+      fireEvent.click(teamRows().getByRole('button', { name: 'Alice' }))
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(alice.id))
+      expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('user queued text')
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('chat.queue_status_paused')
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      // The dropped auto-send released its request key: the same request can be delivered again.
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              text: 'internal canvas auto-send',
+              autoSend: true,
+              requestId: 'mixed-stop-request',
+              targetScope: 'runtime-flow'
+            }
+          })
+        )
+      })
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      expect(
+        (hoisted.requestChatCompletionMock.mock.calls[1][0].messages as ChatMessage[]).at(-1)
+          ?.content
+      ).toBe('internal canvas auto-send')
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('user queued text')
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('creates a member with empty history and switches back to its lead without enabling execution', async () => {
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+    renderChatPage({ team: true, rows: true })
+    await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
+    const lead = readCurrentSessionState()!.id
+    chooseAddMenuEntry('chat-composer-menu-add-member')
+    fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'writer' } })
+    fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'write notes' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
+    await waitFor(() =>
+      expect(
+        teamRows()
+          .getAllByRole('button')
+          .map((row) => row.textContent)
+      ).toEqual(['Lead', 'writer'])
+    )
+    const committed = hoisted.storedSessions.value.find(
+      (session) => session.teamMemberName === 'writer'
+    )
+    expect(committed).toMatchObject({ teamLeadId: lead, messages: [] })
+    fireEvent.click(teamRows().getByRole('button', { name: 'writer' }))
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(committed?.id))
+    expect(readCurrentSessionState()?.messages).toEqual([])
+    fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead))
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+
+  it('creates a team member, switches within the same column and returns to lead', async () => {
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+    renderChatPage({ team: true, rows: true })
+    await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
+    const lead = readCurrentSessionState()!.id
+    chooseAddMenuEntry('chat-composer-menu-add-member')
+    fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'writer' } })
+    fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'write notes' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
+    await waitFor(() =>
+      expect(
+        teamRows()
+          .getAllByRole('button')
+          .map((row) => row.textContent)
+      ).toEqual(['Lead', 'writer'])
+    )
+    expect(readCurrentSessionState()?.id).toBe(lead)
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '@writer write a short note' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalled())
+    expect(readCurrentSessionState()?.id).toBe(lead)
+    expect(readCurrentSessionState()?.messages).toHaveLength(0)
+    fireEvent.click(teamRows().getByRole('button', { name: 'writer' }))
+    await waitFor(() => expect(readCurrentSessionState()?.teamLeadId).toBe(lead))
+    await waitFor(() =>
+      expect(
+        readCurrentSessionState()?.messages.some(
+          (message) => message.content === 'write a short note'
+        )
+      ).toBe(true)
+    )
+    fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead))
+  })
+  async function openTeamManagement() {
+    await waitFor(() => expect(readCurrentSessionState()).toBeDefined())
+    const current = readCurrentSessionState()
+    const hasMembers =
+      !current?.teamEnded &&
+      hoisted.storedSessions.value.some(
+        (session) => session.teamLeadId === current?.id && !session.archived
+      )
+    fireEvent.click(
+      hasMembers
+        ? await screen.findByTestId('agent-header-team')
+        : screen.getByTestId('agent-header-team')
+    )
+    await screen.findByRole('dialog', { name: '团队管理' })
+  }
+
+  it.each([
+    {
+      label: '频道消息',
+      text: 'local channel entry',
+      button: '添加到频道记录',
+      field: 'teamChannel' as const
+    },
+    { label: '任务', text: 'local task entry', button: '添加任务', field: 'teamTasks' as const }
+  ])(
+    'persists $field after changing the lead model while retaining stale team default',
+    async ({ label, text, button, field }) => {
+      const lead: ChatSession = {
+        id: 'model-change-local-record',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model',
+        teamSettings: { maxMembers: 6, defaultModel: 'base-model', autoCleanup: false }
+      }
+      hoisted.storedSessions.value = [lead]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      renderChatPage({ team: true, rows: true })
+      await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
+      fireEvent.click(screen.getByTestId('select-vision-model'))
+      await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('vision-model'))
+      await waitFor(() =>
+        expect(hoisted.storedSessions.value.find((s) => s.id === lead.id)?.profileId).toBe(
+          'vision-model'
+        )
+      )
+      expect(readCurrentSessionState()?.teamSettings?.defaultModel).toBe('base-model')
+      await openTeamManagement()
+      fireEvent.change(screen.getByLabelText(label), { target: { value: text } })
+      expect(screen.getByLabelText(label)).toHaveValue(text)
+      fireEvent.click(screen.getByRole('button', { name: button }))
+      await waitFor(() => {
+        const stored = hoisted.storedSessions.value.find((s) => s.id === lead.id)
+        if (field === 'teamChannel')
+          expect(stored?.teamChannel).toEqual(
+            expect.arrayContaining([expect.objectContaining({ text })])
+          )
+        else
+          expect(stored?.teamTasks).toEqual(
+            expect.arrayContaining([expect.objectContaining({ title: text })])
+          )
+      })
+    }
+  )
+
+  it.each([
+    { label: '任务', text: 'keep pending task', button: '添加任务', field: 'teamTasks' as const },
+    {
+      label: '频道消息',
+      text: 'keep pending channel',
+      button: '添加到频道记录',
+      field: 'teamChannel' as const
+    }
+  ])(
+    'retains $field draft until CAS succeeds and keeps it on conflict',
+    async ({ label, text, button, field }) => {
+      const lead: ChatSession = {
+        id: 'team-draft-save-race',
+        title: 'Lead',
+        profileId: 'base-model',
+        messages: [],
+        teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+      }
+      hoisted.storedSessions.value = [lead]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      renderChatPage({ team: true, rows: true })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await openTeamManagement()
+      const input = screen.getByLabelText(label)
+      fireEvent.change(input, { target: { value: text } })
+      let release!: () => void
+      hoisted.saveSessionToDBGateStarted.value = null
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      try {
+        fireEvent.click(screen.getByRole('button', { name: button }))
+        await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(lead.id))
+        expect(input).toHaveValue(text)
+        const external = cloneValue(hoisted.storedSessions.value.find((s) => s.id === lead.id)!)
+        external.title = 'External change'
+        hoisted.storedSessions.value = [external]
+        await act(async () => {
+          hoisted.saveSessionToDBGate.value = null
+          release()
+        })
+        await waitFor(() =>
+          expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('无法保存团队设置')
+        )
+        expect(input).toHaveValue(text)
+        const stored = hoisted.storedSessions.value.find((s) => s.id === lead.id)
+        expect(stored?.title).toBe('External change')
+        expect(stored?.[field]).toBeUndefined()
+        expect(screen.getByText(new RegExp(`${text}.*未确认|未确认.*${text}`))).toBeVisible()
+        expect(screen.getByRole('button', { name: button })).toBeDisabled()
+        expect(readCurrentSessionState()?.[field]?.length).toBe(1)
+      } finally {
+        release?.()
+        hoisted.saveSessionToDBGate.value = null
+      }
+    }
+  )
+
+  it.each([
+    {
+      label: '任务',
+      text: 'successful task draft',
+      button: '添加任务',
+      field: 'teamTasks' as const
+    },
+    {
+      label: '频道消息',
+      text: 'successful channel draft',
+      button: '添加到频道记录',
+      field: 'teamChannel' as const
+    }
+  ])('clears $field draft only after successful CAS', async ({ label, text, button, field }) => {
+    const lead: ChatSession = {
+      id: 'team-draft-success',
+      title: 'Lead',
+      profileId: 'base-model',
+      messages: [],
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    hoisted.storedSessions.value = [lead]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    renderChatPage({ team: true, rows: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    await openTeamManagement()
+    const input = screen.getByLabelText(label)
+    fireEvent.change(input, { target: { value: text } })
+    let release!: () => void
+    hoisted.saveSessionToDBGateStarted.value = null
+    hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    try {
+      fireEvent.click(screen.getByRole('button', { name: button }))
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(lead.id))
+      expect(input).toHaveValue(text)
+      await act(async () => {
+        hoisted.saveSessionToDBGate.value = null
+        release()
+      })
+      await waitFor(() => {
+        const stored = hoisted.storedSessions.value.find((s) => s.id === lead.id)
+        if (field === 'teamTasks')
+          expect(stored?.teamTasks).toEqual(
+            expect.arrayContaining([expect.objectContaining({ title: text })])
+          )
+        else
+          expect(stored?.teamChannel).toEqual(
+            expect.arrayContaining([expect.objectContaining({ text })])
+          )
+      })
+      await waitFor(() => expect(input).toHaveValue(''))
+    } finally {
+      release?.()
+      hoisted.saveSessionToDBGate.value = null
+    }
+  })
+
+  it('keeps the new scope task draft when an older scope task save acknowledges after commit', async () => {
+    const scopeA = 'runtime-flow',
+      scopeB = 'team-scope-b',
+      id = 'same-team-lead'
+    const leadA: ChatSession = {
+      id,
+      title: 'Lead A',
+      profileId: 'base-model',
+      messages: [],
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    const leadB: ChatSession = { ...leadA, title: 'Lead B' }
+    hoisted.scopedTestSessions.value = { [scopeA]: [leadA], [scopeB]: [leadB] }
+    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) =>
+      cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
+    )
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scopeA), id)
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scopeB), id)
+    const route = {
+      channel: 'canvas' as const,
+      scopeType: 'thread' as const,
+      scopeId: 'runtime-project',
+      threadId: 'runtime-pane'
+    }
+    const page = renderChatPage({ team: true })
+    let release!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Lead A'))
+      await openTeamManagement()
+      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'scope A task' } })
+      hoisted.teamPostCommitGate.value = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
+      await waitFor(() =>
+        expect(hoisted.teamPostCommitSnapshot.value?.teamTasks).toEqual(
+          expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
+        )
+      )
+      expect(hoisted.scopedTestSessions.value?.[scopeA][0].teamTasks).toEqual(
+        expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
+      )
+      page.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage compact storageScope={scopeB} route={route} />
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Lead B'))
+      if (!screen.queryByLabelText('任务')) await openTeamManagement()
+      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'scope B draft' } })
+      await act(async () => {
+        hoisted.teamPostCommitGate.value = null
+        release()
+      })
+      expect(screen.getByLabelText('任务')).toHaveValue('scope B draft')
+      expect(hoisted.scopedTestSessions.value?.[scopeB][0].teamTasks).toBeUndefined()
+      expect(hoisted.scopedTestSessions.value?.[scopeA][0].teamTasks).toEqual(
+        expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
+      )
+      expect(readCurrentSessionState()?.title).toBe('Lead B')
+    } finally {
+      release?.()
+      hoisted.teamPostCommitGate.value = null
+      page.unmount()
+    }
+  })
+
+  it('keeps the committed A task and B isolated after A-B-A and a delayed mock save, then retries', async () => {
+    const a = 'ack-scope-a',
+      b = 'ack-scope-b',
+      id = 'ack-shared-id'
+    const leadA: ChatSession = {
+      id,
+      title: 'Ack A',
+      profileId: 'base-model',
+      messages: [],
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    const leadB: ChatSession = { ...leadA, title: 'Ack B' }
+    hoisted.scopedTestSessions.value = { [a]: [leadA], [b]: [leadB] }
+    let aReads = 0,
+      releaseStale!: (value: ChatSession[]) => void
+    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) => {
+      if (scope === a && ++aReads === 2)
+        return new Promise<ChatSession[]>((resolve) => {
+          releaseStale = resolve
+        })
+      return cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
+    })
+    for (const scope of [a, b])
+      localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), id)
+    const route = {
+      channel: 'canvas' as const,
+      scopeType: 'thread' as const,
+      scopeId: 'runtime-project',
+      threadId: 'runtime-pane'
+    }
+    const ui = (scope: string) => (
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage compact storageScope={scope} route={route} />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const page = render(ui(a))
+    let releaseWrite!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Ack A'))
+      await openTeamManagement()
+      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'scope A task' } })
+      hoisted.teamPostCommitGate.value = new Promise<void>((resolve) => {
+        releaseWrite = resolve
+      })
+      fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
+      await waitFor(() =>
+        expect(hoisted.teamPostCommitSnapshot.value?.teamTasks).toEqual(
+          expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
+        )
+      )
+      page.rerender(ui(b))
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Ack B'))
+      page.rerender(ui(a))
+      await waitFor(() => expect(releaseStale).toBeDefined())
+      await act(async () => {
+        hoisted.teamPostCommitGate.value = null
+        releaseWrite()
+      })
+      await act(async () => releaseStale([cloneValue(leadA)]))
+      await waitFor(() =>
+        expect(
+          screen.getByText('This thread has unsaved changes. Retry saving before closing it.')
+        ).toBeVisible()
+      )
+      expect(hoisted.scopedTestSessions.value?.[b][0].teamTasks).toBeUndefined()
+      expect(hoisted.scopedTestSessions.value?.[a][0].teamTasks).toEqual(
+        expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.teamTasks).toEqual(
+          expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
+        )
+      )
+      await waitFor(() =>
+        expect(
+          screen.queryByText('This thread has unsaved changes. Retry saving before closing it.')
+        ).not.toBeInTheDocument()
+      )
+      expect(hoisted.scopedTestSessions.value?.[b][0].teamTasks).toBeUndefined()
+    } finally {
+      hoisted.teamPostCommitGate.value = null
+      releaseWrite?.()
+      page.unmount()
+    }
+  })
+
+  it('retains a newer A task and rejects an external A change during delayed mock save acknowledgement', async () => {
+    const a = 'ack-external-a',
+      b = 'ack-external-b',
+      id = 'ack-external-id'
+    const leadA: ChatSession = {
+      id,
+      title: 'External A',
+      profileId: 'base-model',
+      messages: [],
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    const leadB: ChatSession = { ...leadA, title: 'External B' }
+    hoisted.scopedTestSessions.value = { [a]: [leadA], [b]: [leadB] }
+    let aReads = 0,
+      releaseStale!: (value: ChatSession[]) => void
+    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) => {
+      if (scope === a && ++aReads === 2)
+        return new Promise<ChatSession[]>((resolve) => {
+          releaseStale = resolve
+        })
+      return cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
+    })
+    for (const scope of [a, b])
+      localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), id)
+    const route = {
+      channel: 'canvas' as const,
+      scopeType: 'thread' as const,
+      scopeId: 'runtime-project',
+      threadId: 'runtime-pane'
+    }
+    const ui = (scope: string) => (
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage compact storageScope={scope} route={route} />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const page = render(ui(a))
+    let releaseWrite!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('External A'))
+      await openTeamManagement()
+      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'scope A task' } })
+      hoisted.teamPostCommitGate.value = new Promise<void>((resolve) => {
+        releaseWrite = resolve
+      })
+      fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
+      await waitFor(() =>
+        expect(hoisted.teamPostCommitSnapshot.value?.teamTasks).toEqual(
+          expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
+        )
+      )
+      page.rerender(ui(b))
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('External B'))
+      page.rerender(ui(a))
+      await waitFor(() => expect(releaseStale).toBeDefined())
+      const committed = cloneValue(hoisted.scopedTestSessions.value![a][0])
+      hoisted.scopedTestSessions.value![a] = [{ ...committed, title: 'Third-party edit' }]
+      await act(async () => {
+        hoisted.teamPostCommitGate.value = null
+        releaseWrite()
+      })
+      await act(async () => releaseStale([cloneValue(leadA)]))
+      await openTeamManagement()
+      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'newer local task' } })
+      fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.teamTasks).toEqual(
+          expect.arrayContaining([expect.objectContaining({ title: 'newer local task' })])
+        )
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+      await waitFor(() => expect(screen.getByText(/Failed to save chat session/)).toBeVisible())
+      expect(hoisted.scopedTestSessions.value?.[a][0].title).toBe('Third-party edit')
+      expect(hoisted.scopedTestSessions.value?.[a][0].teamTasks).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ title: 'newer local task' })])
+      )
+      expect(readCurrentSessionState()?.teamTasks).toEqual(
+        expect.arrayContaining([expect.objectContaining({ title: 'newer local task' })])
+      )
+      expect(hoisted.scopedTestSessions.value?.[b][0].teamTasks).toBeUndefined()
+    } finally {
+      hoisted.teamPostCommitGate.value = null
+      releaseWrite?.()
+      page.unmount()
+    }
+  })
+
+  it('dispatches only a ready assigned team task and persists done after its member responds', async () => {
+    const lead: ChatSession = {
+      id: 'task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false },
+      teamTasks: [
+        {
+          id: 'first',
+          title: '准备素材',
+          ownerId: 'task-member',
+          status: 'pending',
+          dependsOn: []
+        },
+        {
+          id: 'second',
+          title: '制作海报',
+          ownerId: 'task-member',
+          status: 'pending',
+          dependsOn: ['first']
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'task-member',
+      title: 'designer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'designer',
+      teamRole: '设计师'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let finish!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    chooseAddMenuEntry('chat-composer-menu-team')
+    expect(screen.getByRole('button', { name: '执行 制作海报' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '执行 准备素材' }))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    const req = hoisted.requestChatCompletionMock.mock.calls[0][0]
+    expect(req.teamMember).toEqual({
+      scope: 'runtime-flow',
+      thread: 'runtime-pane',
+      lead: lead.id,
+      member: member.id
+    })
+    expect(req.messages.at(-1)?.content).toContain('准备素材')
+    expect(
+      hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0].status
+    ).toBe('running')
+    expect(screen.getByRole('button', { name: '执行 制作海报' })).toBeDisabled()
+    await act(async () => {
+      finish({ content: '素材已准备' })
+    })
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+          .status
+      ).toBe('done')
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: '执行 制作海报' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '执行 制作海报' }))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    expect(hoisted.requestChatCompletionMock.mock.calls[1][0].messages.at(-1)?.content).toContain(
+      '制作海报'
+    )
+  })
+
+  it('keeps two member results and a newer lead message when task completion overlaps lead saving', async () => {
+    const lead: ChatSession = {
+      id: 'interleave-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        { id: 'task', title: '准备素材', ownerId: 'interleave-a', status: 'pending', dependsOn: [] }
+      ]
+    }
+    const a: ChatSession = {
+      id: 'interleave-a',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const b: ChatSession = {
+      id: 'interleave-b',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, a, b]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let finishA!: (value: { content: string }) => void
+    let finishLead!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishA = resolve
+          })
+      )
+      .mockResolvedValueOnce({ content: 'Bob result' })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishLead = resolve
+          })
+      )
+    const page = renderChatPage({ team: true })
+    let release!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await openTeamManagement()
+      fireEvent.click(screen.getByRole('button', { name: '执行 准备素材' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Bob independent' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value
+            .find((s) => s.id === b.id)
+            ?.messages.some((m) => m.content === 'Bob result')
+        ).toBe(true)
+      )
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const selective = { id: lead.id, gate, started: false }
+      hoisted.selectiveSaveGate.value = selective
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Lead latest message' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(selective.started).toBe(true))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      await act(async () => finishA({ content: 'Alice result' }))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value
+            .find((s) => s.id === a.id)
+            ?.messages.some((m) => m.content === 'Alice result')
+        ).toBe(true)
+      )
+      hoisted.selectiveSaveGate.value = null
+      await act(async () => release())
+      await act(async () => finishLead({ content: 'Lead reply' }))
+      await waitFor(() => {
+        const saved = hoisted.storedSessions.value.find((s) => s.id === lead.id)
+        expect(saved?.teamTasks?.[0].status).toBe('done')
+        expect(saved?.messages.some((m) => m.content === 'Lead latest message')).toBe(true)
+        expect(saved?.messages.some((m) => m.content === 'Lead reply')).toBe(true)
+      })
+      expect(hoisted.notifyErrorMock).not.toHaveBeenCalledWith(
+        expect.stringMatching(/Failed to save chat session/)
+      )
+      hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: 'Summary reply' })
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Summarize members' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(4))
+      const summaryRequest = hoisted.requestChatCompletionMock.mock.calls[3][0]
+      const summaryContext = JSON.stringify(summaryRequest.messages)
+      expect(summaryContext).toContain('Alice result')
+      expect(summaryContext).toContain('Bob result')
+      await waitFor(() => {
+        const saved = hoisted.storedSessions.value.find((s) => s.id === lead.id)
+        expect(saved?.messages.some((m) => m.content === 'Lead latest message')).toBe(true)
+        expect(saved?.messages.some((m) => m.content === 'Summary reply')).toBe(true)
+      })
+    } finally {
+      hoisted.selectiveSaveGate.value = null
+      release?.()
+      finishA?.({ content: 'cleanup' })
+      finishLead?.({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('can execute a task immediately after creating it in the team menu', async () => {
+    const lead: ChatSession = {
+      id: 'new-task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'new-task-member',
+      title: 'designer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'designer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    chooseAddMenuEntry('chat-composer-menu-team')
+    fireEvent.change(screen.getByLabelText('任务'), { target: { value: '刚添加的任务' } })
+    fireEvent.mouseDown(screen.getByLabelText('负责人'))
+    fireEvent.click(await screen.findByRole('option', { name: 'designer' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
+    await waitFor(() => expect(screen.getByLabelText('任务')).toHaveValue(''))
+    fireEvent.click(screen.getByRole('button', { name: '执行 刚添加的任务' }))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(hoisted.requestChatCompletionMock.mock.calls[0][0].messages.at(-1)?.content).toContain(
+      '刚添加的任务'
+    )
+  })
+
+  it('pumps a busy user broadcast when MAIN list remains pending', async () => {
+    const lead: ChatSession = {
+      id: 'pending-list-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let releaseList!: (value: { intents: never[] }) => void
+    const listGate = new Promise<{ intents: never[] }>((resolve) => {
+      releaseList = resolve
+    })
+    hoisted.listAgentTeamMessagesMock.mockReturnValue(listGate)
+    let finish!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await waitFor(() => expect(hoisted.listAgentTeamMessagesMock).toHaveBeenCalledTimes(1))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Bob busy first' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await openTeamManagement()
+      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Bob' })).toBeChecked())
+      fireEvent.change(screen.getByLabelText('频道消息'), {
+        target: { value: 'pending list broadcast' }
+      })
+      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, 'pending list broadcast')).toBe('queued')
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      await act(async () => finish({ content: 'busy completed' }))
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, 'pending list broadcast')).toBe('response_received')
+      )
+      expect(
+        storedMessages(bob.id).some(
+          (message) => message.role === 'user' && message.content.includes('pending list broadcast')
+        )
+      ).toBe(true)
+      expect(hoisted.listAgentTeamMessagesMock).toHaveBeenCalledTimes(1)
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      const request = hoisted.requestChatCompletionMock.mock.calls[1][0]
+      expect(request.teamMember.member).toBe('bob')
+      expect(request.teamMessageHop).toBe(1)
+      expect(request.messages.at(-1).content).toContain('pending list broadcast')
+      expect(hoisted.claimAgentTeamMessageMock).not.toHaveBeenCalled()
+    } finally {
+      finish?.({ content: 'cleanup' })
+      page.unmount()
+      await act(async () => releaseList({ intents: [] }))
+    }
+  })
+
+  it('saves a member tool checkpoint queued behind its in-flight placeholder without a false conflict', async () => {
+    const lead: ChatSession = {
+      id: 'checkpoint-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'checkpoint-writer',
+      title: 'Writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let finish!: (value: unknown) => void
+    let pending!: { onEvent: (event: unknown) => void }
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pending = input
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const page = renderChatPage({ team: true })
+    let release!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Writer do work' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(pending).toBeDefined())
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(member.id))
+      await act(async () =>
+        pending.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'run',
+            toolCallId: 'call',
+            toolName: 'scratchpad',
+            status: 'running'
+          },
+          toolHistory: [
+            {
+              runId: 'run',
+              toolCallId: 'call',
+              toolName: 'scratchpad',
+              status: 'running',
+              args: {}
+            }
+          ]
+        })
+      )
+      hoisted.saveSessionToDBGate.value = null
+      await act(async () => release())
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((item) => item.id === member.id)?.messages.at(-1)
+            ?.toolHistory?.[0]?.status
+        ).toBe('running')
+      )
+      await act(async () => finish({ result: { content: 'done' }, response: 'done' }))
+      await waitFor(() => {
+        const saved = hoisted.storedSessions.value.find((item) => item.id === member.id)
+        expect(saved?.messages.at(-1)?.content).toBe('done')
+        expect(saved?.messages.at(-1)?.toolHistory?.[0]?.toolName).toBe('scratchpad')
+      })
+      expect(hoisted.notifyErrorMock).not.toHaveBeenCalledWith(
+        expect.stringMatching(/Failed to save chat session/)
+      )
+      expect(screen.queryByText(/Failed to save chat session/)).not.toBeInTheDocument()
+    } finally {
+      hoisted.saveSessionToDBGate.value = null
+      release?.()
+      finish?.({ result: { content: 'done' }, response: 'done' })
+      page.unmount()
+    }
+  })
+
+  it('prefers a final tool history over the earlier validated running checkpoint', async () => {
+    const lead: ChatSession = {
+      id: 'checkpoint-final-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'checkpoint-final-writer',
+      title: 'Writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    const running = {
+      runId: 'run',
+      toolCallId: 'call',
+      toolName: 'scratchpad',
+      status: 'running' as const,
+      args: {}
+    }
+    const completed = { ...running, status: 'completed' as const, content: 'stored fixture result' }
+    let finish!: (value: unknown) => void
+    let pending!: { onEvent: (event: unknown) => void }
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pending = input
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Writer do work' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(pending).toBeDefined())
+      await act(async () =>
+        pending.onEvent({ type: 'tool-status', toolStatus: running, toolHistory: [running] })
+      )
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((item) => item.id === member.id)?.messages.at(-1)
+            ?.toolHistory
+        ).toEqual([running])
+      )
+      await act(async () =>
+        finish({
+          result: { content: 'done', metadata: { toolHistory: [completed] } },
+          response: 'done'
+        })
+      )
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((item) => item.id === member.id)?.messages.at(-1)
+        ).toMatchObject({ content: 'done', toolHistory: [completed] })
+      )
+      expect(hoisted.notifyErrorMock).not.toHaveBeenCalledWith(
+        expect.stringMatching(/Failed to save chat session/)
+      )
+    } finally {
+      finish?.({ result: { content: 'cleanup' }, response: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('retains an external member edit and surfaces a conflict when the in-flight placeholder loses CAS', async () => {
+    const lead: ChatSession = {
+      id: 'external-checkpoint-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'external-checkpoint-writer',
+      title: 'Writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let finish!: (value: unknown) => void
+    let pending!: { onEvent: (event: unknown) => void }
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pending = input
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const page = renderChatPage({ team: true, rows: true })
+    let release!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Writer do work' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(pending).toBeDefined())
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(member.id))
+      await act(async () =>
+        pending.onEvent({
+          type: 'tool-status',
+          toolStatus: {
+            runId: 'run',
+            toolCallId: 'call',
+            toolName: 'scratchpad',
+            status: 'running'
+          },
+          toolHistory: [
+            {
+              runId: 'run',
+              toolCallId: 'call',
+              toolName: 'scratchpad',
+              status: 'running',
+              args: {}
+            }
+          ]
+        })
+      )
+      hoisted.storedSessions.value = hoisted.storedSessions.value.map((item) =>
+        item.id === member.id ? { ...item, title: 'External member edit' } : item
+      )
+      hoisted.saveSessionToDBGate.value = null
+      await act(async () => release())
+      await waitFor(() =>
+        expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+          expect.stringContaining('Session save conflict')
+        )
+      )
+      expect(hoisted.storedSessions.value.find((item) => item.id === member.id)).toMatchObject({
+        title: 'External member edit',
+        messages: []
+      })
+      fireEvent.click(teamRows().getByRole('button', { name: 'Writer' }))
+      await waitFor(() =>
+        expect(
+          readCurrentSessionState()?.messages.some((message) => message.content === 'do work')
+        ).toBe(true)
+      )
+    } finally {
+      hoisted.saveSessionToDBGate.value = null
+      release?.()
+      finish?.({ result: { content: 'cleanup' }, response: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('pumps a user broadcast despite rejected MAIN polling and after a busy member becomes free', async () => {
+    const lead: ChatSession = {
+      id: 'broadcast-busy-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    const carol: ChatSession = {
+      id: 'carol',
+      title: 'Carol',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Carol'
+    }
+    hoisted.storedSessions.value = [lead, bob, carol]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    hoisted.listAgentTeamMessagesMock.mockRejectedValue(new Error('fixture IPC unavailable'))
+    let finish!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Bob busy user request' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(hoisted.listAgentTeamMessagesMock).toHaveBeenCalled())
+      await openTeamManagement()
+      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Bob' })).toBeChecked())
+      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Carol' })).toBeChecked())
+      fireEvent.change(screen.getByLabelText('频道消息'), { target: { value: '用户本地广播' } })
+      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      await waitFor(() =>
+        expect(dispatch.status('user', carol.id, '用户本地广播')).toBe('response_received')
+      )
+      expect(dispatch.status('user', bob.id, '用户本地广播')).toBe('queued')
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      expect(hoisted.requestChatCompletionMock.mock.calls[1][0].teamMember.member).toBe('carol')
+      await act(async () => finish({ content: 'busy completed' }))
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, '用户本地广播')).toBe('response_received')
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3)
+      const request = hoisted.requestChatCompletionMock.mock.calls[2][0]
+      expect(request.teamMember.member).toBe('bob')
+      expect(request.teamMessageHop).toBe(1)
+      expect(request.messages.at(-1).content).toContain('用户本地广播')
+      expect(hoisted.claimAgentTeamMessageMock).not.toHaveBeenCalled()
+    } finally {
+      finish?.({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('broadcasts the user menu message once to each subscriber, distinct from agent tool messages', async () => {
+    const lead: ChatSession = {
+      id: 'user-broadcast-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    const carol: ChatSession = {
+      id: 'carol',
+      title: 'Carol',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Carol'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob, carol]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const agentIntent = {
+      id: 'agent-origin',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'agent tool origin'
+    }
+    let queued = false
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [agentIntent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent: agentIntent }
+    })
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await openTeamManagement()
+      const carolSubscription = await screen.findByRole('checkbox', { name: 'Carol' })
+      await waitFor(() => expect(carolSubscription).toBeChecked())
+      fireEvent.click(carolSubscription)
+      const draft = screen.getByLabelText('频道消息')
+      fireEvent.change(draft, { target: { value: '用户广播正文' } })
+      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      const requests = hoisted.requestChatCompletionMock.mock.calls.map((call) => call[0])
+      expect(requests.map((req) => req.teamMember.member).sort()).toEqual(['alice', 'bob'])
+      for (const req of requests) {
+        expect(req.teamMessageHop).toBe(1)
+        expect(req.messages.at(-1).content).toContain('用户频道消息')
+        expect(req.messages.at(-1).content).toContain('用户广播正文')
+        expect(req.messages.at(-1).content).not.toContain('团队成员消息')
+      }
+      await waitFor(() =>
+        expect(dispatch.status('user', alice.id, '用户广播正文')).toBe('response_received')
+      )
+      await waitFor(() =>
+        expect(dispatch.status('user', bob.id, '用户广播正文')).toBe('response_received')
+      )
+      expect(dispatch.records('user', carol.id)).toEqual([])
+      expect(dispatch.records('user', alice.id)).toHaveLength(1)
+      expect(dispatch.records('user', bob.id)).toHaveLength(1)
+      await waitFor(() => expect(draft).toHaveValue(''))
+      queued = true
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'agent tool origin')).toBe('response_received')
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3)
+      const memberRequest = hoisted.requestChatCompletionMock.mock.calls[2][0]
+      expect(memberRequest.messages.at(-1).content).toContain('团队成员消息，来自 Alice')
+      expect(memberRequest.teamMessageHop).toBe(1)
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('does not enqueue a broadcast under an unavailable versioned member model and preserves its draft', async () => {
+    const lead: ChatSession = {
+      id: 'blocked-broadcast-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: {
+        maxMembers: 6,
+        defaultModel: null,
+        autoCleanup: false,
+        memberModelSelection: { version: 1, profileId: 'vision-model' }
+      }
+    }
+    const member: ChatSession = {
+      id: 'blocked-broadcast-member',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const fetchBlocked = vi.fn(async () => {
+      throw new Error('Unexpected network request in broadcast test')
+    })
+    vi.stubGlobal('fetch', fetchBlocked)
+    const page = renderChatPage({ team: true })
+    try {
+      await openTeamManagement()
+      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Bob' })).toBeChecked())
+      const input = screen.getByLabelText('频道消息')
+      fireEvent.change(input, { target: { value: '不可用的广播' } })
+      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      expect(
+        await screen.findByText('广播结果未确认，请先核对相关会话，避免重复发送。')
+      ).toBeVisible()
+      expect(input).toHaveValue('不可用的广播')
+      const broadcast = screen.getByRole('button', { name: '广播给订阅成员' })
+      expect(broadcast).toBeDisabled()
+      fireEvent.change(input, { target: { value: '修改后的广播草稿' } })
+      expect(broadcast).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: '我已了解风险，允许再次广播' }))
+      expect(input).toHaveValue('修改后的广播草稿')
+      expect(broadcast).toBeEnabled()
+      expect(screen.queryByText(/用户 → Bob/)).not.toBeInTheDocument()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === member.id)?.messages
+      ).toEqual([])
+    } finally {
+      page.unmount()
+      vi.unstubAllGlobals()
+      expect(fetchBlocked).not.toHaveBeenCalled()
+    }
+  })
+
+  it.each([false, true])(
+    'does not dispatch a queued broadcast if a marker appears after preparation (stream=%s)',
+    async (stream) => {
+      const lead: ChatSession = {
+        id: 'late-broadcast-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model',
+        teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+      }
+      const bob: ChatSession = {
+        id: 'late-broadcast-bob',
+        title: 'Bob',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Bob'
+      }
+      hoisted.storedSessions.value = [lead, bob]
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      let release!: () => void
+      const gate = {
+        gate: new Promise<void>((resolve) => {
+          release = resolve
+        }),
+        entered: false
+      }
+      hoisted.teamBeforeDispatchGate.value = gate
+      const dispatch = watchTeamDispatch()
+      const page = renderChatPage({ team: true })
+      try {
+        await openTeamManagement()
+        await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Bob' })).toBeChecked())
+        fireEvent.change(screen.getByLabelText('频道消息'), {
+          target: { value: '等候中的频道消息' }
+        })
+        fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+        await waitFor(() => expect(gate.entered).toBe(true))
+        hoisted.storedSessions.value = hoisted.storedSessions.value.map((session) =>
+          session.id === lead.id
+            ? {
+                ...session,
+                teamSettings: {
+                  ...session.teamSettings!,
+                  memberModelSelection: { version: 1, profileId: 'vision-model' }
+                }
+              }
+            : session
+        )
+        await act(async () => {
+          release()
+        })
+        await waitFor(() =>
+          expect(dispatch.status('user', bob.id, '等候中的频道消息')).toBe('unavailable')
+        )
+        // One record for Bob, and it ends unavailable (never request_started or unknown).
+        expect(dispatch.records('user', bob.id).map((entry) => entry.status)).toEqual([
+          'unavailable'
+        ])
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        hoisted.teamBeforeDispatchGate.value = null
+        release()
+        page.unmount()
+      }
+    }
+  )
+
+  it('preserves user broadcast draft and sends no request with no subscribers', async () => {
+    const lead: ChatSession = {
+      id: 'broadcast-empty-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const page = renderChatPage({ team: true })
+    try {
+      await openTeamManagement()
+      const subscription = await screen.findByRole('checkbox', { name: 'Bob' })
+      await waitFor(() => expect(subscription).toBeChecked())
+      fireEvent.click(subscription)
+      const draft = screen.getByLabelText('频道消息')
+      fireEvent.change(draft, { target: { value: '保留广播草稿' } })
+      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      expect(await screen.findByText('未送出，请检查订阅')).toBeVisible()
+      expect(draft).toHaveValue('保留广播草稿')
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it.fails(
+    'P6 known End-remount draft loss: preserves user broadcast draft after End',
+    async () => {
+      const lead: ChatSession = {
+        id: 'broadcast-empty-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const bob: ChatSession = {
+        id: 'bob',
+        title: 'Bob',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Bob'
+      }
+      hoisted.storedSessions.value = [lead, bob]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      const page = renderChatPage({ team: true })
+      try {
+        await openTeamManagement()
+        const subscription = await screen.findByRole('checkbox', { name: 'Bob' })
+        await waitFor(() => expect(subscription).toBeChecked())
+        fireEvent.click(subscription)
+        const draft = screen.getByLabelText('频道消息')
+        fireEvent.change(draft, { target: { value: '保留广播草稿' } })
+        fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+        expect(await screen.findByText('未送出，请检查订阅')).toBeVisible()
+        expect(draft).toHaveValue('保留广播草稿')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+        fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+        await waitFor(() =>
+          expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(
+            true
+          )
+        )
+        await waitFor(() => expect(readCurrentSessionState()?.teamEnded).toBe(true))
+        if (!screen.queryByLabelText('频道消息')) await openTeamManagement()
+        const endButton = screen.queryByRole('button', { name: '广播给订阅成员' })
+        if (endButton && !endButton.hasAttribute('disabled')) {
+          fireEvent.click(endButton)
+          expect(await screen.findByText(/未送出/)).toBeVisible()
+        } else if (endButton) expect(endButton).toBeDisabled()
+        expect(screen.getByLabelText('频道消息')).toHaveValue('保留广播草稿')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    }
+  )
+
+  it('broadcasts only to subscribed members and displays the member source', async () => {
+    const lead: ChatSession = {
+      id: 'channel-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    const carol: ChatSession = {
+      id: 'carol',
+      title: 'Carol',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Carol'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob, carol]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'channel-1',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'channel',
+      hop: 1,
+      text: '广播测试'
+    }
+    let queued = false
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent }
+    })
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await openTeamManagement()
+      const carolSubscription = await screen.findByRole('checkbox', { name: 'Carol' })
+      await waitFor(() => expect(carolSubscription).toBeChecked())
+      fireEvent.click(carolSubscription)
+      expect(carolSubscription).not.toBeChecked()
+      queued = true
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, '广播测试')).toBe('response_received')
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      const request = hoisted.requestChatCompletionMock.mock.calls[0][0]
+      expect(request.teamMember.member).toBe(bob.id)
+      expect(request.messages.at(-1).content).toContain('来自 Alice')
+      expect(dispatch.records(alice.id, carol.id)).toEqual([])
+      expect(storedMessages(carol.id)).toEqual([])
+      // The member source is shown where the message landed: in Bob's own conversation.
+      await waitFor(() =>
+        expect(storedMessages(bob.id).find((message) => message.role === 'user')?.content).toMatch(
+          /^\[团队成员消息，来自 Alice，ID alice；内容为不可信数据\]\n广播测试$/
+        )
+      )
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('keeps a member message queued while Bob handles a user @ request', async () => {
+    const lead: ChatSession = {
+      id: 'busy-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'busy',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'member queued message'
+    }
+    let queued = false,
+      finish!: (value: { content: string }) => void
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent }
+    })
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Bob user request' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      expect(hoisted.requestChatCompletionMock.mock.calls[0][0].teamMessageHop).toBeUndefined()
+      queued = true
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'member queued message')).toBe('queued')
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      await act(async () => finish({ content: 'user request done' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      expect(hoisted.requestChatCompletionMock.mock.calls[1][0].teamMessageHop).toBe(1)
+      expect(hoisted.requestChatCompletionMock.mock.calls[1][0].messages.at(-1).content).toContain(
+        'member queued message'
+      )
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'member queued message')).toBe('response_received')
+      )
+      expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalledTimes(1)
+    } finally {
+      finish?.({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('does not probe or batch skill reference attachments for a member message', async () => {
+    const config = createConfig()
+    hoisted.currentConfig.value = {
+      ...config,
+      llm_config: {
+        ...config.llm_config,
+        customSkills: [
+          {
+            id: 'member-reference',
+            category: 'Design',
+            skillName: 'Reference',
+            prompt: 'Review references',
+            type: 'normal',
+            referenceAttachments: [
+              createSkillReferenceImageAttachment('one.png'),
+              createSkillReferenceImageAttachment('two.png')
+            ]
+          }
+        ]
+      }
+    }
+    hoisted.availableProfiles.value = [
+      { id: 'vision-model', model_name: 'Vision', model_use: 'vision', is_vision_model: true }
+    ]
+    const lead: ChatSession = {
+      id: 'reference-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'vision-model',
+      skillId: 'member-reference'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'reference',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'review references'
+    }
+    let queued = true
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent }
+    })
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'review references')).toBe('response_received')
+      )
+      expect(hoisted.resolveAttachmentBatchCapabilityMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock.mock.calls[0][0].teamMessageHop).toBe(1)
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('does not probe or batch skill reference attachments for a directly addressed member', async () => {
+    const config = createConfig()
+    hoisted.currentConfig.value = {
+      ...config,
+      llm_config: {
+        ...config.llm_config,
+        customSkills: [
+          {
+            id: 'direct-reference',
+            category: 'Design',
+            skillName: 'Reference',
+            prompt: 'Review references',
+            type: 'normal',
+            referenceAttachments: [
+              createSkillReferenceImageAttachment('one.png'),
+              createSkillReferenceImageAttachment('two.png')
+            ]
+          }
+        ]
+      }
+    }
+    hoisted.availableProfiles.value = [
+      { id: 'vision-model', model_name: 'Vision', model_use: 'vision', is_vision_model: true }
+    ]
+    const lead: ChatSession = {
+      id: 'direct-reference-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'vision-model',
+      skillId: 'direct-reference'
+    }
+    const member: ChatSession = {
+      id: 'direct-reference-bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'review references' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      expect(hoisted.resolveAttachmentBatchCapabilityMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock.mock.calls[0][0].teamMember.member).toBe(member.id)
+      expect(
+        hoisted.requestChatCompletionMock.mock.calls[0][0].messages.at(-1).attachments
+      ).toHaveLength(2)
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('records a failed member request as unknown and shows its delegated row failed without offering an extra send', async () => {
+    const lead: ChatSession = {
+      id: 'unknown-hint-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'unknown-hint-alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'unknown-hint-bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'unknown-hint-message',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'unknown hint fixture'
+    }
+    let queued = true
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent }
+    })
+    hoisted.requestChatCompletionMock.mockRejectedValueOnce(new Error('synthetic unknown'))
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'unknown hint fixture')).toBe('unknown')
+      )
+      // No unknown-result check is shown any more (d3e35c51 removed the hint): the dispatcher
+      // record is 'unknown', and Bob's delegated line in the lead's transcript shows the failed run
+      // and its task, and offers no send of its own.
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['failed']))
+      const line = screen.getByTestId('team-delegated-row')
+      expect(line).toHaveTextContent('unknown hint fixture')
+      expect(
+        within(line).queryByRole('button', { name: /发送|重试|retry|send/i })
+      ).not.toBeInTheDocument()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it.each([false, true])(
+    'does not mark preprocessing failure as a started member request (stream=%s)',
+    async (stream) => {
+      const lead: ChatSession = {
+        id: 'preprocess-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const alice: ChatSession = {
+        id: 'alice',
+        title: 'Alice',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Alice'
+      }
+      const bob: ChatSession = {
+        id: 'bob',
+        title: 'Bob',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Bob'
+      }
+      hoisted.storedSessions.value = [lead, alice, bob]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      hoisted.teamPreprocessingFails.value = true
+      const intent = {
+        id: 'preprocess',
+        source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+        kind: 'message',
+        hop: 1,
+        recipient: bob.id,
+        text: 'preprocessing fails'
+      }
+      let queued = true
+      hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+        intents: queued ? [intent] : []
+      }))
+      hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+        queued = false
+        return { intent }
+      })
+      const dispatch = watchTeamDispatch()
+      const page = renderChatPage({ team: true })
+      try {
+        await waitFor(() => expect(dispatch.status(alice.id, bob.id)).toBe('unavailable'))
+        expect(dispatch.records(alice.id, bob.id).map((entry) => entry.status)).toEqual([
+          'unavailable'
+        ])
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        hoisted.teamPreprocessingFails.value = false
+        page.unmount()
+      }
+    }
+  )
+
+  it.each([false, true])(
+    'does not retry invalid continuation after a member message starts (stream=%s)',
+    async (stream) => {
+      hoisted.availableProfiles.value = [
+        {
+          id: 'continuation-model',
+          model_name: 'Continuation Model',
+          model_use: 'vision',
+          is_vision_model: true,
+          supports_session_continuation: true
+        }
+      ]
+      const lead: ChatSession = {
+        id: 'continuation-team',
+        title: 'Lead',
+        messages: [],
+        profileId: 'continuation-model'
+      }
+      const alice: ChatSession = {
+        id: 'alice',
+        title: 'Alice',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Alice'
+      }
+      const bob: ChatSession = {
+        id: 'bob',
+        title: 'Bob',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Bob',
+        profileId: 'continuation-model',
+        sessionUrl: 'expired-session',
+        sessionProfileId: 'continuation-model',
+        sessionRouteFingerprint: 'local-continuation-model'
+      }
+      hoisted.storedSessions.value = [lead, alice, bob]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      const intent = {
+        id: 'continuation-message',
+        source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+        kind: 'message',
+        hop: 1,
+        recipient: bob.id,
+        text: 'side effect may have occurred'
+      }
+      let queued = true,
+        sideEffects = 0
+      hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+        intents: queued ? [intent] : []
+      }))
+      hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+        queued = false
+        return { intent }
+      })
+      const request = stream
+        ? hoisted.requestChatCompletionStreamMock
+        : hoisted.requestChatCompletionMock
+      request.mockImplementationOnce(async () => {
+        sideEffects += 1
+        throw createExpiredContinuationError()
+      })
+      const dispatch = watchTeamDispatch()
+      const page = renderChatPage({ team: true })
+      try {
+        await waitFor(() =>
+          expect(dispatch.status(alice.id, bob.id, 'side effect may have occurred')).toBe('unknown')
+        )
+        expect(request).toHaveBeenCalledTimes(1)
+        expect(request.mock.calls[0][0].sessionUrl).toBe('expired-session')
+        expect(request.mock.calls[0][0].teamMessageHop).toBe(1)
+        expect(sideEffects).toBe(1)
+        queued = true
+        await waitFor(() =>
+          expect(hoisted.claimAgentTeamMessageMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+        )
+        expect(request).toHaveBeenCalledTimes(1)
+        expect(sideEffects).toBe(1)
+        expect(dispatch.records(alice.id, bob.id)).toHaveLength(1)
+      } finally {
+        page.unmount()
+      }
+    }
+  )
+
+  it.each([false, true])(
+    'member message failure is unknown and never retried (stream=%s)',
+    async (stream) => {
+      const lead: ChatSession = {
+        id: 'message-fail-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const alice: ChatSession = {
+        id: 'alice',
+        title: 'Alice',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Alice'
+      }
+      const bob: ChatSession = {
+        id: 'bob',
+        title: 'Bob',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Bob'
+      }
+      hoisted.storedSessions.value = [lead, alice, bob]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      const intent = {
+        id: 'failure',
+        source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+        kind: 'message',
+        hop: 1,
+        recipient: bob.id,
+        text: 'fixture failure message'
+      }
+      let queued = true
+      hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+        intents: queued ? [intent] : []
+      }))
+      hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+        queued = false
+        return { intent }
+      })
+      const request = stream
+        ? hoisted.requestChatCompletionStreamMock
+        : hoisted.requestChatCompletionMock
+      request.mockRejectedValueOnce(new Error('fixture failure'))
+      const dispatch = watchTeamDispatch()
+      const page = renderChatPage({ team: true })
+      try {
+        await waitFor(() =>
+          expect(dispatch.status(alice.id, bob.id, 'fixture failure message')).toBe('unknown')
+        )
+        expect(request).toHaveBeenCalledTimes(1)
+        expect(request.mock.calls[0][0].teamMember.member).toBe(bob.id)
+        expect(request.mock.calls[0][0].teamMessageHop).toBe(1)
+        // A fresh poll observing the already-claimed ID must not execute it again.
+        queued = true
+        await waitFor(() =>
+          expect(hoisted.claimAgentTeamMessageMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+        )
+        expect(request).toHaveBeenCalledTimes(1)
+        expect(dispatch.records(alice.id, bob.id).map((entry) => entry.status)).toEqual(['unknown'])
+      } finally {
+        page.unmount()
+      }
+    }
+  )
+
+  it('marks a cancelled member message unknown and does not retry', async () => {
+    const lead: ChatSession = {
+      id: 'cancel-msg-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), bob.id)
+    const intent = {
+      id: 'cancel',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'cancel this'
+    }
+    let queued = true,
+      signal: AbortSignal | undefined,
+      rejectPending!: (error: Error) => void
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent }
+    })
+    hoisted.requestChatCompletionMock.mockImplementationOnce((request: { signal: AbortSignal }) => {
+      signal = request.signal
+      return new Promise((_resolve, reject) => {
+        rejectPending = reject
+        signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
+          once: true
+        })
+      })
+    })
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'cancel this')).toBe('request_started')
+      )
+      fireEvent.click(await screen.findByTestId('chat-composer-stop-mock'))
+      expect(signal?.aborted).toBe(true)
+      await waitFor(() => expect(dispatch.status(alice.id, bob.id, 'cancel this')).toBe('unknown'))
+      queued = true
+      await waitFor(() =>
+        expect(hoisted.claimAgentTeamMessageMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(dispatch.records(alice.id, bob.id)).toHaveLength(1)
+    } finally {
+      rejectPending?.(new Error('cleanup'))
+      page.unmount()
+    }
+  })
+
+  it('does not send an old-scope message after a pending claim resolves', async () => {
+    const lead: ChatSession = {
+      id: 'scope-msg-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'scope-claim',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'old scope'
+    }
+    hoisted.listAgentTeamMessagesMock.mockResolvedValue({ intents: [intent] })
+    let release!: (value: { intent: typeof intent }) => void
+    hoisted.claimAgentTeamMessageMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(release).toBeDefined())
+      page.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage
+              compact
+              storageScope="other-scope"
+              route={{
+                channel: 'canvas',
+                scopeType: 'thread',
+                scopeId: 'runtime-project',
+                threadId: 'runtime-pane'
+              }}
+            />
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+      await act(async () => release({ intent }))
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally {
+      release?.({ intent })
+      page.unmount()
+    }
+  })
+
+  it('does not retract an already-started member message when the team ends', async () => {
+    const lead: ChatSession = {
+      id: 'message-live-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'live',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'already started'
+    }
+    let queued = true,
+      finish!: (value: { content: string }) => void,
+      signal: AbortSignal | undefined
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent }
+    })
+    hoisted.requestChatCompletionMock.mockImplementationOnce((request: { signal: AbortSignal }) => {
+      signal = request.signal
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'already started')).toBe('request_started')
+      )
+      await openTeamManagement()
+      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+      await waitFor(() =>
+        expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(
+          true
+        )
+      )
+      expect(signal?.aborted).toBe(false)
+      await act(async () => finish({ content: 'already dispatched result' }))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value
+            .find((item) => item.id === bob.id)
+            ?.messages.some((message) => message.content === 'already dispatched result')
+        ).toBe(true)
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(dispatch.records(alice.id, bob.id)).toHaveLength(1)
+    } finally {
+      finish?.({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('keeps same-generation member work when returning to a lead; after remount it comes from storage, not the transient record', async () => {
+    const lead: ChatSession = {
+      id: 'activity-lead',
+      title: 'Activity lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'activity-alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'activity-bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    const other: ChatSession = {
+      id: 'activity-other',
+      title: 'Other lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob, other]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'activity-transient',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'transient activity'
+    }
+    let queued = true
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent }
+    })
+    // The member details that listed this message are gone (99dc5e79): the lead's transcript
+    // shows Bob's work as a delegated line read from Bob's stored conversation, and the
+    // delivery state stays a renderer-local record of the dispatcher.
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, 'transient activity')).toBe('response_received')
+      )
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['completed']))
+      expect(screen.getByTestId('team-delegated-row')).toHaveTextContent('transient activity')
+      await dispatchSwitchSession(other.id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(other.id))
+      expect(screen.queryByText(/transient activity/)).not.toBeInTheDocument()
+      await dispatchSwitchSession(lead.id)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['completed']))
+      expect(screen.getByTestId('team-delegated-row')).toHaveTextContent('transient activity')
+    } finally {
+      page.unmount()
+    }
+    const dispatchersBeforeRemount = dispatch.dispatchers.length
+    const reopened = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await waitFor(() => expect(delegatedLineStates()).toEqual(['completed']))
+      expect(screen.getByTestId('team-delegated-row')).toHaveTextContent('transient activity')
+      // No dispatcher of the remounted page holds a record of the earlier delivery.
+      await waitFor(() =>
+        expect(dispatch.dispatchers.length).toBeGreaterThan(dispatchersBeforeRemount)
+      )
+      for (const dispatcher of dispatch.dispatchers.slice(dispatchersBeforeRemount))
+        expect(dispatcher.entries()).toEqual([])
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(storedMessages(bob.id).filter((message) => message.role === 'user')).toHaveLength(1)
+    } finally {
+      reopened.unmount()
+    }
+  })
+
+  it('records an invalid recipient as not sent without a model request', async () => {
+    const lead: ChatSession = {
+      id: 'missing-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    hoisted.storedSessions.value = [lead, alice]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'missing',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: 'missing-bob',
+      text: 'not deliverable'
+    }
+    let queued = true
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      queued = false
+      return { intent }
+    })
+    // The dispatcher records the claimed message; its record must say it was not sent.
+    const dispatchers: TeamMessageDispatcher[] = []
+    const enqueue = TeamMessageDispatcher.prototype.enqueue
+    const enqueueSpy = vi
+      .spyOn(TeamMessageDispatcher.prototype, 'enqueue')
+      .mockImplementation(function (this: TeamMessageDispatcher, input) {
+        dispatchers.push(this)
+        return enqueue.call(this, input)
+      })
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalled())
+      await waitFor(() => expect(dispatchers).toHaveLength(1))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(dispatchers[0].entries()).toEqual([
+        expect.objectContaining({
+          intent: expect.objectContaining({ id: 'missing', recipient: 'missing-bob' }),
+          status: 'unavailable'
+        })
+      ])
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally {
+      enqueueSpy.mockRestore()
+      page.unmount()
+    }
+  })
+
+  it('does not send a claimed member message when End occurs while the claim is pending', async () => {
+    const lead: ChatSession = {
+      id: 'claim-end-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'end-claim',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: 'must not send'
+    }
+    hoisted.listAgentTeamMessagesMock.mockResolvedValue({ intents: [intent] })
+    let release!: (value: { intent: typeof intent }) => void
+    hoisted.claimAgentTeamMessageMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(release).toBeDefined())
+      await openTeamManagement()
+      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+      await waitFor(() =>
+        expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(
+          true
+        )
+      )
+      await act(async () => release({ intent }))
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    } finally {
+      release?.({ intent })
+      page.unmount()
+    }
+  })
+
+  it('routes a queued member message to the recipient model and reports request and response separately', async () => {
+    const lead: ChatSession = {
+      id: 'msg-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const alice: ChatSession = {
+      id: 'alice',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    const bob: ChatSession = {
+      id: 'bob',
+      title: 'Bob',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Bob'
+    }
+    hoisted.storedSessions.value = [lead, alice, bob]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const intent = {
+      id: 'msg-1',
+      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+      kind: 'message',
+      hop: 1,
+      recipient: bob.id,
+      text: '来自 Alice 的问题',
+      expiresAt: Date.now() + 60000
+    }
+    let queued = true,
+      finish!: (value: { content: string }) => void
+    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+      intents: queued ? [intent] : []
+    }))
+    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+      if (!queued) return {}
+      queued = false
+      return { intent }
+    })
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const dispatch = watchTeamDispatch()
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      const request = hoisted.requestChatCompletionMock.mock.calls[0][0]
+      expect(request.teamMember).toEqual({
+        scope: 'runtime-flow',
+        thread: 'runtime-pane',
+        lead: lead.id,
+        member: bob.id
+      })
+      expect(request.teamMessageHop).toBe(1)
+      expect(request.messages.at(-1)?.content).toContain('来自 Alice 的问题')
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, '来自 Alice 的问题')).toBe('request_started')
+      )
+      await act(async () => {
+        finish({ content: 'Bob 的答复' })
+      })
+      await waitFor(() =>
+        expect(dispatch.status(alice.id, bob.id, '来自 Alice 的问题')).toBe('response_received')
+      )
+      await waitFor(() =>
+        expect(
+          storedMessages(bob.id).some(
+            (message) => message.role === 'assistant' && message.content === 'Bob 的答复'
+          )
+        ).toBe(true)
+      )
+      expect(hoisted.claimAgentTeamMessageMock).toHaveBeenCalledTimes(1)
+    } finally {
+      finish?.({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('returns a task to pending with outcome failed if its member request fails, and never retries it by itself', async () => {
+    const lead: ChatSession = {
+      id: 'failed-task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        {
+          id: 'task',
+          title: '失败任务',
+          ownerId: 'failed-task-member',
+          status: 'pending',
+          dependsOn: []
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'failed-task-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    hoisted.requestChatCompletionMock.mockRejectedValueOnce(new Error('fixture failure'))
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    chooseAddMenuEntry('chat-composer-menu-team')
+    fireEvent.click(screen.getByRole('button', { name: '执行 失败任务' }))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value
+          .find((session) => session.id === member.id)
+          ?.messages.some((message) => String(message.content).includes('fixture failure'))
+      ).toBe(true)
+    )
+    // K2: the failed run no longer leaves the task running; it is back to pending with its outcome.
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+      ).toEqual({
+        id: 'task',
+        title: '失败任务',
+        ownerId: member.id,
+        status: 'pending',
+        dependsOn: [],
+        lastOutcome: 'failed'
+      })
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+    // The user runs it again; a confirmed reply marks it done and clears the outcome.
+    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: 'second attempt' })
+    await waitFor(() => expect(screen.getByRole('button', { name: '执行 失败任务' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '执行 失败任务' }))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+      ).toEqual({
+        id: 'task',
+        title: '失败任务',
+        ownerId: member.id,
+        status: 'done',
+        dependsOn: []
+      })
+    )
+  })
+
+  it('does not mark a task done when its member response cannot be saved', async () => {
+    const lead: ChatSession = {
+      id: 'unsaved-task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        {
+          id: 'task',
+          title: '需保存结果',
+          ownerId: 'unsaved-task-member',
+          status: 'pending',
+          dependsOn: []
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'unsaved-task-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    hoisted.failTaskResponseSave.value = member.id
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: '结果已返回但未保存' })
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    chooseAddMenuEntry('chat-composer-menu-team')
+    fireEvent.click(screen.getByRole('button', { name: '执行 需保存结果' }))
+    await waitFor(() =>
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
+        'The member replied, but its conversation save is not confirmed. The task is back to pending.'
+      )
+    )
+    // K2: an unconfirmed reply is not a result; the task goes back to pending instead of staying running.
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+      ).toMatchObject({ status: 'pending', lastOutcome: 'interrupted' })
+    )
+    expect(
+      hoisted.storedSessions.value
+        .find((session) => session.id === member.id)
+        ?.messages.some((message) => message.content === '结果已返回但未保存')
+    ).toBe(false)
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns a task to pending with outcome cancelled when its member run is stopped, and leaves done tasks alone', async () => {
+    const doneTask = {
+      id: 'earlier',
+      title: '已完成任务',
+      ownerId: 'cancel-task-member',
+      status: 'done' as const,
+      dependsOn: []
+    }
+    const lead: ChatSession = {
+      id: 'cancel-task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        doneTask,
+        {
+          id: 'task',
+          title: '可取消任务',
+          ownerId: 'cancel-task-member',
+          status: 'pending',
+          dependsOn: ['earlier']
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'cancel-task-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let signal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      ({ signal: requestSignal }: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          signal = requestSignal
+          requestSignal.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true }
+          )
+        })
+    )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      fireEvent.click(screen.getByRole('button', { name: '执行 可取消任务' }))
+      await waitFor(() => expect(signal).toBeDefined())
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[1]
+          .status
+      ).toBe('running')
+      fireEvent.click(screen.getByRole('button', { name: '关闭团队管理' }))
+      // The lead's composer stop stops the running member.
+      await waitFor(() => expect(screen.getByTestId('chat-composer-stop-mock')).toBeVisible())
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      expect(signal?.aborted).toBe(true)
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[1]
+        ).toEqual({
+          id: 'task',
+          title: '可取消任务',
+          ownerId: member.id,
+          status: 'pending',
+          dependsOn: ['earlier'],
+          lastOutcome: 'cancelled'
+        })
+      )
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+      ).toEqual(doneTask)
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('offers a reset for a stored running task with no live run after a remount, and runs it only on the next explicit dispatch', async () => {
+    const doneTask = {
+      id: 'earlier',
+      title: '已完成任务',
+      ownerId: 'orphan-task-member',
+      status: 'done' as const,
+      dependsOn: []
+    }
+    const lead: ChatSession = {
+      id: 'orphan-task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        doneTask,
+        {
+          id: 'task',
+          title: '中断任务',
+          ownerId: 'orphan-task-member',
+          status: 'running',
+          dependsOn: ['earlier']
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'orphan-task-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const first = renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    first.unmount()
+    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: '重新执行完成' })
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      expect(screen.getByText(/中断任务 · writer · 进行中 · Last run interrupted/)).toBeVisible()
+      expect(screen.getByRole('button', { name: '执行 中断任务' })).toBeDisabled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Reset: 中断任务' }))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[1]
+        ).toEqual({
+          id: 'task',
+          title: '中断任务',
+          ownerId: member.id,
+          status: 'pending',
+          dependsOn: ['earlier'],
+          lastOutcome: 'interrupted'
+        })
+      )
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+      ).toEqual(doneTask)
+      expect(screen.queryByRole('button', { name: 'Reset: 中断任务' })).not.toBeInTheDocument()
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '执行 中断任务' })).toBeEnabled()
+      )
+      fireEvent.click(screen.getByRole('button', { name: '执行 中断任务' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[1]
+        ).toEqual({
+          id: 'task',
+          title: '中断任务',
+          ownerId: member.id,
+          status: 'done',
+          dependsOn: ['earlier']
+        })
+      )
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+      ).toEqual(doneTask)
+    } finally {
+      page.unmount()
+    }
+  })
+
+  it('offers no reset while the owner of a running task is still running it', async () => {
+    const lead: ChatSession = {
+      id: 'live-task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        {
+          id: 'task',
+          title: '运行中任务',
+          ownerId: 'live-task-member',
+          status: 'pending',
+          dependsOn: []
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'live-task-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let finish!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      fireEvent.click(screen.getByRole('button', { name: '执行 运行中任务' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(screen.getByText(/运行中任务 · writer · 进行中/)).toBeVisible())
+      expect(screen.queryByRole('button', { name: 'Reset: 运行中任务' })).not.toBeInTheDocument()
+      expect(screen.queryByText(/Last run interrupted/)).not.toBeInTheDocument()
+      await act(async () => {
+        finish({ content: '完成' })
+      })
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+            .status
+        ).toBe('done')
+      )
+      expect(screen.queryByRole('button', { name: 'Reset: 运行中任务' })).not.toBeInTheDocument()
+    } finally {
+      finish?.({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('offers no reset while a finished task waits for its turn on the lead save chain, and records it done', async () => {
+    const lead: ChatSession = {
+      id: 'finish-window-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        {
+          id: 'task',
+          title: '保存中任务',
+          ownerId: 'finish-window-member',
+          status: 'pending',
+          dependsOn: []
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'finish-window-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const finishers: Array<(value: { content: string }) => void> = []
+    hoisted.requestChatCompletionMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishers.push(resolve)
+        })
+    )
+    let release: (() => void) | undefined
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      fireEvent.click(screen.getByRole('button', { name: '执行 保存中任务' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      fireEvent.click(screen.getByRole('button', { name: '关闭团队管理' }))
+      // A lead save is in flight: the task's finish has to wait for its turn on the lead's chain.
+      const selective = {
+        id: lead.id,
+        gate: new Promise<void>((resolve) => {
+          release = resolve
+        }),
+        started: false
+      }
+      hoisted.selectiveSaveGate.value = selective
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'Lead message during the task' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(selective.started).toBe(true))
+      await act(async () => finishers[0]({ content: '任务结果' }))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value
+            .find((session) => session.id === member.id)
+            ?.messages.some((message) => message.content === '任务结果')
+        ).toBe(true)
+      )
+      // The member is idle and the lead still shows the task running, but its finish is pending: no reset.
+      chooseAddMenuEntry('chat-composer-menu-team')
+      await waitFor(() => expect(screen.getByText(/保存中任务 · writer · 进行中/)).toBeVisible())
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(screen.queryByRole('button', { name: 'Reset: 保存中任务' })).not.toBeInTheDocument()
+      expect(screen.queryByText(/Last run interrupted/)).not.toBeInTheDocument()
+      hoisted.selectiveSaveGate.value = null
+      await act(async () => {
+        release?.()
+      })
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+        ).toEqual({
+          id: 'task',
+          title: '保存中任务',
+          ownerId: member.id,
+          status: 'done',
+          dependsOn: []
+        })
+      )
+      expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith(
+        'The task returned its result, but its status could not be saved.'
+      )
+      expect(screen.queryByRole('button', { name: 'Reset: 保存中任务' })).not.toBeInTheDocument()
+    } finally {
+      hoisted.selectiveSaveGate.value = null
+      release?.()
+      for (const finish of finishers) finish({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('re-checks the owner at the moment of the reset click, not at the last render', async () => {
+    const lead: ChatSession = {
+      id: 'click-check-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        {
+          id: 'task',
+          title: '点击时检查',
+          ownerId: 'click-check-member',
+          status: 'running',
+          dependsOn: []
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'click-check-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const externalLoading = (loading: boolean) =>
+      window.dispatchEvent(
+        new CustomEvent('chat:set-external-loading', {
+          detail: { scope: 'runtime-flow', sessionId: member.id, loading }
+        })
+      )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      const reset = screen.getByRole('button', { name: 'Reset: 点击时检查' })
+      // A Canvas Target run of the owner starts and the reset is clicked before the page renders again.
+      await act(async () => {
+        externalLoading(true)
+        reset.click()
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+      ).toEqual(lead.teamTasks![0])
+      expect(readCurrentSessionState()?.teamTasks?.[0].status).toBe('running')
+      expect(screen.queryByRole('button', { name: 'Reset: 点击时检查' })).not.toBeInTheDocument()
+      // The external run ends: the reset is offered again and works.
+      await act(async () => {
+        externalLoading(false)
+      })
+      fireEvent.click(await screen.findByRole('button', { name: 'Reset: 点击时检查' }))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+        ).toEqual({
+          id: 'task',
+          title: '点击时检查',
+          ownerId: member.id,
+          status: 'pending',
+          dependsOn: [],
+          lastOutcome: 'interrupted'
+        })
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      externalLoading(false)
+      page.unmount()
+    }
+  })
+
+  it.each([
+    ['the user stops it', 'cancelled'],
+    ['its team record changes', 'interrupted']
+  ] as const)(
+    'returns a task whose member send ends in preflight because %s to pending with outcome %s',
+    async (cause, outcome) => {
+      const lead: ChatSession = {
+        id: 'preflight-task-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model',
+        teamTasks: [
+          {
+            id: 'task',
+            title: '准备中任务',
+            ownerId: 'preflight-task-member',
+            status: 'pending',
+            dependsOn: []
+          }
+        ]
+      }
+      const member: ChatSession = {
+        id: 'preflight-task-member',
+        title: 'writer',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'writer'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      let release!: () => void
+      const gate = {
+        gate: new Promise<void>((resolve) => {
+          release = resolve
+        }),
+        entered: false
+      }
+      const page = renderChatPage({ team: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+        chooseAddMenuEntry('chat-composer-menu-team')
+        hoisted.teamPreflightReadGate.value = gate
+        fireEvent.click(screen.getByRole('button', { name: '执行 准备中任务' }))
+        await waitFor(() => expect(gate.entered).toBe(true))
+        fireEvent.click(screen.getByRole('button', { name: '关闭团队管理' }))
+        if (cause === 'the user stops it') {
+          // The lead's composer stop covers a member whose send is still preparing.
+          await waitFor(() => expect(screen.getByTestId('chat-composer-stop-mock')).toBeVisible())
+          fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+        } else {
+          hoisted.storedSessions.value = hoisted.storedSessions.value.map((session) =>
+            session.id === member.id ? { ...session, teamLifecycleRevision: 1 } : session
+          )
+        }
+        await act(async () => {
+          hoisted.teamPreflightReadGate.value = null
+          release()
+        })
+        await waitFor(() =>
+          expect(
+            hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+          ).toEqual({
+            id: 'task',
+            title: '准备中任务',
+            ownerId: member.id,
+            status: 'pending',
+            dependsOn: [],
+            lastOutcome: outcome
+          })
+        )
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        })
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+            .lastOutcome
+        ).toBe(outcome)
+      } finally {
+        hoisted.teamPreflightReadGate.value = null
+        release()
+        page.unmount()
+      }
+    }
+  )
+
+  it('keeps a task pending when its owner is busy at dispatch, before or while the claim commits', async () => {
+    const lead: ChatSession = {
+      id: 'busy-task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        {
+          id: 'task',
+          title: '忙碌任务',
+          ownerId: 'busy-task-member',
+          status: 'pending',
+          dependsOn: []
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'busy-task-member',
+      title: 'Alice',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Alice'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const finishers: Array<(value: { content: string }) => void> = []
+    hoisted.requestChatCompletionMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishers.push(resolve)
+        })
+    )
+    let release: (() => void) | undefined
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      // Busy before dispatch: refused, nothing claimed.
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Alice first' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      chooseAddMenuEntry('chat-composer-menu-team')
+      fireEvent.click(screen.getByRole('button', { name: '执行 忙碌任务' }))
+      await waitFor(() =>
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
+          'Task cannot run: check its owner, dependencies and saved state.'
+        )
+      )
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+      ).toEqual(lead.teamTasks![0])
+      await act(async () => {
+        finishers[0]({ content: 'first done' })
+      })
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value
+            .find((session) => session.id === member.id)
+            ?.messages.some((message) => message.content === 'first done')
+        ).toBe(true)
+      )
+      // Busy while the claim commits: the claim is undone, the stored task is the pre-claim record.
+      hoisted.migrationStarted.value = false
+      hoisted.migrationCommitGate.value = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '执行 忙碌任务' })).toBeEnabled()
+      )
+      fireEvent.click(screen.getByRole('button', { name: '执行 忙碌任务' }))
+      await waitFor(() => expect(hoisted.migrationStarted.value).toBe(true))
+      fireEvent.click(screen.getByRole('button', { name: '关闭团队管理' }))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Alice second' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      await act(async () => {
+        hoisted.migrationCommitGate.value = null
+        release?.()
+      })
+      await waitFor(() =>
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
+          'The owner is busy with another request. The task was not started; try again later.'
+        )
+      )
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
+        ).toEqual(lead.teamTasks![0])
+      )
+      expect(readCurrentSessionState()?.teamTasks?.[0].status).toBe('pending')
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      expect(
+        hoisted.requestChatCompletionMock.mock.calls.every(
+          (call) => !JSON.stringify(call[0].messages).includes('忙碌任务')
+        )
+      ).toBe(true)
+    } finally {
+      hoisted.migrationCommitGate.value = null
+      release?.()
+      for (const finish of finishers) finish({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('does not dispatch a task whose claim commits after End', async () => {
+    const lead: ChatSession = {
+      id: 'gated-task-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamTasks: [
+        {
+          id: 'task',
+          title: '等待结束',
+          ownerId: 'gated-task-member',
+          status: 'pending',
+          dependsOn: []
+        }
+      ]
+    }
+    const member: ChatSession = {
+      id: 'gated-task-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let release!: () => void
+    hoisted.migrationCommitGate.value = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await openTeamManagement()
+      fireEvent.click(screen.getByRole('button', { name: '执行 等待结束' }))
+      await waitFor(() => expect(hoisted.migrationStarted.value).toBe(true))
+      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+      await waitFor(() =>
+        expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(
+          true
+        )
+      )
+      await act(async () => {
+        release()
+        hoisted.migrationCommitGate.value = null
+      })
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(
+        hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamTasks?.[0].status
+      ).toBe('pending')
+    } finally {
+      hoisted.migrationCommitGate.value = null
+      release?.()
+    }
+  })
+
+  it('keeps an already dispatched member request alive through End and denies later sends', async () => {
+    const lead: ChatSession = {
+      id: 'end-live-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    const member: ChatSession = {
+      id: 'end-live-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      teamRole: '文案'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    let finish!: (value: { content: string }) => void
+    let signal: AbortSignal | undefined
+    hoisted.requestChatCompletionMock.mockImplementationOnce((request: { signal: AbortSignal }) => {
+      signal = request.signal
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '写一段文案' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(signal?.aborted).toBe(false)
+    await openTeamManagement()
+    fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+    await waitFor(() =>
+      expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(true)
+    )
+    expect(signal?.aborted).toBe(false)
+    await act(async () => {
+      finish({ content: '已发请求的文案结果' })
+    })
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value
+          .find((item) => item.id === member.id)
+          ?.messages.some((message) => message.content === '已发请求的文案结果')
+      ).toBe(true)
+    )
+    await dispatchSwitchSession(member.id)
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '结束后不应执行' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('结束后不应执行')
+  })
+
+  it('rejects member creation that is still pending when the team ends', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: true }
+    }
+    hoisted.storedSessions.value = [lead]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    vi.mocked(createTeamMemberInDB).mockClear()
+    const page = renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    let release!: () => void
+    hoisted.saveSessionToDBGate.value = new Promise((resolve) => {
+      release = resolve
+    })
+    try {
+      chooseAddMenuEntry('chat-composer-menu-add-member')
+      fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'waiting' } })
+      fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'do work' } })
+      fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '确认创建成员' })).toBeDisabled()
+      )
+      await openTeamManagement()
+      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamEnded
+        ).toBe(true)
+      )
+      await act(async () => {
+        release()
+        hoisted.saveSessionToDBGate.value = null
+      })
+      await waitFor(() => expect(createTeamMemberInDB).toHaveReturnedTimes(1))
+      const committedCreate = vi.mocked(createTeamMemberInDB).mock.results[0].value
+      await expect(committedCreate).rejects.toThrow('Team changed')
+      // End unmounts the creation form; it must not resurrect its old error UI.
+      expect(screen.queryByText(MEMBER_CREATE_UNCONFIRMED)).not.toBeInTheDocument()
+      expect(
+        hoisted.storedSessions.value.some(
+          (session) => session.teamMemberName === 'waiting' && !session.archived
+        )
+      ).toBe(false)
+      expect(screen.queryByRole('button', { name: /waiting.*空闲/ })).toBeNull()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      hoisted.saveSessionToDBGate.value = null
+      release()
+      page.unmount()
+    }
+  })
+  it('keeps an existing member archived when its in-flight save resumes after End', async () => {
+    const lead: ChatSession = {
+      id: 'saving-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: true }
+    }
+    const member: ChatSession = {
+      id: 'saving-writer',
+      title: 'Writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'Writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    hoisted.supportsStreamingChatCompletionMock.mockReturnValue(true)
+    let finish!: (value: unknown) => void
+    let pending!: { onEvent: (event: unknown) => void }
+    hoisted.requestChatCompletionStreamMock.mockImplementationOnce((input) => {
+      pending = input
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    })
+    const page = renderChatPage({ team: true, rows: true })
+    let release!: () => void
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      vi.mocked(saveSessionToDB).mockClear()
+      hoisted.saveSessionToDBGateStarted.value = null
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@Writer pending save' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(pending).toBeDefined())
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(member.id))
+      const save = vi.mocked(saveSessionToDB)
+      const saveIndex = save.mock.calls.findIndex(([session]) => session.id === member.id)
+      expect(saveIndex).toBeGreaterThanOrEqual(0)
+      const inFlightSave = save.mock.results[saveIndex].value
+      await openTeamManagement()
+      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamEnded
+        ).toBe(true)
+      )
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === member.id)
+      ).toMatchObject({ archived: true, teamLifecycleRevision: 1 })
+      hoisted.saveSessionToDBGate.value = null
+      await act(async () => {
+        release()
+      })
+      await expect(inFlightSave).rejects.toThrow('Session lifecycle changed')
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === member.id)
+      ).toMatchObject({ archived: true, teamLifecycleRevision: 1 })
+      expect(teamRows().queryByRole('button', { name: 'Writer' })).not.toBeInTheDocument()
+    } finally {
+      hoisted.saveSessionToDBGate.value = null
+      release?.()
+      finish?.({ result: { content: 'cleanup' }, response: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('renders a creation error while a live team remains available', async () => {
+    const lead: ChatSession = {
+      id: 'team-create-error',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [lead]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const create = vi.mocked(createTeamMemberInDB)
+    create.mockClear()
+    create.mockRejectedValueOnce(new Error('Team changed'))
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    chooseAddMenuEntry('chat-composer-menu-add-member')
+    fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'waiting' } })
+    fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'do work' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(MEMBER_CREATE_UNCONFIRMED)
+    expect(within(screen.getByTestId('agent-team-member-form')).getByRole('alert')).toBeVisible()
+    expect(screen.getByLabelText('成员名')).toHaveValue('waiting')
+    expect(screen.getByLabelText('角色 / 当前任务')).toHaveValue('do work')
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+  it('keeps terminated members archived when selecting a lead that needs normalization', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'missing-model',
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: true }
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [
+        { role: 'user', content: 'keep history' },
+        { role: 'assistant', content: '' }
+      ],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    expect(hoisted.storedSessions.value.find((session) => session.id === lead.id)?.profileId).toBe(
+      'missing-model'
+    )
+    chooseAddMenuEntry('chat-composer-menu-team')
+    fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    expect(screen.queryByRole('button', { name: /writer.*空闲/ })).toBeNull()
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === member.id)?.archived
+      ).toBe(true)
+    )
+    expect(
+      hoisted.storedSessions.value.find((session) => session.id === member.id)?.messages[0]
+    ).toEqual({ role: 'user', content: 'keep history' })
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+  it('branches a member into a standalone conversation instead of copying team membership', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamGeneration: 1
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      teamMemberGeneration: 1,
+      teamRole: 'writer',
+      memberModelChoice: { version: 1, profileId: 'vision-model' }
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/branch' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-command-confirm-card')).toHaveAttribute(
+        'data-command',
+        '/branch'
+      )
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'chat.command_card.new_conversation' }))
+    await waitFor(() => expect(readCurrentSessionState()?.id).not.toBe(member.id))
+    expect(readCurrentSessionState()?.teamLeadId).toBeUndefined()
+    expect(readCurrentSessionState()?.teamMemberName).toBeUndefined()
+    expect(readCurrentSessionState()?.memberModelChoice).toBeUndefined()
+    expect(readCurrentSessionState()?.teamMemberGeneration).toBeUndefined()
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+  it('uses the live lead model rather than member or team overrides', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: { maxMembers: 6, defaultModel: 'vision-model', autoCleanup: false }
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      profileId: 'vision-model',
+      skillId: 'forged-skill'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'member request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(hoisted.requestChatCompletionMock.mock.calls[0][0].profileId).toBe('base-model')
+  })
+  it.each([false, true])(
+    'uses the target member profile effort when the lead composer sends (stream=%s)',
+    async (stream) => {
+      hoisted.availableProfiles.value = [
+        {
+          id: 'lead-codex',
+          model_name: 'Lead Codex',
+          model_use: 'chat' as const,
+          call_type: 'codex'
+        },
+        {
+          id: 'member-codex',
+          model_name: 'Member Codex',
+          model_use: 'chat' as const,
+          call_type: 'codex'
+        }
+      ]
+      const lead: ChatSession = {
+        id: 'effort-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'lead-codex'
+      }
+      const member: ChatSession = {
+        id: 'effort-writer',
+        title: '文案',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: '文案',
+        memberModelChoice: { version: 1, profileId: 'member-codex' }
+      }
+      hoisted.storedSessions.value = [lead, member]
+      localStorage.setItem(
+        'chat.reasoningEffort',
+        JSON.stringify({ 'lead-codex': 'low', 'member-codex': 'high' })
+      )
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      const page = renderChatPage({ team: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: '@文案 write a tagline' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        const request = stream
+          ? hoisted.requestChatCompletionStreamMock
+          : hoisted.requestChatCompletionMock
+        await waitFor(() => expect(request).toHaveBeenCalledTimes(1))
+        expect(request.mock.calls[0][0]).toMatchObject({
+          profileId: 'member-codex',
+          reasoningEffort: 'high'
+        })
+      } finally {
+        page.unmount()
+      }
+    }
+  )
+
+  it('uses an explicitly selected member model while continuing to inherit the lead skill', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      profileId: 'base-model',
+      skillId: 'forged-skill',
+      memberModelChoice: { version: 1, profileId: 'vision-model' }
+    }
+    hoisted.storedSessions.value = [lead, member]
+    hoisted.currentConfig.value!.llm_config.api_profiles = [
+      {
+        id: 'base-model',
+        model_name: 'Lead',
+        base_url: 'http://127.0.0.1',
+        api_key: 'fixture',
+        model_use: 'chat'
+      },
+      {
+        id: 'vision-model',
+        model_name: 'Member',
+        base_url: 'http://127.0.0.1',
+        api_key: 'fixture',
+        model_use: 'vision'
+      }
+    ]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'member request' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    expect(hoisted.requestChatCompletionMock.mock.calls[0][0].profileId).toBe('vision-model')
+    expect(hoisted.requestChatCompletionMock.mock.calls[0][0].skillRuntime?.skillId).not.toBe(
+      'forged-skill'
+    )
+  })
+  it.each([false, true])(
+    'blocks a versioned member model before direct send without consuming the draft (stream=%s)',
+    async (stream) => {
+      const lead: ChatSession = {
+        id: 'team-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model',
+        teamSettings: {
+          maxMembers: 6,
+          defaultModel: null,
+          autoCleanup: false,
+          memberModelSelection: { version: 1, profileId: 'vision-model' }
+        }
+      }
+      const member: ChatSession = {
+        id: 'team-member',
+        title: 'writer',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'writer'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        member.id
+      )
+      renderChatPage({ team: true })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'do not send this draft' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Team lead unavailable.')
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('do not send this draft')
+      expect(readCurrentSessionState()?.messages).toEqual([])
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    }
+  )
+  it('keeps an @member draft when a versioned member model is unavailable', async () => {
+    const lead: ChatSession = {
+      id: 'blocked-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: {
+        maxMembers: 6,
+        defaultModel: null,
+        autoCleanup: false,
+        memberModelSelection: { version: 1, profileId: 'vision-model' }
+      }
+    }
+    const member: ChatSession = {
+      id: 'blocked-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '@writer retain this task' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Team lead unavailable.')
+    )
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('@writer retain this task')
+    expect(readCurrentSessionState()?.messages).toEqual([])
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+  })
+  it('keeps an @member draft when its explicitly selected model is no longer available', async () => {
+    const lead: ChatSession = {
+      id: 'missing-choice-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'missing-choice-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      memberModelChoice: { version: 1, profileId: 'removed-profile' }
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@writer retain this draft' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Team lead unavailable.')
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+        '@writer retain this draft'
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === member.id)?.messages
+      ).toEqual([])
+    } finally {
+      page.unmount()
+    }
+  })
+  it('keeps a new @member draft if that member is already running', async () => {
+    const lead: ChatSession = {
+      id: 'busy-choice-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'busy-choice-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let finish!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      const input = screen.getByTestId('chat-composer-input-mock')
+      fireEvent.change(input, { target: { value: '@writer first task' } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      fireEvent.change(input, { target: { value: '@writer second task' } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('成员正在处理其他请求，请稍后重试。')
+      expect(input).toHaveValue('@writer second task')
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      await act(async () => finish({ content: 'first finished' }))
+    } finally {
+      finish?.({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+  it.each(['attachment', 'hidden'] as const)(
+    'keeps an @member draft with %s rather than silently dropping context',
+    async (kind) => {
+      const attachment: ChatAttachment = {
+        type: 'image',
+        url: 'data:image/png;base64,AA==',
+        fileName: 'fixture.png'
+      }
+      const lead: ChatSession = {
+        id: 'context-choice-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model',
+        draft: {
+          inputValue: '@writer preserve context',
+          pendingAttachments: kind === 'attachment' ? [attachment] : [],
+          pendingHiddenContext: kind === 'hidden' ? 'private context' : '',
+          updatedAt: 1
+        }
+      }
+      const member: ChatSession = {
+        id: 'context-choice-member',
+        title: 'writer',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'writer'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      const page = renderChatPage({ team: true })
+      try {
+        await waitFor(() =>
+          expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+            '@writer preserve context'
+          )
+        )
+        if (kind === 'attachment')
+          await waitFor(() =>
+            expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+          )
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
+          '团队指派暂不支持附件或隐藏上下文，请先处理后重试。'
+        )
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+          '@writer preserve context'
+        )
+        if (kind === 'attachment')
+          expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        page.unmount()
+      }
+    }
+  )
+  it('retains an @member draft and reports a rejected asynchronous preparation', async () => {
+    const lead: ChatSession = {
+      id: 'reject-choice-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'reject-choice-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    hoisted.resolveSkillRuntimeResourceEntriesMock.mockRejectedValueOnce(
+      new Error('fixture preparation rejected')
+    )
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '@writer preserve on rejection' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(hoisted.notifyErrorMock).toHaveBeenCalledWith('fixture preparation rejected')
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+        '@writer preserve on rejection'
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === member.id)?.messages
+      ).toEqual([])
+    } finally {
+      page.unmount()
+    }
+  })
+  it.each(['edit', 'switch', 'switch-back'] as const)(
+    'does not clear or send an @member draft after a preflight %s',
+    async (change) => {
+      const lead: ChatSession = {
+        id: 'draft-race-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const member: ChatSession = {
+        id: 'draft-race-member',
+        title: 'writer',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'writer'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      let release!: () => void
+      const gate = {
+        gate: new Promise<void>((resolve) => {
+          release = resolve
+        }),
+        entered: false
+      }
+      const page = renderChatPage({ team: true, rows: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+        hoisted.teamPreflightReadGate.value = gate
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: '@writer first version' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(gate.entered).toBe(true))
+        if (change === 'edit')
+          fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+            target: { value: 'newer draft' }
+          })
+        else {
+          fireEvent.click(teamRows().getByRole('button', { name: 'writer' }))
+          await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+          if (change === 'switch-back') {
+            fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+            await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+            await waitFor(() =>
+              expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+                '@writer first version'
+              )
+            )
+          }
+        }
+        await act(async () => {
+          hoisted.teamPreflightReadGate.value = null
+          release()
+        })
+        await waitFor(() =>
+          expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Team lead unavailable.')
+        )
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+        expect(
+          hoisted.storedSessions.value.find((session) => session.id === member.id)?.messages
+        ).toEqual([])
+        if (change === 'edit')
+          expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('newer draft')
+        else {
+          if (change === 'switch') {
+            fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
+            await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+          }
+          await waitFor(() =>
+            expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue(
+              '@writer first version'
+            )
+          )
+        }
+      } finally {
+        hoisted.teamPreflightReadGate.value = null
+        release()
+        page.unmount()
+      }
+    }
+  )
+  it('keeps a newer lead draft durable when background channel delivery begins', async () => {
+    const lead: ChatSession = {
+      id: 'background-draft-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'background-draft-writer',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let release!: () => void
+    const gate = {
+      gate: new Promise<void>((resolve) => {
+        release = resolve
+      }),
+      entered: false
+    }
+    hoisted.teamPreflightReadGate.value = gate
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      await openTeamManagement()
+      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'writer' })).toBeChecked())
+      fireEvent.change(screen.getByLabelText('频道消息'), { target: { value: 'background work' } })
+      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      await waitFor(() => expect(gate.entered).toBe(true))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'new lead draft' }
+      })
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 100))
+      })
+      await act(async () => {
+        hoisted.teamPreflightReadGate.value = null
+        release()
+      })
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      await waitFor(() =>
+        expect(hoisted.draftBackups.value[`runtime-flow:${lead.id}`]?.draft?.inputValue).toBe(
+          'new lead draft'
+        )
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new lead draft')
+    } finally {
+      hoisted.teamPreflightReadGate.value = null
+      release()
+      page.unmount()
+    }
+  })
+  it.each([false, true])(
+    'rechecks a newly stored marker after member request preparation (stream=%s)',
+    async (stream) => {
+      const lead: ChatSession = {
+        id: 'late-marker-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model',
+        teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+      }
+      const member: ChatSession = {
+        id: 'late-marker-member',
+        title: 'writer',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'writer'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        member.id
+      )
+      let release!: () => void
+      const gate = {
+        gate: new Promise<void>((resolve) => {
+          release = resolve
+        }),
+        entered: false
+      }
+      hoisted.teamBeforeDispatchGate.value = gate
+      const page = renderChatPage({ team: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: 'prepare first' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+        await waitFor(() => expect(gate.entered).toBe(true))
+        hoisted.storedSessions.value = hoisted.storedSessions.value.map((session) =>
+          session.id === lead.id
+            ? {
+                ...session,
+                teamSettings: {
+                  ...session.teamSettings!,
+                  memberModelSelection: { version: 1, profileId: 'vision-model' }
+                }
+              }
+            : session
+        )
+        await act(async () => {
+          release()
+        })
+        await waitFor(() =>
+          expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+            'Team ended or changed before dispatch.'
+          )
+        )
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      } finally {
+        hoisted.teamBeforeDispatchGate.value = null
+        release()
+        page.unmount()
+      }
+    }
+  )
+  it.each(['missing', 'unrunnable', '3d'] as const)(
+    'fails closed when the confirmed member model is %s',
+    async (reason) => {
+      const profileId = reason === '3d' ? 'hunyuan3d-pro' : 'vision-model'
+      const lead: ChatSession = {
+        id: 'team-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model',
+        teamSettings: {
+          maxMembers: 6,
+          defaultModel: null,
+          autoCleanup: false,
+          memberModelSelection: { version: 1, profileId }
+        }
+      }
+      const member: ChatSession = {
+        id: 'team-member',
+        title: 'writer',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'writer'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      hoisted.currentConfig.value!.llm_config.api_profiles =
+        reason === 'unrunnable'
+          ? [
+              {
+                id: 'vision-model',
+                model_name: 'Member',
+                base_url: '',
+                api_key: '',
+                model_use: 'vision'
+              }
+            ]
+          : []
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        member.id
+      )
+      renderChatPage({ team: true })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'do not send' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Team lead unavailable.')
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    }
+  )
+  it.each(['unset', 'archived-lead', 'archived-member', 'missing', 'nested', 'hunyuan'] as const)(
+    'denies a member request when team owner is %s',
+    async (reason) => {
+      const lead: ChatSession = {
+        id: 'team-lead',
+        title: 'Lead',
+        messages: [],
+        profileId:
+          reason === 'unset' ? undefined : reason === 'hunyuan' ? 'hunyuan3d-pro' : 'base-model',
+        archived: reason === 'archived-lead',
+        teamLeadId: reason === 'nested' ? 'other' : undefined
+      }
+      const member: ChatSession = {
+        id: 'team-member',
+        title: 'writer',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'writer',
+        profileId: 'vision-model',
+        archived: reason === 'archived-member'
+      }
+      hoisted.storedSessions.value = reason === 'missing' ? [member] : [lead, member]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        member.id
+      )
+      renderChatPage({ team: true })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'should not run' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Team lead unavailable.')
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    }
+  )
+  it('lets an admitted member run finish when the lead model changes', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      profileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let observedSignal: AbortSignal | undefined
+    let finish!: (result: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise((resolve) => {
+          observedSignal = signal
+          finish = resolve
+        })
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '@writer assigned work' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(observedSignal).toBeDefined())
+    await act(async () =>
+      window.dispatchEvent(
+        new CustomEvent('chat:append-message', {
+          detail: {
+            scope: 'runtime-flow',
+            sessionId: lead.id,
+            role: 'assistant',
+            content: 'ordinary activity'
+          }
+        })
+      )
+    )
+    fireEvent.click(screen.getByTestId('select-vision-model'))
+    expect(observedSignal?.aborted).toBe(false)
+    await act(async () => finish({ content: 'completed under the original settings' }))
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value
+          .find((session) => session.id === member.id)
+          ?.messages.some((message) => message.content === 'completed under the original settings')
+      ).toBe(true)
+    )
+  })
+  it('keeps the admitted result if lead settings change away and back', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      profileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let signal: AbortSignal | undefined
+    let finish!: (result: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(
+      (input: { signal: AbortSignal }) =>
+        new Promise((resolve) => {
+          signal = input.signal
+          finish = resolve
+        })
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '@writer work' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(signal).toBeDefined())
+    fireEvent.click(screen.getByTestId('select-vision-model'))
+    fireEvent.click(screen.getByTestId('select-base-model'))
+    expect(signal?.aborted).toBe(false)
+    await act(async () => finish({ content: 'admitted result' }))
+    await waitFor(() =>
+      expect(
+        hoisted.storedSessions.value
+          .find((session) => session.id === member.id)
+          ?.messages.some((message) => message.content === 'admitted result')
+      ).toBe(true)
+    )
+  })
+  it('denies explicit member tool commands before dispatch', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/tool session.status' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('成员会话暂不支持直接运行工具')
+    )
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+  it('refuses remote team member sends before dispatch', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    hoisted.currentConfig.value!.use_remote_llm = true
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'Please write copy' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('团队成员暂不支持远程模型')
+    )
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+  })
+  it('refuses an inherited external Agent transport before member dispatch', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      skillId: 'external-fixture'
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    const config = createConfig()
+    hoisted.currentConfig.value = {
+      ...config,
+      llm_config: {
+        ...config.llm_config,
+        customSkills: [
+          {
+            id: 'external-fixture',
+            category: 'fixture',
+            skillName: 'external',
+            prompt: '',
+            type: 'agent',
+            apiAddress: 'http://127.0.0.1/unused'
+          }
+        ]
+      }
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      member.id
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'Please write copy' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
+        '团队成员暂不支持外部 Agent 传输，请使用组长的本地模型'
+      )
+    )
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+  })
+  it('revokes preflight when lead model changes away and back before resources resolve', async () => {
+    const lead: ChatSession = {
+      id: 'team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'team-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer',
+      profileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let release!: (value: never[]) => void
+    hoisted.resolveSkillRuntimeResourceEntriesMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '@writer preflight' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(release).toBeDefined())
+    fireEvent.click(screen.getByTestId('select-vision-model'))
+    fireEvent.click(screen.getByTestId('select-base-model'))
+    await act(async () => release([]))
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+  })
+  it('revokes a lead preflight when an End notice discovers a conflicting local history', async () => {
+    const lead: ChatSession = {
+      id: 'lead-conflict',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+    }
+    hoisted.storedSessions.value = [lead]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    let release!: (value: never[]) => void
+    hoisted.resolveSkillRuntimeResourceEntriesMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'do not send after conflict' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(release).toBeDefined())
+    let releaseSave!: () => void
+    hoisted.debouncedSaveAllSessionsGate.value = new Promise((resolve) => {
+      releaseSave = resolve
+    })
+    await act(async () =>
+      window.dispatchEvent(
+        new CustomEvent('chat:append-message', {
+          detail: {
+            scope: 'runtime-flow',
+            sessionId: lead.id,
+            role: 'assistant',
+            content: 'local edit'
+          }
+        })
+      )
+    )
+    hoisted.storedSessions.value = [
+      {
+        ...lead,
+        messages: [{ role: 'user', content: 'other writer' }],
+        teamGeneration: 1,
+        teamLifecycleRevision: 1
+      }
+    ]
+    await act(async () =>
+      window.dispatchEvent(
+        new CustomEvent('chat:team-lifecycle-ended', {
+          detail: { scope: 'runtime-flow', leadId: lead.id }
+        })
+      )
+    )
+    await waitFor(() =>
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('团队状态冲突，已保留本地更改')
+    )
+    await act(async () => release([]))
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+    expect(
+      readCurrentSessionState()?.messages.some((message) => message.content === 'local edit')
+    ).toBe(true)
+    hoisted.debouncedSaveAllSessionsGate.value = null
+    void releaseSave
+  })
+
+  it.each([false, true])(
+    'fails closed for a member send without consuming its draft (stream=%s)',
+    async (stream) => {
+      const lead: ChatSession = {
+        id: 'ended-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const member: ChatSession = {
+        id: 'ended-member',
+        title: 'writer',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'writer'
+      }
+      hoisted.storedSessions.value = [lead, member]
+      hoisted.supportsStreamingChatCompletionMock.mockReturnValue(stream)
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        member.id
+      )
+      renderChatPage({ team: true })
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(member.id))
+      hoisted.storedSessions.value = [
+        { ...lead, teamGeneration: 1, teamLifecycleRevision: 1 },
+        { ...member, teamLifecycleRevision: 1 }
+      ]
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'unsent member draft' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('Team lead unavailable.')
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('unsent member draft')
+      expect(readCurrentSessionState()?.messages).toEqual([])
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(
+        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamGeneration
+      ).toBe(1)
+    }
+  )
+
+  it('preserves an @member draft when the named member is unavailable', async () => {
+    const lead: ChatSession = {
+      id: 'disabled-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'disabled-member',
+      title: 'writer',
+      messages: [],
+      teamLeadId: lead.id,
+      teamMemberName: 'writer'
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    renderChatPage({ team: true })
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '@absent unsent' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('请选择唯一的成员名称并输入任务')
+    )
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('@absent unsent')
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])(
+    'reconciles a dirty scope after missing End; conflicting history=%s',
+    async (conflicting) => {
+      const lead: ChatSession = {
+        id: 'return-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model',
+        teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
+      }
+      const other: ChatSession = { id: 'other-scope', title: 'Other', messages: [] }
+      hoisted.storedSessions.value = [lead]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'other-scope'),
+        other.id
+      )
+      const view = renderChatPage({ team: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+        // Keep the mock writer gated throughout; this case checks reconciliation, not real CAS.
+        hoisted.debouncedSaveAllSessionsGate.value = new Promise(() => {})
+        await act(async () =>
+          window.dispatchEvent(
+            new CustomEvent('chat:append-message', {
+              detail: {
+                scope: 'runtime-flow',
+                sessionId: lead.id,
+                role: 'assistant',
+                content: 'keep locally'
+              }
+            })
+          )
+        )
+        await waitFor(() =>
+          expect(
+            readCurrentSessionState()?.messages.some(
+              (message) => message.content === 'keep locally'
+            )
+          ).toBe(true)
+        )
+        hoisted.storedSessions.value = [other]
+        view.rerender(
+          <MemoryRouter>
+            <ThemeProvider theme={theme}>
+              <ChatPage compact storageScope="other-scope" />
+            </ThemeProvider>
+          </MemoryRouter>
+        )
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(other.id))
+        const ended = {
+          ...lead,
+          messages: conflicting ? [{ role: 'user' as const, content: 'external history' }] : [],
+          teamEnded: true,
+          teamGeneration: 1,
+          teamLifecycleRevision: 1
+        }
+        hoisted.storedSessions.value = [ended]
+        view.rerender(
+          <MemoryRouter>
+            <ThemeProvider theme={theme}>
+              <ChatPage compact storageScope="runtime-flow" />
+            </ThemeProvider>
+          </MemoryRouter>
+        )
+        if (conflicting) {
+          await waitFor(() =>
+            expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('团队状态冲突，已保留本地更改')
+          )
+          expect(readCurrentSessionState()?.teamLifecycleRevision ?? 0).toBe(0)
+        } else {
+          await waitFor(() => expect(readCurrentSessionState()?.teamLifecycleRevision).toBe(1))
+          expect(readCurrentSessionState()?.teamGeneration).toBe(1)
+          expect(readCurrentSessionState()?.teamEnded).toBe(true)
+        }
+        expect(
+          readCurrentSessionState()?.messages.some((message) => message.content === 'keep locally')
+        ).toBe(true)
+        expect(hoisted.storedSessions.value).toEqual([ended])
+      } finally {
+        view.unmount()
+        hoisted.debouncedSaveAllSessionsGate.value = null
+      }
+    }
+  )
+
+  it('selects a profile without discarding an immediately preceding session update', async () => {
+    const lead: ChatSession = {
+      id: 'profile-race',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model',
+      sessionUrl: 'old-continuation',
+      sessionProfileId: 'base-model'
+    }
+    hoisted.storedSessions.value = [lead]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:append-message', {
+          detail: {
+            scope: 'runtime-flow',
+            sessionId: lead.id,
+            role: 'assistant',
+            content: 'preserve this update'
+          }
+        })
+      )
+      fireEvent.click(screen.getByTestId('select-vision-model'))
+    })
+    await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('vision-model'))
+    expect(
+      readCurrentSessionState()?.messages.some(
+        (message) => message.content === 'preserve this update'
+      )
+    ).toBe(true)
+    expect(readCurrentSessionState()?.sessionUrl).toBeUndefined()
+    expect(readCurrentSessionState()?.sessionProfileId).toBeUndefined()
+  })
+
+  it('offers video workspace handoff without a model or generation request', async () => {
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: '/video_gen' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Open video generation workspace' })).toBeVisible()
+    )
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+  it('runs slash compaction at once in the Agent column, like the compact button of the composer', async () => {
+    const session: ChatSession = {
+      id: 'slash-compact-column',
+      title: 'Long',
+      messages: Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `message ${index}`
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    const view = renderWithProviders(<ChatPage compact storageScope="runtime-flow" />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-compress-context-mock')).not.toBeDisabled()
+      )
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: '/compact' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(JSON.stringify(hoisted.notifyWarningMock.mock.calls)).toBe('[]')
+      // No question and no card: the summary of the transcript is the result.
+      expect(
+        screen.queryByRole('button', { name: 'chat.confirm_model_compaction' })
+      ).not.toBeInTheDocument()
+      expect(screen.queryByTestId('agent-basic-command-view')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('chat-command-card')).not.toBeInTheDocument()
+      await waitFor(() => expect(readCurrentSessionState()?.contextCompression?.manual).toBe(true))
+      expect(readCurrentSessionState()?.compactedMessages?.length).toBeGreaterThan(0)
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('requires explicit slash compaction confirmation in the full-page chat and rejects changed model configuration', async () => {
+    const session: ChatSession = {
+      id: 'slash-compact',
+      title: 'Long',
+      messages: Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `message ${index}`
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    const view = renderWithProviders(<ChatPage storageScope="runtime-flow" />)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      const open = () => {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: '/compact' }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      }
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-compress-context-mock')).not.toBeDisabled()
+      )
+      open()
+      expect(JSON.stringify(hoisted.notifyWarningMock.mock.calls)).toBe('[]')
+      expect(
+        await screen.findByRole('button', { name: 'chat.confirm_model_compaction' })
+      ).toBeVisible()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      const configured = hoisted.currentConfig.value
+      if (!configured) throw new Error('Fixture config missing')
+      hoisted.currentConfig.value = { ...configured, llm_config: { ...configured.llm_config } }
+      view.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage storageScope="runtime-flow" />
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'chat.confirm_model_compaction' }))
+      expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
+        'chat.compaction_unavailable_or_changed'
+      )
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      open()
+      fireEvent.click(screen.getByRole('button', { name: 'chat.confirm_model_compaction' }))
+      await waitFor(() => expect(readCurrentSessionState()?.contextCompression?.manual).toBe(true))
+      expect(readCurrentSessionState()?.compactedMessages?.length).toBeGreaterThan(0)
+    } finally {
+      view.unmount()
+    }
   })
 
   it('compresses the current chat context from composer controls', async () => {
@@ -2391,6 +13583,136 @@ describe('ChatPage runtime workflow integration', () => {
       expect(currentSession?.contextCompression?.manual).toBe(true)
     })
     expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context compressed.')
+  })
+
+  it('rejects an old refresh after a compaction commit and preserves compaction in the next save', async () => {
+    const session: ChatSession = {
+      id: 'compaction-ack-refresh-race',
+      title: 'Compaction acknowledgement',
+      profileId: 'base-model',
+      createdAt: 302,
+      messages: Array.from({ length: 12 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `history ${index + 1}`
+      }))
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    const page = renderChatPage()
+    let releaseSave!: () => void
+    let releaseRead!: () => void
+    let readStarted = false
+    const originalDispatchEvent = window.dispatchEvent.bind(window)
+    let compactRefreshSuppressed = false
+    let dispatchSpy: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      // Hold the background debounce independently: only the compact job can reach this save gate.
+      hoisted.debouncedSaveAllSessionsGate.value = new Promise(() => {})
+      hoisted.saveSessionToDBGateStarted.value = null
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        releaseSave = resolve
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-compress-context-mock'))
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(session.id))
+      expect(readCurrentSessionState()?.contextCompression?.manual).toBe(true)
+      expect(hoisted.storedSessions.value[0]?.contextCompression).toBeUndefined()
+      hoisted.loadAllSessionsMock.mockImplementationOnce(async () => {
+        const snapshot = cloneValue(hoisted.storedSessions.value)
+        readStarted = true
+        await new Promise<void>((resolve) => {
+          releaseRead = resolve
+        })
+        return snapshot
+      })
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', {
+            detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+          })
+        )
+      )
+      await waitFor(() => expect(readStarted).toBe(true))
+      // Keep compaction's own preview event from starting another read. This models another valid
+      // read source (e.g. polling) remaining pending rather than accidentally being rescued by the
+      // compact job's later refresh; it does not change any save or epoch implementation.
+      dispatchSpy = vi.spyOn(window, 'dispatchEvent').mockImplementation((event: Event) => {
+        const detail =
+          event instanceof CustomEvent
+            ? (event.detail as { scope?: string; reason?: string })
+            : undefined
+        if (
+          event.type === 'chat:preview-refresh' &&
+          detail?.scope === 'runtime-flow' &&
+          detail.reason === 'storage-updated'
+        ) {
+          compactRefreshSuppressed = true
+          return true
+        }
+        return originalDispatchEvent(event)
+      })
+      await act(async () => {
+        hoisted.saveSessionToDBGate.value = null
+        releaseSave()
+      })
+      await waitFor(() =>
+        expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context compressed.')
+      )
+      expect(compactRefreshSuppressed).toBe(true)
+      expect(hoisted.storedSessions.value[0]?.contextCompression?.manual).toBe(true)
+      expect(hoisted.latestSaveCallback.value).not.toBeNull()
+      hoisted.saveSessionToDBGateStarted.value = null
+      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
+        releaseSave = resolve
+      })
+      const pending = hoisted.latestSaveCallback.value!(session.id, 'runtime-flow').catch(
+        () => null
+      )
+      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(session.id))
+      // The current compacted snapshot is still marked dirty, so this cannot establish that a
+      // clean session is rolled back solely by the compaction acknowledgement.
+      expect(hoisted.saveSuccessCount.value).toBe(0)
+      await act(async () => releaseRead())
+      expect(readCurrentSessionState()?.contextCompression?.manual).toBe(true)
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: {
+              scope: 'runtime-flow',
+              sessionId: session.id,
+              role: 'assistant',
+              content: 'after compaction'
+            }
+          })
+        )
+      )
+      await act(async () => {
+        hoisted.saveSessionToDBGate.value = null
+        releaseSave()
+        await pending
+      })
+      hoisted.debouncedSaveAllSessionsGate.value = null
+      // Invoke the actual registered writer for the edited live session, not a captured old clone.
+      await act(async () => {
+        await hoisted.latestSaveCallback.value!(session.id, 'runtime-flow')
+      })
+      expect(hoisted.storedSessions.value[0]?.contextCompression?.manual).toBe(true)
+      expect(
+        hoisted.storedSessions.value[0]?.messages.some(
+          (message) => message.content === 'after compaction'
+        )
+      ).toBe(true)
+    } finally {
+      releaseRead?.()
+      releaseSave?.()
+      dispatchSpy?.mockRestore()
+      hoisted.saveSessionToDBGate.value = null
+      hoisted.debouncedSaveAllSessionsGate.value = null
+      page.unmount()
+    }
   })
 
   it('preserves assistant images through manual compaction and the next request', async () => {
@@ -2439,14 +13761,23 @@ describe('ChatPage runtime workflow integration', () => {
       )
     )
 
+    await waitFor(() =>
+      expect(hoisted.notifySuccessMock).toHaveBeenCalledWith('Context compressed.')
+    )
     fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
       target: { value: 'edit the generated image' }
     })
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
 
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
-    const requestMessages = hoisted.requestChatCompletionMock.mock.calls.at(-1)?.[0]
-      ?.messages as ChatMessage[]
+    let requestMessages: ChatMessage[] | undefined
+    await waitFor(() => {
+      requestMessages = hoisted.requestChatCompletionMock.mock.calls
+        .map((call) => call[0]?.messages as ChatMessage[] | undefined)
+        .find((messages) =>
+          messages?.some((message) => message.content === 'edit the generated image')
+        )
+      expect(requestMessages).toBeDefined()
+    })
     expect(requestMessages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -2664,6 +13995,199 @@ describe('ChatPage runtime workflow integration', () => {
     } finally {
       window.removeEventListener('chat:activity', handleActivity)
     }
+  })
+
+  it.each([
+    { label: 'short history', historySize: 1, expected: '当前预览无需压缩' },
+    { label: 'long history', historySize: 20, expected: '预计需要压缩' }
+  ])(
+    'shows an estimated next-request context preview for $label, not an executed compression',
+    async ({ historySize, expected }) => {
+      hoisted.availableProfiles.value = [
+        {
+          id: 'base-model',
+          model_name: 'GPT-4o',
+          model_use: 'chat',
+          context_window_tokens: 20_000,
+          context_budget_tokens: 15_000
+        }
+      ]
+      const session: ChatSession = {
+        id: 'preview-session',
+        title: 'Preview session',
+        profileId: 'base-model',
+        messages: Array.from({ length: historySize }, (_, index) => ({
+          role: index % 2 === 0 ? 'user' : 'assistant',
+          content:
+            historySize > 1 ? `Message ${index} ${'example content '.repeat(350)}` : 'short history'
+        }))
+      }
+      hoisted.storedSessions.value = [session]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        session.id
+      )
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+        'base-model'
+      )
+      renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      const indicator = await screen.findByTestId('chat-context-compression-indicator')
+      expect(indicator).toHaveAttribute('aria-label', expect.stringContaining('预计下次请求'))
+      fireEvent.mouseOver(indicator)
+      const hint = await screen.findByText(new RegExp(expected))
+      expect(hint).toBeVisible()
+      expect(screen.getByText(/估算约/)).toBeVisible()
+      expect(screen.queryByText(/自动压缩已生效|已用/)).not.toBeInTheDocument()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it('hides the context preview when the selected profile has no known context budget', async () => {
+    hoisted.availableProfiles.value = [
+      { id: 'base-model', model_name: 'unrecognized-fixture-model', model_use: 'chat' }
+    ]
+    const session: ChatSession = {
+      id: 'unknown-context',
+      title: 'Unknown context',
+      profileId: 'base-model',
+      messages: []
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    expect(screen.queryByTestId('chat-context-compression-indicator')).not.toBeInTheDocument()
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+
+  it('labels a budget-only preview as a budget rather than a model window', async () => {
+    hoisted.availableProfiles.value = [
+      {
+        id: 'base-model',
+        model_name: 'unrecognized-fixture-model',
+        model_use: 'chat',
+        context_budget_tokens: 15_000
+      }
+    ]
+    const session: ChatSession = {
+      id: 'budget-only',
+      title: 'Budget only',
+      profileId: 'base-model',
+      messages: []
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    const indicator = await screen.findByTestId('chat-context-compression-indicator')
+    expect(indicator).toHaveAttribute('aria-label', expect.stringContaining('上下文预算'))
+    expect(indicator).not.toHaveAttribute('aria-label', expect.stringContaining('上下文窗口'))
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+
+  it('updates the context preview when the selected profile configuration changes', async () => {
+    const profile = {
+      id: 'base-model',
+      model_name: 'fixture-model',
+      model_use: 'chat' as const,
+      context_window_tokens: 20_000,
+      context_budget_tokens: 15_000
+    }
+    hoisted.availableProfiles.value = [profile]
+    const session: ChatSession = {
+      id: 'changing-context',
+      title: 'Changing context',
+      profileId: profile.id,
+      messages: []
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'), profile.id)
+    const ui = () => (
+      <MemoryRouter>
+        <ThemeProvider theme={theme}>
+          <ChatPage compact storageScope="runtime-flow" />
+        </ThemeProvider>
+      </MemoryRouter>
+    )
+    const page = render(ui())
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+    expect(screen.getByTestId('chat-context-compression-indicator')).toBeInTheDocument()
+    hoisted.availableProfiles.value = [
+      { id: profile.id, model_name: 'unrecognized-fixture-model', model_use: 'chat' }
+    ]
+    page.rerender(ui())
+    await waitFor(() =>
+      expect(screen.queryByTestId('chat-context-compression-indicator')).not.toBeInTheDocument()
+    )
+    hoisted.availableProfiles.value = [profile]
+    page.rerender(ui())
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-context-compression-indicator')).toBeInTheDocument()
+    )
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+  })
+
+  it('updates the context preview after selecting a different model', async () => {
+    hoisted.availableProfiles.value = [
+      {
+        id: 'base-model',
+        model_name: 'fixture-base',
+        model_use: 'chat',
+        context_window_tokens: 20_000,
+        context_budget_tokens: 15_000
+      },
+      {
+        id: 'vision-model',
+        model_name: 'unknown-fixture-vision',
+        model_use: 'vision',
+        is_vision_model: true
+      }
+    ]
+    const session: ChatSession = {
+      id: 'model-preview',
+      title: 'Model preview',
+      profileId: 'base-model',
+      messages: []
+    }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
+      'base-model'
+    )
+    renderChatPage()
+    await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
+    expect(screen.getByTestId('chat-context-compression-indicator')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('select-vision-model'))
+    await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('vision-model'))
+    expect(screen.queryByTestId('chat-context-compression-indicator')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('select-base-model'))
+    await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
+    expect(screen.getByTestId('chat-context-compression-indicator')).toBeInTheDocument()
+    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
   })
 
   it('does not trigger compact from aggregate usage when context usage stays below the threshold', async () => {
@@ -3214,6 +14738,276 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('binds dedicated managed pane identity only while the actual original conversation is visible, retiring across side view and session switches', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'managed-pane',
+      threadId: 'thread'
+    } as const
+    const a: ChatSession = { id: 'managed-a', title: 'A', messages: [] },
+      b: ChatSession = { id: 'managed-b', title: 'B', messages: [] }
+    hoisted.storedSessions.value = [a, b]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), a.id)
+    const branch = {
+      id: '11111111-1111-4111-8111-111111111111',
+      revision: 1,
+      title: 'Pane side',
+      status: 'completed',
+      busy: false,
+      canContinue: true
+    }
+    hoisted.listAgentSidesMock.mockResolvedValue({ branches: [branch] })
+    hoisted.openAgentSideMock.mockResolvedValue({
+      branch,
+      messages: [{ role: 'assistant', kind: 'answer', content: 'PANE_SIDE' }]
+    })
+    const view = renderWithProviders(
+      <WithThreadSubRows>
+        {(host) => (
+          <ChatPage compact storageScope="runtime-flow" route={route} threadSubRowsHost={host} />
+        )}
+      </WithThreadSubRows>
+    )
+    const activations = () =>
+      hoisted.setManagedFirstRunPaneScopeMock.mock.calls
+        .filter(([req]) => req.active)
+        .map(([req]) => req)
+    try {
+      await waitFor(() => expect(activations()).toHaveLength(1))
+      const first = activations()[0]
+      expect(first).toEqual({
+        route,
+        conversationId: a.id,
+        active: true,
+        lifecycleRevision: expect.any(Number)
+      })
+      expect(first.lifecycleRevision).toBeGreaterThan(50)
+      // The thread skills card is a row of the transcript: the conversation stays visible and bound.
+      await openSkillsCard()
+      expect(hoisted.setManagedFirstRunPaneScopeMock).not.toHaveBeenCalledWith({
+        ...first,
+        active: false
+      })
+      expect(activations()).toHaveLength(1)
+      fireEvent.click(await screen.findByRole('button', { name: /Pane side/ }))
+      await screen.findByText('PANE_SIDE')
+      expect(hoisted.setManagedFirstRunPaneScopeMock).toHaveBeenCalledWith({
+        ...first,
+        active: false
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_side.main' }))
+      await waitFor(() => expect(activations()).toHaveLength(2))
+      const third = activations()[1]
+      expect(third.lifecycleRevision).toBeGreaterThan(first.lifecycleRevision)
+      await dispatchSwitchSession(b.id)
+      await waitFor(() => expect(activations().at(-1)?.conversationId).toBe(b.id))
+      expect(hoisted.setManagedFirstRunPaneScopeMock).toHaveBeenCalledWith({
+        ...third,
+        active: false
+      })
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
+      expect(readCurrentSessionState()?.messages).toEqual([])
+    } finally {
+      view.unmount()
+    }
+  })
+  it.each(['ordinary', 'remote', 'inactive'] as const)(
+    'does not bind managed pane identity when the actual ChatPage is %s',
+    async (mode) => {
+      const route = {
+        channel: 'canvas',
+        scopeType: 'thread',
+        scopeId: 'managed-unavailable',
+        threadId: 'thread'
+      } as const
+      if (mode === 'remote') hoisted.currentConfig.value!.use_remote_llm = true
+      const view = renderWithProviders(
+        <ChatPage
+          compact
+          storageScope="runtime-flow"
+          route={mode === 'ordinary' ? undefined : route}
+          active={mode !== 'inactive'}
+        />
+      )
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+        expect(hoisted.managedFirstRunPaneRevisionMock).not.toHaveBeenCalled()
+        expect(hoisted.setManagedFirstRunPaneScopeMock).not.toHaveBeenCalled()
+      } finally {
+        view.unmount()
+      }
+    }
+  )
+  it('retires original managed pane identity immediately when actual ChatPage becomes inactive or remote', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'managed-retire',
+      threadId: 'thread'
+    } as const
+    const ui = (active: boolean) => (
+      <ChatPage compact storageScope="runtime-flow" route={route} active={active} />
+    )
+    const view = renderWithProviders(ui(true))
+    try {
+      await waitFor(() =>
+        expect(hoisted.setManagedFirstRunPaneScopeMock.mock.calls.some(([req]) => req.active)).toBe(
+          true
+        )
+      )
+      const original = hoisted.setManagedFirstRunPaneScopeMock.mock.calls.find(
+        ([req]) => req.active
+      )![0]
+      view.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>{ui(false)}</ThemeProvider>
+        </MemoryRouter>
+      )
+      expect(hoisted.setManagedFirstRunPaneScopeMock).toHaveBeenCalledWith({
+        ...original,
+        active: false
+      })
+      view.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>{ui(true)}</ThemeProvider>
+        </MemoryRouter>
+      )
+      await waitFor(() =>
+        expect(
+          hoisted.setManagedFirstRunPaneScopeMock.mock.calls.filter(([req]) => req.active)
+        ).toHaveLength(2)
+      )
+      const second = hoisted.setManagedFirstRunPaneScopeMock.mock.calls.findLast(
+        ([req]) => req.active
+      )![0]
+      hoisted.currentConfig.value = { ...hoisted.currentConfig.value!, use_remote_llm: true }
+      view.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>{ui(true)}</ThemeProvider>
+        </MemoryRouter>
+      )
+      expect(hoisted.setManagedFirstRunPaneScopeMock).toHaveBeenCalledWith({
+        ...second,
+        active: false
+      })
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+  it('retires managed pane identity when a loaded conversation is replaced by the no-API warning', async () => {
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'managed-no-api',
+      threadId: 'thread'
+    } as const
+    const session: ChatSession = { id: 'loaded-no-api', title: 'Loaded conversation', messages: [] }
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    const ui = () => <ChatPage compact storageScope="runtime-flow" route={route} />
+    const view = renderWithProviders(ui())
+    try {
+      await waitFor(() =>
+        expect(hoisted.setManagedFirstRunPaneScopeMock.mock.calls.some(([req]) => req.active)).toBe(
+          true
+        )
+      )
+      const original = hoisted.setManagedFirstRunPaneScopeMock.mock.calls.find(
+        ([req]) => req.active
+      )![0]
+      hoisted.availableProfiles.value = []
+      view.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>{ui()}</ThemeProvider>
+        </MemoryRouter>
+      )
+      expect(screen.queryByTestId('chat-composer-input-mock')).not.toBeInTheDocument()
+      expect(hoisted.setManagedFirstRunPaneScopeMock).toHaveBeenCalledWith({
+        ...original,
+        active: false
+      })
+      hoisted.availableProfiles.value = [
+        { id: 'restored-model', model_name: 'Restored', model_use: 'chat' }
+      ]
+      view.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>{ui()}</ThemeProvider>
+        </MemoryRouter>
+      )
+      await waitFor(() =>
+        expect(
+          hoisted.setManagedFirstRunPaneScopeMock.mock.calls.filter(([req]) => req.active)
+        ).toHaveLength(2)
+      )
+      expect(
+        hoisted.setManagedFirstRunPaneScopeMock.mock.calls.findLast(([req]) => req.active)![0]
+          .lifecycleRevision
+      ).toBeGreaterThan(original.lifecycleRevision)
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  })
+  it('adds the thread skills card only in the pane whose composer ran /skills, and nothing takes the pane over', async () => {
+    const a = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'skill-portal',
+      threadId: 'a'
+    } as const
+    const b = { ...a, threadId: 'b' }
+    const panes = (firstActive: boolean) => (
+      <>
+        <ChatPage compact storageScope="runtime-flow-a" route={a} active={firstActive} />
+        <ChatPage compact storageScope="runtime-flow-b" route={b} active={!firstActive} />
+      </>
+    )
+    const view = renderWithProviders(panes(true))
+    try {
+      const paneRoot = (scope: string) =>
+        document.querySelector<HTMLElement>(`[data-chat-page-root="${scope}"]`)!
+      await waitFor(() =>
+        expect(readCurrentSessionStateWithin(paneRoot('runtime-flow-a'))?.id).toBeTruthy()
+      )
+      // No pane publishes a skills button into the workspace header any more.
+      expect(screen.queryByRole('button', { name: '技能' })).not.toBeInTheDocument()
+      const card = await openSkillsCard(paneRoot('runtime-flow-a'))
+      expect(card.closest('[data-chat-page-root]')).toHaveAttribute(
+        'data-chat-page-root',
+        'runtime-flow-a'
+      )
+      expect(screen.getAllByTestId('chat-command-card')).toHaveLength(1)
+      // The composer stays where it is: the card is a row of the transcript.
+      expect(
+        within(paneRoot('runtime-flow-a')).getByTestId('chat-composer-input-mock')
+      ).toBeVisible()
+      expect(screen.queryByRole('button', { name: 'general.close' })).not.toBeInTheDocument()
+      // The card is view state of the active pane: it leaves when the pane is left.
+      view.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>{panes(false)}</ThemeProvider>
+        </MemoryRouter>
+      )
+      await waitFor(() =>
+        expect(readCurrentSessionStateWithin(paneRoot('runtime-flow-b'))?.id).toBeTruthy()
+      )
+      expect(screen.queryByTestId('chat-command-card')).not.toBeInTheDocument()
+      const second = await openSkillsCard(paneRoot('runtime-flow-b'))
+      expect(screen.getAllByTestId('chat-command-card')).toHaveLength(1)
+      expect(second.closest('[data-chat-page-root]')).toHaveAttribute(
+        'data-chat-page-root',
+        'runtime-flow-b'
+      )
+    } finally {
+      view.unmount()
+    }
+  })
   it('materializes blob attachments received from send-to-agent before previewing them', async () => {
     const originalFileReader = globalThis.FileReader
     const originalFetch = globalThis.fetch
@@ -3227,6 +15021,12 @@ describe('ChatPage runtime workflow integration', () => {
 
         readAsDataURL(_blob: Blob) {
           this.result = 'data:image/png;base64,Y2FudmFz'
+          void Promise.resolve().then(() => this.onload?.())
+        }
+
+        // A blob is sent to main as bytes (jsdom's Blob has no arrayBuffer()).
+        readAsArrayBuffer(_blob: Blob) {
+          this.result = new Uint8Array([99, 97, 110, 118, 97, 115]).buffer
           void Promise.resolve().then(() => this.onload?.())
         }
       }
@@ -3271,11 +15071,49 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  // These run in order: the first test of each pair leaves state behind, the second checks that
+  // the harness cleared it before the next test.
+  describe('test harness hygiene', () => {
+    it('can leave a render-loop count behind when a test uses fake timers', () => {
+      vi.useFakeTimers()
+      try {
+        for (let render = 1; render < RENDER_LOOP_LIMIT; render += 1) guardRenderLoop()
+      } finally {
+        // The scheduled reset was a fake timer and is dropped here without running.
+        vi.useRealTimers()
+      }
+      expect(rendersWithoutMacrotask).toBe(RENDER_LOOP_LIMIT - 1)
+    })
+
+    it('starts the next test with a fresh render-loop count', () => {
+      expect(rendersWithoutMacrotask).toBe(0)
+      expect(renderLoopResetScheduled).toBe(false)
+    })
+
+    it('installs the team dispatcher spies for one test without restoring them by hand', () => {
+      watchTeamDispatch()
+      expect(vi.isMockFunction(TeamMessageDispatcher.prototype.enqueue)).toBe(true)
+      expect(vi.isMockFunction(TeamMessageDispatcher.prototype.pump)).toBe(true)
+    })
+
+    it('restores the team dispatcher spies once that test finished', () => {
+      expect(vi.isMockFunction(TeamMessageDispatcher.prototype.enqueue)).toBe(false)
+      expect(vi.isMockFunction(TeamMessageDispatcher.prototype.pump)).toBe(false)
+    })
+  })
+
   describe('asynchronous drop destination isolation', () => {
     const originalFetch = globalThis.fetch
     const originalFileReader = globalThis.FileReader
     const originalImage = globalThis.Image
     type EditingProps = {
+      editingMessageIndex: number | null
+      onSendEditedMessage: (
+        content: string,
+        attachments: ChatAttachment[] | undefined,
+        hiddenContext: string | undefined,
+        baseMessages: ChatSession['messages']
+      ) => void
       onSetEditingIndex: (index: number | null) => void
       onSetEditingContent: (content: string) => void
       onRegisterEditingAttachmentReceiver: (
@@ -3319,6 +15157,30 @@ describe('ChatPage runtime workflow integration', () => {
         editingProps().onRegisterEditingAttachmentReceiver(receiver)
       })
     }
+
+    it('submits the current edit using the real form callback order without restoring removed attachments', async () => {
+      hoisted.storedSessions.value[0].messages[0].attachments = [
+        createImageAttachment('removed.png')
+      ]
+      renderWithProviders(<ChatPage compact storageScope="runtime-flow" />)
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      expect(readCurrentSessionState()?.messages[0].attachments?.[0].fileName).toBe('removed.png')
+      const receiver = vi.fn()
+      startEditing(receiver)
+      await waitFor(() => expect(editingProps().editingMessageIndex).toBe(0))
+      const props = editingProps()
+      act(() => {
+        props.onSetEditingIndex(null)
+        props.onSetEditingContent('')
+        props.onSendEditedMessage('Edited local prompt', undefined, undefined, [])
+      })
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      const input = hoisted.requestChatCompletionMock.mock.calls[0][0] as {
+        messages: Array<{ role: string; content: string; attachments?: ChatAttachment[] }>
+      }
+      expect(input.messages.at(-1)).toMatchObject({ role: 'user', content: 'Edited local prompt' })
+      expect(input.messages.at(-1)?.attachments ?? []).toEqual([])
+    })
 
     const imageFiles = () =>
       ['first.png', 'second.png'].map((name) =>
@@ -3370,18 +15232,30 @@ describe('ChatPage runtime workflow integration', () => {
       }
     }
 
-    const beginBlobDrop = () => {
+    // The drop reads its blob: URL inside the managed-media import (b86546df), a few microtasks
+    // after the drop event: by default wait until that read is in flight before the caller
+    // changes the destination. changeBeforeRead covers the window before the read instead: it
+    // runs synchronously right after the drop event, with no await in between, so the drop's
+    // pending microtasks cannot reach fetch first (an awaited helper would let them).
+    const beginBlobDrop = async ({ changeBeforeRead }: { changeBeforeRead?: () => void } = {}) => {
       let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
       const readAsDataURL = vi.fn()
+      const readAsArrayBuffer = vi.fn()
       vi.stubGlobal(
         'FileReader',
         class {
-          result: string | null = null
+          result: string | ArrayBuffer | null = null
           onload: (() => void) | null = null
           onerror: (() => void) | null = null
           readAsDataURL(blob: Blob) {
             readAsDataURL(blob)
             this.result = 'data:image/png;base64,Y2FudmFz'
+            queueMicrotask(() => this.onload?.())
+          }
+          // The blob is sent to main as bytes (jsdom's Blob has no arrayBuffer()).
+          readAsArrayBuffer(blob: Blob) {
+            readAsArrayBuffer(blob)
+            this.result = new Uint8Array([99, 97, 110, 118, 97, 115]).buffer
             queueMicrotask(() => this.onload?.())
           }
         }
@@ -3403,7 +15277,14 @@ describe('ChatPage runtime workflow integration', () => {
           getData: (type: string) => (type === 'application/x-qapp-image' ? payload : '')
         }
       })
-      expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop')
+      if (changeBeforeRead) {
+        expect(fetchMock).not.toHaveBeenCalled()
+        changeBeforeRead()
+        // The destination changed while nothing had been read yet.
+        expect(fetchMock).not.toHaveBeenCalled()
+      } else {
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('blob:delayed-drop'))
+      }
       return async () => {
         await act(async () => {
           releaseFetch({
@@ -3411,7 +15292,21 @@ describe('ChatPage runtime workflow integration', () => {
             blob: async () => new Blob(['canvas'], { type: 'image/png' })
           })
         })
-        await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+        if (changeBeforeRead && fetchMock.mock.calls.length === 0) {
+          // Today the product still reads and imports the blob after the destination changed
+          // and discards it afterwards, so this branch does not run. It keeps these tests valid
+          // if handleDrop learns to skip the read for a stale destination: let it settle.
+          await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 20))
+          })
+          return
+        }
+        await waitFor(() => expect(readAsArrayBuffer).toHaveBeenCalledOnce())
+        expect(readAsDataURL).not.toHaveBeenCalled()
+        // Let the import that follows the read settle before the caller asserts the outcome.
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        })
       }
     }
 
@@ -3421,7 +15316,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
       startEditing(receiveAttachment)
 
-      const finishDrop = beginBlobDrop()
+      const finishDrop = await beginBlobDrop()
       await finishDrop()
 
       expect(receiveAttachment).toHaveBeenCalledWith(
@@ -3444,7 +15339,7 @@ describe('ChatPage runtime workflow integration', () => {
       )
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
 
-      const finishDrop = beginBlobDrop()
+      const finishDrop = await beginBlobDrop()
       await finishDrop()
 
       expect(screen.getByTestId('chat-composer-attachment-names')).toHaveTextContent(
@@ -3462,7 +15357,7 @@ describe('ChatPage runtime workflow integration', () => {
         renderChatPage()
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
         startEditing(originalReceiver)
-        const finishDrop = beginBlobDrop()
+        const finishDrop = await beginBlobDrop()
 
         act(() => {
           editingProps().onSetEditingIndex(null)
@@ -3487,19 +15382,61 @@ describe('ChatPage runtime workflow integration', () => {
       }
     )
 
+    it.each(['cancel', 'another edit', 'edit round trip'])(
+      'discards the old internal drop after %s before its blob read starts',
+      async (change) => {
+        const originalReceiver = vi.fn()
+        const nextReceiver = vi.fn()
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        startEditing(originalReceiver)
+        const finishDrop = await beginBlobDrop({
+          changeBeforeRead: () => {
+            act(() => {
+              editingProps().onSetEditingIndex(null)
+              editingProps().onSetEditingContent('')
+              editingProps().onRegisterEditingAttachmentReceiver(null)
+            })
+            if (change !== 'cancel') {
+              act(() => {
+                editingProps().onSetEditingIndex(change === 'another edit' ? 2 : 0)
+                editingProps().onRegisterEditingAttachmentReceiver(
+                  change === 'another edit' ? nextReceiver : originalReceiver
+                )
+              })
+            }
+          }
+        })
+        await finishDrop()
+
+        expect(originalReceiver).not.toHaveBeenCalled()
+        expect(nextReceiver).not.toHaveBeenCalled()
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+      }
+    )
+
     it('discards a delayed send-to-agent attachment after its edit is cancelled', async () => {
       const originalReceiver = vi.fn()
       let releaseFetch!: (response: Pick<Response, 'ok' | 'blob'>) => void
       const readAsDataURL = vi.fn()
+      const readAsArrayBuffer = vi.fn()
       vi.stubGlobal(
         'FileReader',
         class {
-          result: string | null = null
+          result: string | ArrayBuffer | null = null
           onload: (() => void) | null = null
           onerror: (() => void) | null = null
           readAsDataURL(blob: Blob) {
             readAsDataURL(blob)
             this.result = 'data:image/png;base64,Y2FudmFz'
+            queueMicrotask(() => this.onload?.())
+          }
+          // The blob is sent to main as bytes (jsdom's Blob has no arrayBuffer()).
+          readAsArrayBuffer(blob: Blob) {
+            readAsArrayBuffer(blob)
+            this.result = new Uint8Array([99, 97, 110, 118, 97, 115]).buffer
             queueMicrotask(() => this.onload?.())
           }
         }
@@ -3540,7 +15477,8 @@ describe('ChatPage runtime workflow integration', () => {
           blob: async () => new Blob(['canvas'], { type: 'image/png' })
         })
       })
-      await waitFor(() => expect(readAsDataURL).toHaveBeenCalledOnce())
+      await waitFor(() => expect(readAsArrayBuffer).toHaveBeenCalledOnce())
+      expect(readAsDataURL).not.toHaveBeenCalled()
 
       expect(originalReceiver).not.toHaveBeenCalled()
       expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
@@ -3552,7 +15490,7 @@ describe('ChatPage runtime workflow integration', () => {
       async (change) => {
         renderChatPage()
         await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
-        const finishDrop = beginBlobDrop()
+        const finishDrop = await beginBlobDrop()
 
         await dispatchSwitchSession('drop-session-b')
         if (change === 'session round trip') await dispatchSwitchSession('drop-session-a')
@@ -3563,6 +15501,63 @@ describe('ChatPage runtime workflow integration', () => {
         expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       }
     )
+
+    it.each(['switch', 'session round trip'])(
+      'discards the old internal drop after a %s before its blob read starts',
+      async (change) => {
+        renderChatPage()
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+        // A synchronous switch: dispatchSwitchSession awaits, which would let the read start.
+        const switchSessionNow = (sessionId: string) =>
+          act(() => {
+            window.dispatchEvent(
+              new CustomEvent('chat:switchSession', {
+                detail: { scope: 'runtime-flow', sessionId }
+              })
+            )
+          })
+        const finishDrop = await beginBlobDrop({
+          changeBeforeRead: () => {
+            switchSessionNow('drop-session-b')
+            if (change === 'session round trip') switchSessionNow('drop-session-a')
+          }
+        })
+        await finishDrop()
+
+        expect(readCurrentSessionState()?.id).toBe(
+          change === 'switch' ? 'drop-session-b' : 'drop-session-a'
+        )
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+        // Nothing reached the old session's stored draft or its draft backup either.
+        const storedDrafts = JSON.stringify([
+          hoisted.storedSessions.value.find((session) => session.id === 'drop-session-a'),
+          hoisted.draftBackups.value
+        ])
+        expect(storedDrafts).not.toContain('delayed-drop')
+        expect(storedDrafts).not.toContain('text from delayed drop')
+        if (change === 'switch') {
+          // ... nor its composer, once the old session is open again.
+          await dispatchSwitchSession('drop-session-a')
+          expect(readCurrentSessionState()?.id).toBe('drop-session-a')
+          expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+          expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+        }
+      }
+    )
+
+    it('discards an internal drop when the ChatPage unmounts before its blob read starts', async () => {
+      const receiveAttachment = vi.fn()
+      const { unmount } = renderChatPage()
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
+      startEditing(receiveAttachment)
+      const finishDrop = await beginBlobDrop({ changeBeforeRead: unmount })
+      await finishDrop()
+
+      expect(receiveAttachment).not.toHaveBeenCalled()
+      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
+    })
 
     it('discards a delayed ordinary file import after switching sessions away and back', async () => {
       let finishImport!: () => void
@@ -3671,7 +15666,7 @@ describe('ChatPage runtime workflow integration', () => {
       const { unmount } = renderChatPage()
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
       startEditing(receiveAttachment)
-      const finishDrop = beginBlobDrop()
+      const finishDrop = await beginBlobDrop()
 
       unmount()
       await finishDrop()
@@ -3687,7 +15682,7 @@ describe('ChatPage runtime workflow integration', () => {
       )
       const { rerender } = renderChatPage()
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe('drop-session-a'))
-      const finishDrop = beginBlobDrop()
+      const finishDrop = await beginBlobDrop()
       const changeScope = (scope: string) =>
         rerender(
           <MemoryRouter>
@@ -3754,7 +15749,10 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('queues Enter while loading, preserves attachments lazily, and continues after stop', async () => {
+  // Owner decision 3 (stop and composer queue): Stop pauses the queued item instead of sending
+  // it; editing it back into the composer and sending resumes it. Re-expressed from
+  // '... and continues after stop'.
+  it('queues Enter while loading, preserves attachments lazily, pauses after stop and resumes on edit', async () => {
     let firstSignal: AbortSignal | undefined
     hoisted.requestChatCompletionMock
       .mockImplementationOnce(
@@ -3802,6 +15800,32 @@ describe('ChatPage runtime workflow integration', () => {
 
     fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
     expect(firstSignal?.aborted).toBe(true)
+
+    // Stop never sends the queued item by itself: it stays, paused, with its attachment.
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('chat.queue_status_paused')
+    )
+    expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued text')
+    expect(
+      within(screen.getByTestId('chat-queue-item')).getByTestId('chat-queue-attachment')
+    ).toHaveTextContent('queued.png')
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+
+    // Edit in the row keeps the attachment; Save resumes the item in place and it is sent.
+    fireEvent.click(
+      within(screen.getByTestId('chat-queue-item')).getByRole('button', { name: 'chat.queue_edit' })
+    )
+    expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue(
+      'queued text'
+    )
+    // Upstream's editor has no attachment labels; the attachment stays with the item and is sent.
+    expect(
+      within(screen.getByTestId('chat-queue-item')).queryByTestId('chat-queue-attachment')
+    ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
 
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
     const queuedRequest = hoisted.requestChatCompletionMock.mock.calls[1]?.[0] as {
@@ -3960,6 +15984,574 @@ describe('ChatPage runtime workflow integration', () => {
     expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
   })
 
+  it('queues a team lead composer draft normally when completed member context is present', async () => {
+    const lead: ChatSession = {
+      id: 'queue-team-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'queue-team-member',
+      title: 'Member',
+      teamLeadId: lead.id,
+      teamMemberName: '设计师',
+      messages: [{ role: 'assistant', content: '设计结果' }]
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const active = Promise.withResolvers<{ content: string }>()
+    const queued = Promise.withResolvers<{ content: string }>()
+    hoisted.requestChatCompletionMock
+      .mockImplementationOnce(() => active.promise)
+      .mockImplementationOnce(() => queued.promise)
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      const send = (text: string) => {
+        fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+          target: { value: text }
+        })
+        fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      }
+      send('first lead request')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      send('second lead draft')
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('second lead draft')
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'new unsent draft' }
+      })
+      await act(async () => active.resolve({ content: 'first lead response' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new unsent draft')
+      const messages = hoisted.requestChatCompletionMock.mock.calls[1][0].messages as ChatMessage[]
+      const sent = messages.find(
+        (message) => message.role === 'user' && message.content === 'second lead draft'
+      )
+      expect(sent?.hiddenContext).toContain('设计结果')
+      expect(screen.queryByTestId('chat-queue-item')).not.toBeInTheDocument()
+      await act(async () => queued.resolve({ content: 'second lead response' }))
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+    } finally {
+      active.resolve({ content: 'cleanup' })
+      queued.resolve({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('retains the original team lead draft without duplicating injected member context after queued preflight fails', async () => {
+    const lead: ChatSession = {
+      id: 'queue-team-failure-lead',
+      title: 'Lead',
+      messages: [],
+      profileId: 'base-model'
+    }
+    const member: ChatSession = {
+      id: 'queue-team-failure-member',
+      title: 'Member',
+      teamLeadId: lead.id,
+      teamMemberName: '设计师',
+      messages: [{ role: 'assistant', content: '设计结果' }]
+    }
+    hoisted.storedSessions.value = [lead, member]
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
+    const active = Promise.withResolvers<{ content: string }>()
+    hoisted.requestChatCompletionMock
+      .mockImplementationOnce(() => active.promise)
+      .mockResolvedValueOnce({ content: 'retried response' })
+    const page = renderChatPage({ team: true })
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'first lead request' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce())
+      const attachment = createFileAttachment('queued.pdf')
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('send-to-agent', {
+            detail: {
+              targetScope: 'runtime-flow',
+              text: 'queued with context',
+              hiddenText: 'user hidden context',
+              attachment
+            }
+          })
+        )
+      )
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('queued with context')
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('queued with context')
+      )
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('')
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      hoisted.preflightFailure.value = true
+      await act(async () => active.resolve({ content: 'first response' }))
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-queue-item')).toHaveTextContent('chat.queue_status_paused')
+      )
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'new lead draft' }
+      })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.queue_paused_first')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('new lead draft')
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledOnce()
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: '' } })
+      fireEvent.click(
+        within(screen.getByTestId('chat-queue-item')).getByRole('button', {
+          name: 'chat.queue_edit'
+        })
+      )
+      expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue(
+        'queued with context'
+      )
+      hoisted.preflightFailure.value = false
+      // Save resumes the item in place: it goes with its attachment and its own hidden context, once.
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      const messages = hoisted.requestChatCompletionMock.mock.calls[1][0].messages as ChatMessage[]
+      const sent = messages.find(
+        (message) => message.role === 'user' && message.content === 'queued with context'
+      )
+      expect(sent?.attachments).toEqual([attachment])
+      expect(sent?.hiddenContext).toContain('user hidden context')
+      expect(
+        sent?.hiddenContext?.match(/Team member results for the lead to use in its answer:/g)
+      ).toHaveLength(1)
+      expect(sent?.hiddenContext?.match(/设计师: 设计结果/g)).toHaveLength(1)
+    } finally {
+      hoisted.preflightFailure.value = false
+      active.resolve({ content: 'cleanup' })
+      page.unmount()
+    }
+  })
+
+  it('says in the queue strip that newer messages wait behind a Stop-paused head', async () => {
+    const abortable = (request: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        request.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+          once: true
+        })
+      })
+    let finishNewer!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock.mockImplementationOnce(abortable).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishNewer = resolve
+        })
+    )
+    renderChatPage('queue-blocking-head')
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    const send = (text: string) => {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: text } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    }
+    send('running')
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    send('first queued')
+    send('second queued')
+    await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+    // Stop pauses the head and holds the next one; nothing is sent by itself.
+    fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+    await waitFor(() =>
+      expect(screen.getAllByTestId('chat-queue-status').map((item) => item.textContent)).toEqual([
+        'chat.queue_status_paused',
+        'chat.queue_status_held'
+      ])
+    )
+    expect(screen.queryByTestId('chat-queue-resume-notice')).not.toBeInTheDocument()
+    // A newer send of the person is accepted and releases the hold: the held message now waits
+    // behind the paused head, and the strip says so on that head, in one line.
+    send('newer request')
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(screen.getAllByTestId('chat-queue-status').map((item) => item.textContent)).toEqual([
+        'chat.queue_status_paused',
+        'chat.queue_status_queued'
+      ])
+    )
+    const [head] = screen.getAllByTestId('chat-queue-item')
+    expect(within(head).getByTestId('chat-queue-resume-notice')).toHaveTextContent(
+      'chat.queue_resume_notice'
+    )
+    await act(async () => finishNewer({ content: 'newer done' }))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+    expect(
+      within(screen.getAllByTestId('chat-queue-item')[0]).getByTestId('chat-queue-resume-notice')
+    ).toBeInTheDocument()
+  })
+
+  it('does not send a queued message while it is edited in the strip, and sends it after Discard', async () => {
+    let finishFirst!: (value: { content: string }) => void
+    hoisted.requestChatCompletionMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirst = resolve
+          })
+      )
+      .mockResolvedValueOnce({ content: 'queued done' })
+    renderChatPage('queue-edit-hold')
+    await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'running' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'waiting' }
+    })
+    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_edit' }))
+    await act(async () => finishFirst({ content: 'first done' }))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    // The run ended, but the item being edited waits.
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('textbox', { name: 'chat.queue_edit_field' })).toHaveValue('waiting')
+    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_discard' }))
+    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+    const messages = hoisted.requestChatCompletionMock.mock.calls[1][0].messages as ChatMessage[]
+    expect(messages.findLast((message) => message.role === 'user')?.content).toBe('waiting')
+    await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
+  })
+
+  describe('queue order around Stop, removal and in-row edits (S5c)', () => {
+    const abortable = (request: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        request.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+          once: true
+        })
+      })
+    const send = (text: string) => {
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), { target: { value: text } })
+      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
+    }
+    const statuses = () =>
+      screen.queryAllByTestId('chat-queue-status').map((item) => item.textContent)
+    const requestedTexts = () =>
+      hoisted.requestChatCompletionMock.mock.calls.map(
+        (call) =>
+          (call[0].messages as ChatMessage[]).findLast((message) => message.role === 'user')
+            ?.content
+      )
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80))
+      })
+    const saveRowEdit = (row: HTMLElement, text: string) => {
+      fireEvent.click(within(row).getByRole('button', { name: 'chat.queue_edit' }))
+      fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+        target: { value: text }
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+    }
+
+    it('removing a Stop-paused head sends the released message next, and a composer send cannot overtake it', async () => {
+      let finishNewer!: (value: { content: string }) => void
+      hoisted.requestChatCompletionMock
+        .mockImplementationOnce(abortable)
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishNewer = resolve
+            })
+        )
+        .mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-remove-head')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('first queued')
+      send('second queued')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() =>
+        expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held'])
+      )
+      // The person's newer send is accepted and releases the hold: 'second queued' now waits behind the paused head.
+      send('newer request')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      await act(async () => finishNewer({ content: 'newer done' }))
+      await settle()
+      expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_queued'])
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      // A direct send on the idle conversation would overtake 'second queued': it is refused and the text stays.
+      hoisted.notifyWarningMock.mockClear()
+      send('latest')
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.queue_paused_first')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('latest')
+      await settle()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
+      // Removing the paused head (as its note says) lets the released message go at once.
+      fireEvent.click(
+        within(screen.getAllByTestId('chat-queue-item')[0]).getByRole('button', {
+          name: 'chat.queue_remove'
+        })
+      )
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
+      send('latest')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(4))
+      expect(requestedTexts()).toEqual(['running', 'newer request', 'second queued', 'latest'])
+    })
+
+    it('removing a paused head whose follower is still held sends nothing', async () => {
+      hoisted.requestChatCompletionMock
+        .mockImplementationOnce(abortable)
+        .mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-remove-held')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('A')
+      send('B')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() =>
+        expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held'])
+      )
+      // Saving an edit of B, held behind the paused A, changes only its text: it stays held.
+      saveRowEdit(screen.getAllByTestId('chat-queue-item')[1], 'B edited')
+      await settle()
+      expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held'])
+      expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual([
+        'A',
+        'B edited'
+      ])
+      expect(screen.queryByTestId('chat-queue-resume-notice')).not.toBeInTheDocument()
+      fireEvent.click(
+        within(screen.getAllByTestId('chat-queue-item')[0]).getByRole('button', {
+          name: 'chat.queue_remove'
+        })
+      )
+      await settle()
+      expect(statuses()).toEqual(['chat.queue_status_held'])
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      // The person's next send goes first and releases the held message, which follows it.
+      send('N')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      expect(requestedTexts()).toEqual(['running', 'N', 'B edited'])
+    })
+
+    it('Stop with three queued, remove the head and edit the third: nothing is sent, then the order is the strip order', async () => {
+      hoisted.requestChatCompletionMock
+        .mockImplementationOnce(abortable)
+        .mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-three')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('A')
+      send('B')
+      send('C')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(3))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() =>
+        expect(statuses()).toEqual([
+          'chat.queue_status_paused',
+          'chat.queue_status_held',
+          'chat.queue_status_held'
+        ])
+      )
+      fireEvent.click(
+        within(screen.getAllByTestId('chat-queue-item')[0]).getByRole('button', {
+          name: 'chat.queue_remove'
+        })
+      )
+      await settle()
+      expect(statuses()).toEqual(['chat.queue_status_held', 'chat.queue_status_held'])
+      saveRowEdit(screen.getAllByTestId('chat-queue-item')[1], 'C edited')
+      await settle()
+      // C keeps its hold behind the held B: nothing goes out by the save.
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      expect(statuses()).toEqual(['chat.queue_status_held', 'chat.queue_status_held'])
+      expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual([
+        'B',
+        'C edited'
+      ])
+      send('N')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(4))
+      expect(requestedTexts()).toEqual(['running', 'N', 'B', 'C edited'])
+    })
+
+    it('a composer send on the idle conversation does not overtake the item open in the row editor', async () => {
+      let finishFirst!: (value: { content: string }) => void
+      hoisted.requestChatCompletionMock
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishFirst = resolve
+            })
+        )
+        .mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-edit-hold')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('X')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_edit' }))
+      await act(async () => finishFirst({ content: 'first done' }))
+      await settle()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      hoisted.notifyWarningMock.mockClear()
+      send('N')
+      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('chat.queue_finish_edit_first')
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('N')
+      await settle()
+      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
+      fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+        target: { value: 'X edited' }
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument())
+      send('N')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      expect(requestedTexts()).toEqual(['running', 'X edited', 'N'])
+    })
+
+    it('saving an edit of the paused head sends it before the ones it held back', async () => {
+      hoisted.requestChatCompletionMock
+        .mockImplementationOnce(abortable)
+        .mockResolvedValue({ content: 'done' })
+      renderChatPage('queue-order-edit-head')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBeTruthy())
+      send('running')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+      send('A')
+      send('B')
+      await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
+      await waitFor(() =>
+        expect(statuses()).toEqual(['chat.queue_status_paused', 'chat.queue_status_held'])
+      )
+      saveRowEdit(screen.getAllByTestId('chat-queue-item')[0], 'A edited')
+      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+      expect(requestedTexts()).toEqual(['running', 'A edited', 'B'])
+    })
+
+    it('offers no edit of a team-internal queued item: a member message goes out as its sender wrote it', async () => {
+      const lead: ChatSession = {
+        id: 'edit-guard-lead',
+        title: 'Lead',
+        messages: [],
+        profileId: 'base-model'
+      }
+      const alice: ChatSession = {
+        id: 'edit-guard-alice',
+        title: 'Alice',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Alice'
+      }
+      const bob: ChatSession = {
+        id: 'edit-guard-bob',
+        title: 'Bob',
+        messages: [],
+        teamLeadId: lead.id,
+        teamMemberName: 'Bob'
+      }
+      hoisted.storedSessions.value = [lead, alice, bob]
+      localStorage.setItem(
+        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+        lead.id
+      )
+      const intent = {
+        id: 'edit-guard',
+        source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
+        kind: 'message',
+        hop: 1,
+        recipient: bob.id,
+        text: 'member queued message'
+      }
+      let listed = false,
+        finishBob!: (value: { content: string }) => void
+      hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
+        intents: listed ? [intent] : []
+      }))
+      hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
+        listed = false
+        return { intent }
+      })
+      hoisted.requestChatCompletionMock
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishBob = resolve
+            })
+        )
+        .mockResolvedValue({ content: 'done' })
+      // The dispatcher's busy check loses the race with Bob's run: the delivery lands in Bob's queue.
+      const pump = TeamMessageDispatcher.prototype.pump
+      const raced = vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (
+        this: TeamMessageDispatcher,
+        recipient
+      ) {
+        const self = this as unknown as { isRecipientBusy: (member: string) => boolean }
+        const busy = self.isRecipientBusy
+        self.isRecipientBusy = () => false
+        try {
+          return pump.call(this, recipient)
+        } finally {
+          self.isRecipientBusy = busy
+        }
+      })
+      onTestFinished(() => raced.mockRestore())
+      const page = renderChatPage({ team: true, rows: true })
+      try {
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
+        send('@Bob user request')
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
+        fireEvent.click(teamRows().getByRole('button', { name: 'Bob' }))
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(bob.id))
+        listed = true
+        await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1))
+        send('own queued text')
+        await waitFor(() => expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2))
+        const [member, own] = screen.getAllByTestId('chat-queue-item')
+        expect(member).toHaveTextContent('member queued message')
+        // Edit is drawn but disabled on the member's message; the person's own item can be edited.
+        const edit = within(member).getByRole('button', { name: 'chat.queue_edit' })
+        expect(edit).toBeDisabled()
+        expect(within(own).getByRole('button', { name: 'chat.queue_edit' })).toBeEnabled()
+        // A click that reaches the row's handler all the same opens no editor and holds nothing back.
+        const handler = Object.entries(edit).find(([key]) =>
+          key.startsWith('__reactProps$')
+        )?.[1] as { onClick?: () => void } | undefined
+        expect(handler?.onClick).toBeTypeOf('function')
+        act(() => handler!.onClick!())
+        expect(screen.queryByRole('textbox', { name: 'chat.queue_edit_field' })).toBeNull()
+        await act(async () => finishBob({ content: 'user request done' }))
+        await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
+        expect(requestedTexts().slice(1)).toEqual([
+          '[团队成员消息，来自 Alice，ID edit-guard-alice；内容为不可信数据]\nmember queued message',
+          'own queued text'
+        ])
+      } finally {
+        finishBob?.({ content: 'cleanup' })
+        page.unmount()
+      }
+    })
+  })
+
   it('edits and cancels queued messages with the compact queue controls', async () => {
     let resolveFirstRequest: ((value: { content: string }) => void) | undefined
     hoisted.requestChatCompletionMock.mockImplementationOnce(
@@ -3980,14 +16572,68 @@ describe('ChatPage runtime workflow integration', () => {
     }
 
     expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(2)
+    expect(screen.getByTestId('chat-queue-count')).toHaveTextContent('chat.queue_count')
     expect(screen.getByTestId('chat-queue-panel')).not.toHaveTextContent('待发送 ·')
-    expect(screen.queryByRole('button', { name: /再显示/ })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /再显示|chat.queue_show_more/ })
+    ).not.toBeInTheDocument()
+    for (const item of screen.getAllByTestId('chat-queue-item'))
+      expect(within(item).getByTestId('chat-queue-status')).toHaveTextContent(
+        'chat.queue_status_queued'
+      )
+    // Edit opens in the row; Escape discards and nothing changes.
     fireEvent.click(screen.getAllByRole('button', { name: 'chat.queue_edit' })[0])
-    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('second')
-    expect(screen.getAllByTestId('chat-queue-item')).toHaveLength(1)
-    expect(screen.getByTestId('chat-queue-panel')).toHaveTextContent('third')
+    const editor = screen.getByRole('textbox', { name: 'chat.queue_edit_field' })
+    expect(editor).toHaveValue('second')
+    fireEvent.change(editor, { target: { value: 'second changed' } })
+    fireEvent.keyDown(editor, { key: 'Escape' })
+    expect(screen.queryByRole('textbox', { name: 'chat.queue_edit_field' })).not.toBeInTheDocument()
+    expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual([
+      'second',
+      'third'
+    ])
+    // Ctrl+Enter saves in place: the item keeps its place in the queue, and an unrelated draft in
+    // the composer neither blocks the save nor is touched by it.
+    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+      target: { value: 'my unrelated draft' }
+    })
+    fireEvent.click(screen.getAllByRole('button', { name: 'chat.queue_edit' })[0])
+    // A command is not a queued message: the save is refused with one line in the row; the editor stays.
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      target: { value: '/status' }
+    })
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      key: 'Enter',
+      ctrlKey: true
+    })
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent(
+      'chat.queue_edit_plain_only'
+    )
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveAttribute('role', 'alert')
+    expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual([
+      'third'
+    ])
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      target: { value: 'second edited' }
+    })
+    expect(screen.queryByTestId('chat-queue-edit-error')).not.toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      key: 'Enter',
+      ctrlKey: true
+    })
+    await waitFor(() =>
+      expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual([
+        'second edited',
+        'third'
+      ])
+    )
+    expect(screen.queryByRole('textbox', { name: 'chat.queue_edit_field' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('my unrelated draft')
+    expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith('请先处理当前输入，再编辑排队消息')
+    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
 
-    fireEvent.click(screen.getByRole('button', { name: 'chat.queue_remove' }))
+    for (const button of screen.getAllByRole('button', { name: 'chat.queue_remove' }))
+      fireEvent.click(button)
     expect(screen.queryByTestId('chat-queue-panel')).not.toBeInTheDocument()
     await act(async () => resolveFirstRequest?.({ content: 'done' }))
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
@@ -4044,7 +16690,9 @@ describe('ChatPage runtime workflow integration', () => {
         expect.stringContaining('second'),
         expect.stringContaining('third')
       ])
-      expect(within(queuedItems[0]).getByLabelText('1 个附件')).toBeInTheDocument()
+      expect(within(queuedItems[0]).getByTestId('chat-queue-attachment')).toHaveTextContent(
+        'chat.queue_attachment_image'
+      )
       expect(screen.getAllByRole('button', { name: 'chat.queue_remove' })).toHaveLength(2)
 
       await act(async () => rejectFirstRequest?.(new Error('first failed')))
@@ -4535,6 +17183,548 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  it('keeps a newer attachment removal when an older blob serialization finishes later', async () => {
+    const attachment: ChatAttachment = {
+      type: 'image',
+      url: 'blob:remove-draft-fixture',
+      fileName: 'fixture.png'
+    }
+    hoisted.storedSessions.value = [
+      {
+        id: 'remove-draft-a',
+        title: 'Draft A',
+        messages: [],
+        draft: {
+          inputValue: 'before removal',
+          pendingAttachments: [attachment],
+          pendingHiddenContext: '',
+          updatedAt: 1
+        }
+      },
+      { id: 'remove-draft-b', title: 'Draft B', messages: [] }
+    ]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      'remove-draft-a'
+    )
+    let releaseBlob!: (response: Response) => void
+    const blobGate = new Promise<Response>((resolve) => {
+      releaseBlob = resolve
+    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (input === 'blob:remove-draft-fixture') return blobGate
+      throw new Error('Unexpected non-fixture fetch')
+    })
+    const view = renderChatPage()
+    try {
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+      )
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'keep after removal' }
+      })
+      fireEvent.blur(window)
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith('blob:remove-draft-fixture'))
+      fireEvent.click(screen.getByTestId('chat-composer-remove-0'))
+      fireEvent.blur(window)
+      await waitFor(() =>
+        expect(
+          hoisted.draftBackups.value['runtime-flow:remove-draft-a']?.draft?.pendingAttachments
+        ).toHaveLength(0)
+      )
+      await act(async () => {
+        releaseBlob({
+          ok: true,
+          blob: async () => new Blob(['fixture'], { type: 'image/png' })
+        } as Response)
+        await Promise.resolve()
+      })
+      // The draft's blob: image is imported into managed media (FIX-PLAN item 4), not inlined.
+      await waitFor(() => expect(hoisted.importManagedBytesMock).toHaveBeenCalled())
+      await dispatchSwitchSession('remove-draft-b')
+      await dispatchSwitchSession('remove-draft-a')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('remove-draft-a'))
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('keep after removal')
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+      expect(
+        hoisted.draftBackups.value['runtime-flow:remove-draft-a']?.draft?.pendingAttachments
+      ).toHaveLength(0)
+    } finally {
+      view.unmount()
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('does not recreate a deleted draft when delayed blob serialization completes', async () => {
+    const attachment: ChatAttachment = {
+      type: 'image',
+      url: 'blob:delete-draft-fixture',
+      fileName: 'fixture.png'
+    }
+    hoisted.storedSessions.value = [
+      {
+        id: 'delete-draft-a',
+        title: 'Draft A',
+        messages: [],
+        draft: {
+          inputValue: 'original',
+          pendingAttachments: [attachment],
+          pendingHiddenContext: '',
+          updatedAt: 1
+        }
+      },
+      { id: 'delete-draft-b', title: 'Draft B', messages: [] }
+    ]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      'delete-draft-a'
+    )
+    let releaseBlob!: (response: Response) => void
+    const blobGate = new Promise<Response>((resolve) => {
+      releaseBlob = resolve
+    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (input === 'blob:delete-draft-fixture') return blobGate
+      throw new Error('Unexpected non-fixture fetch')
+    })
+    const view = renderChatPage()
+    try {
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('original')
+      )
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'pending deletion' }
+      })
+      fireEvent.blur(window)
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith('blob:delete-draft-fixture'))
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:deleteSession', {
+            detail: { scope: 'runtime-flow', sessionId: 'delete-draft-a' }
+          })
+        )
+      )
+      await waitFor(() =>
+        expect(
+          hoisted.storedSessions.value.some((session) => session.id === 'delete-draft-a')
+        ).toBe(false)
+      )
+      await act(async () => {
+        releaseBlob({
+          ok: true,
+          blob: async () => new Blob(['fixture'], { type: 'image/png' })
+        } as Response)
+        await Promise.resolve()
+      })
+      // The draft's blob: image is imported into managed media (FIX-PLAN item 4), not inlined.
+      await waitFor(() => expect(hoisted.importManagedBytesMock).toHaveBeenCalled())
+      expect(hoisted.storedSessions.value.some((session) => session.id === 'delete-draft-a')).toBe(
+        false
+      )
+      expect(hoisted.draftBackups.value['runtime-flow:delete-draft-a']).toBeUndefined()
+      expect(readCurrentSessionState()?.id).toBe('delete-draft-b')
+    } finally {
+      view.unmount()
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('keeps a blob-failed draft when switching sessions before serialization finishes', async () => {
+    const attachments: ChatAttachment[] = [
+      { type: 'image', url: 'blob:switch-draft-fixture', fileName: 'fixture.png' }
+    ]
+    hoisted.storedSessions.value = [
+      {
+        id: 'draft-switch-a',
+        title: 'Draft A',
+        messages: [],
+        draft: {
+          inputValue: 'original',
+          pendingAttachments: attachments,
+          pendingHiddenContext: '',
+          updatedAt: 1
+        }
+      },
+      { id: 'draft-switch-b', title: 'Draft B', messages: [] }
+    ]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      'draft-switch-a'
+    )
+    let rejectBlob: ((error: Error) => void) | undefined
+    const blobGate = new Promise<Response>((_resolve, reject) => {
+      rejectBlob = reject
+    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (input === 'blob:switch-draft-fixture') return blobGate
+      throw new Error('Unexpected non-fixture fetch')
+    })
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const view = renderChatPage()
+    try {
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('original')
+      )
+      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
+        target: { value: 'unsaved switch edit' }
+      })
+      await dispatchSwitchSession('draft-switch-b')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('draft-switch-b'))
+      expect(fetchSpy).toHaveBeenCalledWith('blob:switch-draft-fixture')
+      await act(async () => {
+        rejectBlob?.(new Error('synthetic blob failure'))
+        await Promise.resolve()
+      })
+      await waitFor(() =>
+        expect(warning).toHaveBeenCalledWith(
+          '[ChatPage] Failed to serialize draft attachment:',
+          expect.any(Error)
+        )
+      )
+      await dispatchSwitchSession('draft-switch-a')
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe('draft-switch-a'))
+      expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('unsaved switch edit')
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+    } finally {
+      view.unmount()
+      fetchSpy.mockRestore()
+      warning.mockRestore()
+    }
+  })
+
+  it('imports a composer file on disk by its path and never reads it in the renderer', async () => {
+    const user = userEvent.setup()
+    const readSizes: number[] = []
+    const dataUrlRead = vi.fn()
+    const OriginalFileReader = globalThis.FileReader
+    vi.stubGlobal(
+      'FileReader',
+      class extends OriginalFileReader {
+        readAsArrayBuffer(blob: Blob) {
+          readSizes.push(blob.size)
+          super.readAsArrayBuffer(blob)
+        }
+        readAsDataURL(blob: Blob) {
+          dataUrlRead(blob)
+          super.readAsDataURL(blob)
+        }
+      }
+    )
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 64
+        naturalHeight = 32
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    const revokeObjectURL = vi.fn()
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL')
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+    onTestFinished(() => {
+      if (originalRevoke) Object.defineProperty(URL, 'revokeObjectURL', originalRevoke)
+      else delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL
+    })
+    hoisted.fileToBlobUrlMock.mockReturnValue('blob:picked-preview')
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    // Larger than the header window, so a read of the whole file would show in readSizes.
+    const picked = new File([new Uint8Array(CHAT_IMAGE_HEADER_READ_BYTES * 2)], 'picked.png', {
+      type: 'image/png'
+    })
+    localFilePaths.set(picked, '/home/artist/Pictures/picked.png')
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(picked, 'arrayBuffer', { value: arrayBuffer })
+    hoisted.selectFileMock.mockResolvedValueOnce(picked)
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+    )
+    expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce()
+    expect(hoisted.importManagedFileMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourcePath: '/home/artist/Pictures/picked.png',
+        originalFileName: 'picked.png'
+      })
+    )
+    expect(hoisted.importManagedBytesMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
+    expect(hoisted.fileToDataUrlMock).not.toHaveBeenCalled()
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    // Only the dimensions probe may touch the file: its header (a bounded slice; jsdom has
+    // no Blob#arrayBuffer, so it goes through FileReader here) or a blob: preview URL.
+    expect(dataUrlRead).not.toHaveBeenCalled()
+    expect(readSizes.length).toBeGreaterThan(0)
+    for (const size of readSizes) {
+      expect(size).toBeLessThanOrEqual(CHAT_IMAGE_HEADER_READ_BYTES)
+      expect(size).toBeLessThan(picked.size)
+    }
+    // The header tells nothing here, so the size came from a decode of a preview URL that
+    // is released afterwards.
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:picked-preview')
+  })
+
+  it('reports a refused video pick as a file, not an image, through the composer notice', async () => {
+    const user = userEvent.setup()
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    // The notice comes from the app's i18next instance (react-i18next is mocked here).
+    const { default: i18next } = await import('i18next')
+    const { default: en } = await import('@shared/locales/en-US/renderer.json')
+    if (!i18next.isInitialized) {
+      await i18next.init({ lng: 'en-US', resources: { 'en-US': { translation: en } } })
+    }
+    const refusal = new Error('Unsupported managed media type')
+    hoisted.importManagedFileMock.mockRejectedValueOnce(refusal)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    hoisted.selectFileMock.mockResolvedValueOnce(
+      createLocalFile('clip.mp4', 'video/mp4', '/home/artist/Videos/clip.mp4')
+    )
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    const asFile = describeChatAttachmentImportFailure(refusal, 'clip.mp4', 'file')
+    expect(asFile).not.toBe(describeChatAttachmentImportFailure(refusal, 'clip.mp4', 'image'))
+    await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(asFile))
+    expect(alert).not.toHaveBeenCalled()
+  })
+
+  it('reports a chooser that fails to open through the composer notice, never a native alert', async () => {
+    const user = userEvent.setup()
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    hoisted.selectFileMock.mockRejectedValueOnce(new Error('dialog failed /home/artist'))
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalledOnce())
+    const [message] = hoisted.notifyErrorMock.mock.calls[0]
+    expect(String(message)).toMatch(
+      /attachment_add_failed|添加附件失败|Could not add the attachment/
+    )
+    expect(String(message)).not.toContain('/home/artist')
+    expect(alert).not.toHaveBeenCalled()
+  })
+
+  it("reads a picked image's size from its header and never decodes it", async () => {
+    const user = userEvent.setup()
+    const imageConstructed = vi.fn()
+    vi.stubGlobal(
+      'Image',
+      class {
+        constructor() {
+          imageConstructed()
+        }
+      }
+    )
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    // A real PNG header (IHDR 4000 x 3000) followed by the start of the image data.
+    const be32 = (value: number) => [
+      (value >>> 24) & 255,
+      (value >>> 16) & 255,
+      (value >>> 8) & 255,
+      value & 255
+    ]
+    const ascii = (text: string) => Array.from(text, (c) => c.charCodeAt(0))
+    const header = new Uint8Array([
+      0x89,
+      0x50,
+      0x4e,
+      0x47,
+      0x0d,
+      0x0a,
+      0x1a,
+      0x0a,
+      ...be32(13),
+      ...ascii('IHDR'),
+      ...be32(4000),
+      ...be32(3000),
+      8,
+      6,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      ...be32(3),
+      ...ascii('IDAT'),
+      1,
+      2,
+      3,
+      0,
+      0,
+      0,
+      0
+    ])
+    const picked = new File([header], 'big-board.png', { type: 'image/png' })
+    localFilePaths.set(picked, '/home/artist/Pictures/big-board.png')
+    hoisted.selectFileMock.mockResolvedValueOnce(picked)
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('1')
+    )
+    expect(hoisted.importManagedFileMock).toHaveBeenCalledOnce()
+    expect(hoisted.fileToBlobUrlMock).not.toHaveBeenCalled()
+    expect(imageConstructed).not.toHaveBeenCalled()
+  })
+
+  it('refuses a path-less composer file above the in-memory cap with the localized message', async () => {
+    const user = userEvent.setup()
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    // A generated video with no file behind it (no path from the preload bridge).
+    const generated = new File(['video'], 'generated.mp4', { type: 'video/mp4' })
+    Object.defineProperty(generated, 'size', { value: 70 * 1024 * 1024 })
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(generated, 'arrayBuffer', { value: arrayBuffer })
+    hoisted.selectFileMock.mockResolvedValueOnce(generated)
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    // The composer's notice with the localized line alone: no native alert, no prefix.
+    await waitFor(() =>
+      expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+        new ChatPathlessAttachmentTooLargeError('generated.mp4', 70 * 1024 * 1024).message
+      )
+    )
+    expect(alert).not.toHaveBeenCalled()
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(hoisted.importManagedBytesMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedFileMock).not.toHaveBeenCalled()
+  })
+
+  it("reports a refused chooser import through the composer notice without main's error text", async () => {
+    const user = userEvent.setup()
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 64
+        naturalHeight = 32
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    const refusal = new Error('Managed media source did not respond in time /home/artist/secret')
+    hoisted.importManagedFileMock.mockRejectedValueOnce(refusal)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    hoisted.selectFileMock.mockResolvedValueOnce(
+      createLocalFile('slow.png', 'image/png', '/mnt/stalled/slow.png')
+    )
+
+    await user.click(screen.getByTestId('chat-composer-upload-mock'))
+
+    const expected = describeChatAttachmentImportFailure(refusal, 'slow.png', 'image')
+    await waitFor(() => expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(expected))
+    for (const [message] of hoisted.notifyErrorMock.mock.calls) {
+      expect(String(message)).not.toContain('/home/artist')
+      expect(String(message)).not.toContain('/mnt/stalled')
+      expect(String(message)).not.toContain('上传文件失败')
+    }
+    expect(alert).not.toHaveBeenCalled()
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+  })
+
+  it('shows a short message when a pasted image fails for another reason than the cap', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.stubGlobal(
+      'Image',
+      class {
+        naturalWidth = 64
+        naturalHeight = 32
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.())
+        }
+      }
+    )
+    const refusal = new Error('Managed media bytes do not match image/png')
+    hoisted.importManagedBytesMock.mockRejectedValueOnce(refusal)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const pasted = new File(['not really a png'], 'clipboard.png', { type: 'image/png' })
+
+    await act(async () => {
+      const pasteEvent = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent
+      Object.defineProperty(pasteEvent, 'clipboardData', {
+        value: { items: [{ type: 'image/png', getAsFile: () => pasted }] }
+      })
+      document.dispatchEvent(pasteEvent)
+    })
+
+    await waitFor(() =>
+      expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+        describeChatAttachmentImportFailure(refusal, 'pasted-image.png', 'image')
+      )
+    )
+    expect(hoisted.notifyErrorMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('do not match')
+    )
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+  })
+
+  it('shows the localized cap message for a pasted image above the in-memory cap and attaches nothing', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    renderChatPage()
+    await waitFor(() => expect(screen.getByTestId('chat-composer-mock')).toBeInTheDocument())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    // Clipboard image data has no file behind it.
+    const pasted = new File(['pasted'], 'clipboard.png', { type: 'image/png' })
+    Object.defineProperty(pasted, 'size', { value: 70 * 1024 * 1024 })
+    const arrayBuffer = vi.fn()
+    Object.defineProperty(pasted, 'arrayBuffer', { value: arrayBuffer })
+
+    await act(async () => {
+      const pasteEvent = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent
+      Object.defineProperty(pasteEvent, 'clipboardData', {
+        value: { items: [{ type: 'image/png', getAsFile: () => pasted }] }
+      })
+      document.dispatchEvent(pasteEvent)
+    })
+
+    await waitFor(() =>
+      expect(hoisted.notifyErrorMock).toHaveBeenCalledWith(
+        new ChatPathlessAttachmentTooLargeError('pasted-image.png', 70 * 1024 * 1024).message
+      )
+    )
+    expect(screen.getByTestId('chat-composer-attachment-count')).toHaveTextContent('0')
+    // Refused before the image is decoded or read.
+    expect(hoisted.fileToBlobUrlMock).not.toHaveBeenCalled()
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(hoisted.importManagedBytesMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedDataUrlMock).not.toHaveBeenCalled()
+    expect(hoisted.importManagedFileMock).not.toHaveBeenCalled()
+  })
+
   it('restores per-session drafts after switching away and remounting the same scope', async () => {
     const user = userEvent.setup()
     const firstRender = renderChatPage()
@@ -4651,7 +17841,8 @@ describe('ChatPage runtime workflow integration', () => {
   it('does not let an older async draft persistence restore over newer composer input', async () => {
     const user = userEvent.setup()
     let releaseImport: (() => void) | null = null
-    hoisted.importManagedDataUrlMock.mockImplementationOnce(
+    // A path-less composer file is sent to main as bytes.
+    hoisted.importManagedBytesMock.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
           releaseImport = () =>
@@ -4687,7 +17878,7 @@ describe('ChatPage runtime workflow integration', () => {
       )
       await user.click(screen.getByTestId('chat-composer-upload-mock'))
 
-      await waitFor(() => expect(hoisted.importManagedDataUrlMock).toHaveBeenCalled())
+      await waitFor(() => expect(hoisted.importManagedBytesMock).toHaveBeenCalled())
 
       await user.type(screen.getByTestId('chat-composer-input-mock'), 'plus fresh edit')
 
@@ -5044,6 +18235,257 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
+  it('preserves an external edit made after an assistant attachment CAS commits but before its acknowledgement', async () => {
+    const session: ChatSession = {
+      id: 'attachment-commit-ack-race',
+      title: 'Attachment acknowledgement',
+      profileId: 'base-model',
+      messages: [{ role: 'user', content: 'initial' }],
+      createdAt: 298
+    }
+    const sourceUrl = 'https://example.com/own-fixture.png'
+    const savedPath = 'C:/MagicPot/AutoSave/Agent/own-fixture.png'
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        blob: async () => new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' })
+      }))
+    )
+    let releaseImage!: (value: { savedPath: string }) => void
+    let releaseCompare!: () => void
+    hoisted.saveImageToDirMock.mockReset()
+    // Only this conversation's save waits; a save an earlier test's page still finishes after
+    // its unmount reaches the same mock and must neither take the gate nor count here.
+    hoisted.saveImageToDirMock.mockImplementation((request: { fileName?: string }) =>
+      request?.fileName?.includes(session.id)
+        ? new Promise((resolve) => {
+            releaseImage = resolve
+          })
+        : Promise.resolve({ savedPath: 'C:/MagicPot/AutoSave/Agent/earlier-test.png' })
+    )
+    const ownSaveNames = () =>
+      hoisted.saveImageToDirMock.mock.calls
+        .map(([request]) => String((request as { fileName?: string })?.fileName ?? ''))
+        .filter((name) => name.includes(session.id))
+    hoisted.storedSessions.value = [session]
+    localStorage.setItem(
+      scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+      session.id
+    )
+    const page = renderChatPage()
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(session.id))
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: {
+              scope: 'runtime-flow',
+              sessionId: session.id,
+              role: 'assistant',
+              content: 'image output',
+              attachments: [{ type: 'image', url: sourceUrl, mimeType: 'image/png' }]
+            }
+          })
+        )
+      )
+      await waitFor(() => expect(ownSaveNames()).toHaveLength(1))
+      await waitFor(() =>
+        expect(hoisted.storedSessions.value[0]?.messages.at(-1)?.attachments?.[0]?.url).toBe(
+          sourceUrl
+        )
+      )
+      hoisted.compareCommitted.value = null
+      hoisted.compareCommitResultGate.value = new Promise<void>((resolve) => {
+        releaseCompare = resolve
+      })
+      await act(async () => releaseImage({ savedPath }))
+      await waitFor(() =>
+        expect(hoisted.compareCommitted.value?.messages.at(-1)?.attachments?.[0]?.url).toBe(
+          `file://${savedPath}`
+        )
+      )
+      expect(hoisted.storedSessions.value[0]?.messages.at(-1)?.attachments?.[0]?.url).toBe(
+        `file://${savedPath}`
+      )
+      // The CAS has committed. Simulate an independent writer committing an additional message
+      // before this window receives the old CAS acknowledgement.
+      const external = cloneValue(hoisted.storedSessions.value[0])
+      external.messages.push({ role: 'user', content: 'external committed edit' })
+      hoisted.storedSessions.value = [external]
+      await act(async () => {
+        hoisted.compareCommitResultGate.value = null
+        releaseCompare()
+      })
+      await waitFor(() =>
+        expect(readCurrentSessionState()?.messages.at(-1)?.attachments?.[0]?.url).toBe(
+          `file://${savedPath}`
+        )
+      )
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: {
+              scope: 'runtime-flow',
+              sessionId: session.id,
+              role: 'assistant',
+              content: 'local edit after ack'
+            }
+          })
+        )
+      )
+      await waitFor(() =>
+        expect(screen.getByRole('alert')).toHaveTextContent(/session save conflict/i)
+      )
+      expect(
+        hoisted.storedSessions.value[0]?.messages.some(
+          (message) => message.content === 'external committed edit'
+        )
+      ).toBe(true)
+      expect(
+        hoisted.storedSessions.value[0]?.messages.some(
+          (message) => message.content === 'local edit after ack'
+        )
+      ).toBe(false)
+      expect(
+        readCurrentSessionState()?.messages.some(
+          (message) => message.content === 'local edit after ack'
+        )
+      ).toBe(true)
+    } finally {
+      releaseCompare?.()
+      hoisted.compareCommitResultGate.value = null
+      vi.stubGlobal('fetch', originalFetch)
+      page.unmount()
+    }
+  })
+
+  it('isolates a committed attachment acknowledgement across scopes with the same session id', async () => {
+    const id = 'attachment-same-id-scope-race'
+    const scopeA = 'runtime-flow',
+      scopeB = 'attachment-scope-b'
+    const a: ChatSession = {
+      id,
+      title: 'scope A',
+      profileId: 'base-model',
+      createdAt: 300,
+      messages: [{ role: 'user', content: 'A initial' }]
+    }
+    const b: ChatSession = {
+      id,
+      title: 'scope B',
+      profileId: 'base-model',
+      createdAt: 300,
+      messages: [{ role: 'user', content: 'B initial' }]
+    }
+    const sourceUrl = 'https://example.com/scope-a-fixture.png'
+    const savedPath = 'C:/MagicPot/AutoSave/Agent/scope-a-fixture.png'
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        blob: async () => new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' })
+      }))
+    )
+    let releaseImage!: (value: { savedPath: string }) => void
+    let releaseCompare!: () => void
+    hoisted.saveImageToDirMock.mockReset()
+    hoisted.saveImageToDirMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseImage = resolve
+        })
+    )
+    hoisted.scopedTestSessions.value = { [scopeA]: [a], [scopeB]: [b] }
+    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) =>
+      cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
+    )
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scopeA), id)
+    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scopeB), id)
+    const page = renderChatPage(scopeA)
+    try {
+      await waitFor(() => expect(readCurrentSessionState()?.messages[0]?.content).toBe('A initial'))
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: {
+              scope: scopeA,
+              sessionId: id,
+              role: 'assistant',
+              content: 'A image',
+              attachments: [{ type: 'image', url: sourceUrl, mimeType: 'image/png' }]
+            }
+          })
+        )
+      )
+      await waitFor(() => expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(1))
+      await waitFor(() =>
+        expect(
+          hoisted.scopedTestSessions.value?.[scopeA][0]?.messages.at(-1)?.attachments?.[0]?.url
+        ).toBe(sourceUrl)
+      )
+      hoisted.compareCommitted.value = null
+      hoisted.compareCommitResultGate.value = new Promise<void>((resolve) => {
+        releaseCompare = resolve
+      })
+      await act(async () => releaseImage({ savedPath }))
+      await waitFor(() =>
+        expect(hoisted.compareCommitted.value?.messages.at(-1)?.attachments?.[0]?.url).toBe(
+          `file://${savedPath}`
+        )
+      )
+      expect(
+        hoisted.scopedTestSessions.value?.[scopeA][0]?.messages.at(-1)?.attachments?.[0]?.url
+      ).toBe(`file://${savedPath}`)
+      const external = cloneValue(hoisted.scopedTestSessions.value![scopeA][0])
+      external.messages.push({ role: 'user', content: 'A external edit' })
+      hoisted.scopedTestSessions.value![scopeA] = [external]
+      page.rerender(
+        <MemoryRouter>
+          <ThemeProvider theme={theme}>
+            <ChatPage compact storageScope={scopeB} />
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+      await waitFor(() => expect(readCurrentSessionState()?.messages[0]?.content).toBe('B initial'))
+      await act(async () => {
+        hoisted.compareCommitResultGate.value = null
+        releaseCompare()
+      })
+      expect(readCurrentSessionState()?.title).toBe('scope B')
+      expect(hoisted.scopedTestSessions.value?.[scopeB][0]?.messages).toEqual(b.messages)
+      await act(async () =>
+        window.dispatchEvent(
+          new CustomEvent('chat:append-message', {
+            detail: { scope: scopeB, sessionId: id, role: 'assistant', content: 'B later edit' }
+          })
+        )
+      )
+      await waitFor(() =>
+        expect(hoisted.scopedTestSessions.value?.[scopeB][0]?.messages.at(-1)?.content).toBe(
+          'B later edit'
+        )
+      )
+      expect(readCurrentSessionState()?.messages[0]?.content).toBe('B initial')
+      expect(
+        hoisted.scopedTestSessions.value?.[scopeB][0]?.messages.some((m) => m.content === 'A image')
+      ).toBe(false)
+      expect(
+        hoisted.scopedTestSessions.value?.[scopeA][0]?.messages.some(
+          (m) => m.content === 'A external edit'
+        )
+      ).toBe(true)
+      expect(
+        hoisted.scopedTestSessions.value?.[scopeA][0]?.messages[1]?.attachments?.[0]?.url
+      ).toBe(`file://${savedPath}`)
+    } finally {
+      releaseCompare?.()
+      hoisted.compareCommitResultGate.value = null
+      vi.stubGlobal('fetch', originalFetch)
+      page.unmount()
+    }
+  })
+
   it('does not overwrite a replaced assistant attachment after a delayed auto-save', async () => {
     const sourceUrl = 'https://example.com/stale-generated.png'
     const savedPath = 'C:/MagicPot/AutoSave/Agent/stale.png'
@@ -5058,6 +18500,8 @@ describe('ChatPage runtime workflow integration', () => {
       }))
     )
     let releaseSave!: (value: { savedPath: string }) => void
+    hoisted.fileExistsBatchMock.mockReset()
+    hoisted.fileExistsBatchMock.mockImplementation(async (paths: string[]) => paths.map(() => true))
     hoisted.saveImageToDirMock.mockReset()
     hoisted.saveImageToDirMock.mockImplementationOnce(
       () =>
@@ -5295,7 +18739,7 @@ describe('ChatPage runtime workflow integration', () => {
     ).toHaveLength(11)
   })
 
-  it('keeps multiple image references together for image generation requests', async () => {
+  it('ignores a stale manual image mode and retains reference attachments for the Agent', async () => {
     localStorage.setItem(
       scopedStorageKey('chat.imageGenerationOptions', 'runtime-flow'),
       JSON.stringify({
@@ -5319,7 +18763,7 @@ describe('ChatPage runtime workflow integration', () => {
 
     await dispatchNewSession({
       profileId: 'vision-model',
-      initialMessage: 'Use both references together.',
+      initialMessage: 'Create an image using both references together.',
       initialAttachments: [
         { ...createImageAttachment('role.png'), sourceWidth: 610, sourceHeight: 610 },
         createImageAttachment('ghost.png')
@@ -5330,11 +18774,7 @@ describe('ChatPage runtime workflow integration', () => {
     expect(hoisted.resolveAttachmentBatchCapabilityMock).not.toHaveBeenCalled()
 
     const firstCall = hoisted.requestChatCompletionMock.mock.calls[0]?.[0]
-    expect(firstCall.imageGenerationOptions).toMatchObject({
-      enabled: true,
-      action: 'edit',
-      size: '1024x1024'
-    })
+    expect(firstCall.imageGenerationOptions).toBeUndefined()
     expect(firstCall.imageHistoryPolicy).toBe('all')
     const lastRequestMessage = firstCall.messages[firstCall.messages.length - 1]
     expect(lastRequestMessage.attachments).toEqual([
@@ -5398,7 +18838,7 @@ describe('ChatPage runtime workflow integration', () => {
 
     await dispatchNewSession({
       profileId: 'vision-model',
-      initialMessage: 'Use all ten references together.',
+      initialMessage: 'Create an image using all ten references together.',
       initialAttachments: Array.from({ length: 10 }, (_, index) =>
         createImageAttachment(`current-${index + 1}.png`)
       )

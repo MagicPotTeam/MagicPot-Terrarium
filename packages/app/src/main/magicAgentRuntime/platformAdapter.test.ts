@@ -1899,6 +1899,91 @@ describe('MagicAgentPlatformAdapter', () => {
     expect(receivedSignal).toBe(controller.signal)
   })
 
+  it('executes an allowlisted creative dependency through the assistant turn and revokes it afterwards', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const originalHandle = assistantRuntime.handleMessage.getMockImplementation()!
+    const qappList = vi.fn(async () => ({ qApps: [{ key: 'saved/demo' }] }))
+    let provider: NonNullable<AssistantInboundMessage['toolProvider']> | undefined
+    const route = { channel: 'generic', scopeType: 'dm', scopeId: 'studio-creative-turn' } as const
+    assistantRuntime.handleMessage.mockImplementation(async (request) => {
+      provider = request.toolProvider!
+      expect(provider.listTools().map((tool) => tool.name)).toEqual(['qapp.list'])
+      await expect(
+        provider.callTool(
+          'qapp.list',
+          {},
+          {
+            route: { ...route, scopeId: 'wrong-route' },
+            runId: 'test-run'
+          }
+        )
+      ).rejects.toThrow(/outside the authorized/)
+      const toolResult = await provider.callTool(
+        'qapp.list',
+        { limit: 4 },
+        {
+          route: request.route,
+          runId: 'test-run',
+          signal: request.signal
+        }
+      )
+      return { ...(await originalHandle(request)), reply: { content: toolResult.content } }
+    })
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolDependencies: { qappList },
+      agentKernel: new AgentKernel()
+    })
+    expect(adapter.listTools().find((tool) => tool.name === 'qapp.list')).toMatchObject({
+      status: 'available'
+    })
+    expect(adapter.listTools().find((tool) => tool.name === 'image.create')).toMatchObject({
+      status: 'unavailable'
+    })
+    const result = await adapter.runAgent({
+      agentId: 'magicpot.default.chat',
+      text: 'list quick apps',
+      route,
+      allowedToolNames: ['qapp.list', 'image.create']
+    })
+    expect(result.status).toBe('completed')
+    expect(result.content).toContain('saved/demo')
+    expect(qappList).toHaveBeenCalledTimes(1)
+    expect(qappList).toHaveBeenCalledWith(
+      { limit: 4 },
+      expect.objectContaining({
+        sessionKey: 'generic:dm:studio-creative-turn',
+        route
+      })
+    )
+    await expect(
+      provider!.callTool('qapp.list', {}, { route, runId: 'late-call' })
+    ).rejects.toThrow(/turn has ended/)
+    expect(qappList).toHaveBeenCalledTimes(1)
+    adapter.dispose()
+  })
+
+  it('does not install creative callbacks when the turn explicitly allows no tools', async () => {
+    const assistantRuntime = createAssistantRuntime()
+    const qappList = vi.fn(async () => ({ qApps: [] }))
+    const adapter = new MagicAgentPlatformAdapter({
+      chatService: createChatService(),
+      assistantRuntime,
+      creativeToolDependencies: { qappList },
+      agentKernel: new AgentKernel()
+    })
+    await adapter.runAgent({
+      agentId: 'magicpot.default.chat',
+      text: 'no tools',
+      route: { channel: 'generic', scopeType: 'dm', scopeId: 'studio-no-tools' },
+      allowedToolNames: []
+    })
+    expect(assistantRuntime.handleMessage.mock.calls[0][0].toolProvider).toBeUndefined()
+    expect(qappList).not.toHaveBeenCalled()
+    adapter.dispose()
+  })
+
   it('defaults route-scoped agent runs to read-only web tools when allowedToolNames is omitted', async () => {
     const assistantRuntime = createAssistantRuntime()
     const adapter = new MagicAgentPlatformAdapter({

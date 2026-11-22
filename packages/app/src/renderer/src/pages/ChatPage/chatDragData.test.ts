@@ -172,4 +172,36 @@ describe('chatDragData', () => {
       }
     ])
   })
+
+  it('keeps a report binding out of every drag format and the token out of text/plain', () => {
+    const { data, target } = createDataTransferMock()
+    const binding = `rb1.${'F'.repeat(43)}`
+
+    setAgentAttachmentDragPayload(target, {
+      type: 'file',
+      url: 'file:///C:/demo/report.md',
+      fileName: 'report.md',
+      reportBundleId: 'bundle-1',
+      reportBundleRole: 'primary-report',
+      reportBundleBinding: binding
+    })
+
+    for (const value of data.values()) expect(value).not.toContain(binding)
+    expect(data.get('text/uri-list')).toBe('local-media:///C:/demo/report.md')
+    const plain = JSON.parse(
+      (data.get('text/plain') || '').slice(INTERNAL_IMAGE_DRAG_PREFIX.length)
+    )
+    expect(plain.attachments[0]).toEqual({
+      type: 'file',
+      url: 'local-media:///C:/demo/report.md',
+      fileName: 'report.md',
+      reportBundleId: 'bundle-1',
+      reportBundleRole: 'primary-report'
+    })
+    const privatePayload = JSON.parse(data.get(QAPP_IMAGE_DRAG_MIME) || '{}')
+    expect(privatePayload.attachments[0]).toEqual({
+      ...plain.attachments[0],
+      reportBundleDragToken: expect.stringMatching(/^rbd\./)
+    })
+  })
 })

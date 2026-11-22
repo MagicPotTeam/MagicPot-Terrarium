@@ -1,3 +1,5 @@
+import type { InstalledCatalogReadResponse } from './installedCatalog'
+import { parseInstalledCatalogReadRequest, parseInstalledCatalogReadResponse } from './installedCatalog'
 import type { MagicAgentConfigContent } from '../magicAgentPlatform2/agentConfig'
 import type { PolicyJsonValue } from '../magicAgentPlatform2/policy'
 import type {
@@ -690,8 +692,14 @@ export type MagicAgentPlatformRunResp = {
   error?: string
 }
 
+export type MagicAgentPlatformSetEnabledReq = {
+  enabled: boolean
+}
+
 export type MagicAgentPlatformStatus = {
   enabled: boolean
+  configuredEnabled?: boolean
+  environmentOverride?: boolean
   featureFlag: 'MAGICPOT_MAGICAGENT_PLATFORM'
   platformVersion: 1
   assistantRuntimeCompatible: true
@@ -1361,6 +1369,13 @@ const validateGetTriggerReq = (value: unknown): MagicAgentPlatformGetTriggerReq 
   for (const field of Object.keys(req))
     if (field !== 'triggerId') throw issue(field, 'Unexpected field')
   return { triggerId: requireString(req.triggerId, 'getTrigger triggerId') }
+}
+
+const validateSetEnabledReq = (value: unknown): MagicAgentPlatformSetEnabledReq => {
+  const req = requireRecord(value, 'setEnabled')
+  for (const field of Object.keys(req))
+    if (field !== 'enabled') throw issue(field, 'Unexpected field')
+  return { enabled: requireBoolean(req.enabled, 'enabled') }
 }
 
 const validateEmptyReq = (value: unknown): MagicAgentPlatformEmptyReq => {
@@ -2831,6 +2846,7 @@ const validateRemoveAgentInstanceReq = (
 }
 
 export interface MagicAgentPlatformSvc {
+  readInstalledCatalog(req: MagicAgentPlatformEmptyReq): Promise<InstalledCatalogReadResponse>
   searchMemory(req: SemanticMemorySearchPublicReq): Promise<SemanticMemoryPublicSearchResult>
   inspectMemory(req: SemanticMemoryInspectPublicReq): Promise<SemanticMemoryPublicInspectResult>
   deleteMemory(req: SemanticMemoryDeletePublicReq): Promise<SemanticMemoryAdminResult>
@@ -2850,6 +2866,7 @@ export interface MagicAgentPlatformSvc {
   ): Promise<SemanticMemoryAgentSessionLink[]>
   listMemoryAgentSessions(req: { agentId: string }): Promise<SemanticMemoryAgentSessionLink[]>
   getStatus(req: MagicAgentPlatformEmptyReq): Promise<MagicAgentPlatformStatusResp>
+  setEnabled(req: MagicAgentPlatformSetEnabledReq): Promise<MagicAgentPlatformStatusResp>
   forkSessionAtEvent(
     req: MagicAgentPlatformSessionForkReq
   ): Promise<MagicAgentPlatformSessionForkResp>
@@ -3104,6 +3121,7 @@ const validateMemoryReq = (value: unknown): any => {
 }
 
 export const magicAgentPlatformSvcDef: ServiceDefSheet<MagicAgentPlatformSvc> = {
+  readInstalledCatalog: { type: 'unary', request: parseInstalledCatalogReadRequest, response: parseInstalledCatalogReadResponse },
   searchMemory: { type: 'unary', request: validateMemoryReq },
   inspectMemory: { type: 'unary', request: validateMemoryReq },
   deleteMemory: { type: 'unary', request: validateMemoryReq },
@@ -3120,6 +3138,7 @@ export const magicAgentPlatformSvcDef: ServiceDefSheet<MagicAgentPlatformSvc> = 
   watchPendingApprovals: { type: 'serverStreaming', request: validateEmptyReq },
   resolvePendingApproval: { type: 'unary', request: validateResolvePendingApprovalReq },
   getStatus: { type: 'unary', request: validateEmptyReq },
+  setEnabled: { type: 'unary', request: validateSetEnabledReq },
   listAgents: { type: 'unary', request: validateEmptyReq },
   registerAgent: { type: 'unary', request: validateRegisterAgentReq },
   runAgent: { type: 'unary', request: validateRunAgentReq },

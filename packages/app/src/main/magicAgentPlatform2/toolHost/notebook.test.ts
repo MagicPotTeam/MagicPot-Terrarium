@@ -122,6 +122,18 @@ describe('NotebookToolHost', () => {
     expect(read.notebook.cells.map((c) => c.id)).toEqual(['md-1', 'code-1'])
   })
 
+  it('rejects an approved snapshot reused for another operation or modified source', async () => {
+    const { root, authorization } = setup(true), file = path.join(root, 'a.ipynb')
+    writeFileSync(file, JSON.stringify(document()))
+    const before = readFileSync(file), host = await NotebookToolHost.create(authorization, { allowedRoots: [root] })
+    const input = { path: 'a.ipynb', expectedSha256: hash(before), cellIds: ['code-1'] }
+    const approved = call(authorization, 'notebook.clear-outputs', input, true)
+    const request = createFilesToolPolicyRequest({ requestId: `bound-${Math.random()}`, actor: { kind: 'agent', id: 'agent' }, target: { kind: 'tool', id: 'notebook.write' }, action: 'notebook.write', toolInput: { ...input, operation: 'notebook.cell.clear-outputs' }, filesystem: { paths: ['a.ipynb'] } })
+    await expect(host.delete({ ...approved, request, input } as never)).rejects.toThrow(/differs from the approved/)
+    await expect(host.clearOutputs({ ...approved, request, input: { ...input, cellIds: ['md-1'] } } as never)).rejects.toThrow(/differs from the approved/)
+    expect(readFileSync(file)).toEqual(before)
+  })
+
   it('performs insert, replace/convert, clear, and delete with CAS, snapshot, canonical newline and mode-safe atomic writes', async () => {
     const { root, authorization } = setup(true)
     const file = path.join(root, 'a.ipynb')
@@ -212,6 +224,19 @@ describe('NotebookToolHost', () => {
     await expect(
       host.read(call(authorization, 'notebook.read', { path: '../outside.ipynb' }) as never)
     ).rejects.toThrow('traversal')
+  })
+
+  it.each([undefined, null, 1, true, ['md-1']].map(id => ({ id })))('rejects a non-string cell ID without JavaScript coercion ($id)', async ({ id }) => {
+    const { root, authorization } = setup(), file = path.join(root, 'typed-id.ipynb')
+    const invalid = document()
+    const cell: Record<string, unknown> = invalid.cells[0]
+    cell.id = id
+    writeFileSync(file, JSON.stringify(invalid))
+    const before = readFileSync(file), audits: unknown[] = []
+    const host = await NotebookToolHost.create(authorization, { allowedRoots: [root], onAudit: evidence => { audits.push(evidence) } })
+    await expect(host.read(call(authorization, 'notebook.read', { path: 'typed-id.ipynb' }) as never)).rejects.toThrow('unique stable id')
+    expect(readFileSync(file)).toEqual(before)
+    expect(audits).toEqual([expect.objectContaining({ tool: 'notebook.read', outcome: 'rejected' })])
   })
 
   it('does not consume approval or write when CAS is stale', async () => {

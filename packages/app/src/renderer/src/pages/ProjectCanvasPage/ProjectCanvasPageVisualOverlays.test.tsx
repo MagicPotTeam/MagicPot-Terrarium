@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 
 import ProjectCanvasPageVisualOverlays from './ProjectCanvasPageVisualOverlays'
+import ProjectCanvasImageInteractionOverlay from './components/ProjectCanvasImageInteractionOverlay'
+import ProjectCanvasMultiSelectionTransformOverlay from './components/ProjectCanvasMultiSelectionTransformOverlay'
+import { getCanvasItemBounds } from './projectCanvasPageShared'
 import type { CanvasOcrHoverDetail } from './ocrCanvasUtils'
 import type {
   CanvasAnnotationItem,
@@ -241,6 +244,7 @@ function renderVisualOverlays(options?: {
   annotationItems?: CanvasAnnotationItem[]
   fileItems?: CanvasFileItem[]
   textItems?: CanvasTextItem[]
+  teamLabelImageItems?: CanvasImageItem[]
   items?: CanvasItem[]
   editingTextItemId?: string | null
   activeOcrHover?: CanvasOcrHoverDetail | null
@@ -268,7 +272,7 @@ function renderVisualOverlays(options?: {
     ...(options?.textItems ?? [])
   ]
 
-  render(
+  const element = (
     <ProjectCanvasPageVisualOverlays
       canvasContainerRef={{ current: portalHost }}
       canvasContainerElement={portalHost}
@@ -279,6 +283,7 @@ function renderVisualOverlays(options?: {
       annotationItems={options?.annotationItems ?? []}
       textItems={options?.textItems ?? []}
       fileItems={options?.fileItems ?? []}
+      teamLabelImageItems={options?.teamLabelImageItems}
       items={items}
       editingTextItemId={options?.editingTextItemId ?? null}
       activeOcrHover={options?.activeOcrHover ?? null}
@@ -319,7 +324,8 @@ function renderVisualOverlays(options?: {
     />
   )
 
-  return { portalHost }
+  const view = render(element)
+  return { portalHost, rerenderImages: (images: CanvasImageItem[]) => view.rerender(React.cloneElement(element, { items: images, teamLabelImageItems: images })) }
 }
 
 afterEach(() => {
@@ -333,6 +339,220 @@ afterEach(() => {
   renderedOverlayOrder.length = 0
   vi.clearAllMocks()
   document.body.innerHTML = ''
+})
+
+describe('team image labels', () => {
+  it.each(['drag', 'resize', 'rotate'] as const)('tracks a real image %s preview and resets on interaction unmount without changing another label', (kind) => {
+    const image: CanvasImageItem = { id: 'image-one', type: 'image', src: 'fixture', teamImageLabel: '甲·图1', x: 100, y: 140, width: 200, height: 120, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+    const other = { ...image, id: 'image-two', teamImageLabel: '乙·图1', x: 450 }
+    const { portalHost } = renderVisualOverlays({ items: [image, other], teamLabelImageItems: [image, other] })
+    const labels = portalHost.querySelectorAll('[data-canvas-team-image-label]')
+    expect(labels).toHaveLength(2)
+    const label = portalHost.querySelector<HTMLElement>('[data-canvas-team-image-label="image-one"]')!
+    const otherLabel = portalHost.querySelector<HTMLElement>('[data-canvas-team-image-label="image-two"]')!
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 0
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { frames.set(++nextFrame, callback); return nextFrame })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id) })
+    const canvasRef = React.createRef<HTMLDivElement>()
+    const onPreview = vi.fn()
+    const interaction = render(<div data-testid="team-image-canvas" ref={canvasRef}><ProjectCanvasImageInteractionOverlay canvasContainerRef={canvasRef} item={image} isSelected showTransformer isDraggable stagePos={{ x: 0, y: 0 }} stageScale={1} broadcastDomPreviewSync onPreviewChange={onPreview} onSelect={vi.fn()} onDragEnd={vi.fn()} onTransformEnd={vi.fn()} /></div>)
+    try {
+      const root = screen.getByTestId('team-image-canvas')
+      vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({ left: 10, top: 20, right: 1010, bottom: 620, width: 1000, height: 600, x: 10, y: 20, toJSON: () => ({}) })
+      const target = kind === 'drag' ? root.querySelector('[data-canvas-overlay="image-interaction"]') : root.querySelector(kind === 'resize' ? '[data-canvas-image-handle="bottom-right"]' : '[data-canvas-image-rotate-hotspot="top-left"]')
+      expect(target).not.toBeNull()
+      const start = kind === 'rotate' ? { clientX: 210, clientY: 120 } : { clientX: 310, clientY: 280 }
+      const end = kind === 'rotate' ? { clientX: 310, clientY: 220 } : { clientX: 410, clientY: 340 }
+      fireEvent.pointerDown(target!, { pointerId: 89, button: 0, ...start })
+      fireEvent.pointerMove(window, { pointerId: 89, ...end })
+      act(() => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(16)) })
+      expect(onPreview).toHaveBeenCalled()
+      const preview = onPreview.mock.calls.at(-1)![1]
+      const bounds = getCanvasItemBounds({ ...image, ...preview })
+      expect(parseFloat(label.style.left)).toBeCloseTo(bounds.minX)
+      expect(parseFloat(label.style.top)).toBeCloseTo(bounds.minY)
+      expect(preview).not.toMatchObject({ x: image.x, y: image.y, rotation: image.rotation, scaleX: image.scaleX, scaleY: image.scaleY })
+      expect(otherLabel.style.left).toBe('450px')
+      interaction.unmount()
+      expect(label.style.left).toBe('100px')
+      expect(label.style.top).toBe('140px')
+      expect(otherLabel.style.left).toBe('450px')
+    } finally { interaction.unmount(); raf.mockRestore(); cancel.mockRestore() }
+  })
+
+  it('flushes multi-selection label previews on pointerup before a delayed commit render', () => {
+    const first: CanvasImageItem = { id: 'instant-first', type: 'image', src: 'fixture', teamImageLabel: '甲·图1', x: 100, y: 140, width: 200, height: 120, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+    const second = { ...first, id: 'instant-second', teamImageLabel: '乙·图1', x: 360, y: 180, width: 100, height: 80 }
+    const { portalHost, rerenderImages } = renderVisualOverlays({ items: [first, second], teamLabelImageItems: [first, second] })
+    const label = (id: string) => portalHost.querySelector<HTMLElement>(`[data-canvas-team-image-label="${id}"]`)!
+    const frames = new Map<number, FrameRequestCallback>()
+    let id = 0
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { frames.set(++id, callback); return id })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(frame => { frames.delete(frame) })
+    const ref = React.createRef<HTMLDivElement>()
+    const commit = vi.fn()
+    const view = render(<div data-testid="instant-canvas" ref={ref}><ProjectCanvasMultiSelectionTransformOverlay canvasContainerRef={ref} items={[first, second]} stagePos={{ x: 0, y: 0 }} stageScale={1} onTransformEnd={commit} /></div>)
+    try {
+      const root = screen.getByTestId('instant-canvas')
+      vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({ left: 10, top: 20, right: 1010, bottom: 620, width: 1000, height: 600, x: 10, y: 20, toJSON: () => ({}) })
+      fireEvent.pointerDown(root.querySelector('[data-canvas-multi-select-drag-surface="true"]')!, { pointerId: 42, clientX: 260, clientY: 200, button: 0 })
+      fireEvent.pointerMove(window, { pointerId: 42, clientX: 308, clientY: 236 })
+      fireEvent.pointerUp(window, { pointerId: 42, clientX: 308, clientY: 236 })
+      expect(commit).toHaveBeenCalledOnce()
+      expect(label(first.id).style.left).toBe('148px')
+      expect(label(second.id).style.left).toBe('408px')
+      act(() => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(16)) })
+      expect(label(first.id).style.left).toBe('148px')
+      const updates = commit.mock.calls[0][0] as { id: string; attrs: Partial<CanvasImageItem> }[]
+      rerenderImages([first, second].map(item => ({ ...item, ...updates.find(update => update.id === item.id)!.attrs })))
+      expect(label(first.id).style.left).toBe('148px')
+      expect(label(second.id).style.left).toBe('408px')
+    } finally { view.unmount(); raf.mockRestore(); cancel.mockRestore() }
+  })
+
+  it('follows real multi-selection drag previews for both labels and resets separately on unmount', () => {
+    const first: CanvasImageItem = { id: 'group-first', type: 'image', src: 'fixture', teamImageLabel: '甲·图1', x: 100, y: 140, width: 200, height: 120, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+    const second = { ...first, id: 'group-second', teamImageLabel: '乙·图1', x: 360, y: 180, width: 100, height: 80 }
+    const other = { ...first, id: 'group-other', teamImageLabel: '旁观', x: 600 }
+    const { portalHost } = renderVisualOverlays({ items: [first, second, other], teamLabelImageItems: [first, second, other] })
+    const label = (id: string) => portalHost.querySelector<HTMLElement>(`[data-canvas-team-image-label="${id}"]`)!
+    expect(portalHost.querySelectorAll('[data-canvas-team-image-label]')).toHaveLength(3)
+    const frames = new Map<number, FrameRequestCallback>()
+    let frameId = 0
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { frames.set(++frameId, callback); return frameId })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id) })
+    const canvasRef = React.createRef<HTMLDivElement>()
+    const onTransformEnd = vi.fn()
+    const interaction = render(<div data-testid="group-canvas" ref={canvasRef}><ProjectCanvasMultiSelectionTransformOverlay canvasContainerRef={canvasRef} items={[first, second]} stagePos={{ x: 0, y: 0 }} stageScale={1} onTransformEnd={onTransformEnd} /></div>)
+    try {
+      const root = screen.getByTestId('group-canvas')
+      vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({ left: 10, top: 20, right: 1010, bottom: 620, width: 1000, height: 600, x: 10, y: 20, toJSON: () => ({}) })
+      const drag = root.querySelector('[data-canvas-multi-select-drag-surface="true"]')!
+      expect(drag).not.toBeNull()
+      fireEvent.pointerDown(drag, { pointerId: 42, clientX: 260, clientY: 200, button: 0 })
+      fireEvent.pointerMove(window, { pointerId: 42, clientX: 308, clientY: 236 })
+      act(() => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(16)) })
+      expect(label(first.id).style.left).toBe('148px')
+      expect(label(first.id).style.top).toBe('176px')
+      expect(label(second.id).style.left).toBe('408px')
+      expect(label(second.id).style.top).toBe('216px')
+      expect(label(other.id).style.left).toBe('600px')
+      expect(portalHost.querySelectorAll('[data-canvas-team-image-label]')).toHaveLength(3)
+      interaction.unmount()
+      expect(onTransformEnd).not.toHaveBeenCalled()
+      expect(label(first.id).style.left).toBe('100px')
+      expect(label(first.id).style.top).toBe('140px')
+      expect(label(second.id).style.left).toBe('360px')
+      expect(label(second.id).style.top).toBe('180px')
+      expect(label(other.id).style.left).toBe('600px')
+      expect(portalHost.querySelectorAll('[data-canvas-team-image-label]')).toHaveLength(3)
+    } finally { interaction.unmount(); raf.mockRestore(); cancel.mockRestore() }
+  })
+
+  it('retains both label previews through pointerup and follows the committed parent items', () => {
+    const first: CanvasImageItem = { id: 'commit-first', type: 'image', src: 'fixture', teamImageLabel: '甲·图1', x: 100, y: 140, width: 200, height: 120, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+    const second = { ...first, id: 'commit-second', teamImageLabel: '乙·图1', x: 360, y: 180, width: 100, height: 80 }
+    const other = { ...first, id: 'commit-other', teamImageLabel: '旁观', x: 600 }
+    const { portalHost, rerenderImages } = renderVisualOverlays({ items: [first, second, other], teamLabelImageItems: [first, second, other] })
+    const label = (id: string) => portalHost.querySelector<HTMLElement>(`[data-canvas-team-image-label="${id}"]`)!
+    const frames = new Map<number, FrameRequestCallback>()
+    let frameId = 0
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { frames.set(++frameId, callback); return frameId })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id) })
+    const canvasRef = React.createRef<HTMLDivElement>()
+    const onTransformEnd = vi.fn()
+    const interaction = render(<div data-testid="commit-canvas" ref={canvasRef}><ProjectCanvasMultiSelectionTransformOverlay canvasContainerRef={canvasRef} items={[first, second]} stagePos={{ x: 0, y: 0 }} stageScale={1} onTransformEnd={onTransformEnd} /></div>)
+    try {
+      const root = screen.getByTestId('commit-canvas')
+      vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({ left: 10, top: 20, right: 1010, bottom: 620, width: 1000, height: 600, x: 10, y: 20, toJSON: () => ({}) })
+      const drag = root.querySelector('[data-canvas-multi-select-drag-surface="true"]')!
+      fireEvent.pointerDown(drag, { pointerId: 42, clientX: 260, clientY: 200, button: 0 })
+      fireEvent.pointerMove(window, { pointerId: 42, clientX: 308, clientY: 236 })
+      act(() => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(16)) })
+      const positions = () => [label(first.id).style.left, label(first.id).style.top, label(second.id).style.left, label(second.id).style.top, label(other.id).style.left, label(other.id).style.top]
+      const expected = ['148px', '176px', '408px', '216px', '600px', '140px']
+      expect(positions()).toEqual(expected)
+      fireEvent.pointerUp(window, { pointerId: 42, clientX: 308, clientY: 236 })
+      expect(onTransformEnd).toHaveBeenCalledTimes(1)
+      expect(positions()).toEqual(expected)
+      const updates = onTransformEnd.mock.calls[0][0] as Array<{ id: string; attrs: Partial<CanvasImageItem> }>
+      expect(updates.map(update => update.id)).toEqual([first.id, second.id])
+      const committed = [first, second, other].map(item => ({ ...item, ...updates.find(update => update.id === item.id)?.attrs }))
+      rerenderImages(committed)
+      expect(positions()).toEqual(expected)
+      expect(portalHost.querySelectorAll('[data-canvas-team-image-label]')).toHaveLength(3)
+      interaction.unmount()
+      expect(positions()).toEqual(expected)
+    } finally { interaction.unmount(); raf.mockRestore(); cancel.mockRestore() }
+  })
+
+  it('keeps both team labels aligned through an unflushed multi-selection resize and delayed parent commit', () => {
+    const first: CanvasImageItem = { id: 'resize-first', type: 'image', src: 'fixture', teamImageLabel: '甲·图1', x: 100, y: 140, width: 200, height: 120, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+    const second = { ...first, id: 'resize-second', teamImageLabel: '乙·图1', x: 360, y: 180, width: 100, height: 80 }
+    const other = { ...first, id: 'resize-other', teamImageLabel: '旁观', x: 600 }
+    const { portalHost, rerenderImages } = renderVisualOverlays({ items: [first, second, other], teamLabelImageItems: [first, second, other] })
+    const label = (id: string) => portalHost.querySelector<HTMLElement>(`[data-canvas-team-image-label="${id}"]`)!
+    const positions = () => [label(first.id).style.left, label(first.id).style.top, label(second.id).style.left, label(second.id).style.top, label(other.id).style.left, label(other.id).style.top]
+    const frames = new Map<number, FrameRequestCallback>()
+    let frameId = 0
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { frames.set(++frameId, callback); return frameId })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id) })
+    const canvasRef = React.createRef<HTMLDivElement>()
+    const onTransformEnd = vi.fn()
+    const interaction = render(<div data-testid="resize-canvas" ref={canvasRef}><ProjectCanvasMultiSelectionTransformOverlay canvasContainerRef={canvasRef} items={[first, second]} stagePos={{ x: 0, y: 0 }} stageScale={1} onTransformEnd={onTransformEnd} /></div>)
+    try {
+      const root = screen.getByTestId('resize-canvas')
+      vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({ left: 10, top: 20, right: 1010, bottom: 620, width: 1000, height: 600, x: 10, y: 20, toJSON: () => ({}) })
+      const handle = root.querySelector('[data-canvas-multi-select-handle="bottom-right"]')!
+      expect(handle).not.toBeNull()
+      fireEvent.pointerDown(handle, { pointerId: 41, clientX: 470, clientY: 280, button: 0 })
+      fireEvent.pointerMove(window, { pointerId: 41, clientX: 650, clientY: 340 })
+      expect(positions()).toEqual(['100px', '140px', '360px', '180px', '600px', '140px'])
+      fireEvent.pointerUp(window, { pointerId: 41, clientX: 650, clientY: 340 })
+      expect(onTransformEnd).toHaveBeenCalledOnce()
+      const expected = ['100px', '140px', '490px', '200px', '600px', '140px']
+      expect(positions()).toEqual(expected)
+      expect(onTransformEnd).toHaveBeenCalledWith([
+        { id: first.id, attrs: { x: 100, y: 140, scaleX: 1.5, scaleY: 1.5 } },
+        { id: second.id, attrs: { x: 490, y: 200, scaleX: 1.5, scaleY: 1.5 } }
+      ])
+      act(() => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(16)) })
+      expect(positions()).toEqual(expected)
+      const updates = onTransformEnd.mock.calls[0][0] as Array<{ id: string; attrs: Partial<CanvasImageItem> }>
+      rerenderImages([first, second, other].map(item => ({ ...item, ...updates.find(update => update.id === item.id)?.attrs })))
+      expect(positions()).toEqual(expected)
+      expect(portalHost.querySelectorAll('[data-canvas-team-image-label]')).toHaveLength(3)
+      interaction.unmount()
+      expect(positions()).toEqual(expected)
+    } finally { interaction.unmount(); raf.mockRestore(); cancel.mockRestore() }
+  })
+
+  it('positions labels at independently calculated transformed AABB corners', () => {
+    const base: CanvasImageItem = { id: 'bounds-image', type: 'image', src: 'fixture', teamImageLabel: '几何', x: 100, y: 140, width: 200, height: 120, rotation: 90, scaleX: 2, scaleY: 0.5, zIndex: 1, locked: false }
+    const { portalHost } = renderVisualOverlays({ items: [base], teamLabelImageItems: [base] })
+    const label = portalHost.querySelector<HTMLElement>('[data-canvas-team-image-label="bounds-image"]')!
+    expect(parseFloat(label.style.left)).toBeCloseTo(40)
+    expect(parseFloat(label.style.top)).toBeCloseTo(140)
+  })
+
+  it('renders only explicit labels and follows canvas preview without becoming an item hit target', () => {
+    const image: CanvasImageItem = { id: 'team-image', type: 'image', src: 'fixture', fileName: '文案·图1.png', teamImageLabel: '文案·图1', x: 10, y: 20, width: 100, height: 50, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+    const ordinary: CanvasImageItem = { ...image, id: 'ordinary', teamImageLabel: undefined }
+    const layer = vi.fn()
+    const { portalHost: host } = renderVisualOverlays({ items: [image, ordinary], teamLabelImageItems: [image], registerViewportLayer: layer })
+    const badge = host.querySelector('[data-canvas-team-image-label="team-image"]') as HTMLElement
+    expect(badge.textContent).toBe('文案·图1')
+    expect(host.querySelector('[data-canvas-team-image-label="ordinary"]')).toBeNull()
+    expect(badge.hasAttribute('data-canvas-item-id')).toBe(false)
+    expect(getComputedStyle(badge).pointerEvents).toBe('none')
+    expect(layer).toHaveBeenCalledWith(badge.parentElement)
+    expect(badge.style.left).toBe('10px'); expect(badge.style.top).toBe('20px')
+    act(() => window.dispatchEvent(new CustomEvent('canvas-sync-team-image', { detail: { x: 50, y: 70, rotation: 0, scaleX: 1, scaleY: 1 } })))
+    expect(badge.style.left).toBe('50px'); expect(badge.style.top).toBe('70px')
+    act(() => window.dispatchEvent(new Event('canvas-reset-team-image')))
+    expect(badge.style.left).toBe('10px'); expect(badge.style.top).toBe('20px')
+  })
 })
 
 describe('ProjectCanvasPageVisualOverlays selection chrome routing', () => {

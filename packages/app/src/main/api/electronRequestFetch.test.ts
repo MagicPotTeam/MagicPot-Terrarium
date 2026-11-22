@@ -11,6 +11,7 @@ import {
 } from './svcLLMProxyImpl'
 
 vi.mock('electron', () => ({ net: {} }))
+vi.mock('../config/buildEnv', () => ({ getBuildEnv: () => ({ pathMap: { data: process.cwd(), file: process.cwd(), resources: '' } }) }))
 vi.mock('../assistantRuntime/runtime', () => ({ getAssistantRuntime: vi.fn() }))
 vi.mock('../mcp/runtime', () => ({ syncMcpClientManager: vi.fn() }))
 vi.mock('../config/config', () => ({ getConfig: vi.fn(), saveConfig: vi.fn() }))
@@ -152,6 +153,32 @@ describe('Electron request Fetch response boundaries', () => {
     expect(fixture.client.abort).toHaveBeenCalledOnce()
   })
 
+  it('cancels a stalled streaming upload before constructing any Electron request', async () => {
+    const fixture = createFixture(), controller = new AbortController(), cancel = vi.fn(() => new Promise<void>(() => undefined))
+    const body = new ReadableStream<Uint8Array>({ cancel }, { highWaterMark: 0 })
+    const request = new Request(url, { method: 'POST', body, signal: controller.signal, duplex: 'half' } as RequestInit)
+    const pending = fixture.fetch(request).catch(error => error)
+    controller.abort(new Error('Stop during upload buffering'))
+    expect(await pending).toMatchObject({ message: 'Stop during upload buffering' })
+    expect(cancel).toHaveBeenCalledOnce(); expect(fixture.factory).not.toHaveBeenCalled(); expect(fixture.client.end).not.toHaveBeenCalled()
+  })
+  it.each(['string', 'array', 'uint16'] as const)('rejects invalid %s upload chunks before constructing an Electron request, matching Fetch byte semantics', async kind => {
+    const fixture = createFixture(), cancel = vi.fn()
+    const invalid = kind === 'string' ? 'text' : kind === 'array' ? [1, 2] : new Uint16Array([300, 400])
+    const body = new ReadableStream({ start(controller) { controller.enqueue(invalid) }, cancel })
+    const request = new Request(url, { method: 'POST', body, duplex: 'half' } as RequestInit)
+    await expect(fixture.fetch(request)).rejects.toThrow('Uint8Array')
+    expect(cancel).toHaveBeenCalledOnce(); expect(fixture.factory).not.toHaveBeenCalled()
+  })
+  it('copies complete streaming upload bytes once and keeps request creation after body completion', async () => {
+    const fixture = createFixture()
+    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(Buffer.from('one')); controller.enqueue(Buffer.from('two')); controller.close() } })
+    const request = new Request(url, { method: 'POST', body, duplex: 'half' } as RequestInit)
+    const pending = fixture.fetch(request); await fixture.sent
+    expect(fixture.client.end).toHaveBeenCalledWith(Buffer.from('onetwo'))
+    fixture.client.emit('response', fixture.incoming); fixture.incoming.emit('end')
+    expect(await (await pending).text()).toBe('')
+  })
   it('preserves Electron scalar response headers alongside multi-value headers', async () => {
     const fixture = createFixture()
     Object.assign(fixture.incoming, {

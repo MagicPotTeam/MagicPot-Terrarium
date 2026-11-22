@@ -4,6 +4,8 @@
  * 2. shell 打开文件夹等
  * 通过在 preload 往 window 注入，使渲染进程处理与 Node 端一致
  */
+import type { RendererRecoveredEvent } from './rendererRecoveryEvent'
+import type { ChatSendStageBreadcrumb } from './chatSendStageBreadcrumb'
 
 ///////////
 // built-in path
@@ -73,6 +75,16 @@ export type CanvasScreenshotBridge = {
 export type AppEventBridge = {
   onCloseActiveTab: (cb: () => void) => () => void
   onQAppDirectoryChanged: (cb: () => void) => () => void
+  /**
+   * Called once when this page was loaded by the main process to replace a renderer that died.
+   * The event is kept until the first subscriber, so a late subscription still receives it.
+   */
+  onRendererRecovered: (cb: (event: RendererRecoveredEvent) => void) => () => void
+}
+
+/** Local diagnostics only: kept in the main process, never sent anywhere. */
+export type AppDiagnosticsBridge = {
+  reportChatSendStage: (breadcrumb: ChatSendStageBreadcrumb) => void
 }
 
 export type WinBridge = {

@@ -2,6 +2,7 @@
 /* eslint-disable react/no-unknown-property */
 /* eslint-disable react-refresh/only-export-components */
 import React, { Suspense, lazy } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useThree } from '@react-three/fiber'
 import { Box, CircularProgress, IconButton, TextField, Typography } from '@mui/material'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
@@ -448,6 +449,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
   enableLocalUpload = false,
   onMetaChange
 }) => {
+  const { t } = useTranslation()
   const { notifyInfo, notifySuccess, notifyWarning, closeMessage } = useMessage()
   const [isDragOver, setIsDragOver] = React.useState(false)
   const [showUrlInput, setShowUrlInput] = React.useState(urlOnly)
@@ -1200,7 +1202,7 @@ const ModelDropZone: React.FC<ModelDropZoneProps> = ({
 
           <IconButton
             size="small"
-            aria-label="Remove 3D model"
+            aria-label={t('chat.remove_model_3d', { defaultValue: 'Remove 3D model' })}
             onClick={handleClear}
             sx={{
               position: 'absolute',

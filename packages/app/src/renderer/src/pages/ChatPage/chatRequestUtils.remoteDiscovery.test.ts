@@ -21,6 +21,17 @@ import {
 // Exercise genuine discovery, normalization, policy and preparation, never a real
 // provider, Electron runtime, user config/file, or actual network transport.
 vi.mock('electron', () => ({ net: {} }))
+// main/config/buildEnv (reached through svcLLMProxyImpl -> teamEndStore) imports this helper. The web
+// Vitest config does not inline it, so Node would load it natively and fail on its named imports from
+// the CommonJS 'electron' package before the mock above could apply.
+vi.mock('@electron-toolkit/utils', () => ({
+  is: { dev: true },
+  platform: {
+    isWindows: process.platform === 'win32',
+    isMacOS: process.platform === 'darwin',
+    isLinux: process.platform === 'linux'
+  }
+}))
 vi.mock('node:fs', async () => {
   const { fs } = await import('memfs')
   return { ...fs, default: fs }

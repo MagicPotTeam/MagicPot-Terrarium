@@ -945,7 +945,9 @@ const ComfyUIPanel: React.FC = () => {
                 '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.3 } }
               }}
             />
-            <span style={{ fontSize: 11, color: '#4ade80' }}>Running</span>
+            <span style={{ fontSize: 11, color: '#4ade80' }}>
+              {t('terminal.running', { defaultValue: 'Running' })}
+            </span>
             {state.pid !== 0 && (
               <span style={{ fontSize: 11, color: consolePalette.toolbarIcon }}>
                 PID:{state.pid}
@@ -1146,6 +1148,7 @@ const BottomPanel: React.FC<BottomPanelProps> = ({ height = BOTTOM_PANEL_DEFAULT
 
   return (
     <Box
+      data-workbench-module="terminal"
       sx={(theme) => ({
         height,
         minHeight: height,
@@ -1158,6 +1161,7 @@ const BottomPanel: React.FC<BottomPanelProps> = ({ height = BOTTOM_PANEL_DEFAULT
       })}
     >
       <Box
+        data-workbench-toolbar="terminal"
         sx={{
           display: 'flex',
           alignItems: 'center',

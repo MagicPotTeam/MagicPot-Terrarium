@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { FakeIDBKeyRange, installFakeIDBKeyRange } from '../../testUtils/fakeIdbKeyRange'
+
+// chatStorage reads one scope through a key range; jsdom has no IDBKeyRange of its own.
+installFakeIDBKeyRange()
 
 const managedMediaApiMock = vi.hoisted(() => ({
   migrateLegacyDataUrl: vi.fn(),
@@ -55,7 +59,7 @@ class FakeIDBObjectStore {
     return request
   }
 
-  getAll(): {
+  getAll(range?: FakeIDBKeyRange): {
     result?: unknown[]
     error?: DOMException
     onsuccess?: () => void
@@ -81,12 +85,22 @@ class FakeIDBObjectStore {
         return
       }
 
-      request.result = [...(this.stores.get(this.storeName)?.values() || [])].map((value) =>
-        cloneValue(value)
-      )
+      request.result = [...(this.stores.get(this.storeName)?.entries() || [])]
+        .filter(([key]) => !range || range.includes(key))
+        .map(([, value]) => cloneValue(value))
       request.onsuccess?.()
     }, 0)
 
+    return request
+  }
+
+  /** Keys only; the scoped readers use it once per connection to look for stray keys. */
+  getAllKeys(): { result?: string[]; onsuccess?: () => void; onerror?: () => void } {
+    const request: { result?: string[]; onsuccess?: () => void; onerror?: () => void } = {}
+    setTimeout(() => {
+      request.result = [...(this.stores.get(this.storeName)?.keys() || [])]
+      request.onsuccess?.()
+    }, 0)
     return request
   }
 
@@ -280,6 +294,29 @@ describe('chatStorage agent continuity persistence', () => {
     localStorage.clear()
   })
 
+  it('persists compacted original records in the same canonical owner across reload and whole-session deletion', async () => {
+    const fakeIndexedDb = createFakeIndexedDb()
+    fakeIndexedDb.state.failGetAllOnce = false
+    vi.stubGlobal('indexedDB', fakeIndexedDb.api)
+    const storage = await import('./chatStorage')
+    const original = {
+      role: 'assistant' as const, content: 'Retained original launch detail', hiddenContext: 'stored but not search-projected',
+      attachments: [{ type: 'file' as const, url: 'same-owner-local-file' }],
+      toolHistory: [{ runId: 'r', toolCallId: 'c', toolName: 'files.read', args: { path: 'not search-projected' }, status: 'completed' as const, content: 'original result' }]
+    }
+    const snapshot = { id: 'retained-chat', title: 'Retained', compactedMessages: [original], messages: [{ role: 'user' as const, content: 'Current window' }] }
+    await storage.saveSessionToDB(snapshot, 'project.pane')
+    const [restored] = await storage.loadAllSessions('project.pane')
+    expect(restored.compactedMessages).toEqual([original])
+    expect(restored.messages).toEqual(snapshot.messages)
+    expect(restored.compactedMessages).not.toBe(snapshot.compactedMessages)
+    await expect(storage.loadAllSessions('project.sibling')).resolves.toEqual([])
+    await storage.saveSessionToDB({ id: 'sibling-chat', title: 'Sibling', messages: [] }, 'project.pane')
+    await storage.deleteSessionFromDB(snapshot.id, 'project.pane')
+    expect((await storage.loadAllSessions('project.pane')).map(item => item.id)).toEqual(['sibling-chat'])
+    expect(fakeIndexedDb.deletedNames).toEqual([])
+    expect(managedMediaApiMock.migrateLegacyDataUrl).not.toHaveBeenCalled()
+  })
   it('persists and reloads a thread media snapshot without cross-scope leakage', async () => {
     const fakeIndexedDb = createFakeIndexedDb()
     fakeIndexedDb.state.failGetAllOnce = false

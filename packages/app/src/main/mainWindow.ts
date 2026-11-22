@@ -1,8 +1,9 @@
 import { app, BrowserWindow, ipcMain, nativeImage, screen, shell } from 'electron'
-import * as fs from 'fs'
-import { basename, extname, join } from 'path'
+import { join } from 'path'
 import { pathToFileURL } from 'url'
-import icon from '../../../runtime-assets/resources/icon.png?asset'
+// 256 px copy of the 4096 px master logo (scripts/assets/generate-logo-sizes.py):
+// the master costs a 64 MB decode per window and per canvas drag without its own icon.
+import icon from '../../../runtime-assets/resources/icon-256.png?asset'
 import { isDev } from './config/buildEnv'
 import { resolveTestArtifactPath } from './testUiPolicy'
 import {
@@ -11,11 +12,19 @@ import {
   showWindowForTestPolicy
 } from './testWindowRuntime'
 import { attachRendererDiagnostics } from './rendererDiagnostics'
-import { winController } from './winControls'
+import { getAuthoritativeMainWindow, winController } from './winControls'
 import { attachWindowStatePersistence, readWindowState, type WindowState } from './windowState'
 import { normalizeAllowedExternalUrl } from './utils/externalUrl'
 import { isTrustedRendererNavigation } from './utils/rendererNavigation'
 import { authorizeScopedLocalMediaPath } from './localMediaAccess'
+import { getLocalMediaTempRootPath } from './localMediaAllowedRoots'
+import {
+  forgetLocalMediaTempRootVerification,
+  reverifyLocalMediaTempRoot
+} from './localMediaTempRoot'
+import { CANVAS_DRAG_TEMP_ROOT_REFUSED, writeCanvasSystemDragFiles } from './canvasSystemDragFiles'
+import { installInstalledCatalogReadBinding } from './magicAgentRuntime/installedCatalogReadBinding'
+import { installStartupStorageReadBinding } from './storageMetadata/startupStorageReadBinding'
 import {
   registerMagicAgentTrustedRouteBinding,
   unregisterMagicAgentTrustedRouteBinding
@@ -32,23 +41,33 @@ type CanvasStartSystemDragPayload = {
 const testUiPolicy = getTestWindowPolicy()
 let canvasStartSystemDragRegistered = false
 
-function sanitizeDragFileName(fileName: string): string {
-  const trimmed = (fileName || '').trim()
-  const baseName = [...basename(trimmed || 'canvas-selection.png')]
-    .map((char) => {
-      const code = char.charCodeAt(0)
-      return code <= 0x1f || '<>:"/\\|?*'.includes(char) ? '_' : char
-    })
-    .join('')
+/**
+ * What the window shows while no page is painted: before the first paint, during a reload and
+ * while a dead renderer is being replaced. It is the dark theme's background (renderer/src/theme.ts,
+ * the app starts in dark mode), so a renderer death is a short dark frame instead of a white sheet.
+ * The light theme choice lives in the renderer's storage and is not known here without a read.
+ */
+export const MAIN_WINDOW_BACKGROUND_COLOR = '#1a1a1a'
 
-  if (!baseName) {
-    return 'canvas-selection.png'
-  }
-  if (extname(baseName)) {
-    return baseName
-  }
-  return `${baseName}.png`
-}
+/**
+ * Listeners of one event ('render-process-gone', 'destroyed', 'did-start-navigation') that the main
+ * window's WebContents holds whatever the app does, rounded up: Electron's own forwarder, renderer
+ * diagnostics, the two read admissions, the team-queue owner, the scope bindings (skill, goal,
+ * first-run), the send-stage breadcrumbs, the unsaved-changes guard and ONE dispatcher
+ * (shared/api/createServer/senderDocumentWatch.ts) for everything that comes and goes with use:
+ * every open IPC stream, every pending canvas path read and every Agent thread interaction lease
+ * (retained background processes, sub-agent jobs, HTML apps, scope bindings, running requests).
+ * Measured in the real app: at most 8 of one event ('destroyed'), unchanged across threads, sends,
+ * reloads and 120 IPC streams open at once.
+ */
+export const MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS = 16
+/**
+ * Listener limit of the main window's WebContents. The count is constant by construction: nothing
+ * adds a listener per request, per stream or per retained entry any more, so there is no allowance
+ * for running requests to guess, and a leak (listeners added per reload or per request and never
+ * removed) warns as soon as it passes the fixed listeners.
+ */
+export const MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS = MAIN_WINDOW_FIXED_WEB_CONTENTS_LISTENERS
 
 function registerCanvasStartSystemDrag(): void {
   if (canvasStartSystemDragRegistered) {
@@ -58,22 +77,36 @@ function registerCanvasStartSystemDrag(): void {
   ipcMain.handle(
     'canvas:start-system-drag',
     async (event, payload: CanvasStartSystemDragPayload): Promise<{ filePath: string }> => {
-      const tempDir = resolveTestArtifactPath({
-        desktopPath: app.getPath('desktop'),
-        tempPath: join(app.getPath('temp'), 'magicpot-local-media'),
-        policy: testUiPolicy,
-        segments: ['drag']
-      })
-      fs.mkdirSync(tempDir, { recursive: true })
-
-      const filePaths = payload.files.map((file) => {
-        const fileName = sanitizeDragFileName(file.fileName)
-        const uniquePrefix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-        const fullPath = join(tempDir, `${uniquePrefix}-${fileName}`)
-        fs.writeFileSync(fullPath, Buffer.from(file.data))
-        authorizeScopedLocalMediaPath(fullPath)
-        return fullPath
-      })
+      // Outside automated test runs (whose artifacts have their own folder) the files go to
+      // main's private temp media folder, verified again right before this write: a folder
+      // another user planted or opened is refused and nothing is written.
+      const tempRoot = testUiPolicy.automatedRun
+        ? join(app.getPath('temp'), 'magicpot-local-media')
+        : reverifyLocalMediaTempRoot(getLocalMediaTempRootPath())
+      let filePaths: string[]
+      try {
+        filePaths = writeCanvasSystemDragFiles(
+          payload.files,
+          tempRoot &&
+            resolveTestArtifactPath({
+              desktopPath: app.getPath('desktop'),
+              tempPath: tempRoot,
+              policy: testUiPolicy,
+              segments: ['drag']
+            })
+        )
+      } catch (error) {
+        // Verified again at the next use; the error carries no path.
+        forgetLocalMediaTempRootVerification()
+        const code = (error as NodeJS.ErrnoException)?.code
+        console.warn('[MainWindow] Canvas drag-out files not written:', code || 'refused')
+        throw new Error(
+          (error as Error)?.message === CANVAS_DRAG_TEMP_ROOT_REFUSED
+            ? CANVAS_DRAG_TEMP_ROOT_REFUSED
+            : 'CANVAS_DRAG_WRITE_FAILED'
+        )
+      }
+      filePaths.forEach((fullPath) => authorizeScopedLocalMediaPath(fullPath))
 
       const dragIcon =
         payload.iconDataUrl && payload.iconDataUrl.startsWith('data:')
@@ -138,6 +171,7 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     x: state.x,
     y: state.y,
     show: false,
+    backgroundColor: MAIN_WINDOW_BACKGROUND_COLOR,
     focusable: !testUiPolicy.noFocus,
     skipTaskbar: testUiPolicy.suppressTaskbar,
     autoHideMenuBar: true,
@@ -155,52 +189,66 @@ export function createMainWindow(onCreated?: (window: BrowserWindow) => void): B
     }
   })
 
-  onCreated?.(mainWindow)
-  ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
-    Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
-  ] = testUiPolicy.suppressTaskbar ? true : undefined
+  // The fixed listeners; running requests add none (see MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS).
+  mainWindow.webContents.setMaxListeners(MAIN_WINDOW_WEB_CONTENTS_MAX_LISTENERS)
 
-  attachWindowStatePersistence(mainWindow, statePath)
-  winController.registerWindow(mainWindow)
-  const senderId = mainWindow.webContents.id
   const trustedRendererUrl = resolveMainWindowRendererUrl()
-  registerMagicAgentTrustedRouteBinding(senderId, undefined, {
-    trustedUrl: trustedRendererUrl,
-    trustedWebContents: mainWindow.webContents
-  })
-  mainWindow.on('closed', () => {
-    unregisterMagicAgentTrustedRouteBinding(senderId)
-  })
+  const disposeCatalogBinding = installInstalledCatalogReadBinding(mainWindow, trustedRendererUrl, () => winController.getMainWindow())
+  let disposeStorageBinding: (() => void) | undefined
+  try {
+    disposeStorageBinding = installStartupStorageReadBinding(mainWindow, trustedRendererUrl, getAuthoritativeMainWindow)
+    onCreated?.(mainWindow)
+    ;(mainWindow as BrowserWindow & { [key: symbol]: boolean | undefined })[
+      Symbol.for('magicpot.testWindowRuntime.skipTaskbar')
+    ] = testUiPolicy.suppressTaskbar ? true : undefined
 
-  mainWindow.on('ready-to-show', () => {
-    if (!testUiPolicy.suppressTaskbar && hasSavedState && state.isMaximized) {
-      mainWindow.maximize()
-    }
-    if (!testUiPolicy.hideWindow) {
-      showWindowForTestPolicy(mainWindow)
-    }
-  })
+    attachWindowStatePersistence(mainWindow, statePath)
+    winController.registerWindow(mainWindow)
+    const senderId = mainWindow.webContents.id
+    registerMagicAgentTrustedRouteBinding(senderId, undefined, {
+      trustedUrl: trustedRendererUrl,
+      trustedWebContents: mainWindow.webContents
+    })
+    mainWindow.on('closed', () => {
+      try { disposeStorageBinding?.() } finally {
+        try { disposeCatalogBinding() } finally { unregisterMagicAgentTrustedRouteBinding(senderId) }
+      }
+    })
 
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (isTrustedRendererNavigation(url, trustedRendererUrl)) {
-      return
-    }
+    mainWindow.on('ready-to-show', () => {
+      if (!testUiPolicy.suppressTaskbar && hasSavedState && state.isMaximized) {
+        mainWindow.maximize()
+      }
+      if (!testUiPolicy.hideWindow) {
+        showWindowForTestPolicy(mainWindow)
+      }
+    })
 
-    event.preventDefault()
-    console.warn('[App] blocked untrusted renderer navigation:', url)
-  })
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+      if (isTrustedRendererNavigation(url, trustedRendererUrl)) {
+        return
+      }
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    try {
-      shell.openExternal(normalizeAllowedExternalUrl(details.url))
-    } catch (error) {
-      console.warn('[App] blocked unsafe external URL:', details.url, error)
-    }
-    return { action: 'deny' }
-  })
+      event.preventDefault()
+      console.warn('[App] blocked untrusted renderer navigation:', url)
+    })
 
-  attachRendererDiagnostics(mainWindow)
-  loadWindowContent(mainWindow, trustedRendererUrl)
+    mainWindow.webContents.setWindowOpenHandler((details) => {
+      try {
+        shell.openExternal(normalizeAllowedExternalUrl(details.url))
+      } catch (error) {
+        console.warn('[App] blocked unsafe external URL:', details.url, error)
+      }
+      return { action: 'deny' }
+    })
 
-  return mainWindow
+    attachRendererDiagnostics(mainWindow)
+    loadWindowContent(mainWindow, trustedRendererUrl)
+
+    return mainWindow
+  } catch (error) {
+    try { disposeStorageBinding?.() } catch { /* Never skip the other independent owner. */ }
+    try { disposeCatalogBinding() } catch { /* Preserve the original setup failure, never repair authority here. */ }
+    throw error
+  }
 }

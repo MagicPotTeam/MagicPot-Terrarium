@@ -1,11 +1,9 @@
+import { bundledCreativeDeclarations } from '@shared/magicAgentRuntime/bundledCreativeDeclarations'
 import { createAdapter, objectSchema } from './helpers'
 
 export const terminalToolAdapter = createAdapter([
   {
-    name: 'terminal.run',
-    category: 'terminal',
-    description:
-      'Thin wrapper for running an explicitly enabled, policy-controlled terminal command adapter.',
+    ...bundledCreativeDeclarations['terminal.run'],
     inputSchema: objectSchema(
       {
         command: {

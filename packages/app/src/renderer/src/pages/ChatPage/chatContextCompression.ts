@@ -677,7 +677,12 @@ export const buildChatContextCompressionPlan = (input: {
     cachedSummary?.sourceHash === sourceHash &&
     cachedSummary.summary.trim()
   const compressionSummary = canReuseCachedSummary
-    ? cachedSummary
+    ? {
+        ...cachedSummary,
+        ...(cachedSummary.replayImageMessages
+          ? { replayImageMessages: [...cachedSummary.replayImageMessages] }
+          : {})
+      }
     : {
         summary: buildExtractiveContextSummary(messagesToCompress, {
           compactRound,

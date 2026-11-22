@@ -9,10 +9,15 @@ import {
   Alert,
   AlertTitle,
   Divider,
-  TextField
+  TextField,
+  FormControlLabel,
+  Switch
 } from '@mui/material'
 import { Code as CodeIcon, Folder as FolderIcon, Refresh as RefreshIcon } from '@mui/icons-material'
 import { PanelProps } from './PanelProps'
+import AgentSkillContextSettings from './components/AgentSkillContextSettings'
+import AgentSkillPackagesSettings from './components/AgentSkillPackagesSettings'
+import AgentShellSettings from './components/AgentShellSettings'
 import SettingSection from './components/SettingSection'
 import EnvironmentInfo from './components/EnvironmentInfo'
 import DataStorageInfo from './components/DataStorageInfo'
@@ -50,6 +55,7 @@ import { useTranslation } from 'react-i18next'
 import { useAppSelector } from '@renderer/store'
 import FigmaBindingDialog from '@renderer/pages/ProjectCanvasPage/Dialogs/FigmaBindingDialog'
 import { loadCanvasItems, saveCanvasItems } from '@renderer/pages/ProjectCanvasPage/canvasStorage'
+import { waitForPendingCanvasSave } from '@renderer/pages/ProjectCanvasPage/canvasPendingSaves'
 import { getCanvasItemsBounds } from '@renderer/pages/ProjectCanvasPage/projectCanvasPageShared'
 import ComfyBatchProfileEditor, {
   ComfyBatchProfileTestButton
@@ -611,7 +617,10 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
       }
     }
 
-    void loadCanvasItems(lastActiveProjectId)
+    // This snapshot is saved back by a Figma bind / unbind: never take it before the
+    // canvas page's last save (the unmount save of the board just left) has landed.
+    void waitForPendingCanvasSave(lastActiveProjectId)
+      .then(() => loadCanvasItems(lastActiveProjectId))
       .then((saved) => {
         if (cancelled) return
         setManagedCanvasSnapshot({
@@ -733,6 +742,7 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
       return
     }
 
+    await waitForPendingCanvasSave(lastActiveProjectId)
     const saved = await loadCanvasItems(lastActiveProjectId)
     const snapshot: ManagedCanvasSnapshot = {
       canvasId: lastActiveProjectId,
@@ -1248,6 +1258,22 @@ const PanelEnvironment: React.FC<PanelProps> = ({ settingsValue, saveSettings }:
             </Box>
 
             <Box key="setup">
+              <SettingSection title={t('environment.agent_skill_context.title')}>
+                <AgentSkillContextSettings settingsValue={settingsValue} saveSettings={saveSettings} />
+              </SettingSection>
+              <SettingSection title={t('environment.agent_skill_packages.title')}>
+                <AgentSkillPackagesSettings settingsValue={settingsValue} saveSettings={saveSettings} />
+              </SettingSection>
+              <SettingSection title={t('environment.agent_shell.title')}>
+                <AgentShellSettings settingsValue={settingsValue} saveSettings={saveSettings} />
+              </SettingSection>
+              <SettingSection title={t('environment.agent_scripts.title')}>
+                <Alert severity="warning" sx={{ mb: 1.5 }}>{t('environment.agent_scripts.warning')}</Alert>
+                <FormControlLabel label={t('environment.agent_scripts.enable')} control={
+                  <Switch checked={settingsValue.project_trace_config?.enable_agent_python_notebook === true}
+                    onChange={(_, value) => saveSettings({ project_trace_config: { ...settingsValue.project_trace_config, enable_agent_python_notebook: value } })} />
+                } />
+              </SettingSection>
               <SettingSection
                 title={t('environment.setup_title')}
                 action={

@@ -8,7 +8,8 @@ export const CANVAS_IMAGE_RELEASE_REASONS = [
   'budget-pressure',
   'canvas-reset',
   'component-unmount',
-  'error-cleanup'
+  'error-cleanup',
+  'uploaded'
 ] as const
 
 export type CanvasImageReleaseReason = (typeof CANVAS_IMAGE_RELEASE_REASONS)[number]

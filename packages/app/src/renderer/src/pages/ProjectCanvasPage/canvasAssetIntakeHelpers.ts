@@ -4,8 +4,16 @@ import { markCanvasImagePlaceholderAsset } from './canvasImageAssetUtils'
 import type { CanvasImageAsset, CanvasImageItem, CanvasProvenanceSource } from './types'
 import { normalizeFileMimeType } from '@renderer/utils/fileDisplay'
 import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from './canvasThumbnailCache'
-import { ensureCanvasThumbnailSet, readWarmCanvasThumbnailSet } from './canvasThumbnailWorkerClient'
-import type { CanvasImageSourceIdentity, CanvasImageThumbnailSet } from './canvasThumbnailTypes'
+import {
+  ensureCanvasThumbnailSet,
+  getCanvasThumbnailWorkerPoolMetrics,
+  readWarmCanvasThumbnailSet
+} from './canvasThumbnailWorkerClient'
+import type {
+  CanvasImageSourceIdentity,
+  CanvasImageThumbnailSet,
+  CanvasThumbnailEnsureResult
+} from './canvasThumbnailTypes'
 import {
   canReadCanvasLocalImageSource,
   createCanvasLocalImageObjectUrl,
@@ -228,6 +236,50 @@ export async function readPngImageFileMetadata(
   }
 }
 
+/**
+ * EXIF orientation of a JPEG APP1 segment (1-8), or null. The decoder turns the picture for
+ * orientations 5-8, so a frame sized from the header has to swap width and height for them.
+ */
+function readJpegExifOrientation(bytes: Uint8Array, start: number, end: number): number | null {
+  // "Exif\0\0", then a TIFF header: byte order, 42, offset of the first directory.
+  if (end - start < 14 || !matchesAscii(bytes, start, 'Exif') || bytes[start + 4] !== 0) {
+    return null
+  }
+
+  const tiff = start + 6
+  const littleEndian = bytes[tiff] === 0x49 && bytes[tiff + 1] === 0x49
+  const bigEndian = bytes[tiff] === 0x4d && bytes[tiff + 1] === 0x4d
+  if (!littleEndian && !bigEndian) {
+    return null
+  }
+  const readUint16 = (at: number) =>
+    littleEndian ? bytes[at] | (bytes[at + 1] << 8) : (bytes[at] << 8) | bytes[at + 1]
+  const readUint32 = (at: number) =>
+    littleEndian
+      ? (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)) >>> 0
+      : ((bytes[at] << 24) | (bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3]) >>> 0
+  if (readUint16(tiff + 2) !== 42) {
+    return null
+  }
+
+  const directory = tiff + readUint32(tiff + 4)
+  if (directory + 2 > end) {
+    return null
+  }
+  const entryCount = readUint16(directory)
+  for (let index = 0; index < entryCount; index += 1) {
+    const entry = directory + 2 + index * 12
+    if (entry + 12 > end) {
+      return null
+    }
+    if (readUint16(entry) === 0x0112) {
+      const orientation = readUint16(entry + 8)
+      return orientation >= 1 && orientation <= 8 ? orientation : null
+    }
+  }
+  return null
+}
+
 export async function readJpegImageFileMetadata(
   file: Blob
 ): Promise<CanvasImageFileMetadata | null> {
@@ -238,6 +290,7 @@ export async function readJpegImageFileMetadata(
     }
 
     let offset = 2
+    let exifOrientation: number | null = null
     while (offset + 9 < bytes.length) {
       while (offset < bytes.length && bytes[offset] !== 0xff) {
         offset += 1
@@ -271,9 +324,17 @@ export async function readJpegImageFileMetadata(
         (marker >= 0xc5 && marker <= 0xc7) ||
         (marker >= 0xc9 && marker <= 0xcb) ||
         (marker >= 0xcd && marker <= 0xcf)
+      if (marker === 0xe1 && exifOrientation == null) {
+        exifOrientation = readJpegExifOrientation(bytes, offset + 2, offset + segmentLength)
+      }
+
       if (isStartOfFrame && segmentLength >= 7) {
-        const height = (bytes[offset + 3] << 8) | bytes[offset + 4]
-        const width = (bytes[offset + 5] << 8) | bytes[offset + 6]
+        const storedHeight = (bytes[offset + 3] << 8) | bytes[offset + 4]
+        const storedWidth = (bytes[offset + 5] << 8) | bytes[offset + 6]
+        // Orientations 5-8 are shown turned by a quarter: the displayed size is the swapped one.
+        const turned = exifOrientation != null && exifOrientation >= 5
+        const width = turned ? storedHeight : storedWidth
+        const height = turned ? storedWidth : storedHeight
         if (width > 0 && height > 0) {
           return {
             width,
@@ -625,6 +686,54 @@ export async function buildCanvasImagePlaceholderAsset({
   return markCanvasImagePlaceholderAsset(canvas)
 }
 
+/**
+ * The pending tile is as wide as an import preview (512 px), so the renderer treats a frame that
+ * waits for its pixels like one that already has its preview: it starts no source decode of its
+ * own unless the frame is shown at more than twice that size. It is only a few rows high: it is
+ * one flat colour, stretched to the frame, and every frame gets its own texture of it in the
+ * renderer (4 KiB each instead of 1 MiB for a square tile).
+ */
+export const CANVAS_IMAGE_PENDING_PIXELS_ASSET_WIDTH = 512
+export const CANVAS_IMAGE_PENDING_PIXELS_ASSET_HEIGHT = 2
+
+const canvasImagePendingPixelsAssets = new WeakSet<object>()
+
+/**
+ * A flat, half-transparent tile for the frames of one import whose pixels are still on their
+ * way: each import makes its own, so that it can tell its waiting frames from any other item
+ * that came to carry the tile (a copy of a waiting frame, an undo that restored another frame).
+ * It is drawn stretched to the item's own rectangle. It carries the placeholder marker: the item
+ * counts as "placeholder" for the renderer's health metrics until its real pixels replace it.
+ */
+export function createCanvasImagePendingPixelsAsset(): CanvasImageAsset | null {
+  if (typeof document === 'undefined') {
+    return null
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = CANVAS_IMAGE_PENDING_PIXELS_ASSET_WIDTH
+  canvas.height = CANVAS_IMAGE_PENDING_PIXELS_ASSET_HEIGHT
+  try {
+    const context = canvas.getContext('2d')
+    if (context) {
+      context.fillStyle = 'rgba(128, 134, 144, 0.32)'
+      context.fillRect(0, 0, canvas.width, canvas.height)
+    }
+  } catch {
+    // A blank tile still frames the item.
+  }
+
+  const tile = markCanvasImagePlaceholderAsset(canvas)
+  canvasImagePendingPixelsAssets.add(tile)
+  return tile
+}
+
+export function isCanvasImagePendingPixelsAsset(
+  image: CanvasImageAsset | null | undefined
+): boolean {
+  return Boolean(image) && canvasImagePendingPixelsAssets.has(image as object)
+}
+
 function describeCanvasImageSource(src: string): string {
   if (src.startsWith('data:')) {
     const commaIndex = src.indexOf(',')
@@ -671,19 +780,152 @@ async function resolveCanvasImageThumbnailSourceBlob({
   return await response.blob()
 }
 
+/**
+ * An image element decoded from encoded bytes in memory. The object URL only lives for the
+ * load: the element keeps the bytes it was loaded from.
+ */
+async function loadCanvasImageFromBlob(
+  blob: Blob,
+  loadImageFromSrcFn: (src: string) => Promise<LoadedCanvasImage>
+): Promise<HTMLImageElement | null> {
+  if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+    return null
+  }
+
+  let objectUrl = ''
+  try {
+    objectUrl = URL.createObjectURL(blob)
+    const { img } = await loadImageFromSrcFn(objectUrl)
+    return img
+  } catch {
+    return null
+  } finally {
+    if (objectUrl && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(objectUrl)
+    }
+  }
+}
+
+/**
+ * A thumbnail set lists every level, but only the levels below the source size have a file of
+ * their own. An entry at or above it repeats the largest file (same file name). For the image
+ * the set belongs to, such an entry stands for the source itself: this returns the set with
+ * those entries pointing at the source, so that "the level above the largest thumbnail" is the
+ * original picture and not an enlarged thumbnail. A set with one file per level (every set
+ * written before, and every source above 2048 px) is returned as it is.
+ */
+export function bindCanvasThumbnailSetToSource(
+  thumbnailSet: CanvasImageThumbnailSet,
+  source: { src: string; sourceWidth?: number; sourceHeight?: number; sizeBytes?: number }
+): CanvasImageThumbnailSet {
+  if (!source.src) {
+    return thumbnailSet
+  }
+
+  const levels = [...thumbnailSet.levels].sort((left, right) => left.maxSide - right.maxSide)
+  const hasSourceSize =
+    typeof source.sourceWidth === 'number' &&
+    typeof source.sourceHeight === 'number' &&
+    source.sourceWidth > 0 &&
+    source.sourceHeight > 0
+  let changed = false
+  let fileLevel: CanvasImageThumbnailSet['levels'][number] | null = null
+  const bound = levels.map((level) => {
+    if (!fileLevel || !level.filename || level.filename !== fileLevel.filename) {
+      fileLevel = level
+      return level
+    }
+    if (level.src === source.src) {
+      return level
+    }
+
+    // Without a known source size the entry is sized like the level it stands for.
+    const fileMaxSide = Math.max(fileLevel.width, fileLevel.height, 1)
+    const scale = level.maxSide / fileMaxSide
+    changed = true
+    return {
+      ...level,
+      src: source.src,
+      width: hasSourceSize ? Math.round(source.sourceWidth!) : Math.round(fileLevel.width * scale),
+      height: hasSourceSize
+        ? Math.round(source.sourceHeight!)
+        : Math.round(fileLevel.height * scale),
+      ...(typeof source.sizeBytes === 'number' && source.sizeBytes > 0
+        ? { sizeBytes: source.sizeBytes }
+        : {})
+    }
+  })
+
+  return changed ? { ...thumbnailSet, levels: bound } : thumbnailSet
+}
+
+/**
+ * Thumbnail generations that hydration (opening a board) runs at the same time. A board saved in
+ * the middle of an import has frames with no cached thumbnails; opening it asked for all of them
+ * at once: the source of each was read into memory, the pool queue filled, and every request it
+ * turned away was generated on the main thread with no byte cap. They now wait here, in order.
+ * An import does not use this: it has its own byte-capped slots.
+ */
+export function getCanvasThumbnailHydrationGenerationConcurrency(): number {
+  return Math.max(4, getCanvasThumbnailWorkerPoolMetrics().maxWorkers + 2)
+}
+
+const hydrationGenerationSlots = { active: 0, waiters: [] as Array<() => void> }
+
+async function withCanvasThumbnailHydrationGenerationSlot<T>(run: () => Promise<T>): Promise<T> {
+  const slots = hydrationGenerationSlots
+  if (slots.active >= getCanvasThumbnailHydrationGenerationConcurrency()) {
+    await new Promise<void>((resolve) => slots.waiters.push(resolve))
+  } else {
+    slots.active += 1
+  }
+  try {
+    return await run()
+  } finally {
+    const next = slots.waiters.shift()
+    if (next) next()
+    else slots.active -= 1
+  }
+}
+
 export async function resolveCanvasImageThumbnailDisplayAsset({
   src,
   sourceIdentity,
   thumbnailSet,
   sourceFile,
+  sourceWidth,
+  sourceHeight,
+  sizeBytes,
   maxPreviewSide = CANVAS_IMAGE_PROXY_MAX_SIDE,
+  onFirstImage,
+  signal,
+  onQueued,
+  onDispatch,
+  boundGeneration = false,
   loadImageFromSrcFn = loadImageFromSrc
 }: {
   src: string
   sourceIdentity?: CanvasImageSourceIdentity
   thumbnailSet?: CanvasImageThumbnailSet
   sourceFile?: Blob
+  /** Pixel size of the source from the header pass, when known. */
+  sourceWidth?: number
+  sourceHeight?: number
+  sizeBytes?: number
   maxPreviewSide?: number
+  /**
+   * Called at most once, and only while the thumbnails are being generated: the image of the
+   * display level, ready before the larger levels are encoded and written. It is the same
+   * image the resolved result carries (the result adds the thumbnail set).
+   */
+  onFirstImage?: (image: CanvasImageAsset) => void
+  /** The caller gave up: a thumbnail job still waiting for a worker is dropped. */
+  signal?: AbortSignal
+  /** Called when the thumbnail job of this image waits for a worker, and when one starts it. */
+  onQueued?: () => void
+  onDispatch?: () => void
+  /** Generate a missing set in turn with the other hydrations (opening a board). */
+  boundGeneration?: boolean
   loadImageFromSrcFn?: (src: string) => Promise<LoadedCanvasImage>
 }): Promise<{ image: CanvasImageAsset; thumbnailSet: CanvasImageThumbnailSet } | null> {
   if (!sourceIdentity) {
@@ -699,25 +941,96 @@ export async function resolveCanvasImageThumbnailDisplayAsset({
     resolvedThumbnailSet = warm.thumbnailSet
   }
 
+  let generatedLevels: CanvasThumbnailEnsureResult['generatedLevels']
+  // Set from the pool's callback: a holder, so that the read below is not narrowed to null.
+  const early: { level: { maxSide: number; image: Promise<HTMLImageElement | null> } | null } = {
+    level: null
+  }
   if (!resolvedThumbnailSet) {
-    try {
+    const generate = async () => {
       const sourceBlob = await resolveCanvasImageThumbnailSourceBlob({ src, sourceFile })
-      if (sourceBlob) {
-        resolvedThumbnailSet = (
-          await ensureCanvasThumbnailSet({
-            source: sourceBlob,
-            identity: sourceIdentity
-          })
-        ).thumbnailSet
+      if (!sourceBlob) {
+        return null
+      }
+      return await ensureCanvasThumbnailSet({
+        source: sourceBlob,
+        identity: sourceIdentity,
+        // The cache was read just above.
+        skipWarmRead: true,
+        ...(signal ? { signal } : {}),
+        ...(onQueued ? { onQueued } : {}),
+        ...(onDispatch ? { onDispatch } : {}),
+        ...(typeof sourceWidth === 'number' && typeof sourceHeight === 'number'
+          ? { sourceWidth, sourceHeight }
+          : {}),
+        ...(onFirstImage
+          ? {
+              firstLevelMaxSide: maxPreviewSide,
+              onFirstLevel: (level) => {
+                if (early.level) {
+                  return
+                }
+                const image = loadCanvasImageFromBlob(level.blob, loadImageFromSrcFn)
+                early.level = { maxSide: level.maxSide, image }
+                void image.then((loaded) => {
+                  if (loaded) {
+                    onFirstImage(loaded)
+                  }
+                })
+              }
+            }
+          : {})
+      })
+    }
+    try {
+      const ensured = boundGeneration
+        ? await withCanvasThumbnailHydrationGenerationSlot(generate)
+        : await generate()
+      if (ensured) {
+        resolvedThumbnailSet = ensured.thumbnailSet
+        generatedLevels = ensured.generatedLevels
       }
     } catch (error) {
       console.warn('[Canvas] Failed to generate thumbnail set for image source:', src, error)
     }
   }
 
+  if (resolvedThumbnailSet) {
+    resolvedThumbnailSet = bindCanvasThumbnailSetToSource(resolvedThumbnailSet, {
+      src,
+      sourceWidth,
+      sourceHeight,
+      sizeBytes
+    })
+  }
+
   const thumbnailLevel = pickBestCanvasThumbnailLevel(resolvedThumbnailSet, maxPreviewSide)
   if (!resolvedThumbnailSet || !thumbnailLevel?.src) {
     return null
+  }
+
+  if (thumbnailLevel.src !== src) {
+    // The level that was handed over early is the display level: keep that one image, so the
+    // canvas uploads it once.
+    const earlyLevel = early.level
+    if (earlyLevel && earlyLevel.maxSide === thumbnailLevel.maxSide) {
+      const image = await earlyLevel.image
+      if (image) {
+        return { image, thumbnailSet: resolvedThumbnailSet }
+      }
+    }
+
+    // A level that was encoded a moment ago is shown from those bytes: no authorisation round
+    // trip and no read of the file that was just written.
+    const generatedLevel = generatedLevels?.find(
+      (level) => level.filename === thumbnailLevel.filename
+    )
+    if (generatedLevel) {
+      const image = await loadCanvasImageFromBlob(generatedLevel.blob, loadImageFromSrcFn)
+      if (image) {
+        return { image, thumbnailSet: resolvedThumbnailSet }
+      }
+    }
   }
 
   try {
@@ -818,16 +1131,18 @@ export async function hydrateCanvasImageItemForCanvas(
     src: item.src,
     sourceIdentity: item.sourceIdentity,
     thumbnailSet: item.thumbnailSet,
+    sourceWidth: item.sourceWidth,
+    sourceHeight: item.sourceHeight,
+    sizeBytes: item.sizeBytes,
     maxPreviewSide,
+    boundGeneration: true,
     loadImageFromSrcFn
   })
   if (thumbnailPreview) {
     return {
       ...item,
       image: thumbnailPreview.image,
-      thumbnailSet: thumbnailPreview.thumbnailSet,
-      sourceWidth: item.sourceWidth ?? item.width,
-      sourceHeight: item.sourceHeight ?? item.height
+      thumbnailSet: thumbnailPreview.thumbnailSet
     }
   }
 
@@ -841,9 +1156,7 @@ export async function hydrateCanvasImageItemForCanvas(
     return placeholder
       ? {
           ...item,
-          image: placeholder,
-          sourceWidth: item.sourceWidth ?? item.width,
-          sourceHeight: item.sourceHeight ?? item.height
+          image: placeholder
         }
       : null
   }

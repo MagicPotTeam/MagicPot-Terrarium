@@ -97,6 +97,7 @@ type ProjectCanvasPageVisualOverlaysProps = {
   annotationItems: CanvasAnnotationItem[]
   textItems: CanvasTextItem[]
   fileItems: CanvasFileItem[]
+  teamLabelImageItems?: CanvasImageItem[]
   items?: CanvasItem[]
   editingTextItemId: string | null
   activeOcrHover: CanvasOcrHoverDetail | null
@@ -198,6 +199,33 @@ const applyModel3DNameBadgeLayout = (
   node.style.maxWidth = `${badgeWidth}px`
 }
 
+const TeamImageLabel: React.FC<{ item: CanvasImageItem }> = ({ item }) => {
+  const ref = React.useRef<HTMLDivElement | null>(null)
+  React.useEffect(() => {
+    const layout = (preview?: CanvasSyncDetail) => {
+      const node = ref.current
+      if (!node) return
+      const current = preview ? { ...item, ...preview } : item
+      const bounds = getCanvasItemBounds(current)
+      node.style.left = `${bounds.minX}px`
+      node.style.top = `${bounds.minY}px`
+    }
+    const sync = (event: Event) => {
+      const detail = (event as CustomEvent<CanvasSyncDetail>).detail
+      if (detail) layout(detail)
+    }
+    const reset = () => layout()
+    layout()
+    window.addEventListener(`canvas-sync-${item.id}`, sync)
+    window.addEventListener(`canvas-reset-${item.id}`, reset)
+    return () => {
+      window.removeEventListener(`canvas-sync-${item.id}`, sync)
+      window.removeEventListener(`canvas-reset-${item.id}`, reset)
+    }
+  }, [item])
+  return <Box ref={ref} data-canvas-team-image-label={item.id} sx={{ position: 'absolute', pointerEvents: 'none', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', px: 0.75, py: 0.25, borderRadius: 1, bgcolor: 'background.paper', color: 'text.primary', typography: 'caption' }}>{item.teamImageLabel}</Box>
+}
+
 const Model3DNameBadge: React.FC<{
   item: CanvasModel3DItem
 }> = ({ item }) => {
@@ -282,6 +310,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
   renderedModel3DItems,
   videoItems,
   htmlItems,
+  teamLabelImageItems = [],
   annotationItems,
   textItems,
   fileItems,
@@ -687,6 +716,7 @@ const ProjectCanvasPageVisualOverlays: React.FC<ProjectCanvasPageVisualOverlaysP
           onViewportSyncReady={handleCanvas3DViewportSyncReady}
         />
         <div ref={registerViewportLayer} style={STAGE_VIEWPORT_LAYER_BASE_STYLE}>
+          {teamLabelImageItems.filter(item => typeof item.teamImageLabel === 'string' && item.teamImageLabel.trim().length > 0).map(item => <TeamImageLabel key={`team-image-label-${item.id}`} item={item} />)}
           {renderableModel3DItems.map(({ item }) => {
             return <Model3DNameBadge key={`model3d-name-${item.id}`} item={item} />
           })}

@@ -1,5 +1,6 @@
 /* @refresh reset */
 import { useCallback, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   buildCanvasGenerationTaskPack,
   buildCanvasGenerationTaskPackPrompt,
@@ -142,17 +143,17 @@ type UseCanvasGenerationWorkflowOptions = {
   sendCanvasItemsToAgent: (
     targetItems: CanvasItem[],
     options?: SendCanvasItemsToAgentOptions
-  ) => Promise<void>
+  ) => Promise<boolean>
 }
 
 export function useCanvasGenerationWorkflow({
   canvasId,
   projectName,
   items,
-  notifySuccess,
   notifyWarning,
   sendCanvasItemsToAgent
 }: UseCanvasGenerationWorkflowOptions) {
+  const { t } = useTranslation()
   const [generationTaskDialogOpen, setGenerationTaskDialogOpen] = useState(false)
   const [generationTargetItemIds, setGenerationTargetItemIds] = useState<string[]>([])
   const [generationTargetScope, setGenerationTargetScope] = useState<string | null>(null)
@@ -247,14 +248,15 @@ export function useCanvasGenerationWorkflow({
       notes: 'Default agent path used without a project model'
     })
 
-    await sendCanvasItemsToAgent(targetItems, {
+    const scheduled = await sendCanvasItemsToAgent(targetItems, {
       targetScope: generationTargetScope || undefined,
       promptPrefix,
       includeCanvasPromptText: false,
       includeGroupCompletionPrompt: false
     })
 
-    notifySuccess('已发送给默认 Agent 生成候选图')
+    if (!scheduled) return
+    notifyWarning(t('project_canvas.generation.delivery_scheduled'))
     handleCloseGenerationTaskDialog()
   }, [
     canvasId,
@@ -263,10 +265,10 @@ export function useCanvasGenerationWorkflow({
     handleCloseGenerationTaskDialog,
     items,
     linkFollowUpTraceRecord,
-    notifySuccess,
     notifyWarning,
     projectName,
-    sendCanvasItemsToAgent
+    sendCanvasItemsToAgent,
+    t
   ])
 
   const handleGenerateCanvasItems = useCallback(

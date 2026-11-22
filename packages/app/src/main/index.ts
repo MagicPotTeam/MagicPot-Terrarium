@@ -1,5 +1,6 @@
 // packages/app/src/main/index.ts
 import './utils/loggingOverride'
+import { shutdownProviderDispatchOwner } from './llmProxy/providerDispatchOwner'
 import fs from 'fs'
 import path from 'path'
 import { app, BrowserWindow } from 'electron'
@@ -9,6 +10,7 @@ import {
   setupReadyAppRuntime
 } from './appRuntime'
 import { resolveStartupUserDataDirectory } from './config/userDataDirectory'
+import { startupStorageSnapshot } from './config/startupStorageSnapshot'
 import { beforeQuit, beforeShow } from './lifeCycle'
 import { runMagicAgentApprovalSmoke } from './magicAgentPlatform2/productionRuntime'
 import { createMainWindow } from './mainWindow'
@@ -20,10 +22,23 @@ import { winController } from './winControls'
 import { flushLocalMediaAccessGrants } from './localMediaAccess'
 import { registerLocalMediaFileIntakeIpc } from './localMediaFileIntakeIpc'
 import { cleanupSubProcesses } from './subprocess/subprocess'
+import { markAppQuitting } from './appQuitState'
+import { startLocalCrashDumps, startProcessDiagnostics } from './processDiagnostics'
 
 const startupUserData = resolveStartupUserDataDirectory()
 fs.mkdirSync(startupUserData.path, { recursive: true })
 app.setPath('userData', startupUserData.path)
+// Only record the startup owner's already-applied result. Never initialize/probe from a later read.
+try {
+  if (app.getPath('userData') === startupUserData.path) {
+    startupStorageSnapshot.publish({ source: startupUserData.source, legacyLayout: startupUserData.legacyLayout })
+  } else {
+    startupStorageSnapshot.invalidate()
+  }
+} catch {
+  // A metadata failure must not change existing normal startup/smoke/transport behavior.
+  startupStorageSnapshot.invalidate()
+}
 
 function setPortableAppPath(name: string, targetPath: string): void {
   try {
@@ -37,6 +52,8 @@ function setPortableAppPath(name: string, targetPath: string): void {
 setPortableAppPath('sessionData', path.join(startupUserData.path, 'sessionData'))
 setPortableAppPath('logs', path.join(startupUserData.path, 'logs'))
 setPortableAppPath('crashDumps', path.join(startupUserData.path, 'crashDumps'))
+// Local minidumps only (never uploaded); see processDiagnostics.ts.
+startLocalCrashDumps()
 const portableTempPath = path.join(startupUserData.path, 'runtime', 'temp')
 setPortableAppPath('temp', portableTempPath)
 process.env.TEMP = portableTempPath
@@ -137,6 +154,12 @@ function openMainWindow(): void {
 if (!launcherSmokeTest)
   app.whenReady().then(async () => {
     await setupReadyAppRuntime()
+    try {
+      startProcessDiagnostics({ getMainWindow: () => mainWindow })
+    } catch (error) {
+      // Diagnostics only: never let them stop the app from starting.
+      console.warn('[App] Process diagnostics could not be started', error)
+    }
 
     console.log('[App] 正在准备显示窗口...')
     try {
@@ -173,16 +196,20 @@ let allowFinalQuit = false
 let updateQuitCleanupPromise: Promise<void> | null = null
 
 app.on('before-quit', async (event) => {
+  // Terminal even when confirmation cancels: no old startup lease can become current again.
+  startupStorageSnapshot.invalidate()
   if (allowFinalQuit) return
 
   flushLocalMediaAccessGrants()
   console.log('[App] 应用即将退出...')
   if (isAppUpdateInstallInProgress()) {
     event.preventDefault()
+    // The update install closes the app without asking: from here a renderer exit is expected.
+    markAppQuitting()
     if (!updateQuitCleanupPromise) {
       cleanupScreenshotManager()
       stopQAppWatcher()
-      updateQuitCleanupPromise = cleanupSubProcesses().finally(() => {
+      updateQuitCleanupPromise = shutdownProviderDispatchOwner().catch(error => console.error('[App] Dispatch ownership shutdown was not confirmed; retained until process exit.', error)).then(() => cleanupSubProcesses()).finally(() => {
         allowFinalQuit = true
         app.quit()
       })
@@ -193,8 +220,11 @@ app.on('before-quit', async (event) => {
 
   event.preventDefault()
   if (!(await winController.confirmAppQuit())) return
+  // Confirmed: renderer recovery must not reload the window or raise a dialog during shutdown.
+  markAppQuitting()
   cleanupScreenshotManager()
   stopQAppWatcher()
+  await shutdownProviderDispatchOwner().catch(error => console.error('[App] Dispatch ownership shutdown was not confirmed; retained until process exit.', error))
   await beforeQuit()
   app.exit(0)
 })

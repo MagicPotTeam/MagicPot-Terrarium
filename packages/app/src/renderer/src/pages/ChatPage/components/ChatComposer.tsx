@@ -1,8 +1,11 @@
 import React, {
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
+  useReducer,
   useRef,
   useState
 } from 'react'
@@ -15,6 +18,7 @@ import {
   useTheme,
   Chip,
   Divider,
+  InputBase,
   ListItemIcon,
   ListItemText,
   Menu,
@@ -34,6 +38,7 @@ import {
   Videocam as VideoIcon,
   ViewInAr as Model3DIcon,
   InsertDriveFile as FileIcon,
+  LightbulbOutlined as SkillIcon,
   SlideshowOutlined as PowerPointFileIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
@@ -54,11 +59,34 @@ import {
   getDroppedLocalImageContent,
   getDroppedTextContent
 } from '@renderer/utils/droppedImageUtils'
-import {
-  getChatAttachmentRenderKeys,
-  getVisibleChatAttachmentEntries
-} from '../chatAttachmentVisibility'
+import { getVisibleChatAttachmentEntries } from '../chatAttachmentVisibility'
+import { useChatAttachmentRenderKeys } from '../useChatAttachmentRenderKeys'
 import type { MagicPotAppToolDescriptor } from '@shared/app/types'
+import { isAgentSkillCommand } from '../agentSkillCommand'
+import { isAgentScratchpadCommand } from '../agentScratchpadCommand'
+import { isAgentSideCommand } from '../agentSideCommand'
+import { DEFAULT_CHAT_IMAGE_COUNT_LIMIT } from '@shared/llm/chatImageCountLimit'
+import { normalizeMediaReference } from '@shared/mediaReference'
+import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
+import {
+  ensureCachedChatImageDerivative,
+  getChatImageDerivativeCacheKey,
+  invalidateCachedChatImageDerivative
+} from '../chatImageDerivativeScheduler'
+import { api } from '@renderer/utils/windowUtils'
+import type { ComposerCommand } from '../composerCommandCatalog'
+import {
+  applyComposerSuggestion,
+  getComposerSuggestionOptionId,
+  resolveComposerSuggestions,
+  type ComposerSkillSuggestion,
+  type ComposerSuggestionItem
+} from '../composerSuggestions'
+import ComposerSuggestionPopup from './ComposerSuggestionPopup'
+import {
+  getAgentColumnRaisedSurface,
+  getAgentColumnTokens
+} from '@renderer/components/agentColumnTokens'
 
 interface ChatComposerProps {
   inputValue: string
@@ -68,7 +96,19 @@ interface ChatComposerProps {
   pendingAttachments: ChatAttachment[]
   uploadProgress: { [key: number]: number }
   onRemoveAttachment: (index: number) => void
+  /**
+   * Whether a removed item's URL is still used elsewhere (the page's queued sends and other
+   * drafts too); a blob: URL is revoked only when it is not. Without it only this composer's own
+   * pending list counts.
+   */
+  isChatAttachmentUrlInUse?: (url: string, excludeIndex: number) => boolean
+  sideCommandEnabled?: boolean
   isLoading: boolean
+  /**
+   * This conversation itself is generating. Defaults to isLoading; differs when the stop button
+   * also covers other work (a team lead's composer stops the running members too).
+   */
+  conversationBusy?: boolean
   onStopGenerating: () => void
   disabled: boolean
   composerInputRef: React.RefObject<HTMLTextAreaElement | HTMLInputElement | null>
@@ -84,25 +124,45 @@ interface ChatComposerProps {
   disableCompressContext?: boolean
   toolHelpItems?: MagicPotAppToolDescriptor[]
   active?: boolean
+  /** Slash commands this conversation handles; none means no "/" suggestions. */
+  suggestionCommands?: readonly ComposerCommand[]
+  /**
+   * Skills offered as the second group of the "/" list (the Agent column). Passing the prop,
+   * even empty, also turns on the group headings.
+   */
+  suggestionSkills?: readonly ComposerSkillSuggestion[]
+  /** A skill row of the "/" list was accepted; the typed token is already removed. */
+  onSelectSuggestedSkill?: (skillId: string) => void
+  /** 'column' is the one-row shell of the Agent column; 'page' (default) the full-page chat. */
+  layout?: 'page' | 'column'
+  /** The Agent thread column: no add menu or attachment button, the owner's own placeholder. */
+  workbench?: boolean
 }
 
-const renderFileAttachmentIcon = (attachment: ChatAttachment) => {
+const NO_SUGGESTION_COMMANDS: readonly ComposerCommand[] = []
+
+/** `chipColor` replaces the per-kind colours with one colour (the Agent column's chips). */
+const renderFileAttachmentIcon = (
+  attachment: ChatAttachment,
+  fontSize = 24,
+  chipColor?: string
+) => {
   const kind = detectDisplayFileKind(attachment.fileName, attachment.mimeType)
 
   switch (kind) {
     case 'markdown':
     case 'text':
-      return <TextFileIcon sx={{ fontSize: 24, color: '#38bdf8' }} />
+      return <TextFileIcon sx={{ fontSize, color: chipColor ?? '#38bdf8' }} />
     case 'word':
-      return <WordFileIcon sx={{ fontSize: 24, color: '#60a5fa' }} />
+      return <WordFileIcon sx={{ fontSize, color: chipColor ?? '#60a5fa' }} />
     case 'powerpoint':
-      return <PowerPointFileIcon sx={{ fontSize: 24, color: '#fb923c' }} />
+      return <PowerPointFileIcon sx={{ fontSize, color: chipColor ?? '#fb923c' }} />
     case 'pdf':
-      return <PdfFileIcon sx={{ fontSize: 24, color: '#f87171' }} />
+      return <PdfFileIcon sx={{ fontSize, color: chipColor ?? '#f87171' }} />
     case 'archive':
-      return <ArchiveFileIcon sx={{ fontSize: 24, color: '#c084fc' }} />
+      return <ArchiveFileIcon sx={{ fontSize, color: chipColor ?? '#c084fc' }} />
     default:
-      return <FileIcon sx={{ fontSize: 24, color: 'text.secondary' }} />
+      return <FileIcon sx={{ fontSize, color: chipColor ?? 'text.secondary' }} />
   }
 }
 
@@ -113,19 +173,70 @@ const MIN_TEXTAREA_HEIGHT = 24
 const TEXTAREA_BOTTOM_VISIBILITY_PADDING = 28
 const COMPOSER_VERTICAL_OVERHEAD = 140
 const ATTACHMENT_TRAY_GAP = 12
+/** Agent column: one line of the textarea, and the height after which it scrolls inside. */
+const COLUMN_TEXTAREA_MIN_HEIGHT = 26
+const COLUMN_TEXTAREA_MAX_HEIGHT = 128
+const COLUMN_CONTROL_SIZE = 32
 const ATTACHMENT_PREVIEW_ITEM_HEIGHT = 80
 
 const ComposerImageThumbnail: React.FC<{
   src: string
+  media?: ChatAttachment['media']
   alt: string
   onPreview: () => void
-}> = ({ src, alt, onPreview }) => {
+}> = ({ src, media, alt, onPreview }) => {
   const { t } = useTranslation()
+  const managed = useMemo(() => {
+    const normalized = normalizeMediaReference(media)
+    return normalized?.kind === 'managed' && normalized.sha256
+      ? { ...normalized, kind: 'managed' as const, sha256: normalized.sha256 }
+      : undefined
+  }, [media])
+  const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc } | undefined)
+    ?.svcManagedMedia
+  const canRequestDerivative = Boolean(managed && typeof service?.ensureDerivative === 'function')
+  const cacheKey = managed ? getChatImageDerivativeCacheKey(managed, 256) : undefined
+  const [display, setDisplay] = useState<{
+    src: string
+    sourceSrc: string
+    cacheKey?: string
+    derivative?: boolean
+  } | null>(null)
   const [failed, setFailed] = useState(false)
+  const sourceCacheKey = cacheKey ?? ''
+
+  useEffect(() => {
+    if (!managed || !service || !canRequestDerivative) return
+    const controller = new AbortController()
+    void ensureCachedChatImageDerivative(service, managed, 256, {
+      priority: -256,
+      signal: controller.signal
+    }).then(
+      (result) => {
+        if (controller.signal.aborted) return
+        setFailed(false)
+        setDisplay(
+          result.status === 'ready'
+            ? { sourceSrc: src, src: result.descriptor.localMediaUrl, cacheKey, derivative: true }
+            : { sourceSrc: src, src, cacheKey }
+        )
+      },
+      () => {
+        if (controller.signal.aborted) return
+        setFailed(false)
+        setDisplay({ sourceSrc: src, src, cacheKey })
+      }
+    )
+    return () => controller.abort()
+  }, [cacheKey, canRequestDerivative, managed, service, src])
 
   useEffect(() => {
     setFailed(false)
-  }, [src])
+  }, [sourceCacheKey, src])
+
+  const current =
+    display?.sourceSrc === src && (display.cacheKey ?? '') === sourceCacheKey ? display : null
+  const displaySrc = canRequestDerivative ? current?.src : src
 
   const failureLabel = t('chat.image_load_failed_label', {
     name: alt,
@@ -156,16 +267,47 @@ const ComposerImageThumbnail: React.FC<{
     )
   }
 
+  if (!displaySrc) {
+    return (
+      <Box
+        component="button"
+        type="button"
+        aria-label={alt}
+        aria-busy="true"
+        onClick={onPreview}
+        sx={{
+          width: '100%',
+          height: '100%',
+          border: 0,
+          cursor: 'pointer',
+          bgcolor: 'action.hover',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}
+      >
+        <CircularProgress size={20} aria-hidden="true" />
+      </Box>
+    )
+  }
+
   return (
     <img
-      src={src}
+      src={displaySrc}
       alt={alt}
       width={80}
       height={ATTACHMENT_PREVIEW_ITEM_HEIGHT}
       loading="lazy"
       decoding="async"
       style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
-      onError={() => setFailed(true)}
+      onError={() => {
+        if (current?.derivative && current.cacheKey) {
+          invalidateCachedChatImageDerivative(current.cacheKey, current.src)
+          setDisplay({ sourceSrc: src, src, cacheKey })
+          return
+        }
+        setFailed(true)
+      }}
       onClick={onPreview}
     />
   )
@@ -174,6 +316,18 @@ const ATTACHMENT_PREVIEW_SCROLLBAR_GUTTER = 12
 const MIN_ATTACHMENT_PREVIEW_HEIGHT = 88
 const MAX_ATTACHMENT_PREVIEW_HEIGHT = 240
 const ATTACHMENT_PREVIEW_HEIGHT_RATIO = 0.32
+
+// View wrappers switch between display:contents and none, neither a layout box.
+// Measure and observe the stable boxed ancestor, even while a view is hidden.
+const getComposerLayoutParent = (root: HTMLElement): HTMLElement | null => {
+  let parent = root.parentElement
+  while (parent) {
+    const display = window.getComputedStyle(parent).display
+    if (display !== 'contents' && display !== 'none') return parent
+    parent = parent.parentElement
+  }
+  return null
+}
 
 const parseCssPixelValue = (value: unknown): number | null => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
@@ -360,6 +514,66 @@ const rankToolHelpItems = (
   })
 }
 
+/** One chip of the Agent column's row above the shell: a non-image attachment or the skill. */
+const ComposerColumnChip: React.FC<{
+  testId: string
+  icon: React.ReactNode
+  label: string
+  title?: string
+  removeLabel: string
+  onRemove?: () => void
+}> = ({ testId, icon, label, title, removeLabel, onRemove }) => {
+  const theme = useTheme()
+  const tokens = useMemo(() => getAgentColumnTokens(theme), [theme])
+  return (
+    <Box
+      data-testid={testId}
+      title={title}
+      sx={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: `${tokens.space.sm}px`,
+        minWidth: 0,
+        maxWidth: 192,
+        padding: `${tokens.space.xs}px ${tokens.space.md}px`,
+        border: `1px solid ${tokens.border}`,
+        borderRadius: `${tokens.radius.content}px`,
+        backgroundColor: tokens.surface,
+        color: tokens.text,
+        fontSize: tokens.fontSize.small,
+        lineHeight: '18px'
+      }}
+    >
+      <Box sx={{ display: 'inline-flex', flex: 'none', color: tokens.muted }}>{icon}</Box>
+      <Box
+        component="span"
+        sx={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+      >
+        {label}
+      </Box>
+      {onRemove ? (
+        <IconButton
+          aria-label={removeLabel}
+          title={removeLabel}
+          onClick={onRemove}
+          sx={{
+            flex: 'none',
+            width: 18,
+            height: 18,
+            padding: 0,
+            borderRadius: `${tokens.radius.control}px`,
+            color: tokens.muted,
+            '&:hover': { backgroundColor: tokens.hover, color: tokens.text },
+            '&.Mui-focusVisible': tokens.focusRing
+          }}
+        >
+          <CloseIcon sx={{ fontSize: 14 }} />
+        </IconButton>
+      ) : null}
+    </Box>
+  )
+}
+
 const ChatComposer: React.FC<ChatComposerProps> = ({
   inputValue,
   onInputChange,
@@ -368,7 +582,10 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   pendingAttachments,
   uploadProgress,
   onRemoveAttachment,
+  isChatAttachmentUrlInUse,
   isLoading,
+  conversationBusy = isLoading,
+  sideCommandEnabled = false,
   onStopGenerating,
   disabled,
   composerInputRef,
@@ -383,17 +600,37 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
   onCompressContext,
   disableCompressContext = false,
   toolHelpItems = [],
-  active = true
+  active = true,
+  suggestionCommands = NO_SUGGESTION_COMMANDS,
+  suggestionSkills,
+  onSelectSuggestedSkill,
+  layout = 'page',
+  workbench = false
 }) => {
   const { t } = useTranslation()
-  const visiblePendingAttachmentEntries = getVisibleChatAttachmentEntries(pendingAttachments)
-  const pendingAttachmentKeys = getChatAttachmentRenderKeys(
+  const isColumn = layout === 'column'
+  // Hidden derived attachments also count at the current send boundary. If they
+  // make a draft unsendable, expose them so the user can remove them; never use
+  // the renderer's visibility flag as proof that an image is exempt from limits.
+  const overImageLimit =
+    pendingAttachments.filter((attachment) => attachment.type === 'image').length >
+    DEFAULT_CHAT_IMAGE_COUNT_LIMIT
+  const visiblePendingAttachmentEntries = overImageLimit
+    ? pendingAttachments.flatMap((attachment, originalIndex) =>
+        attachment.hiddenFromChatView === true && attachment.type !== 'image'
+          ? []
+          : [{ attachment, originalIndex }]
+      )
+    : getVisibleChatAttachmentEntries(pendingAttachments)
+  const pendingAttachmentKeys = useChatAttachmentRenderKeys(
     visiblePendingAttachmentEntries.map(({ attachment }) => attachment)
   )
   const theme = useTheme()
+  const columnTokens = useMemo(() => getAgentColumnTokens(theme), [theme])
   const hasModelSelectorSlot = modelSelectorSlot != null
 
   const composerRootRef = useRef<HTMLDivElement | null>(null)
+  const columnShellRef = useRef<HTMLDivElement | null>(null)
   const attachmentPreviewRef = useRef<HTMLDivElement | null>(null)
   const committedInputValueRef = useRef(inputValue)
   const lastInputSyncRef = useRef({ key: inputSyncKey, value: inputValue })
@@ -408,6 +645,17 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     undefined
   )
   const [attachmentPreviewOverflowing, setAttachmentPreviewOverflowing] = useState(false)
+  const suggestionListId = useId()
+  const addMenuId = useId()
+  // Focus lives in a ref: a render on every focus change would re-apply the last recorded
+  // selection (see the layout effect below) to drafts that have nothing to suggest.
+  const isInputFocusedRef = useRef(false)
+  const [, refreshSuggestions] = useReducer((tick: number) => tick + 1, 0)
+  const [dismissedSuggestionValue, setDismissedSuggestionValue] = useState<string | null>(null)
+  const [suggestionCursor, setSuggestionCursor] = useState<{ key: string | null; index: number }>({
+    key: null,
+    index: 0
+  })
 
   useEffect(() => {
     const syncKeyChanged = inputSyncKey !== lastInputSyncRef.current.key
@@ -421,6 +669,29 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     setLocalInputValue(inputValue)
   }, [inputSyncKey, inputValue])
 
+  // Only a draft that starts with "/" can open the list; "@name task" is plain text here.
+  const canSuggestFor = (value: string) =>
+    value.startsWith('/') && (suggestionCommands.length > 0 || Boolean(suggestionSkills?.length))
+  const suggestions =
+    active &&
+    !disabled &&
+    isInputFocusedRef.current &&
+    // A field that was disabled while focused gets no blur event.
+    document.activeElement === composerInputRef.current &&
+    localInputValue !== dismissedSuggestionValue &&
+    canSuggestFor(localInputValue)
+      ? resolveComposerSuggestions(localInputValue, suggestionCommands, suggestionSkills)
+      : null
+  // A list that closes or changes its query starts again at the first option.
+  const suggestionKey = suggestions?.key ?? null
+  if (suggestionCursor.key !== suggestionKey) {
+    setSuggestionCursor({ key: suggestionKey, index: 0 })
+  }
+  const activeSuggestionIndex =
+    suggestions && suggestionCursor.key === suggestionKey
+      ? Math.min(suggestionCursor.index, suggestions.items.length - 1)
+      : 0
+
   useEffect(() => {
     if (active) return
     setAddMenuAnchorEl(null)
@@ -430,10 +701,13 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     const root = composerRootRef.current
     if (!root) return
 
-    const flexCol = root.parentElement
-    if (!flexCol) return
+    const layoutParent = getComposerLayoutParent(root)
+    if (!layoutParent) return
 
-    const parentRect = flexCol.getBoundingClientRect()
+    const parentRect = layoutParent.getBoundingClientRect()
+    // A fully hidden pane has no measurable height. Keep the last usable budget;
+    // observing its box will recalculate when it is displayed again.
+    if (parentRect.height <= 0) return
     const composerMaxHeight = Math.max(MIN_TEXTAREA_HEIGHT, parentRect.height)
     const nextAttachmentPreviewMaxHeight = visiblePendingAttachmentEntries.length
       ? Math.max(
@@ -496,7 +770,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
 
     let observer: ResizeObserver | undefined
     const root = composerRootRef.current
-    const observed = root?.parentElement
+    const observed = root ? getComposerLayoutParent(root) : null
     if (observed && typeof ResizeObserver !== 'undefined') {
       observer = new ResizeObserver(scheduleRecalcMaxHeight)
       observer.observe(observed)
@@ -562,6 +836,17 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     latestInputSelectionRef.current = readInputSelectionSnapshot(event.currentTarget)
   }
 
+  const handleInputFocus = (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    isInputFocusedRef.current = true
+    handleInputSelectionChange(event)
+    if (canSuggestFor(event.currentTarget.value)) refreshSuggestions()
+  }
+
+  const handleInputBlur = (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    isInputFocusedRef.current = false
+    if (canSuggestFor(event.currentTarget.value)) refreshSuggestions()
+  }
+
   const handleBeforeInput = (event: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     beforeInputSelectionRef.current = readInputSelectionSnapshot(event.currentTarget)
   }
@@ -584,6 +869,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     latestInputSelectionRef.current = nextSelection
     pendingInputSelectionRef.current = nextSelection
     setLocalInputValue(nextValue)
+    setDismissedSuggestionValue(null)
     onInputChange(nextValue)
   }
 
@@ -599,10 +885,29 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     const previousValue = committedInputValueRef.current
     committedInputValueRef.current = nextValue
     setLocalInputValue(nextValue)
-    latestInputSelectionRef.current = readInputSelectionSnapshot(event.currentTarget)
+    handleInputSelectionChange(event)
     if (nextValue !== previousValue) {
       onInputChange(nextValue)
     }
+  }
+
+  const acceptSuggestion = (item: ComposerSuggestionItem) => {
+    if (!suggestions) return
+    const next = applyComposerSuggestion(localInputValue, suggestions, item)
+    const nextSelection: InputSelectionSnapshot = {
+      value: next.value,
+      start: next.caret,
+      end: next.caret,
+      direction: 'none'
+    }
+    committedInputValueRef.current = next.value
+    latestInputSelectionRef.current = nextSelection
+    pendingInputSelectionRef.current = nextSelection
+    setLocalInputValue(next.value)
+    // The completed text must not reopen the list; the next edit does.
+    setDismissedSuggestionValue(next.value)
+    if (next.value !== localInputValue) onInputChange(next.value)
+    if (item.kind === 'skill') onSelectSuggestedSkill?.(item.skillId)
   }
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
@@ -611,6 +916,37 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
       isComposingInputRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229
 
     if (isImeComposing) return
+
+    if (suggestions) {
+      const unmodified = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
+      const item = suggestions.items[activeSuggestionIndex]
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        setDismissedSuggestionValue(localInputValue)
+        return
+      }
+      // A single row has nowhere to move to: the arrows keep moving the caret.
+      if (
+        unmodified &&
+        suggestions.items.length > 1 &&
+        (event.key === 'ArrowDown' || event.key === 'ArrowUp')
+      ) {
+        event.preventDefault()
+        const count = suggestions.items.length
+        const step = event.key === 'ArrowDown' ? 1 : count - 1
+        setSuggestionCursor({ key: suggestions.key, index: (activeSuggestionIndex + step) % count })
+        return
+      }
+      // A command typed in full still runs on Enter, exactly as without the list, unless it
+      // needs arguments: then Enter completes it with the trailing space instead of sending it.
+      const runsAsTyped = item.typedInFull && !(item.kind === 'command' && item.argumentsRequired)
+      if (unmodified && (event.key === 'Tab' || (event.key === 'Enter' && !runsAsTyped))) {
+        event.preventDefault()
+        acceptSuggestion(item)
+        return
+      }
+    }
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
@@ -696,13 +1032,15 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
     setAddMenuAnchorEl(null)
   }
 
+  const addMenuItems = React.Children.toArray(addMenuSlot?.(closeAddMenu))
+
   const handleUploadFileFromMenu = () => {
     closeAddMenu()
     onUploadFile()
   }
 
   const canCompressFromStatusSlot = Boolean(
-    onCompressContext && !disabled && !isLoading && !disableCompressContext
+    onCompressContext && !disabled && !conversationBusy && !disableCompressContext
   )
 
   const handleStatusSlotCompressClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -756,6 +1094,727 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
       )
     : []
 
+  // Attributes and handlers of the textarea, the same in both layouts.
+  const textareaProps: InputBaseComponentProps = {
+    'data-testid': 'chat-composer-input',
+    rows: 1,
+    ...(suggestions
+      ? {
+          'aria-haspopup': 'listbox',
+          'aria-autocomplete': 'list',
+          'aria-expanded': true,
+          'aria-controls': suggestionListId,
+          'aria-activedescendant': getComposerSuggestionOptionId(
+            suggestionListId,
+            activeSuggestionIndex
+          )
+        }
+      : null),
+    onFocus: handleInputFocus,
+    onBlur: handleInputBlur,
+    onBeforeInput: handleBeforeInput,
+    onKeyUp: handleInputSelectionChange,
+    onMouseUp: handleInputSelectionChange,
+    onClick: handleInputSelectionChange,
+    onSelect: handleInputSelectionChange,
+    onCompositionStart: handleCompositionStart,
+    onCompositionEnd: handleCompositionEnd,
+    onDragOver: handleInputDragOver,
+    onDrop: handleInputDrop
+  }
+
+  const renderAttachmentTile = (
+    { attachment, originalIndex }: (typeof visiblePendingAttachmentEntries)[number],
+    idx: number
+  ) => {
+    const progress = uploadProgress[originalIndex]
+    return (
+      <Box
+        key={pendingAttachmentKeys[idx]}
+        title={attachment.fileName || undefined}
+        sx={{
+          position: 'relative',
+          width: 80,
+          height: ATTACHMENT_PREVIEW_ITEM_HEIGHT,
+          borderRadius: 1,
+          overflow: 'hidden',
+          border: 1,
+          borderColor: 'divider'
+        }}
+      >
+        {attachment.type === 'image' ? (
+          <ComposerImageThumbnail
+            src={normalizeLocalMediaUrl(attachment.url)}
+            media={attachment.media}
+            alt={t('chat.preview_alt_index', { index: idx + 1 })}
+            onPreview={() => onPreviewImage(attachment.url)}
+          />
+        ) : attachment.type === 'video' ? (
+          <Box
+            sx={{
+              width: '100%',
+              height: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'background.paper',
+              gap: 0.5
+            }}
+          >
+            <VideoIcon sx={{ fontSize: 24, color: 'text.secondary' }} />
+            {progress !== undefined && progress < 100 && <CircularProgress size={16} />}
+          </Box>
+        ) : attachment.type === 'model3d' ? (
+          <Box
+            sx={{
+              width: '100%',
+              height: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'background.paper',
+              gap: 0.5
+            }}
+          >
+            <Model3DIcon sx={{ fontSize: 24, color: 'text.secondary' }} />
+            <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.6rem' }}>
+              3D
+            </Typography>
+            {progress !== undefined && progress < 100 && <CircularProgress size={16} />}
+          </Box>
+        ) : attachment.type === 'file' ? (
+          <Box
+            sx={{
+              width: '100%',
+              height: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'background.paper',
+              gap: 0.5
+            }}
+          >
+            {renderFileAttachmentIcon(attachment)}
+            <Typography
+              variant="caption"
+              color="primary"
+              sx={{ fontSize: '0.6rem', fontWeight: 700 }}
+            >
+              {getFileBadgeText(attachment.fileName, attachment.mimeType)}
+            </Typography>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{
+                fontSize: '0.55rem',
+                maxWidth: '100%',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                px: 0.5
+              }}
+            >
+              {attachment.fileName || t('chat.file', { defaultValue: 'File' })}
+            </Typography>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{
+                fontSize: '0.52rem',
+                maxWidth: '100%',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                px: 0.5
+              }}
+            >
+              {buildFileMetaLabel({
+                fileName: attachment.fileName,
+                mimeType: attachment.mimeType,
+                sizeBytes: attachment.sizeBytes
+              })}
+            </Typography>
+          </Box>
+        ) : null}
+        {progress !== undefined && progress < 100 && (
+          <Box
+            sx={{
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: 4,
+              bgcolor: 'rgba(0,0,0,0.2)'
+            }}
+          >
+            <Box
+              sx={{
+                height: '100%',
+                width: `${progress}%`,
+                bgcolor: 'primary.main',
+                transition: 'width 0.3s'
+              }}
+            />
+          </Box>
+        )}
+        <IconButton
+          size="small"
+          aria-label={t('chat.remove_attachment', {
+            defaultValue: 'Remove attachment'
+          })}
+          onClick={() => {
+            if (
+              attachment.url.startsWith('blob:') &&
+              !(isChatAttachmentUrlInUse
+                ? isChatAttachmentUrlInUse(attachment.url, originalIndex)
+                : pendingAttachments.some(
+                    (item, index) => index !== originalIndex && item.url === attachment.url
+                  ))
+            ) {
+              URL.revokeObjectURL(attachment.url)
+            }
+            onRemoveAttachment(originalIndex)
+          }}
+          sx={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            bgcolor: 'rgba(0,0,0,0.5)',
+            color: 'white',
+            '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' }
+          }}
+        >
+          <CloseIcon fontSize="small" />
+        </IconButton>
+      </Box>
+    )
+  }
+
+  const toolHelp =
+    toolHelpItems.length > 0 ? (
+      <Box data-testid="chat-composer-tool-help" sx={{ mb: 1 }}>
+        <Typography color="text.secondary" variant="caption">
+          {isToolCommandMode
+            ? 'Use /tool <name> {"key":"value"} to call a bound tool directly. Click a tool or example to fill it.'
+            : 'This skill can call bound tools directly with /tool <name> {"key":"value"}.'}
+        </Typography>
+        {isToolCommandMode && parsedToolCommand ? (
+          <Typography
+            color={selectedToolValidationMessage ? 'error.main' : 'text.secondary'}
+            variant="caption"
+            sx={{ display: 'block', mt: 0.25 }}
+          >
+            {selectedToolValidationMessage ||
+              (selectedToolHelpItem
+                ? `Ready to execute ${selectedToolHelpItem.name}${selectedToolInputSchemaSummary ? `: expects ${selectedToolInputSchemaSummary}.` : '.'}`
+                : `No bound tool matches "${parsedToolCommand.toolName}".`)}
+          </Typography>
+        ) : null}
+        {isToolCommandMode ? (
+          <Box
+            sx={{
+              mt: 0.5,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 0.25,
+              maxHeight: 120,
+              overflowY: 'auto'
+            }}
+          >
+            {filteredToolHelpItems.length > 0 ? (
+              <Typography color="text.secondary" variant="caption" sx={{ mb: 0.25 }}>
+                {requestedToolName
+                  ? `Matching bound tools (${filteredToolHelpItems.length}):`
+                  : 'Available bound tools:'}
+              </Typography>
+            ) : (
+              <Typography color="text.secondary" variant="caption" sx={{ mb: 0.25 }}>
+                No bound tools match the current /tool prefix.
+              </Typography>
+            )}
+            {filteredToolHelpItems.map((tool) => (
+              <Typography
+                key={tool.name}
+                color="text.secondary"
+                variant="caption"
+                sx={{ whiteSpace: 'pre-wrap', cursor: 'pointer' }}
+                onClick={() => handleInsertToolCommand(tool)}
+              >
+                <Box component="span" sx={{ fontFamily: 'monospace', color: 'text.primary' }}>
+                  {tool.name}
+                </Box>
+                {tool.description ? ` - ${tool.description}` : ''}
+                {buildToolInputSchemaSummary(tool)
+                  ? `\nexpects ${buildToolInputSchemaSummary(tool)}`
+                  : ''}
+              </Typography>
+            ))}
+            {selectedToolHelpItem?.inputSchema ? (
+              <Box sx={{ mt: 0.5 }}>
+                <Typography color="text.secondary" variant="caption" sx={{ display: 'block' }}>
+                  Suggested example:
+                </Typography>
+                <Typography
+                  color="text.primary"
+                  variant="caption"
+                  data-testid="chat-composer-tool-example"
+                  sx={{
+                    display: 'block',
+                    mt: 0.25,
+                    whiteSpace: 'pre-wrap',
+                    fontFamily: 'monospace',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => handleInsertToolCommand(selectedToolHelpItem)}
+                >
+                  {buildToolCommandExample(selectedToolHelpItem)}
+                </Typography>
+              </Box>
+            ) : null}
+          </Box>
+        ) : toolHelpSummary ? (
+          <Typography color="text.secondary" variant="caption" sx={{ display: 'block', mt: 0.25 }}>
+            {remainingToolHelpCount > 0
+              ? `${toolHelpSummary} +${remainingToolHelpCount} more`
+              : toolHelpSummary}
+          </Typography>
+        ) : null}
+      </Box>
+    ) : null
+
+  const addMenuOpen = active && Boolean(addMenuAnchorEl)
+  const addMenu = (
+    <Menu
+      id={isColumn ? addMenuId : undefined}
+      anchorEl={addMenuAnchorEl}
+      open={addMenuOpen}
+      onClose={closeAddMenu}
+      anchorOrigin={{ horizontal: 'left', vertical: 'top' }}
+      transformOrigin={{ horizontal: 'left', vertical: 'bottom' }}
+      // The column's shell ends 8px before the window edge; do not push the menu away from it.
+      marginThreshold={isColumn ? 4 : undefined}
+      slotProps={{
+        paper: {
+          sx: isColumn
+            ? {
+                // As wide as the shell it is anchored to, floating 8px above it.
+                width: addMenuAnchorEl?.offsetWidth || undefined,
+                minWidth: 0,
+                maxWidth: 'none',
+                mt: '-8px',
+                borderRadius: `${columnTokens.radius.shell}px`,
+                border: `1px solid ${columnTokens.border}`,
+                bgcolor: getAgentColumnRaisedSurface(theme),
+                boxShadow: '0 10px 15px rgba(0,0,0,0.1)'
+              }
+            : {
+                minWidth: 232,
+                borderRadius: 2,
+                mt: -0.5
+              }
+        }
+      }}
+    >
+      <MenuItem onClick={handleUploadFileFromMenu}>
+        <ListItemIcon>
+          <AttachFileIcon fontSize="small" />
+        </ListItemIcon>
+        <ListItemText
+          primary={t('chat.add_file')}
+          primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
+        />
+      </MenuItem>
+      {addMenuItems.length > 0
+        ? isColumn
+          ? addMenuItems
+          : [<Divider key="add-menu-slot-divider" sx={{ my: 0.5 }} />, ...addMenuItems]
+        : null}
+    </Menu>
+  )
+
+  const statusControl = statusSlot ? (
+    <Box data-testid="chat-composer-status-slot" sx={{ display: 'flex', alignItems: 'center' }}>
+      {onCompressContext ? (
+        <Box
+          data-testid="chat-composer-context-status-compress"
+          role="button"
+          aria-label={t('chat.compress_context', { defaultValue: 'Compress context' })}
+          aria-disabled={!canCompressFromStatusSlot}
+          tabIndex={canCompressFromStatusSlot ? 0 : -1}
+          onClick={handleStatusSlotCompressClick}
+          onKeyDown={handleStatusSlotCompressKeyDown}
+          sx={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: isColumn ? COLUMN_CONTROL_SIZE : 30,
+            height: isColumn ? COLUMN_CONTROL_SIZE : 30,
+            borderRadius: isColumn ? `${columnTokens.radius.control}px` : '50%',
+            color: 'text.secondary',
+            cursor: canCompressFromStatusSlot ? 'pointer' : 'default',
+            opacity: disabled || conversationBusy ? 0.5 : 1,
+            outline: 'none',
+            '&:focus-visible': isColumn
+              ? columnTokens.focusRing
+              : {
+                  boxShadow: (theme) => `0 0 0 2px ${theme.palette.primary.main}`
+                },
+            '& [data-testid="chat-context-compression-indicator"]': {
+              cursor: canCompressFromStatusSlot ? 'pointer' : 'default'
+            }
+          }}
+        >
+          {statusSlot}
+        </Box>
+      ) : (
+        statusSlot
+      )}
+    </Box>
+  ) : null
+
+  if (isColumn) {
+    const canSend = Boolean(localInputValue.trim()) || pendingAttachments.length > 0
+    // The shell is "active" (focus-coloured border) while there is something to send;
+    // focus itself is matched in CSS so that focusing does not re-render the composer.
+    const shellActive = localInputValue.length > 0 || visiblePendingAttachmentEntries.length > 0
+    const sideCommandLabel =
+      isLoading &&
+      sideCommandEnabled &&
+      (isAgentSideCommand(localInputValue) ||
+        isAgentSkillCommand(localInputValue) ||
+        isAgentScratchpadCommand(localInputValue))
+        ? t(
+            isAgentScratchpadCommand(localInputValue)
+              ? 'chat.agent_scratchpad.command_send'
+              : isAgentSkillCommand(localInputValue)
+                ? 'chat.agent_skill_session.command_send'
+                : 'chat.agent_side.command_send'
+          )
+        : null
+    const placeholder = workbench
+      ? t('chat.workbench_prompt')
+      : t('chat.composer_column.placeholder')
+    const moreActionsLabel = t('chat.composer_column.more_actions')
+    const controlSx = {
+      flex: 'none',
+      width: COLUMN_CONTROL_SIZE,
+      height: COLUMN_CONTROL_SIZE,
+      padding: 0,
+      borderRadius: `${columnTokens.radius.control}px`,
+      '&.Mui-focusVisible': columnTokens.focusRing
+    } as const
+    const primarySx = (fill: 'primary' | 'error') =>
+      ({
+        ...controlSx,
+        bgcolor: `${fill}.main`,
+        color: `${fill}.contrastText`,
+        '&:hover': { bgcolor: `${fill}.dark` },
+        '&.Mui-disabled': {
+          bgcolor: `${fill}.main`,
+          color: `${fill}.contrastText`,
+          opacity: 0.45,
+          cursor: 'not-allowed',
+          pointerEvents: 'auto'
+        }
+      }) as const
+
+    return (
+      <Box
+        ref={composerRootRef}
+        data-testid="chat-composer-root"
+        data-composer-layout="column"
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          flexShrink: 0,
+          minWidth: 0,
+          minHeight: 0,
+          maxHeight: '100%',
+          width: '100%',
+          padding: `${columnTokens.space.md}px`,
+          borderTop: `1px solid ${columnTokens.border}`
+        }}
+      >
+        {visiblePendingAttachmentEntries.length > 0 || selectedSkillName ? (
+          <Box
+            ref={attachmentPreviewRef}
+            data-testid="chat-composer-attachments"
+            sx={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'flex-end',
+              alignContent: 'flex-start',
+              gap: `${columnTokens.space.md}px`,
+              mb: `${columnTokens.space.md}px`,
+              minWidth: 0,
+              // Only the attachment tray has a height budget; a lone skill chip never scrolls.
+              maxHeight:
+                visiblePendingAttachmentEntries.length > 0
+                  ? resolvedAttachmentPreviewMaxHeight
+                  : undefined,
+              overflowX: 'hidden',
+              overflowY: 'auto',
+              '& > *': { flexShrink: 0 }
+            }}
+          >
+            {selectedSkillName ? (
+              <ComposerColumnChip
+                testId="chat-composer-skill-chip"
+                icon={<SkillIcon sx={{ fontSize: 14 }} />}
+                label={selectedSkillName}
+                title={selectedSkillName}
+                removeLabel={t('chat.composer_column.remove_skill', { name: selectedSkillName })}
+                onRemove={onClearSkill}
+              />
+            ) : null}
+            {visiblePendingAttachmentEntries.map((entry, idx) => {
+              const { attachment, originalIndex } = entry
+              // Images keep their thumbnail; every other file is a chip.
+              if (attachment.type === 'image') return renderAttachmentTile(entry, idx)
+              const progress = uploadProgress[originalIndex]
+              const name = attachment.fileName || t('chat.file', { defaultValue: 'File' })
+              return (
+                <ComposerColumnChip
+                  key={pendingAttachmentKeys[idx]}
+                  testId="chat-composer-file-chip"
+                  icon={
+                    progress !== undefined && progress < 100 ? (
+                      <CircularProgress size={12} />
+                    ) : attachment.type === 'video' ? (
+                      <VideoIcon sx={{ fontSize: 14 }} />
+                    ) : attachment.type === 'model3d' ? (
+                      <Model3DIcon sx={{ fontSize: 14 }} />
+                    ) : (
+                      renderFileAttachmentIcon(attachment, 14, 'inherit')
+                    )
+                  }
+                  label={name}
+                  title={attachment.fileName || undefined}
+                  removeLabel={t('chat.composer_column.remove_attachment', { name })}
+                  onRemove={() => {
+                    if (
+                      attachment.url.startsWith('blob:') &&
+                      !(isChatAttachmentUrlInUse
+                        ? isChatAttachmentUrlInUse(attachment.url, originalIndex)
+                        : pendingAttachments.some(
+                            (item, index) => index !== originalIndex && item.url === attachment.url
+                          ))
+                    ) {
+                      URL.revokeObjectURL(attachment.url)
+                    }
+                    onRemoveAttachment(originalIndex)
+                  }}
+                />
+              )
+            })}
+          </Box>
+        ) : null}
+
+        {/* Positioning parent of the "/" list, which floats above the shell. */}
+        <Box sx={{ position: 'relative', minWidth: 0 }}>
+          {suggestions ? (
+            <ComposerSuggestionPopup
+              id={suggestionListId}
+              suggestions={suggestions}
+              activeIndex={activeSuggestionIndex}
+              grouped={suggestionSkills !== undefined}
+              layout="column"
+              onActiveIndexChange={(index) => setSuggestionCursor({ key: suggestions.key, index })}
+              onAccept={acceptSuggestion}
+            />
+          ) : null}
+          <Box
+            ref={columnShellRef}
+            data-testid="chat-composer-shell"
+            data-active={shellActive ? 'true' : undefined}
+            sx={{
+              display: 'flex',
+              alignItems: 'flex-end',
+              gap: `${columnTokens.space.sm}px`,
+              minWidth: 0,
+              padding: `${columnTokens.space.md}px`,
+              border: `1px solid ${columnTokens.border}`,
+              borderRadius: `${columnTokens.radius.shell}px`,
+              backgroundColor: columnTokens.surface,
+              boxShadow: 'none',
+              transition: 'border-color 120ms ease',
+              '&[data-active="true"], &:has(textarea:focus)': { borderColor: columnTokens.accent }
+            }}
+          >
+            {workbench ? null : (
+              <>
+                <IconButton
+                  data-testid="chat-composer-add-menu-button"
+                  aria-label={moreActionsLabel}
+                  aria-haspopup="menu"
+                  aria-expanded={addMenuOpen}
+                  aria-controls={addMenuOpen ? addMenuId : undefined}
+                  title={moreActionsLabel}
+                  disabled={disabled}
+                  // Anchored to the shell: the menu spans the shell's width above it.
+                  onClick={(event) =>
+                    setAddMenuAnchorEl(columnShellRef.current ?? event.currentTarget)
+                  }
+                  sx={{
+                    ...controlSx,
+                    color: columnTokens.muted,
+                    '&:hover': { backgroundColor: columnTokens.hover }
+                  }}
+                >
+                  <AddIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+                {addMenu}
+              </>
+            )}
+            {toolbarSlot ? (
+              <Box
+                data-testid="chat-composer-toolbar-slot"
+                sx={{
+                  flex: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  minWidth: 0,
+                  height: COLUMN_CONTROL_SIZE
+                }}
+              >
+                {toolbarSlot}
+              </Box>
+            ) : null}
+            <InputBase
+              inputRef={composerInputRef}
+              value={localInputValue}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              disabled={disabled}
+              inputComponent={StableNativeTextarea as React.ElementType<InputBaseComponentProps>}
+              // A textarea cannot end its own placeholder with an ellipsis, so the visible
+              // placeholder is this one-line label; the native one stays for assistive tech.
+              endAdornment={
+                localInputValue.length === 0 ? (
+                  <Box
+                    component="span"
+                    aria-hidden
+                    data-testid="chat-composer-placeholder"
+                    sx={{
+                      position: 'absolute',
+                      left: 0,
+                      right: 0,
+                      top: '3px',
+                      color: columnTokens.muted,
+                      pointerEvents: 'none',
+                      userSelect: 'none',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {placeholder}
+                  </Box>
+                ) : null
+              }
+              inputProps={{
+                ...textareaProps,
+                'aria-label': placeholder,
+                style: {
+                  minHeight: `${COLUMN_TEXTAREA_MIN_HEIGHT}px`,
+                  maxHeight: `${COLUMN_TEXTAREA_MAX_HEIGHT}px`,
+                  overflowY: 'auto',
+                  overflowX: 'hidden',
+                  resize: 'none',
+                  boxSizing: 'border-box'
+                }
+              }}
+              sx={{
+                flex: 1,
+                minWidth: 0,
+                padding: 0,
+                // One line (26px) sits centred against the 32px controls of the row.
+                mb: `${(COLUMN_CONTROL_SIZE - COLUMN_TEXTAREA_MIN_HEIGHT) / 2}px`,
+                color: columnTokens.text,
+                fontSize: columnTokens.fontSize.base,
+                lineHeight: '20px',
+                '& .MuiInputBase-input': {
+                  padding: '3px 0',
+                  border: 0,
+                  backgroundColor: 'transparent',
+                  font: 'inherit',
+                  lineHeight: 'inherit',
+                  wordBreak: 'break-word',
+                  overflowWrap: 'break-word',
+                  // Invisible, and never wrapping: a wrapped placeholder would grow the textarea.
+                  '&::placeholder': {
+                    color: 'transparent',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden'
+                  }
+                }
+              }}
+            />
+            {statusControl}
+            {hasModelSelectorSlot ? (
+              <Box
+                data-testid="chat-composer-model-selector-slot"
+                sx={{
+                  flex: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  minWidth: 0,
+                  minHeight: COLUMN_CONTROL_SIZE
+                }}
+              >
+                {modelSelectorSlot}
+              </Box>
+            ) : null}
+            {/* Keep the parent's Stop available while a private command is submitted separately. */}
+            {sideCommandLabel ? (
+              <IconButton
+                data-chat-side-command-btn
+                aria-label={sideCommandLabel}
+                title={sideCommandLabel}
+                disabled={disabled || !active}
+                onClick={onSend}
+                sx={{
+                  ...controlSx,
+                  color: columnTokens.muted,
+                  '&:hover': { backgroundColor: columnTokens.hover }
+                }}
+              >
+                <SendIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            ) : null}
+            {isLoading ? (
+              <IconButton
+                aria-label={t('chat.stop_generating')}
+                title={t('chat.stop_generating')}
+                onClick={onStopGenerating}
+                sx={primarySx('error')}
+              >
+                <StopIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            ) : (
+              <IconButton
+                data-chat-send-btn
+                aria-label={t('chat.send_message')}
+                title={t('chat.send_message')}
+                disabled={disabled || !canSend}
+                onClick={() => {
+                  if (canSend) onSend()
+                }}
+                sx={primarySx('primary')}
+              >
+                <SendIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            )}
+          </Box>
+        </Box>
+      </Box>
+    )
+  }
+
   return (
     <Box
       ref={composerRootRef}
@@ -770,7 +1829,17 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
         width: '100%'
       }}
     >
-      <Box sx={{ width: '100%', px: 1.5, pb: 2 }}>
+      <Box sx={{ position: 'relative', width: '100%', px: 1.5, pb: 2 }}>
+        {suggestions ? (
+          <ComposerSuggestionPopup
+            id={suggestionListId}
+            suggestions={suggestions}
+            activeIndex={activeSuggestionIndex}
+            grouped={suggestionSkills !== undefined}
+            onActiveIndexChange={(index) => setSuggestionCursor({ key: suggestions.key, index })}
+            onAccept={acceptSuggestion}
+          />
+        ) : null}
         <Box
           sx={(theme) => ({
             display: 'flex',
@@ -814,164 +1883,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 }
               }}
             >
-              {visiblePendingAttachmentEntries.map(({ attachment, originalIndex }, idx) => {
-                const progress = uploadProgress[originalIndex]
-                return (
-                  <Box
-                    key={pendingAttachmentKeys[idx]}
-                    sx={{
-                      position: 'relative',
-                      width: 80,
-                      height: ATTACHMENT_PREVIEW_ITEM_HEIGHT,
-                      borderRadius: 1,
-                      overflow: 'hidden',
-                      border: 1,
-                      borderColor: 'divider'
-                    }}
-                  >
-                    {attachment.type === 'image' ? (
-                      <ComposerImageThumbnail
-                        src={normalizeLocalMediaUrl(attachment.url)}
-                        alt={t('chat.preview_alt_index', { index: idx + 1 })}
-                        onPreview={() => onPreviewImage(attachment.url)}
-                      />
-                    ) : attachment.type === 'video' ? (
-                      <Box
-                        sx={{
-                          width: '100%',
-                          height: '100%',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          bgcolor: 'background.paper',
-                          gap: 0.5
-                        }}
-                      >
-                        <VideoIcon sx={{ fontSize: 24, color: 'text.secondary' }} />
-                        {progress !== undefined && progress < 100 && <CircularProgress size={16} />}
-                      </Box>
-                    ) : attachment.type === 'model3d' ? (
-                      <Box
-                        sx={{
-                          width: '100%',
-                          height: '100%',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          bgcolor: 'background.paper',
-                          gap: 0.5
-                        }}
-                      >
-                        <Model3DIcon sx={{ fontSize: 24, color: 'text.secondary' }} />
-                        <Typography
-                          variant="caption"
-                          color="text.secondary"
-                          sx={{ fontSize: '0.6rem' }}
-                        >
-                          3D
-                        </Typography>
-                        {progress !== undefined && progress < 100 && <CircularProgress size={16} />}
-                      </Box>
-                    ) : attachment.type === 'file' ? (
-                      <Box
-                        sx={{
-                          width: '100%',
-                          height: '100%',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          bgcolor: 'background.paper',
-                          gap: 0.5
-                        }}
-                      >
-                        {renderFileAttachmentIcon(attachment)}
-                        <Typography
-                          variant="caption"
-                          color="primary"
-                          sx={{ fontSize: '0.6rem', fontWeight: 700 }}
-                        >
-                          {getFileBadgeText(attachment.fileName, attachment.mimeType)}
-                        </Typography>
-                        <Typography
-                          variant="caption"
-                          color="text.secondary"
-                          sx={{
-                            fontSize: '0.55rem',
-                            maxWidth: '100%',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            px: 0.5
-                          }}
-                        >
-                          {attachment.fileName || 'File'}
-                        </Typography>
-                        <Typography
-                          variant="caption"
-                          color="text.secondary"
-                          sx={{
-                            fontSize: '0.52rem',
-                            maxWidth: '100%',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            px: 0.5
-                          }}
-                        >
-                          {buildFileMetaLabel({
-                            fileName: attachment.fileName,
-                            mimeType: attachment.mimeType,
-                            sizeBytes: attachment.sizeBytes
-                          })}
-                        </Typography>
-                      </Box>
-                    ) : null}
-                    {progress !== undefined && progress < 100 && (
-                      <Box
-                        sx={{
-                          position: 'absolute',
-                          bottom: 0,
-                          left: 0,
-                          right: 0,
-                          height: 4,
-                          bgcolor: 'rgba(0,0,0,0.2)'
-                        }}
-                      >
-                        <Box
-                          sx={{
-                            height: '100%',
-                            width: `${progress}%`,
-                            bgcolor: 'primary.main',
-                            transition: 'width 0.3s'
-                          }}
-                        />
-                      </Box>
-                    )}
-                    <IconButton
-                      size="small"
-                      onClick={() => {
-                        if (attachment.url.startsWith('blob:')) {
-                          URL.revokeObjectURL(attachment.url)
-                        }
-                        onRemoveAttachment(originalIndex)
-                      }}
-                      sx={{
-                        position: 'absolute',
-                        top: 0,
-                        right: 0,
-                        bgcolor: 'rgba(0,0,0,0.5)',
-                        color: 'white',
-                        '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' }
-                      }}
-                    >
-                      <CloseIcon fontSize="small" />
-                    </IconButton>
-                  </Box>
-                )
-              })}
+              {visiblePendingAttachmentEntries.map(renderAttachmentTile)}
             </Box>
           )}
 
@@ -1042,18 +1954,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
                 }
               }}
               inputProps={{
-                'data-testid': 'chat-composer-input',
-                rows: 1,
-                onFocus: handleInputSelectionChange,
-                onBeforeInput: handleBeforeInput,
-                onKeyUp: handleInputSelectionChange,
-                onMouseUp: handleInputSelectionChange,
-                onClick: handleInputSelectionChange,
-                onSelect: handleInputSelectionChange,
-                onCompositionStart: handleCompositionStart,
-                onCompositionEnd: handleCompositionEnd,
-                onDragOver: handleInputDragOver,
-                onDrop: handleInputDrop,
+                ...textareaProps,
                 style: {
                   minHeight: `${MIN_TEXTAREA_HEIGHT}px`,
                   maxHeight: resolvedTextareaMaxHeight,
@@ -1112,104 +2013,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
             />
           </Box>
 
-          {toolHelpItems.length > 0 ? (
-            <Box data-testid="chat-composer-tool-help" sx={{ mb: 1 }}>
-              <Typography color="text.secondary" variant="caption">
-                {isToolCommandMode
-                  ? 'Use /tool <name> {"key":"value"} to call a bound tool directly. Click a tool or example to fill it.'
-                  : 'This skill can call bound tools directly with /tool <name> {"key":"value"}.'}
-              </Typography>
-              {isToolCommandMode && parsedToolCommand ? (
-                <Typography
-                  color={selectedToolValidationMessage ? 'error.main' : 'text.secondary'}
-                  variant="caption"
-                  sx={{ display: 'block', mt: 0.25 }}
-                >
-                  {selectedToolValidationMessage ||
-                    (selectedToolHelpItem
-                      ? `Ready to execute ${selectedToolHelpItem.name}${selectedToolInputSchemaSummary ? `: expects ${selectedToolInputSchemaSummary}.` : '.'}`
-                      : `No bound tool matches "${parsedToolCommand.toolName}".`)}
-                </Typography>
-              ) : null}
-              {isToolCommandMode ? (
-                <Box
-                  sx={{
-                    mt: 0.5,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 0.25,
-                    maxHeight: 120,
-                    overflowY: 'auto'
-                  }}
-                >
-                  {filteredToolHelpItems.length > 0 ? (
-                    <Typography color="text.secondary" variant="caption" sx={{ mb: 0.25 }}>
-                      {requestedToolName
-                        ? `Matching bound tools (${filteredToolHelpItems.length}):`
-                        : 'Available bound tools:'}
-                    </Typography>
-                  ) : (
-                    <Typography color="text.secondary" variant="caption" sx={{ mb: 0.25 }}>
-                      No bound tools match the current /tool prefix.
-                    </Typography>
-                  )}
-                  {filteredToolHelpItems.map((tool) => (
-                    <Typography
-                      key={tool.name}
-                      color="text.secondary"
-                      variant="caption"
-                      sx={{ whiteSpace: 'pre-wrap', cursor: 'pointer' }}
-                      onClick={() => handleInsertToolCommand(tool)}
-                    >
-                      <Box component="span" sx={{ fontFamily: 'monospace', color: 'text.primary' }}>
-                        {tool.name}
-                      </Box>
-                      {tool.description ? ` - ${tool.description}` : ''}
-                      {buildToolInputSchemaSummary(tool)
-                        ? `\nexpects ${buildToolInputSchemaSummary(tool)}`
-                        : ''}
-                    </Typography>
-                  ))}
-                  {selectedToolHelpItem?.inputSchema ? (
-                    <Box sx={{ mt: 0.5 }}>
-                      <Typography
-                        color="text.secondary"
-                        variant="caption"
-                        sx={{ display: 'block' }}
-                      >
-                        Suggested example:
-                      </Typography>
-                      <Typography
-                        color="text.primary"
-                        variant="caption"
-                        data-testid="chat-composer-tool-example"
-                        sx={{
-                          display: 'block',
-                          mt: 0.25,
-                          whiteSpace: 'pre-wrap',
-                          fontFamily: 'monospace',
-                          cursor: 'pointer'
-                        }}
-                        onClick={() => handleInsertToolCommand(selectedToolHelpItem)}
-                      >
-                        {buildToolCommandExample(selectedToolHelpItem)}
-                      </Typography>
-                    </Box>
-                  ) : null}
-                </Box>
-              ) : toolHelpSummary ? (
-                <Typography
-                  color="text.secondary"
-                  variant="caption"
-                  sx={{ display: 'block', mt: 0.25 }}
-                >
-                  {remainingToolHelpCount > 0
-                    ? `${toolHelpSummary} +${remainingToolHelpCount} more`
-                    : toolHelpSummary}
-                </Typography>
-              ) : null}
-            </Box>
-          ) : null}
+          {toolHelp}
 
           {/* Bottom Action Bar: + button and Send button */}
           <Box
@@ -1227,6 +2031,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}
             >
               <IconButton
+                data-testid="chat-composer-add-menu-button"
                 onClick={(event) => setAddMenuAnchorEl(event.currentTarget)}
                 disabled={disabled}
                 sx={{
@@ -1239,38 +2044,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
               >
                 <AddIcon fontSize="small" />
               </IconButton>
-              <Menu
-                anchorEl={addMenuAnchorEl}
-                open={active && Boolean(addMenuAnchorEl)}
-                onClose={closeAddMenu}
-                anchorOrigin={{ horizontal: 'left', vertical: 'top' }}
-                transformOrigin={{ horizontal: 'left', vertical: 'bottom' }}
-                slotProps={{
-                  paper: {
-                    sx: {
-                      minWidth: 232,
-                      borderRadius: 2,
-                      mt: -0.5
-                    }
-                  }
-                }}
-              >
-                <MenuItem onClick={handleUploadFileFromMenu}>
-                  <ListItemIcon>
-                    <AttachFileIcon fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={t('chat.add_file')}
-                    primaryTypographyProps={{ fontSize: 13, fontWeight: 600 }}
-                  />
-                </MenuItem>
-                {addMenuSlot ? (
-                  <>
-                    <Divider sx={{ my: 0.5 }} />
-                    {addMenuSlot(closeAddMenu)}
-                  </>
-                ) : null}
-              </Menu>
+              {addMenu}
               {toolbarSlot ? (
                 <Box
                   data-testid="chat-composer-toolbar-slot"
@@ -1288,58 +2062,44 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
 
             <Box
               data-testid="chat-composer-send-group"
-              sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}
+              sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}
             >
+              {statusControl}
+
               {hasModelSelectorSlot ? (
                 <Box
                   data-testid="chat-composer-model-selector-slot"
-                  sx={{ display: 'flex', alignItems: 'center', transform: 'translateY(-3px)' }}
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    minWidth: 0,
+                    transform: 'translateY(-3px)'
+                  }}
                 >
                   {modelSelectorSlot}
                 </Box>
               ) : null}
-
-              {statusSlot ? (
-                <Box
-                  data-testid="chat-composer-status-slot"
-                  sx={{ display: 'flex', alignItems: 'center' }}
-                >
-                  {onCompressContext ? (
-                    <Box
-                      data-testid="chat-composer-context-status-compress"
-                      role="button"
-                      aria-label={t('chat.compress_context', { defaultValue: 'Compress context' })}
-                      aria-disabled={!canCompressFromStatusSlot}
-                      tabIndex={canCompressFromStatusSlot ? 0 : -1}
-                      onClick={handleStatusSlotCompressClick}
-                      onKeyDown={handleStatusSlotCompressKeyDown}
-                      sx={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        width: 30,
-                        height: 30,
-                        borderRadius: '50%',
-                        color: 'text.secondary',
-                        cursor: canCompressFromStatusSlot ? 'pointer' : 'default',
-                        opacity: disabled || isLoading ? 0.5 : 1,
-                        outline: 'none',
-                        '&:focus-visible': {
-                          boxShadow: (theme) => `0 0 0 2px ${theme.palette.primary.main}`
-                        },
-                        '& [data-testid="chat-context-compression-indicator"]': {
-                          cursor: canCompressFromStatusSlot ? 'pointer' : 'default'
-                        }
-                      }}
-                    >
-                      {statusSlot}
-                    </Box>
-                  ) : (
-                    statusSlot
+              {/* Keep parent Stop available while a private command is submitted separately. */}
+              {isLoading &&
+              sideCommandEnabled &&
+              (isAgentSideCommand(localInputValue) ||
+                isAgentSkillCommand(localInputValue) ||
+                isAgentScratchpadCommand(localInputValue)) ? (
+                <IconButton
+                  data-chat-side-command-btn
+                  disabled={disabled || !active}
+                  onClick={onSend}
+                  title={t(
+                    isAgentScratchpadCommand(localInputValue)
+                      ? 'chat.agent_scratchpad.command_send'
+                      : isAgentSkillCommand(localInputValue)
+                        ? 'chat.agent_skill_session.command_send'
+                        : 'chat.agent_side.command_send'
                   )}
-                </Box>
+                >
+                  <SendIcon fontSize="small" />
+                </IconButton>
               ) : null}
-
               {/* 发送/停止按钮 */}
               {isLoading ? (
                 <IconButton

@@ -71,6 +71,10 @@ type MockTextureSource = {
   unload: ReturnType<typeof vi.fn>
 }
 type MockSpriteInstance = {
+  // 'mesh' is the edge-antialiased display object of a rotated image.
+  kind: 'sprite' | 'mesh'
+  shader?: { destroyed: boolean; resources: Record<string, unknown> }
+  geometry?: { destroyed: boolean }
   texture: MockTextureInstance
   position: MockPoint
   scale: MockPoint
@@ -89,6 +93,8 @@ type MockContainerInstance = {
   position: MockPoint
   scale: MockPoint
   addChild: (child: MockSpriteInstance) => void
+  addChildAt: (child: MockSpriteInstance, index: number) => void
+  getChildIndex: (child: MockSpriteInstance) => number
   sortChildren: () => void
 }
 
@@ -106,7 +112,13 @@ type MockWebGLContext = {
 type MockApplicationInstance = {
   stage: MockContainerInstance
   canvas: HTMLCanvasElement
-  renderer: { resize: ReturnType<typeof vi.fn>; gl: MockWebGLContext }
+  renderer: {
+    resize: ReturnType<typeof vi.fn>
+    gl: MockWebGLContext
+    resolution?: number
+    context?: { webGLVersion: number }
+    texture?: { initSource: ReturnType<typeof vi.fn>; _uploads?: Record<string, unknown> }
+  }
   render: ReturnType<typeof vi.fn>
   destroy: ReturnType<typeof vi.fn>
   initOptions?: Record<string, unknown>
@@ -121,6 +133,31 @@ let textureScaleModeReadCount = 0
 let textureScaleModeWriteCount = 0
 let createdBaseTextures: MockTextureInstance[] = []
 let bitmapClosedWithLiveTexture: ImageBitmap[] = []
+// Bitmaps that were closed. A closed bitmap keeps reporting its pinned size, so "closed" is
+// tracked here and every upload path of the Pixi mock checks it.
+let closedBitmaps = new WeakSet<object>()
+// false simulates a renderer without an eager upload: Pixi then uploads on a later draw.
+let mockRendererSupportsEagerUpload = true
+// Eager uploads of the layer's own decodes (bitmaps, decoded image elements)...
+let eagerTextureUploads: unknown[] = []
+// ...and of the items' own preview images (item.image of an item from createItem, or any
+// real <img> element), which the layer uploads eagerly too but never releases.
+let eagerPreviewUploads: unknown[] = []
+let providedItemImages = new WeakSet<object>()
+// Called at the start of every eager upload of the mock renderer, before the upload itself.
+let eagerUploadHook: ((source: MockTextureSource) => void) | null = null
+// Textures that the mock render had to upload on their first draw (Pixi's lazy upload).
+let lazyRenderUploadCount = 0
+// 1 simulates a WebGL 1 context, which cannot run the edge-antialias program.
+let mockWebGLVersion = 2
+// true gives the mock context WebGL 2 fences; each one passes when the test sets `signaled`.
+let mockWebGLFences = false
+let createdWebGLFences: { signaled: boolean; deleted: boolean }[] = []
+let createdEdgeAntialiasShaders: { destroyed: boolean; resources: Record<string, unknown> }[] = []
+// Upload methods registered with the mocked Pixi extensions (name -> method), copied into each
+// renderer's texture system when it is created, as Pixi does.
+let registeredTextureUploaders: Record<string, unknown> = {}
+const pixiImageUploadMock = vi.fn()
 const originalDevicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio
 
 type MockImageInstance = {
@@ -211,6 +248,7 @@ function installPixiMock() {
       height: number
       destroyed = false
       destroySourceCalled = false
+      textureMatrix = { mapCoord: { frameOf: this as MockTextureInstance } }
 
       constructor({
         source,
@@ -260,6 +298,8 @@ function installPixiMock() {
           destroyed: false,
           resource: image as unknown | null,
           gpuValid: false,
+          // Pixi's ImageSource is collectable by default.
+          autoGarbageCollect: true,
           unload: vi.fn(),
           get image() {
             return this.resource
@@ -293,6 +333,7 @@ function installPixiMock() {
     }
 
     class MockSprite implements MockSpriteInstance {
+      kind: 'sprite' | 'mesh' = 'sprite'
       position = createPoint()
       scale = createPoint(1, 1)
       rotation = 0
@@ -319,6 +360,52 @@ function installPixiMock() {
       }
     }
 
+    class MockGlProgram {
+      static from(options: { vertex: string; fragment: string; name?: string }) {
+        return { ...options }
+      }
+    }
+
+    class MockShader {
+      destroyed = false
+      resources: Record<string, unknown>
+
+      constructor(options: { glProgram: unknown; resources: Record<string, unknown> }) {
+        this.resources = options.resources
+        createdEdgeAntialiasShaders.push(this)
+      }
+
+      destroy() {
+        this.destroyed = true
+      }
+    }
+
+    class MockMeshGeometry {
+      destroyed = false
+
+      constructor(public options: { positions: Float32Array; uvs: Float32Array }) {}
+
+      destroy() {
+        this.destroyed = true
+      }
+    }
+
+    class MockMesh extends MockSprite {
+      shader: MockShader
+      geometry: MockMeshGeometry
+
+      constructor(options: {
+        geometry: MockMeshGeometry
+        shader: MockShader
+        texture: MockTextureInstance
+      }) {
+        super(options.texture)
+        this.kind = 'mesh'
+        this.shader = options.shader
+        this.geometry = options.geometry
+      }
+    }
+
     class MockContainer implements MockContainerInstance {
       children: MockSpriteInstance[] = []
       sortableChildren = false
@@ -330,6 +417,19 @@ function installPixiMock() {
         child.parent = this
       }
 
+      addChildAt(child: MockSpriteInstance, index: number) {
+        this.children.splice(index, 0, child)
+        child.parent = this
+      }
+
+      getChildIndex(child: MockSpriteInstance) {
+        const index = this.children.indexOf(child)
+        if (index < 0) {
+          throw new Error('The supplied child is not a child of the container.')
+        }
+        return index
+      }
+
       sortChildren() {
         this.children.sort((left, right) => left.zIndex - right.zIndex)
       }
@@ -338,11 +438,37 @@ function installPixiMock() {
     class MockApplication implements MockApplicationInstance {
       stage = new MockContainer()
       canvas = document.createElement('canvas')
-      renderer = {
+      renderer: MockApplicationInstance['renderer'] = {
         resize: vi.fn((width: number, height: number) => {
           this.canvas.width = width
           this.canvas.height = height
         }),
+        ...(mockRendererSupportsEagerUpload
+          ? {
+              texture: {
+                _uploads: { ...registeredTextureUploaders },
+                initSource: vi.fn((source: MockTextureSource) => {
+                  eagerUploadHook?.(source)
+                  if (source.destroyed) {
+                    throw new Error('Pixi attempted to upload a destroyed texture source.')
+                  }
+                  if (!source.gpuValid) {
+                    assertBitmapUploadable(source.resource)
+                    if (
+                      source.resource instanceof HTMLImageElement ||
+                      providedItemImages.has(source.resource as object)
+                    ) {
+                      eagerPreviewUploads.push(source.resource)
+                    } else {
+                      eagerTextureUploads.push(source.resource)
+                    }
+                    source.gpuValid = true
+                  }
+                })
+              }
+            }
+          : {}),
+        context: { webGLVersion: mockWebGLVersion },
         gl: {
           getError: vi.fn(() => 0),
           NO_ERROR: 0,
@@ -351,7 +477,23 @@ function installPixiMock() {
           INVALID_OPERATION: 1282,
           INVALID_FRAMEBUFFER_OPERATION: 1286,
           OUT_OF_MEMORY: 1285,
-          CONTEXT_LOST_WEBGL: 37442
+          CONTEXT_LOST_WEBGL: 37442,
+          ...(mockWebGLFences
+            ? {
+                fenceSync: vi.fn(() => {
+                  const fence = { signaled: false, deleted: false }
+                  createdWebGLFences.push(fence)
+                  return fence
+                }),
+                getSyncParameter: vi.fn((fence: { signaled: boolean }, pname: number) =>
+                  pname === 0x9114 && fence.signaled ? 0x9119 : 0x9118
+                ),
+                deleteSync: vi.fn((fence: { deleted: boolean }) => {
+                  fence.deleted = true
+                }),
+                flush: vi.fn()
+              }
+            : {})
         }
       }
       render = vi.fn(() => {
@@ -363,6 +505,7 @@ function installPixiMock() {
             }
             if (!source.gpuValid) {
               assertBitmapUploadable(source.resource)
+              lazyRenderUploadCount += 1
               source.gpuValid = true
             }
           }
@@ -384,7 +527,22 @@ function installPixiMock() {
     return {
       Application: MockApplication,
       Container: MockContainer,
+      ExtensionType: { TextureUploaderWebGL: 'texture-uploader-webgl' },
+      extensions: {
+        add: (...added: { extension: { type: string; name: string } }[]) => {
+          added.forEach((extension) => {
+            if (extension.extension.type === 'texture-uploader-webgl') {
+              registeredTextureUploaders[extension.extension.name] = extension
+            }
+          })
+        }
+      },
+      glUploadImageResource: { id: 'image', upload: pixiImageUploadMock },
+      GlProgram: MockGlProgram,
+      Mesh: MockMesh,
+      MeshGeometry: MockMeshGeometry,
       Rectangle: MockRectangle,
+      Shader: MockShader,
       Sprite: MockSprite,
       Texture: MockTexture
     }
@@ -407,7 +565,10 @@ function createImage(width: number, height: number) {
 
 function assertBitmapUploadable(value: unknown) {
   const image = value as ImageBitmap | undefined
-  if (typeof image?.close === 'function' && (image.width === 0 || image.height === 0)) {
+  if (
+    typeof image?.close === 'function' &&
+    (closedBitmaps.has(image) || image.width === 0 || image.height === 0)
+  ) {
     throw new Error('Pixi attempted to upload a closed ImageBitmap.')
   }
 }
@@ -422,18 +583,24 @@ function createBitmap(width: number, height: number) {
       return closed ? 0 : height
     },
     close: vi.fn(() => {
+      // Closing a bitmap is only a bug while a live texture still has to upload it.
       if (
-        createdBaseTextures.some(
-          (texture) =>
-            !texture.destroyed && (texture.source as { image?: unknown }).image === bitmap
-        )
+        createdBaseTextures.some((texture) => {
+          const source = texture.source as MockTextureSource & { image?: unknown }
+          return !texture.destroyed && source.image === bitmap && !source.gpuValid
+        })
       ) {
         bitmapClosedWithLiveTexture.push(bitmap as ImageBitmap)
       }
       closed = true
+      closedBitmaps.add(bitmap)
     })
   }
   return bitmap as ImageBitmap & { close: ReturnType<typeof vi.fn> }
+}
+
+function isBitmapClosed(bitmap: unknown) {
+  return closedBitmaps.has(bitmap as object)
 }
 
 function deferredBitmap() {
@@ -444,12 +611,38 @@ function deferredBitmap() {
   return { promise, resolve }
 }
 
+const realSetTimeoutForPolling = globalThis.setTimeout
+
+/**
+ * The layer arms short real timers of its own after a pass (viewport reconcile 48 ms, source
+ * upgrade idle 80 ms, deferred image version 180 ms...). On a loaded machine they fired inside an
+ * act() a test was measuring and ran an extra reconcile pass there. Tests that keep setTimeout
+ * fake from the first render wait with this instead of waitFor (whose act wrapper waits on a
+ * setTimeout): fake time moves only here, `advanceMs` per step next to 20 ms of real time
+ * (promises and animation frames stay real), and never inside the act() under test. Before
+ * the measured act() a test passes 0, so the timers armed at mount are still pending there.
+ */
+async function waitAdvancingFakeTimers(assertion: () => void, advanceMs = 20): Promise<void> {
+  for (let step = 0; ; step += 1) {
+    try {
+      assertion()
+      return
+    } catch (error) {
+      if (step >= 250) throw error
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(advanceMs)
+      await new Promise((resolve) => realSetTimeoutForPolling(resolve, 20))
+    })
+  }
+}
+
 function getTextureImage(sprite: MockSpriteInstance | null) {
   return (sprite?.texture.source as { image?: unknown } | undefined)?.image
 }
 
 function createItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
-  return {
+  const item: CanvasImageItem = {
     id: 'image-1',
     type: 'image',
     src: 'file:///image-1.png',
@@ -466,6 +659,10 @@ function createItem(overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
     image: createImage(100, 60),
     ...overrides
   }
+  if (item.image && typeof item.image === 'object') {
+    providedItemImages.add(item.image)
+  }
+  return item
 }
 
 function createNamedItem(id: string, overrides: Partial<CanvasImageItem> = {}): CanvasImageItem {
@@ -556,6 +753,19 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     textureScaleModeWriteCount = 0
     createdBaseTextures = []
     bitmapClosedWithLiveTexture = []
+    closedBitmaps = new WeakSet<object>()
+    mockRendererSupportsEagerUpload = true
+    eagerTextureUploads = []
+    eagerPreviewUploads = []
+    providedItemImages = new WeakSet<object>()
+    eagerUploadHook = null
+    lazyRenderUploadCount = 0
+    mockWebGLVersion = 2
+    mockWebGLFences = false
+    createdWebGLFences = []
+    createdEdgeAntialiasShaders = []
+    registeredTextureUploaders = {}
+    pixiImageUploadMock.mockReset()
     setWindowDevicePixelRatio(originalDevicePixelRatio)
     installPixiMock()
   })
@@ -578,6 +788,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     afterEach(() => {
       vi.unstubAllGlobals()
       vi.restoreAllMocks()
+      vi.doUnmock('../canvasImageResourceLifecycle')
       expect(bitmapClosedWithLiveTexture).toEqual([])
     })
 
@@ -608,7 +819,635 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       })
     }
 
-    it('keeps an initial local bitmap open until its texture is destroyed on unmount', async () => {
+    it('loads a local image again once main answers for it, never one it refused', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const busy = localSourceItem({ id: 'busy', src: 'local-media:///Volumes/nas/busy.png' })
+      const refused = localSourceItem({
+        id: 'refused',
+        src: 'local-media:///Users/x/refused.png',
+        x: 400
+      })
+      // Main's scoped-path check: the share does not answer at first, then it does; the other
+      // file is never authorized.
+      let busyChecks = 0
+      const resolveAuthorizedLocalMediaPath = vi.fn(async (filePath: string) => {
+        if (filePath.includes('busy')) return (busyChecks += 1) <= 2 ? '' : filePath
+        return ''
+      })
+      vi.stubGlobal('electronFile', { resolveAuthorizedLocalMediaPath })
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'HEAD') {
+          return new Response(null, { status: url.includes('busy') ? 503 : 403 })
+        }
+        return new Response(new Blob(['image'], { type: 'image/png' }), { status: 200 })
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      const bitmap = createBitmap(640, 360)
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async () => bitmap)
+      )
+      const failed = vi.fn()
+      const { unmount } = render(
+        <Layer
+          items={[busy, refused]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          onFailedIdsChange={failed}
+        />
+      )
+      await waitFor(() => expect(failed).toHaveBeenLastCalledWith(new Set(['busy', 'refused'])), {
+        timeout: 15000
+      })
+      // Retried after a short wait: the image loads and is no longer failed.
+      await waitFor(
+        () => {
+          expect(getTextureImage(getLiveSpriteByLabel('busy'))).toBe(bitmap)
+          expect(failed).toHaveBeenLastCalledWith(new Set(['refused']))
+        },
+        { timeout: 15000 }
+      )
+      expect(fetchMock).toHaveBeenCalledWith(busy.src, { method: 'HEAD', cache: 'no-store' })
+      // The refused file was asked about once and never loaded again.
+      await new Promise((done) => setTimeout(done, 1_000))
+      expect(
+        resolveAuthorizedLocalMediaPath.mock.calls.filter(([filePath]) =>
+          filePath.includes('refused')
+        )
+      ).toHaveLength(2)
+      expect(getLiveSpriteByLabel('refused')).toBeNull()
+      unmount()
+    }, 30000)
+
+    it('closes an initial local bitmap right after its upload and never uploads it again', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmap = createBitmap(640, 360)
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async () => bitmap)
+      )
+      const item = localSourceItem()
+      const metrics = vi.fn()
+      const { unmount } = render(
+        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} onMetricsChange={metrics} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(bitmap))
+      expect(bitmap).not.toHaveProperty('naturalWidth')
+      // One decoded copy per image: the pixels live in the texture, the bitmap is closed.
+      expect(eagerTextureUploads).toEqual([bitmap])
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+      expect(isBitmapClosed(bitmap)).toBe(true)
+      // The closed bitmap still reports its size, so texture keys and LOD decisions hold.
+      expect([bitmap.width, bitmap.height]).toEqual([640, 360])
+      const source = getLiveSpriteByLabel(item.id)!.texture.source as MockTextureSource
+      expect(source.gpuValid).toBe(true)
+      expect((source as { autoGarbageCollect?: boolean }).autoGarbageCollect).toBe(false)
+      const app = createdApplications[0]
+      for (let frame = 0; frame < 3; frame += 1) {
+        expect(() => (app.render as unknown as () => void)()).not.toThrow()
+      }
+      expect(app.renderer.texture?.initSource).toHaveBeenCalledTimes(1)
+      await waitFor(() =>
+        expect(metrics).toHaveBeenLastCalledWith(
+          expect.objectContaining({ decodedResidentBytes: 0, sourceImageCacheCount: 1 })
+        )
+      )
+      unmount()
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+      expect(createdBaseTextures.every((texture) => texture.destroyed)).toBe(true)
+      expect(
+        createdBaseTextures.every((texture) => {
+          const source = texture.source as MockTextureSource
+          return source.destroyed && source.resource === null
+        })
+      ).toBe(true)
+    })
+
+    // Three images whose decodes (2048 x 2048, 16 MiB each) finish in the same task.
+    const renderThreeLargeDecodes = async (side = 2048, count = 3) => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const pending = Array.from({ length: count }, () => deferredBitmap())
+      const bitmaps = pending.map(() => createBitmap(side, side))
+      let decodeIndex = 0
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(() => pending[Math.min(decodeIndex++, pending.length - 1)].promise)
+      )
+      const items = Array.from({ length: count }, (_, index) => `large-${index + 1}`).map(
+        (id, index) =>
+          localSourceItem({
+            id,
+            src: `local-media:///C:/images/${id}.png`,
+            x: 24 + (index % 4) * 260,
+            y: 24 + Math.floor(index / 4) * 260,
+            sourceWidth: side,
+            sourceHeight: side
+          })
+      )
+      const utils = render(<Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(decodeIndex).toBe(count))
+      const app = createdApplications[0]
+      const uploadFrames: number[] = []
+      let displayFrame = 0
+      const requestFrame = window.requestAnimationFrame.bind(window)
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+        requestFrame((time) => {
+          displayFrame += 1
+          callback(time)
+        })
+      )
+      const upload = app.renderer.texture!.initSource
+      const uploadImplementation = upload.getMockImplementation() as (
+        source: MockTextureSource
+      ) => void
+      upload.mockImplementation((source: MockTextureSource) => {
+        uploadFrames.push(displayFrame)
+        uploadImplementation(source)
+      })
+      await act(async () => {
+        pending.forEach((entry, index) => entry.resolve(bitmaps[index]))
+        await Promise.resolve()
+      })
+      const settle = (ms: number) =>
+        act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, ms))
+        })
+      return { ...utils, app, items, bitmaps, uploadFrames, settle }
+    }
+
+    it('starts a large upload only after the previous one finished on the GPU', async () => {
+      mockWebGLFences = true
+      const { items, bitmaps, settle, unmount } = await renderThreeLargeDecodes()
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+      await settle(250)
+      // The first upload is still in flight: the others keep their decodes and wait.
+      expect(eagerTextureUploads).toHaveLength(1)
+      expect(createdWebGLFences).toHaveLength(1)
+      expect(items.filter((item) => getLiveSpriteByLabel(item.id))).toHaveLength(1)
+      const waiting = bitmaps.filter((bitmap) => !eagerTextureUploads.includes(bitmap))
+      expect(waiting).toHaveLength(2)
+      expect(waiting.some(isBitmapClosed)).toBe(false)
+
+      createdWebGLFences[0].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(2))
+      expect(createdWebGLFences[0].deleted).toBe(true)
+      await settle(250)
+      expect(eagerTextureUploads).toHaveLength(2)
+
+      createdWebGLFences[1].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(3))
+      await waitFor(() =>
+        expect(items.filter((item) => getLiveSpriteByLabel(item.id))).toHaveLength(3)
+      )
+      expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
+      expect(bitmaps.every(isBitmapClosed)).toBe(true)
+
+      unmount()
+      expect(createdWebGLFences.every((fence) => fence.deleted)).toBe(true)
+    })
+
+    it('uploads at most one large texture per display frame without fences', async () => {
+      const { items, bitmaps, uploadFrames, settle } = await renderThreeLargeDecodes()
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(3))
+      await settle(100)
+      expect(eagerTextureUploads).toHaveLength(3)
+      expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
+      // Each large upload ran in a display frame of its own.
+      expect(new Set(uploadFrames).size).toBe(3)
+      expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true)
+    })
+
+    it('keeps uploading small textures of one pass together', async () => {
+      // 1024 x 1024 is 4 MiB: below the size that is staged in a chunk of its own.
+      const { bitmaps, uploadFrames } = await renderThreeLargeDecodes(1024)
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(3))
+      expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
+      expect(new Set(uploadFrames).size).toBe(1)
+    })
+
+    it('spreads a burst of small uploads over display frames by bytes', async () => {
+      // Six 4 MiB textures from one pass: 16 MiB go up in the first frame, the rest in the next.
+      const { items, bitmaps, uploadFrames } = await renderThreeLargeDecodes(1024, 6)
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(6))
+      expect(new Set(eagerTextureUploads)).toEqual(new Set(bitmaps))
+      const uploadsPerFrame = new Map<number, number>()
+      uploadFrames.forEach((frame) =>
+        uploadsPerFrame.set(frame, (uploadsPerFrame.get(frame) ?? 0) + 1)
+      )
+      expect([...uploadsPerFrame.values()]).toEqual([4, 2])
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+    })
+
+    it('waits for the previous frame of small uploads to finish on the GPU', async () => {
+      mockWebGLFences = true
+      const { items, settle } = await renderThreeLargeDecodes(1024, 6)
+
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(4))
+      await settle(250)
+      // One fence covers the whole first frame of uploads; the rest waits for it.
+      expect(eagerTextureUploads).toHaveLength(4)
+      expect(createdWebGLFences).toHaveLength(1)
+      createdWebGLFences[0].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(6))
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+    })
+
+    // Items that arrive with a preview image of their own (an import's 512 px bitmaps), each
+    // upload taking `uploadMs` of main-thread time on a clock that moves only during uploads.
+    const renderOwnPreviews = async (count: number, uploadMs: number) => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      let clockMs = 1000
+      vi.spyOn(window.performance, 'now').mockImplementation(() => clockMs)
+      let displayFrame = 0
+      const requestFrame = window.requestAnimationFrame.bind(window)
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+        requestFrame((time) => {
+          displayFrame += 1
+          callback(time)
+        })
+      )
+      const items = Array.from({ length: count }, (_, index) =>
+        createNamedItem(`preview-${index + 1}`, {
+          x: 24 + (index % 6) * 180,
+          y: 24 + Math.floor(index / 6) * 140,
+          zIndex: index,
+          image: createImage(512, 512)
+        })
+      )
+      const uploadFrames: number[] = []
+      eagerUploadHook = () => {
+        uploadFrames.push(displayFrame)
+        clockMs += uploadMs
+      }
+      const utils = render(<Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      const uploadsPerFrame = () => {
+        const perFrame = new Map<number, number>()
+        uploadFrames.forEach((frame) => perFrame.set(frame, (perFrame.get(frame) ?? 0) + 1))
+        return [...perFrame.values()]
+      }
+      return { ...utils, items, uploadsPerFrame, getLazyUploads: () => lazyRenderUploadCount }
+    }
+
+    it("uploads the items' own preview images eagerly, within the frame byte budget", async () => {
+      // Twenty 1 MiB previews: 16 MiB go up in one display frame, the rest in the next one,
+      // before any draw; Pixi never uploads one lazily inside a render.
+      const { items, uploadsPerFrame, getLazyUploads } = await renderOwnPreviews(20, 0)
+
+      await waitFor(() => expect(eagerPreviewUploads).toHaveLength(20))
+      expect(new Set(eagerPreviewUploads)).toEqual(new Set(items.map((item) => item.image)))
+      expect(uploadsPerFrame()).toEqual([16, 4])
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+      expect(getLazyUploads()).toBe(0)
+      // The page owns its preview images: nothing is released or replaced.
+      items.forEach((item) =>
+        expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(item.image)
+      )
+    })
+
+    it('keeps the uploads of one display frame within the frame time budget', async () => {
+      // Each preview takes 3 ms to upload: a second one would pass the 4 ms frame budget, so
+      // the previews go up one per display frame, and every one of them does.
+      const { items, uploadsPerFrame, getLazyUploads } = await renderOwnPreviews(5, 3)
+
+      await waitFor(() => expect(eagerPreviewUploads).toHaveLength(5))
+      expect(uploadsPerFrame()).toEqual([1, 1, 1, 1, 1])
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+      expect(getLazyUploads()).toBe(0)
+    })
+
+    it('keeps the sprites on screen while the rest of the previews wait for their frame', async () => {
+      const { items, uploadsPerFrame } = await renderOwnPreviews(5, 3)
+
+      await waitFor(() => expect(eagerPreviewUploads.length).toBeGreaterThanOrEqual(2))
+      const first = items.find((item) => getLiveSpriteByLabel(item.id))!
+      const firstSprite = getLiveSpriteByLabel(first.id)
+      await waitFor(() => expect(eagerPreviewUploads).toHaveLength(5))
+      expect(getLiveSpriteByLabel(first.id)).toBe(firstSprite)
+      expect(firstSprite?.destroyed).toBe(false)
+      expect(uploadsPerFrame().every((count) => count === 1)).toBe(true)
+    })
+
+    describe('strip uploads of large sources', () => {
+      const createStripGl = () => {
+        const calls: { fn: string; args: unknown[] }[] = []
+        const gl = {
+          UNPACK_SKIP_ROWS: 0x0cf3,
+          pixelStorei: vi.fn((...args: unknown[]) => calls.push({ fn: 'pixelStorei', args })),
+          texImage2D: vi.fn((...args: unknown[]) => calls.push({ fn: 'texImage2D', args })),
+          texSubImage2D: vi.fn((...args: unknown[]) => calls.push({ fn: 'texSubImage2D', args }))
+        }
+        return { gl, calls }
+      }
+      const createStripSource = (width: number, height: number) => ({
+        pixelWidth: width,
+        pixelHeight: height,
+        resourceWidth: width,
+        resourceHeight: height,
+        resource: createBitmap(width, height)
+      })
+      const createGlTexture = (width = -1, height = -1) => ({
+        target: 3553,
+        internalFormat: 6408,
+        format: 6408,
+        type: 5121,
+        width,
+        height
+      })
+
+      it('uploads a 4096 x 3072 source as strips of at most 4 MiB covering every row', async () => {
+        const {
+          uploadProjectCanvasTextureInStrips,
+          PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES
+        } = await import('./projectCanvasWebGLStripUpload')
+        const { gl, calls } = createStripGl()
+        const source = createStripSource(4096, 3072)
+        const glTexture = createGlTexture()
+
+        uploadProjectCanvasTextureInStrips(source, glTexture, gl, 2)
+
+        // Allocated once without data, so no upload of the whole image is staged at once.
+        expect(gl.texImage2D).toHaveBeenCalledTimes(1)
+        expect(gl.texImage2D.mock.calls[0]).toEqual([
+          3553,
+          0,
+          6408,
+          4096,
+          3072,
+          0,
+          6408,
+          5121,
+          null
+        ])
+        const strips = gl.texSubImage2D.mock.calls.map((args) => ({
+          y: args[3] as number,
+          width: args[4] as number,
+          rows: args[5] as number,
+          resource: args[8]
+        }))
+        expect(strips).toHaveLength(12)
+        let nextRow = 0
+        strips.forEach((strip) => {
+          expect(strip.y).toBe(nextRow)
+          expect(strip.width).toBe(4096)
+          expect(strip.width * strip.rows * 4).toBeLessThanOrEqual(
+            PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES
+          )
+          expect(strip.resource).toBe(source.resource)
+          nextRow += strip.rows
+        })
+        expect(nextRow).toBe(3072)
+        // Each strip reads its own rows of the image, and the unpack state is left clean.
+        const skipRows = calls.filter((call) => call.fn === 'pixelStorei').map((call) => call.args)
+        expect(skipRows.slice(0, -1)).toEqual(strips.map((strip) => [0x0cf3, strip.y]))
+        expect(skipRows.at(-1)).toEqual([0x0cf3, 0])
+        expect(calls.at(-1)?.fn).toBe('pixelStorei')
+        expect([glTexture.width, glTexture.height]).toEqual([4096, 3072])
+        expect(pixiImageUploadMock).not.toHaveBeenCalled()
+      })
+
+      it('refills a texture of the same size without allocating it again', async () => {
+        const { uploadProjectCanvasTextureInStrips } =
+          await import('./projectCanvasWebGLStripUpload')
+        const { gl } = createStripGl()
+
+        uploadProjectCanvasTextureInStrips(
+          createStripSource(2048, 2048),
+          createGlTexture(2048, 2048),
+          gl,
+          2
+        )
+
+        expect(gl.texImage2D).not.toHaveBeenCalled()
+        expect(gl.texSubImage2D.mock.calls.map((args) => [args[3], args[5]])).toEqual([
+          [0, 512],
+          [512, 512],
+          [1024, 512],
+          [1536, 512]
+        ])
+      })
+
+      it('leaves small images and WebGL 1 to the single upload of Pixi', async () => {
+        const { uploadProjectCanvasTextureInStrips } =
+          await import('./projectCanvasWebGLStripUpload')
+        const { gl } = createStripGl()
+        const small = createStripSource(1024, 1024)
+        const large = createStripSource(2048, 2048)
+
+        uploadProjectCanvasTextureInStrips(small, createGlTexture(), gl, 2)
+        uploadProjectCanvasTextureInStrips(large, createGlTexture(), gl, 1)
+
+        expect(gl.texImage2D).not.toHaveBeenCalled()
+        expect(gl.texSubImage2D).not.toHaveBeenCalled()
+        expect(pixiImageUploadMock.mock.calls.map((args) => [args[0], args[3]])).toEqual([
+          [small, 2],
+          [large, 1]
+        ])
+      })
+
+      it('gives decoded sources above the strip size the strip upload method', async () => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        vi.stubGlobal(
+          'createImageBitmap',
+          vi.fn(async () => createBitmap(2048, 2048))
+        )
+        const item = createNamedItem('strip-source', {
+          src: 'local-media:///C:/images/strip-source.png',
+          sourceWidth: 2048,
+          sourceHeight: 2048,
+          image: createImage(16, 16)
+        })
+        const { unmount } = render(
+          <Layer
+            items={[item]}
+            {...TEST_STAGE_VIEWPORT_1280_720}
+            selectedIds={new Set([item.id])}
+          />
+        )
+        await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+        const sourceTexture = createdBaseTextures.find(
+          (texture) => (texture.source as MockTextureSource).resource === eagerTextureUploads[0]
+        )!
+        // The preview's texture (destroyed once the source replaced it) kept Pixi's upload.
+        const otherTextures = createdBaseTextures.filter((texture) => texture !== sourceTexture)
+        expect(otherTextures.length).toBeGreaterThan(0)
+        expect((sourceTexture.source as { uploadMethodId?: string }).uploadMethodId).toBe(
+          'project-canvas-strips'
+        )
+        expect(
+          otherTextures.every(
+            (texture) =>
+              (texture.source as { uploadMethodId?: string }).uploadMethodId === undefined
+          )
+        ).toBe(true)
+        // The method Pixi calls for it is the strip upload, registered before the renderer.
+        const uploads = createdApplications[0].renderer.texture!._uploads!
+        const { uploadProjectCanvasTextureInStrips } =
+          await import('./projectCanvasWebGLStripUpload')
+        expect((uploads['project-canvas-strips'] as { upload: unknown }).upload).toBe(
+          uploadProjectCanvasTextureInStrips
+        )
+        unmount()
+      })
+
+      it('keeps the single upload on a WebGL 1 renderer', async () => {
+        mockWebGLVersion = 1
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        vi.stubGlobal(
+          'createImageBitmap',
+          vi.fn(async () => createBitmap(2048, 2048))
+        )
+        const item = createNamedItem('webgl1-source', {
+          src: 'local-media:///C:/images/webgl1-source.png',
+          sourceWidth: 2048,
+          sourceHeight: 2048,
+          image: createImage(16, 16)
+        })
+        const { unmount } = render(
+          <Layer
+            items={[item]}
+            {...TEST_STAGE_VIEWPORT_1280_720}
+            selectedIds={new Set([item.id])}
+          />
+        )
+        await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+        expect(
+          createdBaseTextures.some(
+            (texture) =>
+              (texture.source as { uploadMethodId?: string }).uploadMethodId !== undefined
+          )
+        ).toBe(false)
+        unmount()
+      })
+    })
+
+    it('moves, re-layers and rotates an image whose large upload is held back', async () => {
+      mockWebGLFences = true
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async () => createBitmap(2048, 2048))
+      )
+      const items = ['big-a', 'big-b'].map((id, index) =>
+        createNamedItem(id, {
+          src: `local-media:///C:/images/${id}.png`,
+          x: 24 + index * 400,
+          sourceWidth: 2048,
+          sourceHeight: 2048,
+          image: createImage(16, 16)
+        })
+      )
+      const selectedIds = new Set(items.map((item) => item.id))
+      const { rerender, unmount } = render(
+        <Layer items={items} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={selectedIds} />
+      )
+      // The two previews go up first, behind one fence of their own.
+      await waitFor(() => expect(eagerPreviewUploads).toHaveLength(2))
+      await waitFor(() => expect(createdWebGLFences).toHaveLength(1))
+      createdWebGLFences[0].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      })
+      // One source upload went through; the other one waits for the next fence and the
+      // image is still drawn from its preview.
+      expect(eagerTextureUploads).toHaveLength(1)
+      const held = items.find(
+        (item) => getTextureImage(getLiveSpriteByLabel(item.id))?.constructor === HTMLImageElement
+      )!
+      expect(held).toBeDefined()
+      const heldSprite = getLiveSpriteByLabel(held.id)!
+      const movedItems = items.map((item) =>
+        item.id === held.id ? { ...item, x: item.x + 333, zIndex: 50 } : item
+      )
+      rerender(
+        <Layer items={movedItems} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={selectedIds} />
+      )
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      })
+      expect(eagerTextureUploads).toHaveLength(1)
+      expect(getLiveSpriteByLabel(held.id)).toBe(heldSprite)
+      expect(heldSprite.position.x).toBe(held.x + 333)
+      expect(heldSprite.zIndex).toBe(50)
+
+      // A rotation while the upload still waits: the edge-antialiased mesh takes over in place.
+      const rotatedItems = movedItems.map((item) =>
+        item.id === held.id ? { ...item, rotation: 15 } : item
+      )
+      rerender(
+        <Layer items={rotatedItems} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={selectedIds} />
+      )
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      })
+      expect(eagerTextureUploads).toHaveLength(1)
+      const rotated = getLiveSpriteByLabel(held.id)!
+      expect(rotated.kind).toBe('mesh')
+      expect(rotated.position.x).toBe(held.x + 333)
+      expect(rotated.rotation).toBeCloseTo(Math.PI / 12)
+
+      createdWebGLFences[1].signaled = true
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(2))
+      await waitFor(() =>
+        expect(getTextureImage(getLiveSpriteByLabel(held.id))).not.toBeInstanceOf(HTMLImageElement)
+      )
+      expect(getLiveSpriteByLabel(held.id)!.position.x).toBe(held.x + 333)
+      unmount()
+    })
+
+    it('moves an image whose new sprite waits for the next creation batch', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      // 40 previews (more than two batches of 16 near 100 %) get sources at once: the pass
+      // creates 16 new sprites and leaves the others on their preview for later passes.
+      const items = Array.from({ length: 40 }, (_, index) =>
+        createNamedItem(`batch-${index + 1}`, {
+          x: (index % 8) * 150,
+          y: Math.floor(index / 8) * 130,
+          width: 140,
+          height: 120,
+          zIndex: index
+        })
+      )
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const { rerender, unmount } = render(
+        <Layer ref={ref} items={items} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+      const app = createdApplications[0]
+      // Every image gets a new decoded object (a new texture key) and is moved in the same
+      // commit. Hold the frames that would run the follow-up creation batches.
+      const frames: FrameRequestCallback[] = []
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        frames.push(callback)
+        return frames.length
+      })
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      const nextItems = items.map((item) => ({
+        ...item,
+        x: item.x + 7,
+        image: createImage(100, 60)
+      }))
+      rerender(<Layer ref={ref} items={nextItems} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      const replaced = nextItems.filter(
+        (item) => getTextureImage(getLiveSpriteByLabel(item.id)) === item.image
+      )
+      const waiting = nextItems.filter(
+        (item) => getTextureImage(getLiveSpriteByLabel(item.id)) !== item.image
+      )
+      expect(replaced.length).toBeGreaterThan(0)
+      expect(waiting.length).toBeGreaterThan(0)
+      // The images that still wait for their new sprite moved with the others.
+      waiting.forEach((item) => expect(getLiveSpriteByLabel(item.id)!.position.x).toBe(item.x))
+      expect(app).toBeDefined()
+      vi.unstubAllGlobals()
+      unmount()
+    })
+
+    it('keeps the bitmap for the texture lifetime when the renderer cannot upload eagerly', async () => {
+      mockRendererSupportsEagerUpload = false
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
       const bitmap = createBitmap(640, 360)
       vi.stubGlobal(
@@ -618,18 +1457,166 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       const item = localSourceItem()
       const { unmount } = render(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />)
       await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(bitmap))
-      expect(bitmap).not.toHaveProperty('naturalWidth')
+      // Pixi uploads on a later draw here, so the input has to stay alive.
       expect(bitmap.close).not.toHaveBeenCalled()
+      const source = getLiveSpriteByLabel(item.id)!.texture.source as MockTextureSource
+      ;(source.unload as unknown as () => void)()
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+      expect(source.gpuValid).toBe(true)
       unmount()
       expect(bitmap.close).toHaveBeenCalledTimes(1)
       expect(bitmap.width).toBe(0)
+    })
+
+    it('decodes again instead of uploading a closed bitmap when an evicted image returns', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const first = createBitmap(640, 360)
+      const second = createBitmap(640, 360)
+      const decode = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second)
+      vi.stubGlobal('createImageBitmap', decode)
+      const item = localSourceItem()
+      const metrics = vi.fn()
+      const { unmount, rerender } = render(
+        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} onMetricsChange={metrics} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(first))
+      expect(first.close).toHaveBeenCalledTimes(1)
+      const firstTexture = getLiveSpriteByLabel(item.id)!.texture
+
+      // Pan far away: the sprite and its texture are destroyed.
+      rerender(
+        <Layer
+          items={[item]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stagePos={{ x: -50_000, y: -50_000 }}
+          onMetricsChange={metrics}
+        />
+      )
+      await waitFor(() => expect(getLiveSpriteByLabel(item.id)).toBeNull())
+      expect(firstTexture.destroyed).toBe(true)
+      // The cache record went with the last sprite: nothing is kept for an image off screen.
+      await waitFor(() =>
+        expect(metrics).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sourceImageCacheCount: 0, decodedResidentBytes: 0 })
+        )
+      )
+
+      // Come back: the released decode must not be uploaded again.
+      rerender(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} onMetricsChange={metrics} />)
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(second))
+      expect(decode).toHaveBeenCalledTimes(2)
+      expect(eagerTextureUploads).toEqual([first, second])
+      expect(second.close).toHaveBeenCalledTimes(1)
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+      unmount()
+      expect(first.close).toHaveBeenCalledTimes(1)
+      expect(second.close).toHaveBeenCalledTimes(1)
+    })
+
+    it('decodes again instead of making a texture from a closed bitmap whose holder went away', async () => {
+      // The 'released decode without a live texture' check runs before the eviction loop of
+      // a pass, and that loop can destroy the texture. The pool below goes on reporting the
+      // gone holder for the two reads before that loop (the stale-handle check of the load
+      // and the first check of the pass): the check right before acquire must catch it.
+      let staleKeyReports = 0
+      let staleReportsLeft = 0
+      vi.doMock('../canvasImageResourceLifecycle', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('../canvasImageResourceLifecycle')>()
+        class StalePool<T> extends actual.CanvasImageSharedResourcePool<T> {
+          getRefCount(key: string) {
+            const refs = super.getRefCount(key)
+            if (staleReportsLeft > 0 && refs === 0 && key.includes('decoded-variant:source')) {
+              staleReportsLeft -= 1
+              staleKeyReports += 1
+              return 1
+            }
+            return refs
+          }
+        }
+        return { ...actual, CanvasImageSharedResourcePool: StalePool }
+      })
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const shared = createBitmap(640, 360)
+      const fresh = createBitmap(640, 360)
+      // The second consumer gets the decode the first one already uploaded and released
+      // (what the shared decode pool hands out while two loads of one source overlap).
+      const decode = vi
+        .fn()
+        .mockResolvedValueOnce(shared)
+        .mockResolvedValueOnce(shared)
+        .mockResolvedValue(fresh)
+      vi.stubGlobal('createImageBitmap', decode)
+      const { sourceIdentity } = createThumbnailSetFixture('evicted-holder')
+      const holder = localSourceItem({ id: 'holder-a', sourceIdentity })
+      const { rerender, unmount } = render(
+        <Layer items={[holder]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(holder.id))).toBe(shared))
+      expect(isBitmapClosed(shared)).toBe(true)
+
+      const warn = vi.spyOn(console, 'warn')
+      staleReportsLeft = 2
+      const duplicate = { ...holder, id: 'duplicate-b' }
+      rerender(<Layer items={[duplicate]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(duplicate.id))).toBe(fresh))
+      expect(staleKeyReports).toBe(2)
+      // No texture was ever made from the closed bitmap after its first upload.
+      const textureFromClosedBitmap = warn.mock.calls.some((call) =>
+        String(call[2] ?? '').includes('closed ImageBitmap')
+      )
+      expect(textureFromClosedBitmap).toBe(false)
+      expect(eagerTextureUploads).toEqual([shared, fresh])
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+      unmount()
+    })
+
+    it('reuses the uploaded texture for a new crop without touching the released decode', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmap = createBitmap(640, 360)
+      const decode = vi.fn(async () => bitmap)
+      vi.stubGlobal('createImageBitmap', decode)
+      const item = localSourceItem()
+      const { unmount, rerender } = render(
+        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(bitmap))
+      const uncropped = getLiveSpriteByLabel(item.id)!
+      const cropped = { ...item, crop: { x: 64, y: 36, width: 320, height: 180 } }
+      rerender(<Layer items={[cropped]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(getLiveSpriteByLabel(item.id)?.texture.frame?.width).toBe(320))
+      expect(uncropped.destroyed).toBe(true)
+      // Same GPU texture underneath: no second decode, no second upload.
+      expect(getLiveSpriteByLabel(item.id)!.texture.source).toBe(uncropped.texture.source)
+      expect(decode).toHaveBeenCalledTimes(1)
+      expect(eagerTextureUploads).toEqual([bitmap])
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+      unmount()
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+    })
+
+    it('tears down cleanly on context loss after the decoded pixels were released', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmap = createBitmap(640, 360)
+      vi.stubGlobal(
+        'createImageBitmap',
+        vi.fn(async () => bitmap)
+      )
+      const ready = vi.fn()
+      const item = localSourceItem()
+      const { unmount } = render(
+        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} onReadyChange={ready} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(bitmap))
+      act(() => {
+        createdApplications[0].canvas.dispatchEvent(new Event('webglcontextlost'))
+      })
+      // The layer falls back to non-WebGL rendering instead of re-uploading anything.
+      expect(ready).toHaveBeenLastCalledWith(false)
       expect(createdBaseTextures.every((texture) => texture.destroyed)).toBe(true)
-      expect(
-        createdBaseTextures.every((texture) => {
-          const source = texture.source as MockTextureSource
-          return source.destroyed && source.resource === null
-        })
-      ).toBe(true)
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+      unmount()
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
     })
 
     it.each(['initial', 'upgrade'])(
@@ -655,7 +1642,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           resizeQuality: 'high',
           premultiplyAlpha: 'none'
         })
-        expect(bitmap.close).not.toHaveBeenCalled()
+        // Closed once, right after the upload; never again.
+        expect(bitmap.close).toHaveBeenCalledTimes(1)
         unmount()
         expect(bitmap.close).toHaveBeenCalledTimes(1)
         expect(preview.close).not.toHaveBeenCalled()
@@ -685,7 +1673,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
           premultiplyAlpha: 'none'
         })
         expect(original.close).toHaveBeenCalledTimes(1)
-        expect(resized.close).not.toHaveBeenCalled()
+        // The resized output is closed as soon as its texture is uploaded.
+        expect(resized.close).toHaveBeenCalledTimes(1)
+        expect(eagerTextureUploads).toEqual([resized])
         expect(textureFromWidths).not.toContain(8192)
         unmount()
         expect(original.close).toHaveBeenCalledTimes(1)
@@ -829,7 +1819,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       }
     )
 
-    it('retains a replaced thumbnail through deferred reconciliation and re-upload', async () => {
+    it('keeps a replaced thumbnail on screen from its texture through deferred reconciliation', async () => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
       const first = createBitmap(1024, 512)
       const second = createBitmap(2048, 1024)
@@ -880,14 +1870,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         act(() => ref.current?.setViewportInteracting(true))
         await act(async () => pending.resolve(second))
         expect(getLiveSpriteByLabel(item.id)).toBe(oldSprite)
-        expect(first.close).not.toHaveBeenCalled()
+        // The first level was closed after its upload; its texture keeps drawing it.
+        expect(first.close).toHaveBeenCalledTimes(1)
+        expect(second.close).not.toHaveBeenCalled()
         const source = oldSprite.texture.source as MockTextureSource
-        ;(source.unload as unknown as () => void)()
         expect(source.resource).toBe(first)
-        expect(source.gpuValid).toBe(false)
+        expect(source.gpuValid).toBe(true)
+        expect(source.unload).not.toHaveBeenCalled()
         act(() => ref.current?.syncViewport({ x: 1, y: 0 }, 0.3))
         expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
-        expect(source.gpuValid).toBe(true)
         expect(ready).toHaveBeenLastCalledWith(true)
         act(() => ref.current?.setViewportInteracting(false))
         await act(async () => {
@@ -895,7 +1886,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         })
         expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(second)
         expect(first.close).toHaveBeenCalledTimes(1)
-        expect(second.close).not.toHaveBeenCalled()
+        expect(second.close).toHaveBeenCalledTimes(1)
+        expect(eagerTextureUploads).toEqual([first, second])
         unmount()
         expect(second.close).toHaveBeenCalledTimes(1)
         expect((item.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
@@ -905,7 +1897,7 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       }
     })
 
-    it('retains the actual shared thumbnail input when its cache owner is pruned', async () => {
+    it('uploads a shared thumbnail once and closes every decoded twin', async () => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
       const first = createBitmap(1024, 512)
       const second = createBitmap(1024, 512)
@@ -930,8 +1922,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(<Layer items={[b]} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.15} />)
       await waitFor(() => expect(getLiveSpriteByLabel(a.id)).toBeNull())
       expect(getLiveSpriteByLabel(b.id)?.texture).toBe(sharedTexture)
-      expect(first.close).not.toHaveBeenCalled()
-      expect(second.close).not.toHaveBeenCalled()
+      // One upload feeds both sprites. The second decode of the same level is redundant and
+      // is closed without ever being uploaded.
+      expect(eagerTextureUploads).toEqual([first])
+      expect(first.close).toHaveBeenCalledTimes(1)
+      expect(second.close).toHaveBeenCalledTimes(1)
       expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
       unmount()
       expect(first.close).toHaveBeenCalledTimes(1)
@@ -939,6 +1934,417 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       expect((a.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
       expect((b.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
     })
+
+    it('keeps the source texture on screen while the thumbnail level is decoded again', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      // Thumbnail levels and the source are told apart by the bytes the fetch mock returns.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) => ({
+          ok: true,
+          status: 200,
+          blob: async () =>
+            new Blob([String(url).includes('thumb-lod') ? 'thumbnail' : 'source-image'], {
+              type: 'image/png'
+            })
+        }))
+      )
+      const sourceBitmap = createBitmap(4096, 2048)
+      const thumbnailBitmaps: ReturnType<typeof createBitmap>[] = []
+      const pendingSecondThumbnail = deferredBitmap()
+      const decode = vi.fn((blob: Blob) => {
+        if (blob.size !== 'thumbnail'.length) return Promise.resolve(sourceBitmap)
+        if (thumbnailBitmaps.length === 0) {
+          thumbnailBitmaps.push(createBitmap(2048, 1024))
+          return Promise.resolve(thumbnailBitmaps[0])
+        }
+        return pendingSecondThumbnail.promise
+      })
+      vi.stubGlobal('createImageBitmap', decode)
+      const item = thumbnailItem()
+      const selected = new Set([item.id])
+      const { unmount, rerender } = render(
+        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={selected} />
+      )
+      // Selected at 100 %: the source texture replaces the thumbnail level.
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(sourceBitmap))
+      expect(sourceBitmap.close).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(thumbnailBitmaps).toHaveLength(1))
+      const sourceSprite = getLiveSpriteByLabel(item.id)!
+      const decodeCountWithSource = decode.mock.calls.length
+
+      // Deselect: the thumbnail level is wanted again, but its texture and pixels are gone.
+      rerender(<Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} selectedIds={new Set()} />)
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(decodeCountWithSource + 1))
+      // No drop to the small preview, and no upload of a closed bitmap, while it decodes.
+      expect(getLiveSpriteByLabel(item.id)).toBe(sourceSprite)
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+
+      const secondThumbnail = createBitmap(2048, 1024)
+      await act(async () => pendingSecondThumbnail.resolve(secondThumbnail))
+      await waitFor(() =>
+        expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(secondThumbnail)
+      )
+      expect(sourceSprite.destroyed).toBe(true)
+      expect(secondThumbnail.close).toHaveBeenCalledTimes(1)
+      expect(sourceBitmap.close).toHaveBeenCalledTimes(1)
+      unmount()
+      expect((item.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
+    })
+
+    it('decodes a released thumbnail level again when its texture has to be refreshed', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const first = createBitmap(1024, 512)
+      const second = createBitmap(1024, 512)
+      const pendingSecond = deferredBitmap()
+      const decode = vi
+        .fn()
+        .mockResolvedValueOnce(first)
+        .mockImplementationOnce(() => pendingSecond.promise)
+      vi.stubGlobal('createImageBitmap', decode)
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const item = thumbnailItem()
+      const { unmount } = render(
+        <Layer ref={ref} items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.15} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(first))
+      const oldSprite = getLiveSpriteByLabel(item.id)!
+      const oldSource = oldSprite.texture.source as MockTextureSource
+      const preview = { x: item.x, y: item.y, width: item.width, height: item.height, rotation: 0 }
+
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 0.01, scaleY: 0.01 }))
+      // The GPU copy is really gone (what Pixi's unload leaves behind): only then is the
+      // released level decoded again.
+      ;(oldSource as unknown as { _gpuData: object })._gpuData = Object.create(null)
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 1, scaleY: 1 }))
+
+      expect(oldSource.unload).not.toHaveBeenCalled()
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(2))
+      expect(getLiveSpriteByLabel(item.id)).toBe(oldSprite)
+      await act(async () => pendingSecond.resolve(second))
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(second))
+      expect(oldSprite.texture.destroyed).toBe(true)
+      expect(eagerTextureUploads).toEqual([first, second])
+      expect(first.close).toHaveBeenCalledTimes(1)
+      expect(second.close).toHaveBeenCalledTimes(1)
+      unmount()
+      expect((item.image as unknown as ImageBitmap).close).not.toHaveBeenCalled()
+    })
+
+    const selectableItems = (count: number, sourceSide = 640) =>
+      Array.from({ length: count }, (_, index) =>
+        createNamedItem(`selectable-${index + 1}`, {
+          src: `local-media:///C:/images/selectable-${index + 1}.png`,
+          x: 20 + (index % 3) * 260,
+          y: 20 + Math.floor(index / 3) * 200,
+          sourceWidth: sourceSide,
+          sourceHeight: sourceSide,
+          zIndex: index
+        })
+      )
+    const lastMetrics = (metrics: ReturnType<typeof vi.fn>) =>
+      metrics.mock.calls[metrics.mock.calls.length - 1]?.[0] as
+        ProjectCanvasWebGLRuntimeMetrics | undefined
+
+    it('drops every source decode record when a selection is cleared', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmaps: ReturnType<typeof createBitmap>[] = []
+      const decode = vi.fn(async () => {
+        const bitmap = createBitmap(640, 640)
+        bitmaps.push(bitmap)
+        return bitmap
+      })
+      vi.stubGlobal('createImageBitmap', decode)
+      const items = selectableItems(6)
+      const metrics = vi.fn()
+      const { unmount, rerender } = render(
+        <Layer
+          items={items}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          selectedIds={new Set(items.map((item) => item.id))}
+          onMetricsChange={metrics}
+        />
+      )
+      // A small selection forces the source texture of every selected image.
+      await waitFor(() => {
+        expect(bitmaps).toHaveLength(6)
+        items.forEach((item) =>
+          expect(bitmaps).toContain(getTextureImage(getLiveSpriteByLabel(item.id)))
+        )
+      })
+      await waitFor(() =>
+        expect(lastMetrics(metrics)).toMatchObject({
+          sourceImageCacheCount: 6,
+          usingSourceImageCount: 6,
+          decodedResidentBytes: 0
+        })
+      )
+
+      rerender(
+        <Layer
+          items={items}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          selectedIds={new Set()}
+          onMetricsChange={metrics}
+        />
+      )
+      await waitFor(() => {
+        items.forEach((item) =>
+          expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(item.image)
+        )
+      })
+      await waitFor(() =>
+        expect(lastMetrics(metrics)).toMatchObject({
+          sourceImageCacheCount: 0,
+          usingSourceImageCount: 0,
+          decodedResidentBytes: 0
+        })
+      )
+      bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
+      expect(decode).toHaveBeenCalledTimes(6)
+      unmount()
+    })
+
+    it.each([
+      { side: 640, kept: 4 },
+      // 4096 x 4096 is 64 MiB decoded: the 128 MiB cap keeps two of them.
+      { side: 4096, kept: 2 }
+    ])(
+      'keeps at most $kept unused $side px decodes that finished after a deselect',
+      async ({ side, kept }) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        const bitmaps: ReturnType<typeof createBitmap>[] = []
+        const pending: ReturnType<typeof deferredBitmap>[] = []
+        const decode = vi.fn(() => {
+          const next = deferredBitmap()
+          pending.push(next)
+          return next.promise
+        })
+        vi.stubGlobal('createImageBitmap', decode)
+        const items = selectableItems(6, side)
+        const metrics = vi.fn()
+        const view = (selected: string[]) => (
+          <Layer
+            items={items}
+            {...TEST_STAGE_VIEWPORT_1280_720}
+            selectedIds={new Set(selected)}
+            onMetricsChange={metrics}
+          />
+        )
+        const { unmount, rerender } = render(view([]))
+        await waitFor(() => expect(getLiveSpriteByLabel(items[5].id)).not.toBeNull())
+
+        // Three times: select two images, clear the selection while both source decodes are
+        // still running, then let them finish. Nobody wants the six results.
+        for (let round = 0; round < 3; round += 1) {
+          rerender(view([items[round * 2].id, items[round * 2 + 1].id]))
+          await waitFor(() => expect(decode).toHaveBeenCalledTimes((round + 1) * 2))
+          rerender(view([]))
+          await act(async () => {
+            for (const next of pending.splice(0)) {
+              const bitmap = createBitmap(side, side)
+              bitmaps.push(bitmap)
+              next.resolve(bitmap)
+            }
+          })
+          const finished = (round + 1) * 2
+          await waitFor(() => {
+            expect(bitmaps.filter((bitmap) => isBitmapClosed(bitmap))).toHaveLength(
+              Math.max(0, finished - kept)
+            )
+            expect(lastMetrics(metrics)?.sourceImageCacheCount).toBe(Math.min(kept, finished))
+          })
+        }
+
+        // The oldest ones were closed, the newest stay for a quick return.
+        const closed = bitmaps.filter((bitmap) => isBitmapClosed(bitmap))
+        expect(closed).toEqual(bitmaps.slice(0, 6 - kept))
+        expect(lastMetrics(metrics)?.decodedResidentBytes).toBe(kept * side * side * 4)
+        expect(lastMetrics(metrics)?.decodedResidentBytes).toBeLessThanOrEqual(128 * 1024 * 1024)
+        expect(eagerTextureUploads).toEqual([])
+
+        // Selecting the newest again uses the kept decode: no new decode, one upload.
+        rerender(view([items[5].id]))
+        await waitFor(() =>
+          expect(bitmaps).toContain(getTextureImage(getLiveSpriteByLabel(items[5].id)))
+        )
+        expect(decode).toHaveBeenCalledTimes(6)
+        expect(eagerTextureUploads).toHaveLength(1)
+        unmount()
+        bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
+      }
+    )
+
+    it('gives up unused decodes fifteen seconds after nobody wanted them', async () => {
+      const { default: Layer, PROJECT_CANVAS_WEBGL_UNUSED_DECODE_MAX_AGE_MS: maxAgeMs } =
+        await import('./ProjectCanvasWebGLImageLayer')
+      const bitmaps: ReturnType<typeof createBitmap>[] = []
+      const pending: ReturnType<typeof deferredBitmap>[] = []
+      const decode = vi.fn(() => {
+        const next = deferredBitmap()
+        pending.push(next)
+        return next.promise
+      })
+      vi.stubGlobal('createImageBitmap', decode)
+      const items = selectableItems(6)
+      const metrics = vi.fn()
+      const view = (selected: string[]) => (
+        <Layer
+          items={items}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          selectedIds={new Set(selected)}
+          onMetricsChange={metrics}
+        />
+      )
+      const { unmount, rerender } = render(view([]))
+      await waitFor(() => expect(getLiveSpriteByLabel(items[5].id)).not.toBeNull())
+
+      // Two source decodes finish after the selection that asked for them is gone.
+      rerender(view([items[0].id, items[1].id]))
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(2))
+      rerender(view([]))
+
+      // From here the clock and the timers are moved by hand; animation frames stay real.
+      const realSetTimeout = globalThis.setTimeout
+      const startedAt = performance.now()
+      let elapsedMs = 0
+      vi.spyOn(window.performance, 'now').mockImplementation(() => startedAt + elapsedMs)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const advance = async (ms: number) => {
+        for (let passed = 0; passed < ms; passed += 250) {
+          elapsedMs += 250
+          await act(async () => {
+            vi.advanceTimersByTime(250)
+            await new Promise((resolve) => realSetTimeout(resolve, 20))
+          })
+        }
+      }
+      try {
+        await act(async () => {
+          for (const next of pending.splice(0)) {
+            const bitmap = createBitmap(640, 640)
+            bitmaps.push(bitmap)
+            next.resolve(bitmap)
+          }
+        })
+        await advance(1000)
+        expect(lastMetrics(metrics)).toMatchObject({
+          sourceImageCacheCount: 2,
+          decodedResidentBytes: 2 * 640 * 640 * 4
+        })
+        expect(bitmaps.some((bitmap) => isBitmapClosed(bitmap))).toBe(false)
+
+        // Still there shortly before the limit...
+        await advance(maxAgeMs - 3000)
+        expect(bitmaps.some((bitmap) => isBitmapClosed(bitmap))).toBe(false)
+        // ...and closed after it, with nothing left on the books.
+        await advance(4000)
+        bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
+        expect(lastMetrics(metrics)).toMatchObject({
+          sourceImageCacheCount: 0,
+          decodedResidentBytes: 0
+        })
+        expect(eagerTextureUploads).toEqual([])
+      } finally {
+        vi.useRealTimers()
+        vi.restoreAllMocks()
+      }
+
+      // The image is decoded again when it is wanted the next time.
+      rerender(view([items[0].id]))
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(3))
+      unmount()
+    }, 30000)
+
+    // Slow: eight 4096 px decodes go through eviction and paced uploads (1.5-2.5 s alone, up
+    // to 5.5 s with four runs in parallel, past the default 5 s timeout).
+    it('evicts the oldest waiting decodes above the hard limit without starving the upload', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const bitmaps: ReturnType<typeof createBitmap>[] = []
+      const pending: ReturnType<typeof deferredBitmap>[] = []
+      const decode = vi.fn(() => {
+        const next = deferredBitmap()
+        pending.push(next)
+        return next.promise
+      })
+      vi.stubGlobal('createImageBitmap', decode)
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const items = Array.from({ length: 6 }, (_, index) => {
+        const fixture = createThumbnailSetFixture(`hard-limit-${index}`)
+        return createNamedItem(`hard-limit-${index}`, {
+          ...fixture,
+          thumbnailSet: {
+            ...fixture.thumbnailSet,
+            levels: fixture.thumbnailSet.levels.map((level) => ({
+              ...level,
+              src: level.src.replace('thumb-lod', `C:/thumb-lod-${index}`)
+            }))
+          },
+          src: `local-media:///C:/images/hard-limit-${index}.png`,
+          image: createBitmap(192, 96) as unknown as HTMLImageElement,
+          // Stacked and 960 px wide on screen: every item asks for its largest (2048) level,
+          // so the oversized test bitmaps cannot make the layer ask for another level.
+          x: 0,
+          y: 0,
+          zIndex: index,
+          width: 3200,
+          height: 1400,
+          sourceWidth: 4096,
+          sourceHeight: 2048
+        })
+      })
+      // Timers stay fake for the whole test, so no pass the layer armed before the gesture can
+      // run while the decodes finish (it uploaded and closed a waiting decode there under load).
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const { unmount } = render(
+          <Layer ref={ref} items={items} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={0.3} />
+        )
+        // Six thumbnail levels decode at once.
+        await waitAdvancingFakeTimers(() => expect(decode).toHaveBeenCalledTimes(6), 0)
+        // While the viewport moves, finished decodes wait for the next reconcile pass.
+        act(() => ref.current?.setViewportInteracting(true))
+        await act(async () => {
+          for (const next of pending.splice(0)) {
+            // 64 MiB each: six of them are 384 MiB, above the 256 MiB limit.
+            const bitmap = createBitmap(4096, 4096)
+            bitmaps.push(bitmap)
+            next.resolve(bitmap)
+          }
+        })
+        // The two oldest were given up at once; the four newest (256 MiB) wait for their upload.
+        expect(bitmaps.map((bitmap) => isBitmapClosed(bitmap))).toEqual([
+          true,
+          true,
+          false,
+          false,
+          false,
+          false
+        ])
+        expect(eagerTextureUploads).toEqual([])
+
+        act(() => ref.current?.setViewportInteracting(false))
+        // The four are uploaded, and the two evicted levels are decoded again.
+        await waitAdvancingFakeTimers(() => expect(eagerTextureUploads).toHaveLength(4))
+        await waitAdvancingFakeTimers(() => expect(decode).toHaveBeenCalledTimes(8))
+        await act(async () => {
+          for (const next of pending.splice(0)) {
+            const bitmap = createBitmap(4096, 4096)
+            bitmaps.push(bitmap)
+            next.resolve(bitmap)
+          }
+        })
+        await waitAdvancingFakeTimers(() => expect(eagerTextureUploads).toHaveLength(6))
+        items.forEach((item) =>
+          expect(bitmaps).toContain(getTextureImage(getLiveSpriteByLabel(item.id)))
+        )
+        expect(decode).toHaveBeenCalledTimes(8)
+        unmount()
+        bitmaps.forEach((bitmap) => expect(bitmap.close).toHaveBeenCalledTimes(1))
+      } finally {
+        vi.useRealTimers()
+      }
+    }, 30000)
 
     it('does not cancel a shared source decode when only one pending consumer leaves', async () => {
       const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -956,7 +2362,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       rerender(<Layer items={[b]} {...TEST_STAGE_VIEWPORT_1280_720} />)
       await act(async () => pending.resolve(bitmap))
       await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(b.id))).toBe(bitmap))
-      expect(bitmap.close).not.toHaveBeenCalled()
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+      expect(eagerTextureUploads).toEqual([bitmap])
       expect(decode).toHaveBeenCalledTimes(1)
       unmount()
       expect(bitmap.close).toHaveBeenCalledTimes(1)
@@ -1085,6 +2492,72 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       backgroundAlpha: 0,
       clearBeforeRender: true
     })
+  })
+
+  it('turns the Pixi garbage collector off and keeps its textures through a long idle period', async () => {
+    vi.stubGlobal('electronFile', {
+      resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(['image'], { type: 'image/png' })
+      }))
+    )
+    const bitmap = createBitmap(640, 360)
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn(async () => bitmap)
+    )
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const bitmapItem = createNamedItem('gc-bitmap', {
+      src: 'local-media:///C:/images/gc-bitmap.png',
+      sourceWidth: 640,
+      sourceHeight: 360,
+      image: undefined as unknown as HTMLImageElement
+    })
+    const htmlItem = createNamedItem('gc-html', { x: 400 })
+    try {
+      const { unmount } = render(
+        <Layer items={[bitmapItem, htmlItem]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => {
+        expect(getTextureImage(getLiveSpriteByLabel(bitmapItem.id))).toBe(bitmap)
+        expect(getLiveSpriteByLabel(htmlItem.id)).not.toBeNull()
+      })
+      const app = createdApplications[0]
+      // Pixi's collector would unload a texture after 60 s without use and upload its
+      // resource again on the next draw. The bitmap is closed by then, so it must stay off,
+      // and every texture of the layer is exempt even if the collector is switched on.
+      expect(app.initOptions).toMatchObject({ gcActive: false })
+      expect(app.initOptions).not.toHaveProperty('textureGCActive')
+      expect(createdBaseTextures.length).toBeGreaterThanOrEqual(2)
+      createdBaseTextures.forEach((texture) => {
+        expect((texture.source as { autoGarbageCollect?: boolean }).autoGarbageCollect).toBe(false)
+      })
+      expect(bitmap.close).toHaveBeenCalledTimes(1)
+
+      vi.useFakeTimers()
+      ;(app.render as unknown as () => void)()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5 * 60_000)
+      })
+      expect(() => (app.render as unknown as () => void)()).not.toThrow()
+      createdBaseTextures.forEach((texture) => {
+        const source = texture.source as MockTextureSource
+        expect(source.unload).not.toHaveBeenCalled()
+        expect(source.gpuValid).toBe(true)
+      })
+      // The resource of the bitmap texture was read exactly once, for its first upload.
+      expect(eagerTextureUploads).toEqual([bitmap])
+      expect(getTextureImage(getLiveSpriteByLabel(bitmapItem.id))).toBe(bitmap)
+      unmount()
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
   })
 
   it('resizes the Pixi renderer when the stage size changes', async () => {
@@ -1321,11 +2794,15 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       })
     })
 
-    expect(sprite.position.x).toBe(80)
-    expect(sprite.position.y).toBe(90)
-    expect(sprite.scale.x).toBe(3)
-    expect(sprite.scale.y).toBe(1)
-    expect(sprite.rotation).toBeCloseTo(Math.PI / 12)
+    // A rotated preview is drawn by the edge-antialiased mesh, a unit quad: its scale is the
+    // previewed size on the canvas (200 x 1.5 by 120 x 0.5).
+    const rotatedPreview = getLiveSpriteByLabel('image-1')!
+    expect(rotatedPreview.kind).toBe('mesh')
+    expect(rotatedPreview.position.x).toBe(80)
+    expect(rotatedPreview.position.y).toBe(90)
+    expect(rotatedPreview.scale.x).toBe(300)
+    expect(rotatedPreview.scale.y).toBe(60)
+    expect(rotatedPreview.rotation).toBeCloseTo(Math.PI / 12)
     expect(app.render).toHaveBeenCalledTimes(renderCountBeforePreview + 1)
 
     const renderCountBeforeClear = app.render.mock.calls.length
@@ -1333,12 +2810,72 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       ref.current?.syncItemPreview('image-1', null)
     })
 
-    expect(sprite.position.x).toBe(24)
-    expect(sprite.position.y).toBe(36)
-    expect(sprite.scale.x).toBe(2)
-    expect(sprite.scale.y).toBe(2)
-    expect(sprite.rotation).toBe(0)
-    expect(app.render).toHaveBeenCalledTimes(renderCountBeforeClear + 1)
+    const restored = getLiveSpriteByLabel('image-1')!
+    expect(restored.kind).toBe('sprite')
+    expect(restored.position.x).toBe(24)
+    expect(restored.position.y).toBe(36)
+    expect(restored.scale.x).toBe(2)
+    expect(restored.scale.y).toBe(2)
+    expect(restored.rotation).toBe(0)
+    // Clearing a preview draws in the coming frame, after the commit that ended it reached
+    // the layer (see 'never draws a committed move back at its old place').
+    expect(app.render).toHaveBeenCalledTimes(renderCountBeforeClear)
+    await waitFor(() =>
+      expect(app.render.mock.calls.length).toBeGreaterThan(renderCountBeforeClear)
+    )
+  }, 15000)
+
+  it('never draws a committed move back at its old place while a job runs', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    // Stands in for the interaction overlay: it clears the preview in a layout effect as soon
+    // as the committed transform arrives, before the layer's own reconcile pass runs.
+    function Host({ item }: { item: CanvasImageItem }) {
+      const committedX = React.useRef(item.x)
+      React.useLayoutEffect(() => {
+        if (committedX.current !== item.x) {
+          committedX.current = item.x
+          ref.current?.syncItemPreview(item.id, null)
+        }
+      }, [item.id, item.x])
+      return (
+        <Layer ref={ref} items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} isPerformanceThrottled />
+      )
+    }
+    const item = createItem()
+    const { rerender, unmount } = render(<Host item={item} />)
+    await waitFor(() => expect(getLiveSpriteByLabel(item.id)).not.toBeNull())
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+    const app = createdApplications[0]
+    const drawnX: number[] = []
+    const draw = app.render.getMockImplementation() as (() => void) | undefined
+    app.render.mockImplementation(() => {
+      drawnX.push(getLiveSpriteByLabel(item.id)!.position.x)
+      draw?.()
+    })
+
+    act(() =>
+      ref.current?.syncItemPreview(item.id, {
+        x: 500,
+        y: item.y,
+        width: item.width,
+        height: item.height,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0
+      })
+    )
+    rerender(<Host item={{ ...item, x: 500 }} />)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+
+    expect(drawnX[0]).toBe(500)
+    expect(drawnX).not.toContain(item.x)
+    expect(getLiveSpriteByLabel(item.id)!.position.x).toBe(500)
+    unmount()
   }, 15000)
 
   it('drops preview state when an item is removed before its id is reused', async () => {
@@ -1433,6 +2970,280 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(sprite.scale.x).toBe(2)
     expect(sprite.scale.y).toBe(2)
   }, 15000)
+
+  it('relies on the GPU copy record of the real Pixi texture source', async () => {
+    // The layer reads Pixi's private `TextureSource._gpuData` to tell an intact GPU copy from
+    // a lost one; without the field it counts every copy as intact and never re-acquires.
+    // Pin it, so that a Pixi upgrade that renames it shows up here.
+    const pixi = await vi.importActual<typeof import('pixi.js')>('pixi.js')
+    const source = new pixi.TextureSource({ width: 4, height: 4 })
+    const gpuData = (source as unknown as { _gpuData?: unknown })._gpuData
+    expect(gpuData).toBeTypeOf('object')
+    expect(gpuData).not.toBeNull()
+    expect(Object.keys(gpuData as object)).toEqual([])
+    // The WebGL texture system keeps its texture there, per renderer...
+    const glTextureSystem = pixi.GlTextureSystem.prototype as unknown as Record<string, unknown>
+    expect(String(glTextureSystem._initSource)).toContain('_gpuData[this._renderer.uid]')
+    // ...and an unload empties it.
+    const glTexture = { destroy: vi.fn() }
+    ;(source as unknown as { _gpuData: Record<number, unknown> })._gpuData[1] = glTexture
+    source.unload()
+    expect(glTexture.destroy).toHaveBeenCalled()
+    expect(Object.keys((source as unknown as { _gpuData: object })._gpuData)).toEqual([])
+    source.destroy()
+  })
+
+  it('decodes a released level again when its GPU copy is gone and a tiny preview grows back', async () => {
+    vi.stubGlobal('electronFile', {
+      resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(['image'], { type: 'image/png' })
+      }))
+    )
+    const first = createBitmap(640, 360)
+    const second = createBitmap(640, 360)
+    const pendingSecond = deferredBitmap()
+    const decode = vi
+      .fn()
+      .mockResolvedValueOnce(first)
+      .mockImplementationOnce(() => pendingSecond.promise)
+    vi.stubGlobal('createImageBitmap', decode)
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    const item = createItem({
+      src: 'local-media:///C:/images/tiny-refresh.png',
+      sourceWidth: 640,
+      sourceHeight: 360,
+      image: undefined as unknown as HTMLImageElement
+    })
+    try {
+      const { unmount } = render(
+        <Layer ref={ref} items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(first))
+      expect(first.close).toHaveBeenCalledTimes(1)
+      const oldSprite = getLiveSpriteByLabel(item.id)!
+      const oldSource = oldSprite.texture.source as MockTextureSource
+      const preview = { x: 24, y: 36, width: 200, height: 120, rotation: 0 }
+
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 0.1, scaleY: 0.1 }))
+      // Only a real loss of the GPU copy (what Pixi's unload leaves behind) needs a re-acquire.
+      ;(oldSource as unknown as { _gpuData: object })._gpuData = Object.create(null)
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 1, scaleY: 1 }))
+
+      // Unloading would make Pixi upload the closed bitmap again. The level is decoded again
+      // instead, and the texture on screen stays until the replacement exists.
+      expect(oldSource.unload).not.toHaveBeenCalled()
+      await waitFor(() => expect(decode).toHaveBeenCalledTimes(2))
+      expect(getLiveSpriteByLabel(item.id)).toBe(oldSprite)
+      expect(() => (createdApplications[0].render as unknown as () => void)()).not.toThrow()
+
+      await act(async () => pendingSecond.resolve(second))
+      await waitFor(() => expect(getTextureImage(getLiveSpriteByLabel(item.id))).toBe(second))
+      expect(oldSprite.destroyed).toBe(true)
+      expect(oldSprite.texture.destroyed).toBe(true)
+      expect(eagerTextureUploads).toEqual([first, second])
+      expect(second.close).toHaveBeenCalledTimes(1)
+      expect(first.close).toHaveBeenCalledTimes(1)
+      // One re-acquire per refresh: nothing is decoded a third time.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 120))
+      })
+      expect(decode).toHaveBeenCalledTimes(2)
+      unmount()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }, 15000)
+
+  describe('zoom cycles', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    })
+
+    const stubLocalMediaFetch = () => {
+      vi.stubGlobal('electronFile', {
+        resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+      })
+      const fetchMock = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(['image'], { type: 'image/png' })
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+      return fetchMock
+    }
+
+    const lastMetrics = (metrics: ReturnType<typeof vi.fn>) =>
+      metrics.mock.calls[metrics.mock.calls.length - 1]?.[0] as
+        ProjectCanvasWebGLRuntimeMetrics | undefined
+
+    it('reads no file and swaps no texture when images zoom out to tiny and back', async () => {
+      const fetchMock = stubLocalMediaFetch()
+      const decode = vi.fn(async () => createBitmap(640, 360))
+      vi.stubGlobal('createImageBitmap', decode)
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      // Small images: 20 px wide on screen (tiny) at 50 %, 50 px at 125 %. Both zooms keep the
+      // same decoded level, so a zoom cycle has nothing to read.
+      const items = Array.from({ length: 8 }, (_, index) =>
+        createNamedItem(`zoom-${index + 1}`, {
+          src: `local-media:///C:/images/zoom-${index + 1}.png`,
+          x: 24 + (index % 4) * 60,
+          y: 36 + Math.floor(index / 4) * 40,
+          width: 40,
+          height: 22,
+          sourceWidth: 640,
+          sourceHeight: 360,
+          image: undefined as unknown as HTMLImageElement
+        })
+      )
+      const metrics = vi.fn()
+      const view = (stageScale: number) => (
+        <Layer
+          items={items}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          stageScale={stageScale}
+          onMetricsChange={metrics}
+        />
+      )
+      const { rerender, unmount } = render(view(1.25))
+      await waitFor(() => expect(items.every((item) => getLiveSpriteByLabel(item.id))).toBe(true))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      })
+      const sprites = items.map((item) => getLiveSpriteByLabel(item.id))
+      const decodes = decode.mock.calls.length
+      const fetches = fetchMock.mock.calls.length
+      const uploads = eagerTextureUploads.length
+      expect(decodes).toBe(8)
+
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        rerender(view(0.5))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        })
+        rerender(view(1.25))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        })
+      }
+
+      expect(decode.mock.calls.length).toBe(decodes)
+      expect(fetchMock.mock.calls.length).toBe(fetches)
+      expect(eagerTextureUploads.length).toBe(uploads)
+      items.forEach((item, index) => expect(getLiveSpriteByLabel(item.id)).toBe(sprites[index]))
+      expect(lastMetrics(metrics)).toMatchObject({
+        imageFileReadCount: 8,
+        textureReacquireCount: 0
+      })
+      unmount()
+    }, 20000)
+
+    it('does not unload a texture with a live input when only the zoom changes', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const item = createItem()
+      const view = (stageScale: number) => (
+        <Layer items={[item]} {...TEST_STAGE_VIEWPORT_1280_720} stageScale={stageScale} />
+      )
+      const { rerender, unmount } = render(view(1))
+      await waitFor(() => expect(getLiveSpriteByLabel(item.id)).not.toBeNull())
+      const source = getLiveSpriteByLabel(item.id)!.texture.source as MockTextureSource
+      for (let cycle = 0; cycle < 2; cycle += 1) {
+        rerender(view(0.05))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        })
+        rerender(view(1))
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        })
+      }
+      expect(source.unload).not.toHaveBeenCalled()
+      unmount()
+    }, 20000)
+
+    it('keeps an image element decode counted and uploads it again instead of fetching it again', async () => {
+      // A source that createImageBitmap rejects decodes through an image element, which
+      // cannot be closed: it is never marked released.
+      vi.stubGlobal('electronFile', {
+        resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path)
+      })
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => {
+          throw new Error('no bounded fetch here')
+        })
+      )
+      const element = createImage(640, 360)
+      const loads: string[] = []
+      vi.stubGlobal(
+        'Image',
+        class {
+          onload: (() => void) | null = null
+          onerror: (() => void) | null = null
+          decoding = 'async'
+          crossOrigin: string | null = null
+          naturalWidth = 640
+          naturalHeight = 360
+          width = 640
+          height = 360
+          set src(value: string) {
+            loads.push(value)
+            setTimeout(() => this.onload?.(), 0)
+          }
+          decode() {
+            return Promise.resolve()
+          }
+        }
+      )
+      void element
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const item = createItem({
+        src: 'local-media:///C:/images/element.png',
+        sourceWidth: 640,
+        sourceHeight: 360,
+        image: undefined as unknown as HTMLImageElement
+      })
+      const metrics = vi.fn()
+      const { unmount } = render(
+        <Layer
+          ref={ref}
+          items={[item]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          onMetricsChange={metrics}
+        />
+      )
+      await waitFor(() => expect(getLiveSpriteByLabel(item.id)).not.toBeNull())
+      await waitFor(() => expect(eagerTextureUploads).toHaveLength(1))
+      const sprite = getLiveSpriteByLabel(item.id)!
+      const source = sprite.texture.source as MockTextureSource
+      const loadsAfterFirst = loads.length
+      expect(loadsAfterFirst).toBeGreaterThan(0)
+      await waitFor(() =>
+        expect(lastMetrics(metrics)?.decodedResidentBytes ?? 0).toBeGreaterThan(0)
+      )
+
+      const preview = { x: 24, y: 36, width: 200, height: 120, rotation: 0 }
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 0.1, scaleY: 0.1 }))
+      act(() => ref.current?.syncItemPreview(item.id, { ...preview, scaleX: 1, scaleY: 1 }))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      })
+      // The element is still the texture's input: Pixi uploads it again, nothing is fetched.
+      expect(source.unload).toHaveBeenCalledTimes(1)
+      expect(loads.length).toBe(loadsAfterFirst)
+      expect(getLiveSpriteByLabel(item.id)).toBe(sprite)
+      expect(lastMetrics(metrics)?.textureReacquireCount ?? 0).toBe(0)
+      unmount()
+    }, 20000)
+  })
 
   it('recreates sprite state when the texture key changes', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -1796,6 +3607,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       lastSpriteReconcileDurationMs: null,
       lastSpriteSortDurationMs: null,
       spriteSortCount: 0,
+      textureReacquireCount: 0,
+      imageFileReadCount: 0,
       lastSpriteReconcileCandidateCount: 0,
       lastSpriteReconcileTargetCount: 0,
       lastSpriteReconcileCreatedCount: 0,
@@ -2080,6 +3893,11 @@ describe('ProjectCanvasWebGLImageLayer', () => {
       )
 
       const app = createdApplications[0]
+      // The error check is sampled: let the check that follows the first texture pass (one
+      // interval after it), and then more than another interval go by.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 2300))
+      })
       app.renderer.gl.getError.mockImplementationOnce(() => app.renderer.gl.OUT_OF_MEMORY)
 
       act(() => {
@@ -2100,6 +3918,107 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         expect.objectContaining({
           message: 'WebGL renderer reported OUT_OF_MEMORY (1285).'
         })
+      )
+    } finally {
+      consoleWarnSpy.mockRestore()
+    }
+  }, 30000)
+
+  it('does not ask the GPU for errors after every new texture', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    // 24 images arrive four at a time, as during an import: 24 new textures, many renders.
+    const items = Array.from({ length: 24 }, (_, index) =>
+      createNamedItem(`imported-${index}`, { x: (index % 6) * 210, y: Math.floor(index / 6) * 130 })
+    )
+    const view = (count: number) => (
+      <Layer items={items.slice(0, count)} {...TEST_STAGE_VIEWPORT_1280_720} />
+    )
+    const { rerender } = render(view(4))
+    await waitFor(() => expect(createdSprites).toHaveLength(4))
+    const app = createdApplications[0]
+    const startedAt = performance.now()
+    const rendersBefore = app.render.mock.calls.length
+    const checksBefore = app.renderer.gl.getError.mock.calls.length
+    for (let count = 8; count <= 24; count += 4) {
+      rerender(view(count))
+      await waitFor(() => expect(createdSprites).toHaveLength(count))
+      await waitFor(() => expect(app.render.mock.calls.length).toBeGreaterThan(rendersBefore))
+    }
+    const elapsedSeconds = (performance.now() - startedAt) / 1000
+
+    expect(createdBaseTextures.length).toBe(24)
+    const checks = app.renderer.gl.getError.mock.calls.length - checksBefore
+    // One sampled check per second at most (plus the one that may be due right now), not one
+    // per texture.
+    expect(checks).toBeLessThanOrEqual(Math.ceil(elapsedSeconds) + 1)
+    expect(checks).toBeLessThan(20)
+  }, 30000)
+
+  it('asks once for a new texture when the render that follows it checks already', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const first = [createItem()]
+    const { rerender } = render(<Layer items={first} {...TEST_STAGE_VIEWPORT_1280_720} />)
+    await waitFor(() => expect(createdSprites).toHaveLength(1))
+    const app = createdApplications[0]
+    // Let the timed check of the first texture pass (one second), and then the sample interval
+    // (another second), so that the next render is due for a sample.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2300))
+    })
+
+    const checksBefore = app.renderer.gl.getError.mock.calls.length
+    const rendersBefore = app.render.mock.calls.length
+    rerender(
+      <Layer
+        items={[...first, createNamedItem('second', { x: 400 })]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+      />
+    )
+    await waitFor(() => expect(createdBaseTextures).toHaveLength(2))
+    // The render that draws the new texture is due for a sample: one check...
+    await waitFor(() => expect(app.render.mock.calls.length).toBeGreaterThan(rendersBefore))
+    expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore + 1)
+    // ...and not a second one from the timer that the new texture had started.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1300))
+    })
+    expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore + 1)
+  }, 30000)
+
+  it('notices a failed texture upload about a second later, even without another render', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const readyCalls: boolean[] = []
+    const handleReadyChange = (ready: boolean) => readyCalls.push(ready)
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const first = [createItem()]
+      const { rerender } = render(
+        <Layer items={first} {...TEST_STAGE_VIEWPORT_1280_720} onReadyChange={handleReadyChange} />
+      )
+      await waitFor(() => expect(createdSprites).toHaveLength(1))
+      const app = createdApplications[0]
+      // Let the sampled check that follows the first texture pass.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1200))
+      })
+      expect(readyCalls.at(-1)).toBe(true)
+
+      // The upload of the next texture fails on the GPU.
+      app.renderer.gl.getError.mockImplementation(() => app.renderer.gl.OUT_OF_MEMORY)
+      rerender(
+        <Layer
+          items={[...first, createNamedItem('too-much', { x: 400 })]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          onReadyChange={handleReadyChange}
+        />
+      )
+      await waitFor(() => expect(createdBaseTextures).toHaveLength(2))
+      // Nothing else happens on the canvas; the sampled check finds the error.
+      await waitFor(() => expect(readyCalls.at(-1)).toBe(false), { timeout: 4000 })
+      expect(document.querySelector('canvas')).toBeNull()
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        '[Canvas WebGL] Pixi render failed; falling back to non-WebGL image rendering.',
+        expect.objectContaining({ message: 'WebGL renderer reported OUT_OF_MEMORY (1285).' })
       )
     } finally {
       consoleWarnSpy.mockRestore()
@@ -2134,7 +4053,8 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     for (let index = 0; index < 20; index += 1) {
       act(() => {
         ref.current?.syncItemPreview('image-1', {
-          x: 24 + index,
+          // Every step moves the image (the item itself is at x 24), so every step renders.
+          x: 25 + index,
           y: 36,
           width: 200,
           height: 120,
@@ -2151,6 +4071,57 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(additionalRenderCount).toBeGreaterThanOrEqual(20)
     expect(additionalErrorCheckCount).toBeGreaterThanOrEqual(0)
     expect(additionalErrorCheckCount).toBeLessThan(additionalRenderCount)
+  }, 30000)
+
+  it('does not ask the GPU for errors in the middle of a gesture, and asks again right after it', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    const readyCalls: boolean[] = []
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      render(
+        <Layer
+          ref={ref}
+          items={[createItem()]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          onReadyChange={(ready) => readyCalls.push(ready)}
+        />
+      )
+      await waitFor(() => {
+        expect(ref.current).not.toBeNull()
+        expect(createdSprites).toHaveLength(1)
+      })
+      const app = createdApplications[0]
+      // Let the timed check that follows the first texture pass.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1200))
+      })
+      expect(readyCalls.at(-1)).toBe(true)
+
+      let now = performance.now() + 10_000
+      vi.spyOn(window.performance, 'now').mockImplementation(() => now)
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+      const checksBefore = app.renderer.gl.getError.mock.calls.length
+      // Five seconds of panning at 60 Hz: 300 renders, which used to be 5 synchronous checks.
+      for (let frame = 1; frame <= 300; frame += 1) {
+        now += 1000 / 60
+        act(() => ref.current?.syncViewport({ x: frame * 2, y: 0 }, 1))
+      }
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 300)
+      expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore)
+
+      // The first render after the gesture checks again, and an error is still noticed.
+      app.renderer.gl.getError.mockImplementation(() => app.renderer.gl.OUT_OF_MEMORY)
+      act(() => ref.current?.setViewportInteracting(false))
+      now += 1000 / 60
+      act(() => ref.current?.syncViewport({ x: 700, y: 0 }, 1))
+      expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore + 1)
+      await waitFor(() => expect(readyCalls.at(-1)).toBe(false))
+    } finally {
+      consoleWarnSpy.mockRestore()
+      vi.restoreAllMocks()
+    }
   }, 30000)
 
   it('tears down the WebGL canvas and reports not-ready when Pixi rendering fails', async () => {
@@ -2319,6 +4290,1137 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     expect(app.render.mock.calls.length).toBeGreaterThan(rendersAfterFirstSync)
     expect((createdSprites[0].texture.source as { scaleMode?: string }).scaleMode).toBe('linear')
   }, 15000)
+
+  describe('edge antialiasing without a multisampled buffer', () => {
+    const rotatedItem = (rotation: number, overrides: Partial<CanvasImageItem> = {}) =>
+      createItem({ rotation, x: 300, y: 200, ...overrides })
+    const liveObject = (id = 'image-1') => getLiveSpriteByLabel(id)!
+    const world = () => liveObject().parent!
+
+    it('creates the WebGL context without multisampling', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      render(<Layer items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdApplications).toHaveLength(1))
+      expect(createdApplications[0].initOptions).toMatchObject({ antialias: false })
+    })
+
+    it.each([0, 90, -90, 180, 270, 360])(
+      'draws an image rotated by %i degrees as a plain sprite',
+      async (rotation) => {
+        const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+        render(<Layer items={[rotatedItem(rotation)]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+        await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+        expect(liveObject().kind).toBe('sprite')
+        expect(createdEdgeAntialiasShaders).toEqual([])
+        // Texture pixels scaled to the item size.
+        expect(liveObject().scale.x).toBe(2)
+        expect(liveObject().scale.y).toBe(2)
+      }
+    )
+
+    it('draws a rotated image with the edge-antialiased mesh, at the same place and size', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const { unmount } = render(
+        <Layer
+          items={[rotatedItem(15, { scaleX: 1.5, zIndex: 4 })]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+        />
+      )
+      await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+      const mesh = liveObject()
+      expect(mesh.kind).toBe('mesh')
+      expect(mesh.position.x).toBe(300)
+      expect(mesh.position.y).toBe(200)
+      expect(mesh.rotation).toBeCloseTo((15 * Math.PI) / 180)
+      expect(mesh.zIndex).toBe(4)
+      // A unit quad: the scale is the item's size on the canvas (200 x 120, scaleX 1.5).
+      expect(mesh.scale.x).toBe(300)
+      expect(mesh.scale.y).toBe(120)
+      expect(createdEdgeAntialiasShaders).toHaveLength(1)
+      expect(mesh.shader?.resources.uTexture).toBe(mesh.texture.source)
+      expect(mesh.shader?.resources.textureUniforms).toEqual({
+        uTextureMatrix: {
+          type: 'mat3x3<f32>',
+          value: (mesh.texture as unknown as { textureMatrix: { mapCoord: unknown } }).textureMatrix
+            .mapCoord
+        }
+      })
+
+      unmount()
+      expect(mesh.destroyed).toBe(true)
+      expect(mesh.shader?.destroyed).toBe(true)
+      expect(mesh.geometry?.destroyed).toBe(true)
+    })
+
+    it('samples the crop of a rotated image through the cropped texture frame', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      render(
+        <Layer
+          items={[rotatedItem(30, { crop: { x: 10, y: 5, width: 40, height: 30 } })]}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+        />
+      )
+      await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+      const mesh = liveObject()
+      expect(mesh.kind).toBe('mesh')
+      expect(mesh.texture.frame).toMatchObject({ x: 10, y: 5, width: 40, height: 30 })
+      const matrix = (
+        mesh.shader?.resources.textureUniforms as {
+          uTextureMatrix: { value: { frameOf: MockTextureInstance } }
+        }
+      ).uTextureMatrix.value
+      expect(matrix.frameOf).toBe(mesh.texture)
+    })
+
+    it('switches between sprite and mesh in place while an image is being rotated', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const items = [
+        createNamedItem('below', { zIndex: 1 }),
+        createItem({ zIndex: 1 }),
+        createNamedItem('above', { zIndex: 1 })
+      ]
+      render(<Layer ref={ref} items={items} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdSprites).toHaveLength(3))
+      const sprite = liveObject()
+      const app = createdApplications[0]
+      const texture = sprite.texture
+      const orderBefore = world().children.map((child) => child.label)
+      const preview = { x: 24, y: 36, width: 200, height: 120, scaleX: 1, scaleY: 1 }
+
+      const rendersBefore = app.render.mock.calls.length
+      act(() => ref.current?.syncItemPreview('image-1', { ...preview, rotation: 12 }))
+      const mesh = liveObject()
+      expect(mesh).not.toBe(sprite)
+      expect(mesh.kind).toBe('mesh')
+      expect(sprite.destroyed).toBe(true)
+      expect(sprite.parent).toBeNull()
+      // Same texture, same place in the z-order, drawn in the same call.
+      expect(mesh.texture).toBe(texture)
+      expect(texture.destroyed).toBe(false)
+      expect(world().children.map((child) => child.label)).toEqual(orderBefore)
+      expect(mesh.zIndex).toBe(1)
+      expect(mesh.scale.x).toBe(200)
+      expect(mesh.rotation).toBeCloseTo((12 * Math.PI) / 180)
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // Further rotation keeps the mesh.
+      act(() => ref.current?.syncItemPreview('image-1', { ...preview, rotation: 40 }))
+      expect(liveObject()).toBe(mesh)
+      expect(createdEdgeAntialiasShaders).toHaveLength(1)
+
+      // The gesture is cancelled: back to the unrotated item and to a plain sprite.
+      act(() => ref.current?.syncItemPreview('image-1', null))
+      const restored = liveObject()
+      expect(restored.kind).toBe('sprite')
+      expect(restored.texture).toBe(texture)
+      expect(restored.scale.x).toBe(2)
+      expect(restored.rotation).toBe(0)
+      expect(mesh.destroyed).toBe(true)
+      expect(mesh.shader?.destroyed).toBe(true)
+      expect(world().children.map((child) => child.label)).toEqual(orderBefore)
+      expect(texture.destroyed).toBe(false)
+    })
+
+    it('switches to the mesh when a rotation is committed, without a new texture', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const item = createItem()
+      const view = (rotation: number) => (
+        <Layer items={[{ ...item, rotation }]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      const { rerender } = render(view(0))
+      await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+      const texture = liveObject().texture
+      const texturesBefore = createdBaseTextures.length
+
+      rerender(view(33))
+      await waitFor(() => expect(liveObject().kind).toBe('mesh'))
+      expect(liveObject().texture).toBe(texture)
+      expect(liveObject().scale.x).toBe(200)
+      expect(liveObject().rotation).toBeCloseTo((33 * Math.PI) / 180)
+
+      rerender(view(90))
+      await waitFor(() => expect(liveObject().kind).toBe('sprite'))
+      expect(liveObject().texture).toBe(texture)
+      expect(liveObject().scale.x).toBe(2)
+      expect(createdBaseTextures).toHaveLength(texturesBefore)
+      expect(createdEdgeAntialiasShaders.every((shader) => shader.destroyed)).toBe(true)
+    })
+
+    it('keeps plain sprites on a WebGL 1 context, which has no derivatives', async () => {
+      mockWebGLVersion = 1
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      render(<Layer ref={ref} items={[rotatedItem(15)]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(getLiveSpriteByLabel('image-1')).not.toBeNull())
+      expect(liveObject().kind).toBe('sprite')
+      act(() =>
+        ref.current?.syncItemPreview('image-1', {
+          x: 300,
+          y: 200,
+          width: 200,
+          height: 120,
+          scaleX: 1,
+          scaleY: 1,
+          rotation: 50
+        })
+      )
+      expect(liveObject().kind).toBe('sprite')
+      expect(createdEdgeAntialiasShaders).toEqual([])
+    })
+  })
+
+  describe('render resolution during gestures', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+      vi.unstubAllGlobals()
+      setWindowDevicePixelRatio(originalDevicePixelRatio)
+    })
+
+    // A layer on a screen with the given device pixel ratio, with a clock the test moves by
+    // hand and display frames (requestAnimationFrame) the test runs by hand.
+    const renderLayerWithManualFrames = async (devicePixelRatio = 2) => {
+      setWindowDevicePixelRatio(devicePixelRatio)
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const { unmount } = render(
+        <Layer ref={ref} items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      await waitFor(() => {
+        expect(ref.current).not.toBeNull()
+        expect(createdSprites).toHaveLength(1)
+      })
+      const app = createdApplications[0]
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      })
+      expect(app.renderer.resolution).toBe(devicePixelRatio)
+      let now = 100_000
+      vi.spyOn(window.performance, 'now').mockImplementation(() => now)
+      const callbacks = new Map<number, FrameRequestCallback>()
+      let nextFrameId = 1
+      const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+        callbacks.set(nextFrameId, callback)
+        return nextFrameId++
+      })
+      vi.stubGlobal('requestAnimationFrame', requestFrame)
+      vi.stubGlobal(
+        'cancelAnimationFrame',
+        vi.fn((id: number) => {
+          callbacks.delete(id)
+        })
+      )
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      let x = 0
+      // One display frame `intervalMs` after the previous one. With `moved`, the view moves in
+      // it (the stage's callback runs first, as in the app); then the layer's own callbacks.
+      const displayFrame = (intervalMs: number, moved: boolean) => {
+        now += intervalMs
+        act(() => {
+          vi.advanceTimersByTime(intervalMs)
+          const due = Array.from(callbacks.values())
+          callbacks.clear()
+          if (moved) {
+            x += 3
+            ref.current?.syncViewport({ x, y: 0 }, 1)
+          }
+          due.forEach((callback) => callback(now))
+        })
+      }
+      const displayFrames = (count: number, intervalMs: number, moved = true) => {
+        for (let frame = 0; frame < count; frame += 1) {
+          displayFrame(intervalMs, moved)
+        }
+      }
+      const wait = (ms: number) => {
+        now += ms
+        act(() => {
+          vi.advanceTimersByTime(ms)
+        })
+      }
+      return {
+        ref,
+        app,
+        unmount,
+        displayFrame,
+        displayFrames,
+        wait,
+        requestedFrames: () => requestFrame.mock.calls.length,
+        pendingFrames: () => callbacks.size
+      }
+    }
+
+    it('measures the display interval, so a 30 Hz display that keeps up stays sharp', async () => {
+      const resolutionListeners: (() => void)[] = []
+      vi.stubGlobal(
+        'matchMedia',
+        vi.fn((media: string) => ({
+          media,
+          matches: true,
+          addEventListener: (_type: string, listener: () => void) =>
+            resolutionListeners.push(listener),
+          removeEventListener: () => {}
+        }))
+      )
+      const { ref, app, displayFrames, wait } = await renderLayerWithManualFrames(2)
+      const thirtyHz = 1000 / 30
+
+      // Before the interval is known, 33 ms frames count as slow (a 60 Hz budget): lowered.
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(60, thirtyHz)
+      expect(app.renderer.resolution).toBe(1)
+      act(() => ref.current?.setViewportInteracting(false))
+      wait(200)
+      expect(app.renderer.resolution).toBe(2)
+
+      // The window lands on the 30 Hz output; the layer measures idle display frames there.
+      act(() => resolutionListeners.at(-1)?.())
+      wait(1000)
+      displayFrames(14, thirtyHz, false)
+
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(60, thirtyHz)
+      expect(app.renderer.resolution).toBe(2)
+      // Frames twice that long are slow on that display too.
+      displayFrames(20, thirtyHz * 2)
+      expect(app.renderer.resolution).toBe(1)
+      act(() => ref.current?.setViewportInteracting(false))
+    })
+
+    it('does not take the pace of a busy board for the display interval', async () => {
+      const resolutionListeners: (() => void)[] = []
+      vi.stubGlobal(
+        'matchMedia',
+        vi.fn((media: string) => ({
+          media,
+          matches: true,
+          addEventListener: (_type: string, listener: () => void) =>
+            resolutionListeners.push(listener),
+          removeEventListener: () => {}
+        }))
+      )
+      const { PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS } =
+        await import('./ProjectCanvasWebGLImageLayer')
+      const { ref, app, displayFrames, wait } = await renderLayerWithManualFrames(2)
+      const thirtyHz = 1000 / 30
+      const gestureAtThirtyHz = () => {
+        act(() => ref.current?.setViewportInteracting(true))
+        displayFrames(60, thirtyHz)
+        const resolution = app.renderer.resolution
+        act(() => ref.current?.setViewportInteracting(false))
+        wait(200)
+        return resolution
+      }
+
+      // The probe's frames come at 30 Hz, but because the layer draws in every one of them
+      // (a board still filling, a live preview), not because of the display: no interval.
+      act(() => resolutionListeners.at(-1)?.())
+      wait(1000)
+      displayFrames(14, thirtyHz, true)
+      expect(gestureAtThirtyHz()).toBe(1)
+      expect(app.renderer.resolution).toBe(2)
+
+      // The probe is repeated later; on idle frames it measures the 30 Hz display.
+      wait(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS)
+      displayFrames(14, thirtyHz, false)
+      expect(gestureAtThirtyHz()).toBe(2)
+    })
+
+    it('follows a device pixel ratio change (another monitor) by the end of the next gesture', async () => {
+      const { ref, app, displayFrames } = await renderLayerWithManualFrames(1)
+      // The window moved to a 200 % monitor; its size in CSS pixels did not change.
+      setWindowDevicePixelRatio(2)
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(90, 1000 / 60)
+      act(() => ref.current?.setViewportInteracting(false))
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1280, 720)
+
+      // And back to 100 %: four times fewer pixels again.
+      setWindowDevicePixelRatio(1)
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(10, 1000 / 60)
+      act(() => ref.current?.setViewportInteracting(false))
+      expect(app.renderer.resolution).toBe(1)
+    })
+
+    it('keeps the full device pixel ratio through a gesture: no resize, no blur and pop', async () => {
+      const { ref, app, displayFrames, wait, requestedFrames } = await renderLayerWithManualFrames()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      const requestedBefore = requestedFrames()
+
+      act(() => ref.current?.setViewportInteracting(true))
+      // Well past the 80 ms after which the layer used to drop to a ratio of 1.
+      displayFrames(90, 1000 / 60)
+      expect(app.renderer.resolution).toBe(2)
+      // A gesture that keeps up is drawn in the stage's frame callback: none of the layer's own.
+      expect(requestedFrames()).toBe(requestedBefore)
+      act(() => ref.current?.setViewportInteracting(false))
+      wait(1000)
+
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+    })
+
+    it('keeps the full resolution when only the input is slow: a careful drag, a notched wheel', async () => {
+      const { ref, app, displayFrame, displayFrames, wait, pendingFrames } =
+        await renderLayerWithManualFrames()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => ref.current?.setViewportInteracting(true))
+      // The pointer moves one pixel every 50 ms, a wheel notch comes every 100 ms: the view
+      // is drawn that seldom, on a display that shows a frame every 16.7 ms. The time
+      // between two draws used to count as a slow frame and lowered the resolution here.
+      for (let move = 0; move < 40; move += 1) {
+        displayFrames(2, 1000 / 60, false)
+        displayFrame(1000 / 60, true)
+      }
+      for (let notch = 0; notch < 40; notch += 1) {
+        displayFrames(5, 1000 / 60, false)
+        displayFrame(1000 / 60, true)
+      }
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+
+      // The pointer rests with the button held: the layer stops timing frames.
+      displayFrames(30, 1000 / 60, false)
+      expect(pendingFrames()).toBe(0)
+
+      act(() => ref.current?.setViewportInteracting(false))
+      wait(1000)
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+    })
+
+    it('lowers the resolution once after ten slow display frames and restores it after the gesture', async () => {
+      const { ref, app, displayFrames, wait, pendingFrames } = await renderLayerWithManualFrames()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => ref.current?.setViewportInteracting(true))
+      // The display shows a frame every 40 ms and the view moves in each. The first draw has
+      // no interval, three late draws start the timing, whose first frame has no interval
+      // either: nine timed slow frames after 14 display frames.
+      displayFrames(14, 40)
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+
+      const rendersBefore = app.render.mock.calls.length
+      displayFrames(1, 40)
+      expect(app.renderer.resolution).toBe(1)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 1)
+      // The frame is drawn again at the new resolution, so the canvas is never blank.
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+      // Lowered: nothing left to time.
+      expect(pendingFrames()).toBe(0)
+
+      // Fast frames at the lower resolution do not flip it back during the gesture.
+      displayFrames(120, 1000 / 60)
+      expect(app.renderer.resolution).toBe(1)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 1)
+      expect(pendingFrames()).toBe(0)
+
+      act(() => ref.current?.setViewportInteracting(false))
+      wait(100)
+      expect(app.renderer.resolution).toBe(1)
+      wait(100)
+      expect(app.renderer.resolution).toBe(2)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 2)
+      wait(2000)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 2)
+    })
+
+    it('stops timing frames when the gesture ends or the layer goes away', async () => {
+      const { ref, unmount, displayFrames, requestedFrames, pendingFrames } =
+        await renderLayerWithManualFrames()
+
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(6, 40)
+      expect(pendingFrames()).toBe(1)
+      act(() => ref.current?.setViewportInteracting(false))
+      // Whatever the end of the gesture asked for is drawn; then no frame is requested again.
+      displayFrames(5, 1000 / 60, false)
+      const requestedAfterGesture = requestedFrames()
+      displayFrames(30, 40, false)
+      expect(requestedFrames()).toBe(requestedAfterGesture)
+      expect(pendingFrames()).toBe(0)
+
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(6, 40)
+      expect(pendingFrames()).toBe(1)
+      unmount()
+      expect(pendingFrames()).toBe(0)
+    })
+
+    it('times nothing on a screen whose full resolution is the lowered one', async () => {
+      const { ref, app, displayFrames, requestedFrames } = await renderLayerWithManualFrames(1)
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      const requestedBefore = requestedFrames()
+
+      act(() => ref.current?.setViewportInteracting(true))
+      displayFrames(40, 40)
+      expect(requestedFrames()).toBe(requestedBefore)
+      expect(app.renderer.resolution).toBe(1)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+    })
+  })
+
+  describe('ComfyUI throttle', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+      vi.unstubAllGlobals()
+      setWindowDevicePixelRatio(originalDevicePixelRatio)
+    })
+
+    // A layer while a ComfyUI job runs, with a hand-moved clock and hand-run animation frames.
+    const renderThrottledLayer = async () => {
+      setWindowDevicePixelRatio(2)
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const items = [createItem()]
+      const view = (nextItems: CanvasImageItem[]) => (
+        <Layer
+          ref={ref}
+          items={nextItems}
+          {...TEST_STAGE_VIEWPORT_1280_720}
+          isPerformanceThrottled
+        />
+      )
+      const utils = render(view(items))
+      await waitFor(() => {
+        expect(ref.current).not.toBeNull()
+        expect(createdSprites).toHaveLength(1)
+      })
+      const app = createdApplications[0]
+      for (let renders = -1; renders !== app.render.mock.calls.length;) {
+        renders = app.render.mock.calls.length
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 400))
+        })
+      }
+      let now = 100_000
+      vi.spyOn(window.performance, 'now').mockImplementation(() => now)
+      const callbacks = new Map<number, FrameRequestCallback>()
+      let nextFrameId = 1
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn((callback: FrameRequestCallback) => {
+          callbacks.set(nextFrameId, callback)
+          return nextFrameId++
+        })
+      )
+      vi.stubGlobal(
+        'cancelAnimationFrame',
+        vi.fn((id: number) => {
+          callbacks.delete(id)
+        })
+      )
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const advance = (ms: number) => {
+        now += ms
+        act(() => {
+          vi.advanceTimersByTime(ms)
+        })
+      }
+      const runFrames = () =>
+        act(() => {
+          const due = Array.from(callbacks.values())
+          callbacks.clear()
+          due.forEach((callback) => callback(now))
+        })
+      return {
+        ref,
+        app,
+        items,
+        view,
+        advance,
+        runFrames,
+        pendingFrames: () => callbacks.size,
+        ...utils
+      }
+    }
+
+    it('draws every gesture frame at once while a job runs', async () => {
+      const { ref, app, advance } = await renderThrottledLayer()
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+
+      // 30 frames at 60 Hz: the throttle used to allow one render per 180 ms, three in all.
+      for (let frame = 1; frame <= 30; frame += 1) {
+        advance(1000 / 60)
+        act(() => ref.current?.syncViewport({ x: frame * 5, y: 0 }, 1))
+        expect(app.render.mock.calls.length).toBe(rendersBefore + frame)
+      }
+      // And at the full resolution.
+      expect(app.renderer.resolution).toBe(2)
+    })
+
+    it('draws a dragged image at once while a job runs', async () => {
+      const { ref, app, advance } = await renderThrottledLayer()
+      const rendersBefore = app.render.mock.calls.length
+      for (let step = 1; step <= 10; step += 1) {
+        advance(1000 / 60)
+        act(() =>
+          ref.current?.syncItemPreview('image-1', {
+            x: 24 + step * 4,
+            y: 36,
+            width: 200,
+            height: 120,
+            scaleX: 1,
+            scaleY: 1,
+            rotation: 0
+          })
+        )
+        expect(app.render.mock.calls.length).toBe(rendersBefore + step)
+      }
+    })
+
+    it('still spaces out background renders while a job runs', async () => {
+      const { ref, app, items, view, rerender, advance, runFrames, pendingFrames } =
+        await renderThrottledLayer()
+      // A render just happened (a gesture frame).
+      act(() => ref.current?.syncViewport({ x: 2, y: 0 }, 1))
+      const rendersBefore = app.render.mock.calls.length
+      advance(10)
+      rerender(view([{ ...items[0], zIndex: 5 }]))
+      // The reconcile pass may not render yet...
+      expect(pendingFrames()).toBe(0)
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+      advance(100)
+      rerender(view([{ ...items[0], zIndex: 6 }]))
+      expect(pendingFrames()).toBe(0)
+      advance(100)
+      // ...and both changes are drawn by one render once the 180 ms interval is over.
+      expect(pendingFrames()).toBe(1)
+      runFrames()
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+    })
+
+    it('does not hold a lowered resolution for the length of the job', async () => {
+      const { ref, app, advance, runFrames } = await renderThrottledLayer()
+      act(() => ref.current?.setViewportInteracting(true))
+      // Display frames 40 ms apart, the view moves in each: slow enough to lower it.
+      for (let frame = 1; frame <= 16; frame += 1) {
+        advance(40)
+        act(() => ref.current?.syncViewport({ x: frame * 5, y: 0 }, 1))
+        runFrames()
+      }
+      expect(app.renderer.resolution).toBe(1)
+
+      act(() => ref.current?.setViewportInteracting(false))
+      advance(200)
+      // The job is still running; the gesture is over, so the full resolution is back.
+      expect(app.renderer.resolution).toBe(2)
+    })
+  })
+
+  it('follows a device pixel ratio change at once, and watches the new ratio afterwards', async () => {
+    const queries: { media: string; listeners: (() => void)[]; removed: number }[] = []
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((media: string) => {
+        const query = { media, listeners: [] as (() => void)[], removed: 0 }
+        queries.push(query)
+        return {
+          media,
+          matches: true,
+          addEventListener: (_type: string, listener: () => void) => query.listeners.push(listener),
+          removeEventListener: () => {
+            query.removed += 1
+          }
+        }
+      })
+    )
+    setWindowDevicePixelRatio(1)
+    try {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const { unmount } = render(<Layer items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdSprites).toHaveLength(1))
+      const app = createdApplications[0]
+      await waitFor(() => expect(queries).toHaveLength(1))
+      expect(queries[0].media).toBe('(resolution: 1dppx)')
+      expect(app.renderer.resolution).toBe(1)
+
+      setWindowDevicePixelRatio(2)
+      act(() => queries[0].listeners.forEach((listener) => listener()))
+      expect(app.renderer.resolution).toBe(2)
+      expect(queries.at(-1)?.media).toBe('(resolution: 2dppx)')
+      expect(queries[0].removed).toBe(1)
+
+      setWindowDevicePixelRatio(1.5)
+      act(() => queries.at(-1)?.listeners.forEach((listener) => listener()))
+      expect(app.renderer.resolution).toBe(1.5)
+      unmount()
+      expect(queries.at(-1)?.removed).toBe(1)
+    } finally {
+      setWindowDevicePixelRatio(originalDevicePixelRatio)
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('holds a timed error check that comes due in a gesture until the gesture ends', async () => {
+    const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+    const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+    const first = [createItem()]
+    const { rerender } = render(<Layer ref={ref} items={first} {...TEST_STAGE_VIEWPORT_1280_720} />)
+    await waitFor(() => expect(createdSprites).toHaveLength(1))
+    const app = createdApplications[0]
+    // Let the timed check of the first texture pass.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+    })
+
+    act(() => ref.current?.setViewportInteracting(true))
+    const checksBefore = app.renderer.gl.getError.mock.calls.length
+    // A thumbnail that was on its way arrives in the middle of the pan: a new texture.
+    rerender(
+      <Layer
+        ref={ref}
+        items={[...first, createNamedItem('arrives-mid-pan', { x: 400 })]}
+        {...TEST_STAGE_VIEWPORT_1280_720}
+      />
+    )
+    await waitFor(() => expect(createdBaseTextures).toHaveLength(2))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1300))
+    })
+    // Its timed check came due while the view was still moving: not now.
+    expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore)
+
+    act(() => ref.current?.setViewportInteracting(false))
+    await waitFor(() => expect(app.renderer.gl.getError.mock.calls.length).toBe(checksBefore + 1))
+  }, 30000)
+
+  describe('panel resize next to the canvas', () => {
+    afterEach(async () => {
+      const { emitCanvasLayoutResizeInteraction } = await import('../canvasLayoutResizeInteraction')
+      emitCanvasLayoutResizeInteraction(false)
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    })
+
+    // A layer whose host size the test sets, with a ResizeObserver the test fires by hand.
+    const renderObservedLayer = async () => {
+      const observerCallbacks: (() => void)[] = []
+      vi.stubGlobal(
+        'ResizeObserver',
+        class {
+          observe = vi.fn()
+          disconnect = vi.fn()
+
+          constructor(callback: () => void) {
+            observerCallbacks.push(callback)
+          }
+        }
+      )
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const { emitCanvasLayoutResizeInteraction } = await import('../canvasLayoutResizeInteraction')
+      const utils = render(<Layer items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => {
+        expect(createdSprites).toHaveLength(1)
+        expect(observerCallbacks).toHaveLength(1)
+      })
+      const app = createdApplications[0]
+      const host = utils.container.querySelector('.project-canvas-webgl-layer') as HTMLElement
+      let hostSize = { width: 1280, height: 720 }
+      vi.spyOn(host, 'getBoundingClientRect').mockImplementation(
+        () => ({ ...hostSize, x: 0, y: 0, top: 0, left: 0 }) as DOMRect
+      )
+      const resizeHost = (width: number, height = 720) => {
+        hostSize = { width, height }
+        act(() => observerCallbacks.forEach((callback) => callback()))
+      }
+      return { app, resizeHost, emit: emitCanvasLayoutResizeInteraction, ...utils }
+    }
+
+    it('follows the host size when no panel is being dragged', async () => {
+      const { app, resizeHost } = await renderObservedLayer()
+      resizeHost(1100)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1100, 720)
+      resizeHost(1000, 650)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1000, 650)
+      expect(app.canvas.style.width).toBe('100%')
+    })
+
+    it('does not resize the renderer while a panel is dragged and resizes once at the end', async () => {
+      const { app, resizeHost, emit } = await renderObservedLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      const rendersBefore = app.render.mock.calls.length
+
+      act(() => emit(true, 'right'))
+      // Twenty mouse moves of the drag.
+      for (let move = 1; move <= 20; move += 1) {
+        resizeHost(1280 - move * 12)
+      }
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+      // The canvas keeps its size on screen instead of being stretched to the host.
+      expect(app.canvas.style.width).toBe('1280px')
+      expect(app.canvas.style.height).toBe('720px')
+
+      act(() => emit(false))
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 1)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1040, 720)
+      expect(app.canvas.style.width).toBe('100%')
+      expect(app.canvas.style.height).toBe('100%')
+      // Drawn again at once, so the resized canvas is not blank.
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // Afterwards it follows the host again.
+      resizeHost(1300)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore + 2)
+    })
+
+    it('does nothing at the end of a drag that did not change the canvas size', async () => {
+      const { app, resizeHost, emit } = await renderObservedLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => emit(true, 'side'))
+      act(() => emit(false))
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+
+      // A drag that returns to the starting width needs no reallocation either.
+      act(() => emit(true, 'right'))
+      resizeHost(1200)
+      resizeHost(1280)
+      act(() => emit(false))
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+      expect(app.canvas.style.width).toBe('100%')
+    })
+
+    it('stops waiting for a drag end that got lost on window blur or pointer release', async () => {
+      const { app, resizeHost, emit } = await renderObservedLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+
+      act(() => emit(true, 'right'))
+      resizeHost(1000)
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+      // The window loses focus before the mouse button comes up: no end event will come.
+      act(() => window.dispatchEvent(new Event('blur')))
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1000, 720)
+      expect(app.canvas.style.width).toBe('100%')
+      // The emitter still says that a drag runs; the canvas follows its host all the same.
+      resizeHost(1200)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1200, 720)
+
+      // The next drag defers again, and a pointer release ends that one too.
+      act(() => emit(true, 'right'))
+      resizeHost(1100)
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1200, 720)
+      act(() => window.dispatchEvent(new Event('pointerup')))
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1100, 720)
+      act(() => emit(false))
+      expect(app.renderer.resize).toHaveBeenLastCalledWith(1100, 720)
+    })
+
+    it('stops waiting for a lost drag end after a few seconds without a resize', async () => {
+      const { app, resizeHost, emit } = await renderObservedLayer()
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        act(() => emit(true, 'right'))
+        resizeHost(1000)
+        act(() => {
+          vi.advanceTimersByTime(2000)
+        })
+        // Still dragging: each resize starts the wait again.
+        resizeHost(990)
+        act(() => {
+          vi.advanceTimersByTime(2900)
+        })
+        expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+        act(() => {
+          vi.advanceTimersByTime(200)
+        })
+        expect(app.renderer.resize).toHaveBeenLastCalledWith(990, 720)
+        expect(app.canvas.style.width).toBe('100%')
+
+        // The drag had only paused: its next moves are deferred again, until it ends.
+        const resizesAfterWait = app.renderer.resize.mock.calls.length
+        resizeHost(970)
+        resizeHost(950)
+        expect(app.renderer.resize.mock.calls.length).toBe(resizesAfterWait)
+        expect(app.canvas.style.width).toBe('990px')
+        act(() => emit(false))
+        expect(app.renderer.resize.mock.calls.length).toBe(resizesAfterWait + 1)
+        expect(app.renderer.resize).toHaveBeenLastCalledWith(950, 720)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('restores the canvas style when the layer goes away in the middle of a drag', async () => {
+      const { app, resizeHost, emit, unmount } = await renderObservedLayer()
+      act(() => emit(true, 'right'))
+      resizeHost(900)
+      expect(app.canvas.style.width).toBe('1280px')
+      const resizesBefore = app.renderer.resize.mock.calls.length
+      unmount()
+      act(() => emit(false))
+      expect(app.renderer.resize.mock.calls.length).toBe(resizesBefore)
+    })
+  })
+
+  describe('world render group', () => {
+    const getWorld = () =>
+      createdSprites[0].parent as unknown as { isRenderGroup?: boolean; position: MockPoint }
+
+    it('makes the world a render group, so a pan or zoom is one transform on the GPU', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      render(<Layer ref={ref} items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdSprites).toHaveLength(1))
+      expect(getWorld().isRenderGroup).toBe(true)
+
+      act(() => ref.current?.syncViewport({ x: -40_000, y: 12_000 }, 0.2))
+      expect(getWorld().isRenderGroup).toBe(true)
+      expect(getWorld().position.x).toBe(-40_000)
+    })
+
+    it('transforms on the CPU where 32-bit GPU maths would move images by visible amounts', async () => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const { PROJECT_CANVAS_WEBGL_RENDER_GROUP_MAX_SCREEN_REACH_PX: limit } =
+        await import('../canvasRenderQuality')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      render(<Layer ref={ref} items={[createItem()]} {...TEST_STAGE_VIEWPORT_1280_720} />)
+      await waitFor(() => expect(createdSprites).toHaveLength(1))
+      const app = createdApplications[0]
+
+      // A deep zoom far from the canvas origin: the stage offset is millions of screen pixels.
+      const rendersBefore = app.render.mock.calls.length
+      act(() => ref.current?.syncViewport({ x: -22_500_000, y: -3_000_000 }, 500))
+      expect(getWorld().isRenderGroup).toBe(false)
+      expect(getWorld().position.x).toBe(-22_500_000)
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // Just inside the limit again is not enough to switch back (no flapping on the limit)...
+      act(() => ref.current?.syncViewport({ x: -(limit - 1280 - 10), y: 0 }, 500))
+      expect(getWorld().isRenderGroup).toBe(false)
+      // ...well inside is.
+      act(() => ref.current?.syncViewport({ x: -(limit / 2), y: 0 }, 500))
+      expect(getWorld().isRenderGroup).toBe(true)
+    })
+  })
+
+  describe('lockstep frame', () => {
+    // Animation frames that only run when the test says so.
+    const installManualAnimationFrames = () => {
+      let nextId = 1
+      const callbacks = new Map<number, FrameRequestCallback>()
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn((callback: FrameRequestCallback) => {
+          const id = nextId++
+          callbacks.set(id, callback)
+          return id
+        })
+      )
+      vi.stubGlobal(
+        'cancelAnimationFrame',
+        vi.fn((id: number) => {
+          callbacks.delete(id)
+        })
+      )
+      return {
+        pending: () => callbacks.size,
+        flush: () => {
+          const due = Array.from(callbacks.values())
+          callbacks.clear()
+          due.forEach((callback) => callback(performance.now()))
+        }
+      }
+    }
+
+    const renderSettledLayer = async (items: CanvasImageItem[]) => {
+      const { default: Layer } = await import('./ProjectCanvasWebGLImageLayer')
+      const ref = React.createRef<ProjectCanvasWebGLImageLayerHandle>()
+      const view = (nextItems: CanvasImageItem[]) => (
+        <Layer ref={ref} items={nextItems} {...TEST_STAGE_VIEWPORT_1280_720} />
+      )
+      const utils = render(view(items))
+      await waitFor(() => {
+        expect(ref.current).not.toBeNull()
+        expect(createdApplications).toHaveLength(1)
+        expect(createdSprites).toHaveLength(items.length)
+      })
+      const app = createdApplications[0]
+      // Let the start-up renders and reconcile timers run out: quiet for 200 ms.
+      for (let renders = -1; renders !== app.render.mock.calls.length;) {
+        renders = app.render.mock.calls.length
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        })
+      }
+      return { ref, app, view, ...utils }
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    })
+
+    it('draws every gesture frame inside the viewport sync, not in a frame of its own', async () => {
+      const { ref, app } = await renderSettledLayer([createItem()])
+      const frames = installManualAnimationFrames()
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+
+      for (let frame = 1; frame <= 5; frame += 1) {
+        act(() => ref.current?.syncViewport({ x: frame * 12, y: frame * 4 }, 1))
+        // Drawn before the sync call returns: the same frame as the DOM layers.
+        expect(app.render.mock.calls.length).toBe(rendersBefore + frame)
+        expect(createdSprites[0].parent?.position.x).toBe(frame * 12)
+        // And no animation frame was asked for, so nothing draws this view a frame later.
+        expect(frames.pending()).toBe(0)
+      }
+
+      // The same view again is not a new frame.
+      act(() => ref.current?.syncViewport({ x: 60, y: 20 }, 1))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 5)
+      act(() => frames.flush())
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 5)
+    })
+
+    it('cancels a render that was already scheduled when the gesture frame draws', async () => {
+      const items = [createItem()]
+      const { ref, app, view, rerender } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      const rendersBefore = app.render.mock.calls.length
+
+      // A reconcile pass asks for a render in the next animation frame.
+      rerender(view([{ ...items[0], zIndex: 7 }]))
+      expect(frames.pending()).toBe(1)
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+
+      act(() => ref.current?.setViewportInteracting(true))
+      act(() => ref.current?.syncViewport({ x: 40, y: 0 }, 1))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+      expect(frames.pending()).toBe(0)
+      act(() => frames.flush())
+      // One render for that frame, not two.
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+    })
+
+    it('lets the gesture frame draw background changes instead of rendering twice', async () => {
+      const items = [createItem()]
+      const { ref, app, view, rerender } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+
+      // A reconcile pass in the middle of the gesture: no frame of its own yet.
+      rerender(view([{ ...items[0], zIndex: 7 }]))
+      expect(frames.pending()).toBe(0)
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+
+      // The next gesture frame shows it.
+      act(() => ref.current?.syncViewport({ x: 40, y: 0 }, 1))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+      act(() => {
+        vi.advanceTimersByTime(200)
+        frames.flush()
+      })
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // The pointer rests: the change is drawn alone, a moment later, once.
+      rerender(view([{ ...items[0], zIndex: 9 }]))
+      act(() => {
+        vi.advanceTimersByTime(20)
+      })
+      expect(frames.pending()).toBe(0)
+      act(() => {
+        vi.advanceTimersByTime(20)
+      })
+      expect(frames.pending()).toBe(1)
+      act(() => frames.flush())
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+      act(() => {
+        vi.advanceTimersByTime(200)
+        frames.flush()
+      })
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+    })
+
+    it('draws a waiting background change right after the gesture ends', async () => {
+      const items = [createItem()]
+      const { ref, app, view, rerender } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      act(() => ref.current?.setViewportInteracting(true))
+      const rendersBefore = app.render.mock.calls.length
+      rerender(view([{ ...items[0], zIndex: 7 }]))
+      expect(frames.pending()).toBe(0)
+
+      act(() => ref.current?.setViewportInteracting(false))
+      // No 34 ms wait any more: the next animation frame.
+      expect(frames.pending()).toBeGreaterThanOrEqual(1)
+      act(() => frames.flush())
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+    })
+
+    it('does not render for preview calls that change nothing on screen', async () => {
+      const items = [
+        createNamedItem('first', { x: 20 }),
+        createNamedItem('second', { x: 320 }),
+        createNamedItem('third', { x: 620 })
+      ]
+      const { ref, app } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      const rendersBefore = app.render.mock.calls.length
+      const canonical = { x: 20, y: 36, width: 200, height: 120, scaleX: 1, scaleY: 1, rotation: 0 }
+
+      // What every hit proxy does when a pan or zoom starts: reset a preview that was never
+      // set. With 160 images on screen that used to be 160 renders in one task.
+      act(() => {
+        ref.current?.setViewportInteracting(true)
+        items.forEach((item) => ref.current?.syncItemPreview(item.id, null))
+      })
+      // A preview equal to the item's own transform moves nothing either.
+      act(() => ref.current?.syncItemPreview('first', canonical))
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+      expect(frames.pending()).toBe(0)
+
+      // A real move is drawn at once, also during the gesture; repeating it is not.
+      act(() => ref.current?.syncItemPreview('first', { ...canonical, x: 64 }))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+      expect(getLiveSpriteByLabel('first')?.position.x).toBe(64)
+      act(() => ref.current?.syncItemPreview('first', { ...canonical, x: 64 }))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+
+      // Clearing the preview moves the image back and asks for one render in a coming frame
+      // (the commit that ends a preview reaches the layer just after it); again, nothing.
+      act(() => ref.current?.syncItemPreview('first', null))
+      expect(getLiveSpriteByLabel('first')?.position.x).toBe(20)
+      act(() => ref.current?.syncItemPreview('first', null))
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 1)
+      act(() => ref.current?.setViewportInteracting(false))
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60))
+      })
+      act(() => frames.flush())
+      expect(app.render.mock.calls.length).toBe(rendersBefore + 2)
+      expect(frames.pending()).toBe(0)
+    })
+
+    it('does not render after the layer is gone', async () => {
+      const items = [createItem()]
+      const { ref, app, view, rerender, unmount } = await renderSettledLayer(items)
+      const frames = installManualAnimationFrames()
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      act(() => ref.current?.setViewportInteracting(true))
+      rerender(view([{ ...items[0], zIndex: 7 }]))
+      const rendersBefore = app.render.mock.calls.length
+
+      unmount()
+      act(() => {
+        vi.advanceTimersByTime(500)
+        frames.flush()
+      })
+      expect(app.render.mock.calls.length).toBe(rendersBefore)
+    })
+  })
 
   it('reconciles resident images after imperative viewport movement without prop changes', async () => {
     const { default: ProjectCanvasWebGLImageLayer } = await import('./ProjectCanvasWebGLImageLayer')
@@ -2736,6 +5838,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
     })
 
     vi.stubGlobal('Image', MockImage as unknown as typeof Image)
+    // Timers stay fake for the whole test, so a pass the layer armed at mount cannot run between
+    // the two loads and the frame count (under load it did, and armed an upload frame there).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 
     try {
       const srcOnlyItems = createItems(2).map((item) => ({
@@ -2747,9 +5852,9 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         <ProjectCanvasWebGLImageLayer items={srcOnlyItems} {...TEST_STAGE_VIEWPORT_1280_720} />
       )
 
-      await waitFor(() => {
+      await waitAdvancingFakeTimers(() => {
         expect(imageInstances).toHaveLength(2)
-      })
+      }, 0)
       queuedAnimationFrames.clear()
 
       await act(async () => {
@@ -2766,13 +5871,14 @@ describe('ProjectCanvasWebGLImageLayer', () => {
         imageVersionFrame(window.performance.now())
       })
 
-      await waitFor(() => {
+      await waitAdvancingFakeTimers(() => {
         expect(createdSprites.filter((sprite) => !sprite.destroyed)).toHaveLength(2)
       })
     } finally {
       requestAnimationFrameSpy.mockRestore()
       cancelAnimationFrameSpy.mockRestore()
       vi.unstubAllGlobals()
+      vi.useRealTimers()
     }
   }, 30000)
 

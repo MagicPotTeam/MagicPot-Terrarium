@@ -4,6 +4,10 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ChatAttachment, ChatMessage } from '@shared/api/svcLLMProxy'
 import type { ChatSession } from './chatStorage'
+import { FakeIDBKeyRange, installFakeIDBKeyRange } from '../../testUtils/fakeIdbKeyRange'
+
+// chatStorage reads one scope through a key range; jsdom has no IDBKeyRange of its own.
+installFakeIDBKeyRange()
 
 type StoreMap = Map<string, Map<string, unknown>>
 
@@ -49,7 +53,7 @@ class FakeIDBObjectStore {
     return request
   }
 
-  getAll(): {
+  getAll(range?: FakeIDBKeyRange): {
     result?: unknown[]
     error?: DOMException
     onsuccess?: () => void
@@ -64,12 +68,22 @@ class FakeIDBObjectStore {
 
     setTimeout(() => {
       this.state.getAllCount += 1
-      request.result = [...(this.stores.get(this.storeName)?.values() || [])].map((value) =>
-        cloneValue(value)
-      )
+      request.result = [...(this.stores.get(this.storeName)?.entries() || [])]
+        .filter(([key]) => !range || range.includes(key))
+        .map(([, value]) => cloneValue(value))
       request.onsuccess?.()
     }, 0)
 
+    return request
+  }
+
+  /** Keys only; the scoped readers use it once per connection to look for stray keys. */
+  getAllKeys(): { result?: string[]; onsuccess?: () => void; onerror?: () => void } {
+    const request: { result?: string[]; onsuccess?: () => void; onerror?: () => void } = {}
+    setTimeout(() => {
+      request.result = [...(this.stores.get(this.storeName)?.keys() || [])]
+      request.onsuccess?.()
+    }, 0)
     return request
   }
 

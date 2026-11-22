@@ -50,6 +50,13 @@ const createConfig = () =>
   }) as never
 
 describe('builtInSkills', () => {
+  it('keeps explicit procedural settings on built-in skills instead of stripping the opted-in record', () => {
+    const defaults = buildBuiltInSkills()
+    const changed = defaults.map((skill) => ({ ...skill, procedural: { enabled: true, paths: ['*.md'] } }))
+    expect(stripDefaultBuiltInSkills(changed)).toEqual(changed)
+    expect(stripDefaultBuiltInSkills(defaults)).toEqual([])
+  })
+
   it('adds active built-in workflows ahead of persisted custom skills', () => {
     const merged = mergeBuiltInSkills([
       {

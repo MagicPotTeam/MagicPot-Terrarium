@@ -1,17 +1,18 @@
-import { createAdapter, objectSchema, statusSchema } from './helpers'
+import { bundledCreativeDeclarations } from '@shared/magicAgentRuntime/bundledCreativeDeclarations'
+import { createAdapter, objectSchema } from './helpers'
 
 export const qAppToolAdapter = createAdapter([
   {
-    name: 'qapp.list',
-    category: 'qapp',
-    description: 'List available QApps through a registered QApp adapter.',
-    inputSchema: statusSchema,
+    ...bundledCreativeDeclarations['qapp.list'],
+    inputSchema: objectSchema(
+      { limit: { type: 'integer', minimum: 1, maximum: 200 } },
+      undefined,
+      false
+    ),
     dependency: 'qappList'
   },
   {
-    name: 'qapp.get',
-    category: 'qapp',
-    description: 'Read one QApp configuration by key through a registered QApp adapter.',
+    ...bundledCreativeDeclarations['qapp.get'],
     inputSchema: objectSchema(
       {
         key: {

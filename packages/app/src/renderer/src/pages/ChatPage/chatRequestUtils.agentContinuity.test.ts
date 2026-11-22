@@ -54,7 +54,7 @@ const fixtureImage: ChatAttachment = {
 }
 
 const installFixtureLocalMediaFetch = () => {
-  const fetchMock = vi.fn(async (url: string) => {
+  const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url !== fixtureImage.url) {
       throw new Error(`unexpected fixture URL: ${url}`)
     }
@@ -142,6 +142,93 @@ afterEach(() => {
 })
 
 describe('external agent continuity fixture', () => {
+  it('sends only compact completed image receipts in both provider history representations', async () => {
+    const fixture = installRemoteFetch([{ content: 'OK' }])
+    const bytes = 'data:image/png;base64,LEGACY_PRIVATE_BYTES'
+    const args = {
+      prompt: 'Draw a tree',
+      transparent_background: true,
+      num_last_images_to_include: 2,
+      gif: { frame_count: 3 }
+    }
+    const receipt = JSON.stringify({
+      completed: true,
+      image_count: 1,
+      edited_images: 2,
+      output_format: 'gif',
+      images: [{ type: 'image', url: '/private/output.gif' }]
+    })
+    const known = {
+      runId: 'r:1',
+      toolCallId: 'c:1',
+      status: 'completed' as const,
+      toolName: 'image_gen',
+      args,
+      content: receipt,
+      metadata: { imagePublicationId: 'private-id' }
+    }
+    const legacy = {
+      ...known,
+      args: { prompt: `old ${bytes}`, nested: { url: bytes }, gif: { raw: bytes } },
+      content: bytes,
+      metadata: { artifacts: [bytes] },
+      error: bytes,
+      extra: bytes
+    }
+    const other = {
+      ...known,
+      toolName: 'files.read',
+      content: 'ordinary output',
+      metadata: { evidence: 'preserve' }
+    }
+    const failed = {
+      ...known,
+      status: 'failed' as const,
+      content: 'failure diagnostic',
+      metadata: { reason: 'keep-failed' }
+    }
+    const history = [known, legacy, other, failed]
+    const messages: ChatMessage[] = [
+      { role: 'assistant', content: 'Earlier turn', toolHistory: history },
+      { role: 'user', content: 'What happened?' }
+    ]
+    const before = JSON.stringify(messages)
+    await requestChatCompletion({
+      config: createConfig(),
+      messages,
+      profileId: 'agent-profile',
+      externalAgentSkill: fixtureSkill,
+      route: fixtureRoute
+    })
+    const [projected] = fixture.requests[0].body.messages as ChatMessage[]
+    const summary = 'Image generation completed. image_count=1; edited_images=2; output_format=gif.'
+    expect(projected.toolHistory).toEqual([
+      {
+        runId: 'r:1',
+        toolCallId: 'c:1',
+        status: 'completed',
+        toolName: 'image_gen',
+        args,
+        content: summary
+      },
+      {
+        runId: 'r:1',
+        toolCallId: 'c:1',
+        status: 'completed',
+        toolName: 'image_gen',
+        args: { gif: {} },
+        content: 'Image generation completed.'
+      },
+      other,
+      failed
+    ])
+    expect(projected.content).toContain(summary)
+    expect(projected.content).toContain('ordinary output')
+    expect(JSON.stringify(projected)).not.toMatch(
+      /LEGACY_PRIVATE_BYTES|base64,|private-id|output\.gif/
+    )
+    expect(JSON.stringify(messages)).toBe(before)
+  })
   it('delivers the first response delta before the delayed remote request settles', async () => {
     let stream!: Parameters<LLMProxySvc['externalAgentStream']>[1]
     let resolveStream: (() => void) | undefined
@@ -188,7 +275,10 @@ describe('external agent continuity fixture', () => {
     try {
       // Image materialization is asynchronous; wait for the stream RPC, not one microtask.
       await vi.waitFor(() => expect(externalAgentStream).toHaveBeenCalledOnce())
-      expect(mediaFetch).toHaveBeenCalledWith(fixtureImage.url)
+      expect(mediaFetch).toHaveBeenCalledExactlyOnceWith(fixtureImage.url, {
+        signal: controller.signal
+      })
+      expect(mediaFetch.mock.calls[0][1]?.signal).toBe(controller.signal)
       expect(remoteFetch).not.toHaveBeenCalled()
       const payload = JSON.parse(externalAgentStream.mock.calls[0][0].body!)
       expect(payload.stream).toBe(true)

@@ -45,6 +45,84 @@ export const resolveWindowsCommandJobHelper = (
   return undefined
 }
 
+/**
+ * The answer of the current helper to `--capabilities`. It must stay equal to the string printed by
+ * packages/magicpot-command-job/src/main.rs and checked by agentThreadHtmlProcess.ts and
+ * scripts/test-magicpot-command-job.mjs.
+ */
+export const WINDOWS_COMMAND_JOB_CAPABILITY = 'magicpot-command-job:atomic-job-list-empty-v2'
+
+/** Runs `<helper> --capabilities` (bounded, no shell) and returns its trimmed output on exit 0. */
+export const probeWindowsCommandJobHelperCapability = (
+  helper: string,
+  spawnProcess: CommandJobsSpawnProcess = spawn,
+  timeoutMs = 2_000
+): Promise<string | undefined> =>
+  new Promise((resolve) => {
+    let output = ''
+    let settled = false
+    const finish = (value: string | undefined) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      try {
+        probe?.kill()
+      } catch {
+        // The probe may already be gone; it is reported as unavailable either way.
+      }
+      finish(undefined)
+    }, timeoutMs)
+    let probe: ReturnType<CommandJobsSpawnProcess> | undefined
+    try {
+      probe = spawnProcess(helper, ['--capabilities'], {
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore']
+      })
+    } catch {
+      finish(undefined)
+      return
+    }
+    probe.stdout?.on('data', (chunk: Buffer | string) => {
+      output += chunk.toString()
+      if (output.length > 1024) {
+        try {
+          probe?.kill()
+        } catch {
+          // Oversized answers are never a valid capability.
+        }
+        finish(undefined)
+      }
+    })
+    probe.once('error', () => finish(undefined))
+    probe.once('close', (code) => finish(code === 0 ? output.trim() : undefined))
+  })
+
+/**
+ * The verified helper (fixed candidates and SHA-256 manifest, never PATH or the workspace) that
+ * also answers the current capability, or undefined. A helper that is missing, fails verification
+ * or reports another capability counts as absent.
+ */
+export const resolveCapableWindowsCommandJobHelper = async (
+  options: Readonly<{
+    candidates?: readonly string[]
+    fileOps?: WindowsCommandJobFileOps
+    probe?: (helper: string) => Promise<string | undefined>
+  }> = {}
+): Promise<string | undefined> => {
+  const helper = resolveWindowsCommandJobHelper(options.candidates, options.fileOps)
+  if (!helper) return undefined
+  const capability = await (options.probe ?? probeWindowsCommandJobHelperCapability)(helper).catch(
+    () => undefined
+  )
+  if (capability !== WINDOWS_COMMAND_JOB_CAPABILITY) return undefined
+  // The file that answered must still be the verified one when it is launched.
+  return resolveWindowsCommandJobHelper([helper], options.fileOps) === helper ? helper : undefined
+}
+
 export const createWindowsJobObjectConfinementAdapter = (
   platform: NodeJS.Platform = process.platform,
   candidates?: readonly string[],
@@ -89,17 +167,32 @@ export const buildWindowsJobObjectArguments = (constraints: PolicyConstraints): 
   ]
 }
 
+/**
+ * The installed helper next to the executable, and in a development checkout the one built into
+ * the repository. A packaged app (Electron without `defaultApp`) never looks in its start
+ * directory: that folder can be anything (a shortcut's start-in, a workspace), and a helper there
+ * would be checked only against a manifest lying next to it, then executed.
+ */
+export const isPackagedElectronApp = (
+  versions: NodeJS.ProcessVersions = process.versions,
+  defaultApp: boolean | undefined = (process as { defaultApp?: boolean }).defaultApp
+): boolean => Boolean(versions.electron) && defaultApp !== true
+
 const defaultCandidates = (): string[] => [
   path.join(path.dirname(process.execPath), 'bin', 'magicpot-command-job', HELPER_NAME),
-  path.join(
-    process.cwd(),
-    'packages',
-    'runtime-assets',
-    'resources',
-    'bin',
-    'magicpot-command-job',
-    HELPER_NAME
-  )
+  ...(isPackagedElectronApp()
+    ? []
+    : [
+        path.join(
+          process.cwd(),
+          'packages',
+          'runtime-assets',
+          'resources',
+          'bin',
+          'magicpot-command-job',
+          HELPER_NAME
+        )
+      ])
 ]
 
 const integerOrDash = (value: unknown, name: string, maximum = Number.MAX_SAFE_INTEGER): string => {

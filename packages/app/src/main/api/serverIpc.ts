@@ -26,10 +26,23 @@ import { DuplicateCheckSvcImpl } from './svcDuplicateCheckImpl'
 import { registerIpcServer } from '@shared/api/createServer/registerIpcServer'
 import { createApiExtensionServices } from './extensionServices'
 import { AppUpdateSvcImpl } from './svcAppUpdateImpl'
+import { createInstalledCatalogReadDelegate } from '../magicAgentRuntime/installedCatalogReadBinding'
+import { createStartupStorageReadDelegate } from '../storageMetadata/startupStorageReadBinding'
 import { MagicAgentPlatformSvcImpl } from './svcMagicAgentPlatformImpl'
-import { ManagedMediaSvcImpl } from './svcManagedMediaImpl'
+import { MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES, ManagedMediaSvcImpl } from './svcManagedMediaImpl'
+import {
+  authorizeLocalMediaImportSourcePathAsync,
+  spendLocalMediaImportGrant
+} from '../localMediaAccess'
+import { getLocalMediaAllowedRoots } from '../localMediaAllowedRoots'
+import { ReportBundlesSvcImpl } from './svcReportBundlesImpl'
 import type { ManagedMediaCleanupScheduler } from '../llmProxy/managedMediaCleanupScheduler'
 import { getChatMediaDir } from '../llmProxy/chatMediaDir'
+import {
+  DEFAULT_IMPORT_SOURCE_GUARD,
+  importSourceRootKey,
+  runImportSourceOperation
+} from '../llmProxy/managedMediaStore'
 
 export const createServer = (
   managedMediaCleanupScheduler?: ManagedMediaCleanupScheduler,
@@ -47,7 +60,7 @@ export const createServer = (
 
   const baseApi: BaseApi = {
     svcAdobeBridge: new AdobeBridgeSvcImpl(),
-    svcState: new StateSvcImpl(),
+    svcState: new StateSvcImpl({ startupStorageRead: createStartupStorageReadDelegate(getMainWindow) }),
     svcHyper: new HyperSvcImpl(),
     svcComfy: new ComfySvcImpl(),
     svcComfyBatch: comfyBatch,
@@ -72,8 +85,25 @@ export const createServer = (
     svcDccBridge: new DccBridgeSvcImpl(),
     svcDuplicateCheck: new DuplicateCheckSvcImpl(),
     svcAppUpdate: new AppUpdateSvcImpl(),
-    svcMagicAgentPlatform: new MagicAgentPlatformSvcImpl(),
+    svcMagicAgentPlatform: new MagicAgentPlatformSvcImpl({ installedCatalogRead: createInstalledCatalogReadDelegate(getMainWindow) }),
     svcManagedMedia: new ManagedMediaSvcImpl({
+      // Renderer-supplied paths: application roots, persisted grants, and the one-use,
+      // in-memory import grant of a file the user just picked or dropped in the chat (spent
+      // by importFile once it accepted the request).
+      // Off the event loop (async realpath) and under the import-source deadline: the path
+      // may sit on a stalled network mount.
+      authorizeImportSourcePath: (sourcePath) =>
+        runImportSourceOperation(
+          () => authorizeLocalMediaImportSourcePathAsync(sourcePath, getLocalMediaAllowedRoots()),
+          {
+            key: importSourceRootKey(sourcePath),
+            file: sourcePath,
+            timeoutMs: DEFAULT_IMPORT_SOURCE_GUARD.operationTimeoutMs
+          }
+        ),
+      consumeImportGrant: (canonicalPath) => spendLocalMediaImportGrant(canonicalPath, 'import'),
+      maxImportFileBytes: MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES,
+      importSourceGuard: DEFAULT_IMPORT_SOURCE_GUARD,
       updateReferenceSnapshot: async (snapshot) => {
         const chatMediaRoot = await getChatMediaDir()
         managedMediaCleanupScheduler?.submitSnapshot({
@@ -83,7 +113,8 @@ export const createServer = (
           referenceCounts: snapshot.referenceCounts
         })
       }
-    })
+    }),
+    svcReportBundles: new ReportBundlesSvcImpl({ getMainWindow })
   }
 
   return {

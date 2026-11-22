@@ -1,0 +1,761 @@
+import { execFileSync } from 'node:child_process'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  LOCAL_MEDIA_IMPORT_GRANT_TTL_MS,
+  authorizeLocalMediaImportSourcePathAsync,
+  authorizeScopedLocalMediaDirectory,
+  authorizeScopedLocalMediaPath,
+  clearScopedLocalMediaPathsForTest,
+  consumeLocalMediaImportGrant,
+  countLocalMediaImportGrantsForTest,
+  recordLocalMediaImportGrant,
+  resolveAuthorizedLocalMediaPath
+} from '../localMediaAccess'
+import { grantLocalMediaImportPath } from '../localMediaFileIntakeIpc'
+import {
+  createImportSourceGate,
+  importManagedMediaFile,
+  importSourceRootKey,
+  runImportSourceOperation
+} from '../llmProxy/managedMediaStore'
+import { ManagedMediaSvcImpl, toImportSourceLocalPath } from './svcManagedMediaImpl'
+
+// Real filesystem: symlinks, FIFOs, /proc and devices are what these tests are about.
+vi.mock('node:fs', async () => vi.importActual<typeof import('node:fs')>('node:fs'))
+vi.mock('node:fs/promises', async () =>
+  vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+)
+vi.mock('electron', () => ({
+  app: { getPath: vi.fn(() => '/tmp/magicpot-test-user-data') }
+}))
+
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64'
+)
+
+const win32 = (value: string, refuseNetworkAndDevicePaths?: boolean): string =>
+  toImportSourceLocalPath(value, {
+    pathApi: path.win32,
+    toPath: (url) => fileURLToPath(url, { windows: true }),
+    refuseNetworkAndDevicePaths
+  })
+const posix = (value: string): string =>
+  toImportSourceLocalPath(value, {
+    pathApi: path.posix,
+    toPath: (url) => fileURLToPath(url, { windows: false })
+  })
+
+describe('toImportSourceLocalPath (no filesystem access)', () => {
+  it('accepts canonical Windows drive-letter paths, long paths and file URIs', () => {
+    const longPath = `C:\\${'nested-folder\\'.repeat(24)}image.png`
+    expect(longPath.length).toBeGreaterThan(260)
+    expect(win32('C:\\Users\\artist\\Pictures\\a.png')).toBe('C:\\Users\\artist\\Pictures\\a.png')
+    expect(win32('d:\\Art Work\\a b.png')).toBe('d:\\Art Work\\a b.png')
+    expect(win32(longPath)).toBe(longPath)
+    expect(win32('file:///C:/Users/artist/a.png')).toBe('C:\\Users\\artist\\a.png')
+    expect(posix('/home/artist/a.png')).toBe('/home/artist/a.png')
+    expect(posix('/home/artist/a:b.png')).toBe('/home/artist/a:b.png')
+    expect(posix('file:///home/artist/a.png')).toBe('/home/artist/a.png')
+  })
+
+  it('refuses UNC, device and long-path namespace, relative, aliased and stream paths', () => {
+    const refused = [
+      '\\\\server\\share\\a.png',
+      '\\\\?\\C:\\Users\\a.png',
+      '\\\\?\\UNC\\server\\share\\a.png',
+      '\\\\.\\PhysicalDrive0',
+      '\\\\.\\pipe\\x',
+      '//server/share/a.png',
+      '/\\server\\share\\a.png',
+      'file://server/share/a.png',
+      'file:////server/share/a.png',
+      'C:\\Users\\a.png:hidden',
+      'C:\\Users\\a.png::$DATA',
+      'C:a.png',
+      'C:\\Users\\..\\a.png',
+      'C:/Users/a.png',
+      'relative\\a.png',
+      'https://example.com/a.png',
+      'smb://server/share/a.png',
+      ''
+    ]
+    for (const value of refused) {
+      expect(() => win32(value), value).toThrow(
+        expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+      )
+    }
+    for (const value of ['//server/share/a.png', '/a/../b.png', 'a.png', '/a//b.png', '/a\0b']) {
+      expect(() => posix(value), value).toThrow(
+        expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+      )
+    }
+  })
+
+  it('refuses NT object-namespace, root-relative and device-name paths on Windows', () => {
+    for (const value of [
+      '\\??\\UNC\\attacker-host\\share\\a.png',
+      '\\??\\C:\\Users\\a.png',
+      '/??/UNC/attacker-host/share/a.png',
+      'file:///%3F%3F/UNC/attacker-host/share/a.png',
+      '\\Users\\artist\\a.png',
+      '\\Users\\artist\\a.png:hidden',
+      'C:\\Users\\artist\\CON',
+      'C:\\Users\\artist\\com1.png',
+      'C:\\Users\\artist\\NUL .txt',
+      'C:\\Users\\artist\\CONOUT$',
+      'C:\\Users\\artist\\lpt¹.png',
+      'file:///C:/Users/artist/aux.png'
+    ]) {
+      expect(() => win32(value), value).toThrow(
+        expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+      )
+    }
+    expect(win32('C:\\Users\\console\\a.png')).toBe('C:\\Users\\console\\a.png')
+    // Win32 rule: a reserved word followed by more than spaces and an extension is an ordinary name.
+    for (const name of ['Con Edison bill.png', 'AUX cable.jpg', 'com1 port.png', 'Nul hypothesis.png']) {
+      expect(win32(`C:\\Users\\artist\\${name}`), name).toBe(`C:\\Users\\artist\\${name}`)
+    }
+    for (const name of ['CON  ', 'CON.tar.gz', 'aux .png']) {
+      expect(() => win32(`C:\\Users\\artist\\${name}`), name).toThrow(
+        expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+      )
+    }
+    expect(win32('C:\\Users\\artist\\com10.png')).toBe('C:\\Users\\artist\\com10.png')
+    // POSIX: the slash form of the NT prefix ('/' + '?' + '?' + '/') is refused as well; reserved
+    // Windows names are ordinary file names.
+    expect(() => posix('/??/UNC/attacker-host/share/a.png')).toThrow(
+      expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+    )
+    expect(posix('/home/artist/con.png')).toBe('/home/artist/con.png')
+  })
+
+  it('keeps UNC paths for main-owned callers that confine paths themselves', () => {
+    expect(win32('\\\\server\\share\\a.png', false)).toBe('\\\\server\\share\\a.png')
+    expect(win32('file://server/share/a.png', false)).toBe('\\\\server\\share\\a.png')
+    expect(() => win32('C:\\a\\..\\b.png', false)).toThrow(
+      expect.objectContaining({ code: 'MANAGED_MEDIA_IMPORT_INVALID' })
+    )
+  })
+
+  it('never puts the refused path into the error message', () => {
+    try {
+      win32('\\\\attacker-host\\share\\secret-name.png')
+      expect.unreachable()
+    } catch (error) {
+      expect(String((error as Error).message)).not.toMatch(/attacker-host|secret-name/)
+    }
+  })
+})
+
+describe('ManagedMediaSvcImpl.importFile with the renderer source-path policy', () => {
+  let root: string
+  let allowed: string
+  let outside: string
+  let media: string
+
+  beforeEach(async () => {
+    root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mp-import-by-path-')))
+    allowed = path.join(root, 'allowed')
+    outside = path.join(root, 'outside')
+    media = path.join(allowed, 'media')
+    await fs.mkdir(media, { recursive: true })
+    await fs.mkdir(outside, { recursive: true })
+    clearScopedLocalMediaPathsForTest()
+  })
+
+  afterEach(async () => {
+    clearScopedLocalMediaPathsForTest()
+    await fs.rm(root, { recursive: true, force: true })
+  })
+
+  // The policy production uses for importFile (serverIpc), on the real filesystem.
+  const create = (overrides: ConstructorParameters<typeof ManagedMediaSvcImpl>[0] = {}) => {
+    const authorize = vi.fn((sourcePath: string) =>
+      authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed])
+    )
+    const importFile = vi.fn(importManagedMediaFile)
+    const service = new ManagedMediaSvcImpl({
+      getMediaDir: () => media,
+      authorizeImportSourcePath: authorize,
+      consumeImportGrant: (canonicalPath) => consumeLocalMediaImportGrant(canonicalPath),
+      importFile,
+      maxImportFileBytes: 1024 * 1024,
+      ensureDerivative: vi.fn(async () => {
+        throw new Error('not needed')
+      }),
+      ...overrides
+    })
+    return { service, authorize, importFile }
+  }
+  const request = (sourcePath: string, mimeType = 'image/png') => ({
+    sourcePath,
+    mimeType,
+    originalFileName: 'picked.png'
+  })
+  const expectNoPathInError = async (promise: Promise<unknown>, code: string) => {
+    const error = await promise.then(
+      () => expect.unreachable('import should be refused'),
+      (reason: unknown) => reason as { code?: string; message?: string }
+    )
+    expect(error).toMatchObject({ code })
+    expect(String(error.message)).not.toContain(root)
+    return error
+  }
+  const stagingIsEmpty = async () => {
+    const staging = path.join(media, '.staging')
+    expect(await fs.readdir(staging).catch(() => [])).toEqual([])
+  }
+
+  it('imports a file under an allowed root and a file outside it once the user picked it', async () => {
+    const inside = path.join(allowed, 'inside.png')
+    const picked = path.join(outside, 'picked.png')
+    await fs.writeFile(inside, PNG)
+    await fs.writeFile(picked, PNG)
+    const { service } = create()
+
+    await expect(service.importFile(request(inside))).resolves.toMatchObject({
+      reference: { kind: 'managed', mimeType: 'image/png', sizeBytes: PNG.length }
+    })
+    await expectNoPathInError(service.importFile(request(picked)), 'MANAGED_MEDIA_IMPORT_FORBIDDEN')
+    // The composer records the pick (preload: webUtils path -> local-media:authorize-picker-path).
+    expect(authorizeScopedLocalMediaPath(picked)).toBe(true)
+    await expect(service.importFile(request(picked))).resolves.toMatchObject({
+      reference: { kind: 'managed', sizeBytes: PNG.length }
+    })
+  })
+
+  it('imports again and again with a persisted grant, of a file or of a folder (canvas boards)', async () => {
+    const boardVideo = path.join(outside, 'board-image.png')
+    const folder = path.join(outside, 'board-folder')
+    await fs.mkdir(folder)
+    const inFolder = path.join(folder, 'frame.png')
+    await fs.writeFile(boardVideo, PNG)
+    await fs.writeFile(inFolder, PNG)
+    const { service, importFile } = create()
+    await expectNoPathInError(
+      service.importFile(request(inFolder)),
+      'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+    )
+    expect(authorizeScopedLocalMediaPath(boardVideo)).toBe(true)
+    expect(authorizeScopedLocalMediaDirectory(folder)).toBe(true)
+    // A persisted grant is not one-use: canvas imports of the same file keep working.
+    for (const sourcePath of [boardVideo, boardVideo, inFolder, inFolder]) {
+      await expect(service.importFile(request(sourcePath))).resolves.toMatchObject({
+        reference: { kind: 'managed' }
+      })
+    }
+    expect(importFile).toHaveBeenCalledTimes(4)
+  })
+
+  it('forwards the source deadlines to the store', async () => {
+    const inside = path.join(allowed, 'guarded.png')
+    await fs.writeFile(inside, PNG)
+    const importSourceGuard = {
+      operationTimeoutMs: 1_234,
+      copyBaseTimeoutMs: 5_678,
+      copyMinBytesPerSecond: 910
+    }
+    const { service, importFile } = create({ importSourceGuard })
+    await service.importFile(request(inside))
+    expect(importFile).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceGuard: importSourceGuard }),
+      expect.anything()
+    )
+  })
+
+  it('imports a picked file once with its one-use import grant and refuses a second use', async () => {
+    const picked = path.join(outside, 'chat-pick.png')
+    await fs.writeFile(picked, PNG)
+    const { service, importFile } = create()
+    // The preload sends the webUtils path of the picked File; main returns the canonical path.
+    const canonical = await grantLocalMediaImportPath(picked, 'image/png')
+    expect(canonical).toBe(picked)
+    await expect(service.importFile(request(canonical))).resolves.toMatchObject({
+      reference: { kind: 'managed', sizeBytes: PNG.length }
+    })
+    await expectNoPathInError(
+      service.importFile(request(canonical)),
+      'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+    )
+    expect(importFile).toHaveBeenCalledOnce()
+    // Nothing was granted durably.
+    expect(resolveAuthorizedLocalMediaPath(picked, [allowed])).toBeNull()
+  })
+
+  describe('an import grant is spent only by the import that uses it', () => {
+    /** The serverIpc composition, with the realpath of the authorization replaceable. */
+    const createWithDeadline = (
+      realpath: (value: string) => Promise<string>,
+      overrides: ConstructorParameters<typeof ManagedMediaSvcImpl>[0] = {}
+    ) => {
+      const gate = createImportSourceGate()
+      return create({
+        authorizeImportSourcePath: (sourcePath) =>
+          runImportSourceOperation(
+            () => authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed], { realpath }),
+            { key: importSourceRootKey(sourcePath), timeoutMs: 60, gate }
+          ),
+        ...overrides
+      })
+    }
+
+    it('keeps the grant when the authorization answers only after its deadline (D)', async () => {
+      const picked = path.join(outside, 'slow-share.png')
+      await fs.writeFile(picked, PNG)
+      expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+      let answer!: () => void
+      const answered = new Promise<void>((resolve) => (answer = resolve))
+      const slow = createWithDeadline(async (value) => {
+        await answered
+        return fs.realpath(value)
+      })
+      await expectNoPathInError(
+        slow.service.importFile(request(picked)),
+        'MANAGED_MEDIA_IMPORT_TIMEOUT'
+      )
+      expect(countLocalMediaImportGrantsForTest()).toBe(1)
+      // The abandoned authorization finishes later: it spends nothing.
+      answer()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(countLocalMediaImportGrantsForTest()).toBe(1)
+      expect(slow.importFile).not.toHaveBeenCalled()
+      // The retry imports with the same grant and spends it.
+      const { service, importFile } = create()
+      await expect(service.importFile(request(picked))).resolves.toMatchObject({
+        reference: { kind: 'managed' }
+      })
+      expect(importFile).toHaveBeenCalledOnce()
+      expect(countLocalMediaImportGrantsForTest()).toBe(0)
+    })
+
+    it.skipIf(process.platform === 'win32')(
+      'keeps the grant when a request names an alias of the granted file (E)',
+      async () => {
+        const picked = path.join(outside, 'granted.png')
+        const alias = path.join(outside, 'alias.png')
+        await fs.writeFile(picked, PNG)
+        await fs.symlink(picked, alias)
+        expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+        const { service, importFile } = create()
+        await expectNoPathInError(
+          service.importFile(request(alias)),
+          'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+        )
+        expect(countLocalMediaImportGrantsForTest()).toBe(1)
+        await expect(service.importFile(request(picked))).resolves.toMatchObject({
+          reference: { kind: 'managed' }
+        })
+        expect(importFile).toHaveBeenCalledOnce()
+        expect(countLocalMediaImportGrantsForTest()).toBe(0)
+      }
+    )
+
+    it('judges the time to live when the grant is spent, after a slow authorization (O)', async () => {
+      const picked = path.join(outside, 'aged.png')
+      await fs.writeFile(picked, PNG)
+      let now = 0
+      recordLocalMediaImportGrant(picked, now)
+      now = 59_000
+      const { service, importFile } = create({
+        authorizeImportSourcePath: async (sourcePath) => {
+          const authorized = await authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed], {
+            now: () => 59_000
+          })
+          // The realpath and the reply took until 73 s.
+          now = 73_000
+          return authorized
+        },
+        consumeImportGrant: (canonicalPath) => consumeLocalMediaImportGrant(canonicalPath, now)
+      })
+      expect(now + 14_000).toBeGreaterThan(LOCAL_MEDIA_IMPORT_GRANT_TTL_MS)
+      await expectNoPathInError(
+        service.importFile(request(picked)),
+        'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+      )
+      expect(importFile).not.toHaveBeenCalled()
+    })
+
+    it('lets only one of two concurrent imports spend one grant', async () => {
+      const picked = path.join(outside, 'once.png')
+      await fs.writeFile(picked, PNG)
+      expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+      // Both authorizations see the live grant before either import goes on to spend it.
+      let arrived = 0
+      let bothAuthorized!: () => void
+      const barrier = new Promise<void>((resolve) => (bothAuthorized = resolve))
+      const { service, importFile } = create({
+        authorizeImportSourcePath: async (sourcePath) => {
+          const authorized = await authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed])
+          expect(authorized).toEqual({ canonicalPath: picked, viaImportGrant: true })
+          if (++arrived === 2) bothAuthorized()
+          await barrier
+          return authorized
+        }
+      })
+      const outcomes = await Promise.allSettled([
+        service.importFile(request(picked)),
+        service.importFile(request(picked))
+      ])
+      expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(['fulfilled', 'rejected'])
+      expect(outcomes.find((outcome) => outcome.status === 'rejected')).toMatchObject({
+        reason: { code: 'MANAGED_MEDIA_IMPORT_FORBIDDEN' }
+      })
+      expect(importFile).toHaveBeenCalledOnce()
+      expect(countLocalMediaImportGrantsForTest()).toBe(0)
+    })
+
+    it('does not spend the grant of a file an application root already covers', async () => {
+      const inside = path.join(allowed, 'in-root.png')
+      await fs.writeFile(inside, PNG)
+      expect(await grantLocalMediaImportPath(inside, 'image/png')).toBe(inside)
+      const { service } = create()
+      await expect(service.importFile(request(inside))).resolves.toMatchObject({
+        reference: { kind: 'managed' }
+      })
+      expect(countLocalMediaImportGrantsForTest()).toBe(1)
+    })
+
+    it('tells the grant store when an import that spent a grant is over, success or failure', async () => {
+      const picked = path.join(outside, 'turn.png')
+      await fs.writeFile(picked, PNG)
+      const finished = vi.fn()
+      const consumeImportGrant = vi.fn(() => ({ finished }))
+      for (const outcome of ['imported', 'failed'] as const) {
+        expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+        finished.mockClear()
+        const { service } = create({
+          consumeImportGrant,
+          ...(outcome === 'failed'
+            ? {
+                importFile: vi.fn(async () => {
+                  throw new Error('copy failed')
+                })
+              }
+            : {})
+        })
+        const result = service.importFile(request(picked))
+        if (outcome === 'imported') await expect(result).resolves.toMatchObject({ reference: {} })
+        else await expect(result).rejects.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_FAILED' })
+        expect(finished).toHaveBeenCalledOnce()
+      }
+    })
+
+    it('refuses an import grant when no spender is wired (fails closed)', async () => {
+      const picked = path.join(outside, 'unwired.png')
+      await fs.writeFile(picked, PNG)
+      expect(await grantLocalMediaImportPath(picked, 'image/png')).toBe(picked)
+      const { service, importFile } = create({ consumeImportGrant: undefined })
+      await expectNoPathInError(
+        service.importFile(request(picked)),
+        'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+      )
+      expect(importFile).not.toHaveBeenCalled()
+    })
+  })
+
+  it('refuses a path outside the allowed roots before the store opens it', async () => {
+    const secret = path.join(outside, 'secret.png')
+    await fs.writeFile(secret, PNG)
+    const { service, importFile } = create()
+    await expectNoPathInError(service.importFile(request(secret)), 'MANAGED_MEDIA_IMPORT_FORBIDDEN')
+    expect(importFile).not.toHaveBeenCalled()
+  })
+
+  it('refuses a UNC or device path before any authorisation or filesystem access', async () => {
+    const { service, authorize, importFile } = create()
+    for (const sourcePath of ['//attacker/share/a.png', '//./pipe/x']) {
+      await expectNoPathInError(
+        service.importFile(request(sourcePath)),
+        'MANAGED_MEDIA_IMPORT_INVALID'
+      )
+    }
+    expect(authorize).not.toHaveBeenCalled()
+    expect(importFile).not.toHaveBeenCalled()
+  })
+
+  it('refuses an unsupported type before touching the file', async () => {
+    const video = path.join(allowed, 'clip.mp4')
+    await fs.writeFile(video, Buffer.alloc(64))
+    const { service, authorize, importFile } = create()
+    await expectNoPathInError(
+      service.importFile(request(video, 'video/mp4')),
+      'MANAGED_MEDIA_UNSUPPORTED'
+    )
+    expect(authorize).not.toHaveBeenCalled()
+    expect(importFile).not.toHaveBeenCalled()
+  })
+
+  it('refuses a directory inside an allowed root', async () => {
+    const directory = path.join(allowed, 'folder.png')
+    await fs.mkdir(directory)
+    const { service } = create()
+    await expectNoPathInError(service.importFile(request(directory)), 'MANAGED_MEDIA_IMPORT_FAILED')
+    await stagingIsEmpty()
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlink to an outside file and a symlink to an allowed file',
+    async () => {
+      const secret = path.join(outside, 'secret.png')
+      const inside = path.join(allowed, 'inside.png')
+      await fs.writeFile(secret, PNG)
+      await fs.writeFile(inside, PNG)
+      const toOutside = path.join(allowed, 'to-outside.png')
+      const toInside = path.join(allowed, 'to-inside.png')
+      await fs.symlink(secret, toOutside)
+      await fs.symlink(inside, toInside)
+      // A symlinked directory inside the allowed root that points outside.
+      const dirLink = path.join(allowed, 'linked-dir')
+      await fs.symlink(outside, dirLink)
+      const { service, importFile } = create()
+
+      for (const sourcePath of [toOutside, toInside, path.join(dirLink, 'secret.png')]) {
+        await expectNoPathInError(
+          service.importFile(request(sourcePath)),
+          'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+        )
+      }
+      expect(importFile).not.toHaveBeenCalled()
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlink that replaces the file after the authorisation, without following it',
+    async () => {
+      const secret = path.join(outside, 'secret.png')
+      const swapped = path.join(allowed, 'swapped.png')
+      await fs.writeFile(secret, PNG)
+      await fs.writeFile(swapped, PNG)
+      const { service } = create({
+        authorizeImportSourcePath: async (sourcePath) => {
+          const authorized = await authorizeLocalMediaImportSourcePathAsync(sourcePath, [allowed])
+          // Swap the checked file for a symlink to an outside file before the copy.
+          execFileSync('ln', ['-sf', secret, swapped])
+          return authorized
+        }
+      })
+      await expectNoPathInError(service.importFile(request(swapped)), 'MANAGED_MEDIA_IMPORT_FAILED')
+      await stagingIsEmpty()
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO and a /proc file without blocking',
+    async () => {
+      const fifo = path.join(allowed, 'pipe.png')
+      execFileSync('mkfifo', [fifo])
+      const { service } = create()
+      await expectNoPathInError(service.importFile(request(fifo)), 'MANAGED_MEDIA_IMPORT_FAILED')
+      await expectNoPathInError(
+        service.importFile(request('/proc/self/environ')),
+        'MANAGED_MEDIA_IMPORT_FORBIDDEN'
+      )
+      // Even when a device or /proc path is inside an allowed root it is not a regular file.
+      const procOpen = create({
+        authorizeImportSourcePath: (sourcePath) =>
+          authorizeLocalMediaImportSourcePathAsync(sourcePath, ['/'])
+      })
+      for (const sourcePath of [`/proc/${process.pid}/environ`, '/dev/zero', '/dev/null']) {
+        await expect(procOpen.service.importFile(request(sourcePath))).rejects.toMatchObject({
+          code: 'MANAGED_MEDIA_IMPORT_FAILED'
+        })
+      }
+      await stagingIsEmpty()
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a file swapped for a FIFO between the checks and the open, without blocking',
+    async () => {
+      const swapped = path.join(allowed, 'swapped-fifo.png')
+      await fs.writeFile(swapped, PNG)
+      let swappedForFifo = false
+      const { service } = create({
+        importFile: (input, dependencies) =>
+          importManagedMediaFile(input, {
+            ...dependencies,
+            fs: {
+              ...fs,
+              open: (async (...args: Parameters<typeof fs.open>) => {
+                if (!swappedForFifo && String(args[0]) === swapped) {
+                  // The lstat / realpath checks saw a regular file; a FIFO takes its place
+                  // before the open. A blocking open would wait for a writer forever.
+                  swappedForFifo = true
+                  await fs.unlink(swapped)
+                  execFileSync('mkfifo', [swapped])
+                }
+                return fs.open(...args)
+              }) as typeof fs.open
+            }
+          })
+      })
+      await expectNoPathInError(service.importFile(request(swapped)), 'MANAGED_MEDIA_IMPORT_FAILED')
+      expect(swappedForFifo).toBe(true)
+      await stagingIsEmpty()
+    },
+    5000
+  )
+
+  it('refuses a file that changes size during the copy and removes the partial copy', async () => {
+    const growing = path.join(allowed, 'growing.png')
+    await fs.writeFile(growing, PNG)
+    let grown = false
+    const { service } = create({
+      importFile: (input, dependencies) =>
+        importManagedMediaFile(input, {
+          ...dependencies,
+          fs: {
+            ...fs,
+            open: (async (...args: Parameters<typeof fs.open>) => {
+              const handle = await fs.open(...args)
+              if (!grown && String(args[0]).includes(`${path.sep}.staging${path.sep}`)) {
+                grown = true
+                await fs.appendFile(growing, Buffer.alloc(4096))
+              }
+              return handle
+            }) as typeof fs.open
+          }
+        })
+    })
+    await expectNoPathInError(service.importFile(request(growing)), 'MANAGED_MEDIA_IMPORT_FAILED')
+    expect(grown).toBe(true)
+    await stagingIsEmpty()
+  })
+
+  it('applies the size cap to the stat and to the bytes actually copied', async () => {
+    const large = path.join(allowed, 'large.png')
+    await fs.writeFile(large, Buffer.concat([PNG, Buffer.alloc(2048)]))
+    const { service, importFile } = create({ maxImportFileBytes: 1024 })
+    await expectNoPathInError(service.importFile(request(large)), 'MANAGED_MEDIA_TOO_LARGE')
+    expect(importFile).toHaveBeenCalledWith(expect.objectContaining({ maxBytes: 1024 }), {
+      authorizedRoot: media
+    })
+    await stagingIsEmpty()
+
+    // A file that grows past the cap after the checks, while it is being copied: the copy
+    // reads to the end of the file and the cap on the copied bytes stops it.
+    const growing = path.join(allowed, 'growing-past-cap.png')
+    await fs.writeFile(growing, PNG)
+    const cap = PNG.length + 10
+    let bytesReadFromSource = 0
+    let grown = false
+    const staged = create({
+      maxImportFileBytes: cap,
+      importFile: (input, dependencies) =>
+        importManagedMediaFile(input, {
+          ...dependencies,
+          fs: {
+            ...fs,
+            open: (async (...args: Parameters<typeof fs.open>) => {
+              const handle = await fs.open(...args)
+              if (String(args[0]) !== growing) return handle
+              return new Proxy(handle, {
+                get(target, property) {
+                  if (property === 'read') {
+                    return async (...readArgs: Parameters<typeof handle.read>) => {
+                      if (!grown) {
+                        grown = true
+                        await fs.appendFile(growing, Buffer.alloc(64 * 1024))
+                      }
+                      const result = await (target.read as (...a: unknown[]) => Promise<{
+                        bytesRead: number
+                      }>)(...readArgs)
+                      bytesReadFromSource += result.bytesRead
+                      return result
+                    }
+                  }
+                  const value = Reflect.get(target, property) as unknown
+                  return typeof value === 'function' ? value.bind(target) : value
+                }
+              })
+            }) as typeof fs.open
+          }
+        })
+    })
+    await expectNoPathInError(staged.service.importFile(request(growing)), 'MANAGED_MEDIA_TOO_LARGE')
+    expect(grown).toBe(true)
+    // Bounded: no more than one read chunk past the cap was read.
+    expect(bytesReadFromSource).toBeGreaterThan(cap)
+    expect(bytesReadFromSource).toBeLessThanOrEqual(cap + 64 * 1024)
+    await stagingIsEmpty()
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses another regular file swapped in before the open (same size and time, other inode)',
+    async () => {
+      const picked = path.join(allowed, 'picked-swap.png')
+      const other = path.join(allowed, 'other.png')
+      // Same size and modification time: only the device / inode check tells them apart.
+      await fs.writeFile(picked, PNG)
+      await fs.writeFile(other, PNG)
+      const time = new Date('2026-01-02T03:04:05Z')
+      await fs.utimes(picked, time, time)
+      await fs.utimes(other, time, time)
+      let swapped = false
+      const { service } = create({
+        importFile: (input, dependencies) =>
+          importManagedMediaFile(input, {
+            ...dependencies,
+            fs: {
+              ...fs,
+              open: (async (...args: Parameters<typeof fs.open>) => {
+                if (!swapped && String(args[0]) === picked) {
+                  swapped = true
+                  await fs.rename(other, picked)
+                }
+                return fs.open(...args)
+              }) as typeof fs.open
+            }
+          })
+      })
+      await expectNoPathInError(service.importFile(request(picked)), 'MANAGED_MEDIA_IMPORT_FAILED')
+      expect(swapped).toBe(true)
+      await stagingIsEmpty()
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'opens the source with O_NOFOLLOW: a symlink swapped in before the open is not followed',
+    async () => {
+      const picked = path.join(allowed, 'picked-link.png')
+      const moved = path.join(outside, 'moved.png')
+      await fs.writeFile(picked, PNG)
+      let swapped = false
+      const { service } = create({
+        importFile: (input, dependencies) =>
+          importManagedMediaFile(input, {
+            ...dependencies,
+            fs: {
+              ...fs,
+              open: (async (...args: Parameters<typeof fs.open>) => {
+                if (!swapped && String(args[0]) === picked) {
+                  // The same file (same inode) now sits outside, reached through a link:
+                  // only O_NOFOLLOW refuses it.
+                  swapped = true
+                  await fs.rename(picked, moved)
+                  await fs.symlink(moved, picked)
+                }
+                return fs.open(...args)
+              }) as typeof fs.open
+            }
+          })
+      })
+      await expectNoPathInError(service.importFile(request(picked)), 'MANAGED_MEDIA_IMPORT_FAILED')
+      expect(swapped).toBe(true)
+      await stagingIsEmpty()
+    }
+  )
+
+  it('checks the image type on the copied bytes, not on the declared type or name', async () => {
+    const fake = path.join(allowed, 'fake.png')
+    await fs.writeFile(fake, Buffer.from('not an image at all'))
+    const { service } = create()
+    await expectNoPathInError(service.importFile(request(fake)), 'MANAGED_MEDIA_INVALID')
+    await stagingIsEmpty()
+  })
+})

@@ -1,28 +1,16 @@
-import { createAdapter, objectSchema, optionalPathOrUrlSchema } from './helpers'
+import { bundledCreativeDeclarations } from '@shared/magicAgentRuntime/bundledCreativeDeclarations'
+import { createAdapter } from './helpers'
+import { configuredLocalFileSchema, executableWorkflowSchema } from './productionSchemas'
 
 export const videoToolAdapter = createAdapter([
   {
-    name: 'video.inspect',
-    category: 'video',
-    description: 'Inspect video metadata through a registered video adapter.',
-    inputSchema: optionalPathOrUrlSchema,
+    ...bundledCreativeDeclarations['video.inspect'],
+    inputSchema: configuredLocalFileSchema,
     dependency: 'videoInspect'
   },
   {
-    name: 'video.create',
-    category: 'video',
-    description: 'Create or transform video through a registered video adapter.',
-    inputSchema: objectSchema({
-      prompt: {
-        type: 'string'
-      },
-      sourcePath: {
-        type: 'string'
-      },
-      outputDir: {
-        type: 'string'
-      }
-    }),
+    ...bundledCreativeDeclarations['video.create'],
+    inputSchema: executableWorkflowSchema,
     dependency: 'videoCreate',
     permissionLevel: 'write',
     requiresConfirmation: true,

@@ -65,6 +65,7 @@ export type RendererHostExtensionApiV1 = {
     discoverModelNames?: (
       profile: LLMAPIProfile
     ) => Promise<string[] | undefined> | string[] | undefined
+    hasThreadImageTool?: (config: Config, profileId: string | null | undefined) => boolean
     resolveAssistantImageAutoSaveDir?: (options: {
       config: Pick<Config, 'download_dir'>
       storageScope?: string

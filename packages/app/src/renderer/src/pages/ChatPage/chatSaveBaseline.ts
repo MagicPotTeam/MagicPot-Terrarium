@@ -3,29 +3,110 @@
  *
  * The whole-session upsert in `saveSessionToDB` is only safe when the writer can prove the record
  * it is about to overwrite is still the snapshot it started from. This helper keeps one frozen
- * baseline snapshot per (scope, sessionId):
+ * baseline snapshot per (scope, sessionId) and one ordered save chain per key:
  *
- * - the baseline is frozen SYNCHRONOUSLY the first time a session becomes dirty, before the save is
- *   queued, so an external refresh that advances the caller's persisted map cannot move it later;
- * - external refreshes never touch this map, so a frozen baseline is never replaced;
- * - a successful save by this writer advances the baseline to the value it just persisted, so a
- *   queued follow-up save by the same writer compares against the latest own write (no self
- *   conflict) while two concurrent own saves still apply in order;
- * - `reset()` bumps an epoch (so a stale in-flight save cannot advance the baseline back) but keeps
- *   the in-flight mutation chains alive instead of dropping them.
+ * - callers freeze the baseline SYNCHRONOUSLY (`freeze` / `ensureFrozen`) the first time a session
+ *   becomes dirty, before the save is queued, so an external refresh that advances the caller's
+ *   persisted map cannot move it later;
+ * - external refreshes only replace baselines of clean sessions without a queued or in-flight
+ *   write (`adoptLoaded`), so a frozen dirty baseline is never replaced;
+ * - `persistLatest` is the only writer: it resolves the live session when its queued turn runs
+ *   (never a captured snapshot), compares it against the frozen baseline by CAS, and advances the
+ *   baseline to the written payload on success;
+ * - `advance`, `fenceAndAdvance`, `reconcileTeamEnd` and `reset()` bump an epoch, so a stale queued
+ *   save is skipped and a stale in-flight save cannot advance the baseline back; in-flight
+ *   mutation chains are kept alive instead of dropped.
  *
  * If a save fails (including a cross-writer conflict) the baseline is left untouched and the
  * rejection propagates, so the caller keeps its dirty reply instead of blindly retrying an
  * overwrite.
+ *
+ * An optional stored form (`setStoredForm`) turns the live session into what is written, for
+ * example with oversized inline images replaced by managed references. The baseline is the written
+ * form; after the write the owner adopts it as its live object, so the acknowledgement compares the
+ * object it now holds with what was written.
  */
-import { saveSessionToDB, type ChatSession } from './chatStorage'
+import {
+  ChatSessionSaveSupersededError,
+  matchesTeamEndBaseline,
+  normalizedSessionsEqual,
+  sameTeamLifecycle,
+  saveSessionToDB,
+  type ChatSession
+} from './chatStorage'
 
-const baselineKey = (scope: string, sessionId: string): string => `${scope}\u0000${sessionId}`
+const baselineKey = (scope: string, sessionId: string): string =>
+  `${scope || 'default'}\u0000${sessionId}`
+
+/**
+ * persistLatest refused an ordinary save because the payload's team membership / lifecycle fences
+ * no longer match the frozen baseline (an ordinary save may never change those). Nothing was
+ * written; the same object can only be refused again.
+ */
+export class ChatSessionLifecycleChangedError extends Error {
+  readonly code = 'CHAT_SESSION_LIFECYCLE_CHANGED'
+  constructor() {
+    super('Session lifecycle changed before save')
+    this.name = 'ChatSessionLifecycleChangedError'
+  }
+}
+
+// A rejection of persistLatest -> the live session object whose payload it was writing (or refused
+// to write) when it failed. Keyed weakly by the error, so nothing outlives the rejection.
+const attemptedSessions = new WeakMap<object, ChatSession>()
+
+/**
+ * The live session object whose payload persistLatest last tried to write when it rejected with
+ * `error`: the source of the refused payload (after a supersede retry, the newer object it moved on
+ * to). Undefined for an error persistLatest did not raise after resolving a session. A caller that
+ * records a refusal must record this object, never whatever object is live when the rejection
+ * arrives: an object that replaced it in between was never sent and may save against a baseline
+ * that moved meanwhile (a team End or lifecycle reconcile, an attachment advance).
+ */
+export function attemptedSessionOf(error: unknown): ChatSession | undefined {
+  return typeof error === 'object' && error !== null ? attemptedSessions.get(error) : undefined
+}
+
+const noteAttempt = (error: unknown, session: ChatSession): void => {
+  if (typeof error === 'object' && error !== null) attemptedSessions.set(error, session)
+}
+
+/**
+ * Turns a live session into the form a save writes (FIX-PLAN item 4: no oversized inline image is
+ * written as it is).
+ */
+export type ChatSessionStoredForm = {
+  /**
+   * The form to write for `session`: the same object when nothing changes, returned synchronously
+   * so a save without such work does not wait. Must not reject; when it cannot prepare a value it
+   * returns `session`.
+   */
+  prepare(scope: string, session: ChatSession): ChatSession | Promise<ChatSession>
+  /**
+   * `stored`, prepared from the live `session`, was written. The owner makes its live state hold
+   * it and returns the object that now stands for the write (normally `stored`).
+   */
+  adopt(scope: string, session: ChatSession, stored: ChatSession): ChatSession
+}
+
+const isPromiseLike = <T>(value: T | Promise<T>): value is Promise<T> =>
+  typeof (value as { then?: unknown } | null)?.then === 'function'
 
 export class ChatSessionSaveBaseline {
+  private storedForm: ChatSessionStoredForm | undefined
   private baselines = new Map<string, ChatSession | null>()
   private chains = new Map<string, Promise<unknown>>()
+  private savedSnapshots = new WeakMap<ChatSession, Map<string, ChatSession>>()
+  private saveAcks = new WeakMap<
+    ChatSession,
+    Map<string, { epoch: number; keyEpoch: number; observation: number }>
+  >()
+  private acknowledgementObservations = new Map<string, number>()
+  private keyEpochs = new Map<string, number>()
   private epoch = 0
+  // A live object -> the object the owner put in its place with the same content in its stored
+  // form (noteReplaced). Weak: an entry lives only as long as the replaced object.
+  private successors = new WeakMap<ChatSession, ChatSession>()
 
   private enqueue<T>(key: string, task: () => Promise<T>): Promise<T> {
     const previous = this.chains.get(key) ?? Promise.resolve()
@@ -41,26 +122,160 @@ export class ChatSessionSaveBaseline {
     return run
   }
 
+  /** Install (or remove) the stored form every later save writes. */
+  setStoredForm(storedForm: ChatSessionStoredForm | undefined): void {
+    this.storedForm = storedForm
+  }
+
+  /**
+   * The form to write for `live`: `live` itself without a stored form or on any error, and a plain
+   * value (no wait) when the stored form has nothing to do.
+   */
+  private prepareStored(scope: string, live: ChatSession): ChatSession | Promise<ChatSession> {
+    const storedForm = this.storedForm
+    if (!storedForm) return live
+    const accept = (stored: ChatSession): ChatSession =>
+      stored && stored.id === live.id ? stored : live
+    const keepLive = (error: unknown): ChatSession => {
+      console.warn('[ChatSessionSaveBaseline] Writing the live form; preparing failed:', error)
+      return live
+    }
+    try {
+      const prepared = storedForm.prepare(scope, live)
+      return isPromiseLike(prepared) ? prepared.then(accept, keepLive) : accept(prepared)
+    } catch (error) {
+      return keepLive(error)
+    }
+  }
+
+  /**
+   * `next` took the place of `previous` as the owner's live object and holds the same content,
+   * only in its stored form (managed references in place of inline images: a background
+   * write-back, an adopted stored form). A save bound to `previous` (persistExact) saves `next`
+   * instead of giving up because its object was swapped.
+   */
+  noteReplaced(previous: ChatSession, next: ChatSession): void {
+    if (previous !== next && previous.id === next.id) this.successors.set(previous, next)
+  }
+
+  /** The object that stands for `session` now: itself, or what replaced it (noteReplaced). */
+  latestFormOf(session: ChatSession): ChatSession {
+    let current = session
+    // Bounded: each replacement is one write-back or adopted save of the same conversation.
+    for (let hops = 0; hops < 64; hops += 1) {
+      const next = this.successors.get(current)
+      if (!next) break
+      current = next
+    }
+    return current
+  }
+
+  /**
+   * Saves exactly `session`, the object a caller changed and must see saved (a team receipt, a
+   * draft): nothing is written and it resolves to null when the live object (`resolveLive`) is
+   * another one, unless the owner put that one in its place with the same content (noteReplaced),
+   * which is then saved and returned. A swap made by a background write-back while this save
+   * waits in the chain is therefore not a failure.
+   */
+  persistExact(
+    scope: string,
+    session: ChatSession,
+    resolveLive: () => ChatSession | null,
+    resolveBaseline: () => ChatSession | null,
+    onAcknowledged?: () => void
+  ): Promise<ChatSession | null> {
+    return this.persistLatest(
+      scope,
+      session.id,
+      () => {
+        const live = resolveLive()
+        return live && live === this.latestFormOf(session) ? live : null
+      },
+      resolveBaseline,
+      onAcknowledged
+    )
+  }
+
+  /** An acknowledgement is valid only while the exact immutable payload remains current. */
+  isAcknowledgementCurrent(scope: string, session: ChatSession): boolean {
+    const key = baselineKey(scope, session.id)
+    const saved = this.savedSnapshots.get(session)?.get(key)
+    const baseline = this.baselines.get(key)
+    const ack = this.saveAcks.get(session)?.get(key)
+    return Boolean(
+      saved &&
+      baseline &&
+      ack &&
+      ack.epoch === this.epoch &&
+      ack.keyEpoch === (this.keyEpochs.get(key) ?? 0) &&
+      ack.observation === (this.acknowledgementObservations.get(key) ?? 0) &&
+      normalizedSessionsEqual(session, saved, scope) &&
+      normalizedSessionsEqual(saved, baseline, scope)
+    )
+  }
+
   /** Whether a baseline has already been frozen for this session. */
   hasBaseline(scope: string, sessionId: string): boolean {
     return this.baselines.has(baselineKey(scope, sessionId))
   }
 
+  /** Freeze synchronously without allocating a caller-owned snapshot copy. */
+  ensureFrozen(scope: string, sessionId: string, snapshot: ChatSession | null): void {
+    const key = baselineKey(scope, sessionId)
+    if (!this.baselines.has(key)) this.baselines.set(key, snapshot && structuredClone(snapshot))
+  }
+
   /** Freeze the baseline on first touch. Returns the effective baseline (null = expect absent). */
   freeze(scope: string, sessionId: string, snapshot: ChatSession | null): ChatSession | null {
-    const key = baselineKey(scope, sessionId)
-    if (!this.baselines.has(key)) this.baselines.set(key, snapshot)
-    return this.baselines.get(key) ?? null
+    this.ensureFrozen(scope, sessionId, snapshot)
+    const frozen = this.baselines.get(baselineKey(scope, sessionId)) ?? null
+    return frozen && structuredClone(frozen)
   }
 
   /** Advance the baseline to a value that is known to be persisted. */
   advance(scope: string, sessionId: string, session: ChatSession): void {
-    this.baselines.set(baselineKey(scope, sessionId), session)
+    const key = baselineKey(scope, sessionId)
+    this.keyEpochs.set(key, (this.keyEpochs.get(key) ?? 0) + 1)
+    this.baselines.set(key, structuredClone(session))
+  }
+
+  /** Install a lifecycle-transition baseline without allowing older queued saves to reuse it. */
+  fenceAndAdvance(scope: string, sessionId: string, session: ChatSession): void {
+    const key = baselineKey(scope, sessionId)
+    this.keyEpochs.set(key, (this.keyEpochs.get(key) ?? 0) + 1)
+    this.baselines.set(key, structuredClone(session))
+  }
+
+  /** Rebase only when End is the sole persisted change from this dirty lineage. */
+  reconcileTeamEnd(scope: string, local: ChatSession, persisted: ChatSession): ChatSession | null {
+    const key = baselineKey(scope, local.id)
+    const baseline = this.baselines.get(key)
+    this.keyEpochs.set(key, (this.keyEpochs.get(key) ?? 0) + 1)
+    if (
+      !baseline ||
+      !sameTeamLifecycle(local, baseline) ||
+      !matchesTeamEndBaseline(baseline, persisted, scope)
+    )
+      return null
+    this.baselines.set(key, structuredClone(persisted))
+    return local.teamLeadId
+      ? {
+          ...local,
+          archived: persisted.archived,
+          teamLifecycleRevision: persisted.teamLifecycleRevision
+        }
+      : {
+          ...local,
+          teamEnded: persisted.teamEnded,
+          teamGeneration: persisted.teamGeneration,
+          teamLifecycleRevision: persisted.teamLifecycleRevision
+        }
   }
 
   /** Drop the baseline (e.g. after the record is clean or deleted). */
   release(scope: string, sessionId: string): void {
-    this.baselines.delete(baselineKey(scope, sessionId))
+    const key = baselineKey(scope, sessionId)
+    this.baselines.delete(key)
   }
 
   /**
@@ -75,7 +290,8 @@ export class ChatSessionSaveBaseline {
 
   /** Whether a write for this key is currently queued/in-flight. */
   isPending(scope: string, sessionId: string): boolean {
-    return this.chains.has(baselineKey(scope, sessionId))
+    const key = baselineKey(scope, sessionId)
+    return this.chains.has(key)
   }
 
   /**
@@ -89,38 +305,165 @@ export class ChatSessionSaveBaseline {
       const key = baselineKey(scope, session.id)
       if (dirtySessionIds.has(session.id)) continue
       if (this.chains.has(key)) continue
-      this.baselines.set(key, session)
+      this.baselines.set(key, structuredClone(session))
     }
   }
 
   /**
-   * Persist one session through the frozen baseline. `resolveBaseline` is consulted SYNCHRONOUSLY,
-   * before enqueueing, the first time a key is touched, so the snapshot captured is the one current
-   * at the moment the session first became dirty. Pass the last confirmed persisted snapshot, or
-   * null for a brand-new session.
+   * Rewrite a stored record in this session's save order (FIX-PLAN item 4: the migration of
+   * stored inline images). `write` receives the record this owner expects in storage (its
+   * baseline) and resolves to the record it stored, or null when it stored nothing. A stored
+   * record becomes the baseline, so the next save compares against it. Without a baseline (the
+   * session is unknown or expected absent) nothing runs.
    */
-  async persist(
+  async rewriteStored(
     scope: string,
-    session: ChatSession,
-    resolveBaseline: () => ChatSession | null
-  ): Promise<void> {
-    const key = baselineKey(scope, session.id)
-    // Freeze immediately (synchronously) so an external refresh cannot move this baseline between
-    // the first dirty observation and the actual queued write.
-    if (!this.baselines.has(key)) this.baselines.set(key, resolveBaseline())
-    const capturedBaseline = this.baselines.get(key) ?? null
+    sessionId: string,
+    resolveBaseline: () => ChatSession | null,
+    write: (expected: ChatSession) => Promise<ChatSession | null>
+  ): Promise<ChatSession | null> {
+    const key = baselineKey(scope, sessionId)
     const callEpoch = this.epoch
+    const keyEpoch = this.keyEpochs.get(key) ?? 0
     return this.enqueue(key, async () => {
-      const sameEpoch = this.epoch === callEpoch
-      // If the lifecycle was reset while this write was queued, the map may now hold a baseline
-      // frozen by the NEW load for the same key. Never let this stale task use it: fall back to the
-      // snapshot captured when the write was enqueued so CAS still rejects a newer record.
-      const expected =
-        sameEpoch && this.baselines.has(key) ? (this.baselines.get(key) ?? null) : capturedBaseline
-      await saveSessionToDB(session, scope, { expectedSession: expected })
-      // Re-check the epoch AFTER the await: a reset may have happened while this write was in
-      // flight, in which case we must not advance (or re-seed) a baseline for the stale snapshot.
-      if (this.epoch === callEpoch) this.baselines.set(key, session)
+      const epochIsCurrent = () =>
+        this.epoch === callEpoch && (this.keyEpochs.get(key) ?? 0) === keyEpoch
+      if (!epochIsCurrent()) return null
+      if (!this.baselines.has(key)) {
+        const resolved = resolveBaseline()
+        this.baselines.set(key, resolved && structuredClone(resolved))
+      }
+      const expected = this.baselines.get(key)
+      if (!expected || expected.id !== sessionId) return null
+      // The writer only reads `expected`; a copy of a record that still holds its inline images
+      // would cost their size once more.
+      const written = await write(expected)
+      if (!written || written.id !== sessionId) return null
+      if (epochIsCurrent()) this.baselines.set(key, structuredClone(written))
+      return written
+    })
+  }
+
+  /** Queue a live-state read with all saves for this session.
+   * `onAcknowledged` is a non-throwing owner callback invoked synchronously after a successful
+   * commit and baseline update, before the save promise can deliver a batch completion callback.
+   * The caller must not perform asynchronous work or throw from it.
+   * Earlier writes settle before `resolveLatest` runs, so debounce never writes a captured object.
+   */
+  async persistLatest(
+    scope: string,
+    sessionId: string,
+    resolveLatest: () => ChatSession | null,
+    resolveBaseline: () => ChatSession | null,
+    onAcknowledged?: () => void,
+    retrySuperseded = false,
+    prepareLatest?: () => ChatSession | null
+  ): Promise<ChatSession | null> {
+    const key = baselineKey(scope, sessionId)
+    const callEpoch = this.epoch
+    const keyEpoch = this.keyEpochs.get(key) ?? 0
+    return this.enqueue(key, async () => {
+      if (this.epoch !== callEpoch || (this.keyEpochs.get(key) ?? 0) !== keyEpoch) return null
+      const session = prepareLatest ? prepareLatest() : resolveLatest()
+      if (!session) return null
+      if (session.id !== sessionId) throw new Error('Resolved session ID changed')
+      if (!this.baselines.has(key)) {
+        const resolved = resolveBaseline()
+        this.baselines.set(key, resolved && structuredClone(resolved))
+      }
+      const expected = this.baselines.get(key) ?? null
+      const epochIsCurrent = () =>
+        this.epoch === callEpoch && (this.keyEpochs.get(key) ?? 0) === keyEpoch
+      let current = session
+      // A stored form that had to wait: while it waited, a reconcile writer may have committed and
+      // moved the baseline (advance, fenceAndAdvance, reconcileTeamEnd) or the owner reset. The
+      // `expected` read above is then stale; comparing with it would turn the page's own write into
+      // a permanent conflict. Such a save is superseded instead, so the caller saves the live
+      // object again against the new baseline.
+      const supersededWhilePreparing = (): ChatSessionSaveSupersededError | null => {
+        if (epochIsCurrent()) return null
+        const superseded = new ChatSessionSaveSupersededError()
+        this.acknowledgementObservations.set(
+          key,
+          (this.acknowledgementObservations.get(key) ?? 0) + 1
+        )
+        noteAttempt(superseded, current)
+        return superseded
+      }
+      const firstPrepared = this.prepareStored(scope, current)
+      let stored = isPromiseLike(firstPrepared) ? await firstPrepared : firstPrepared
+      const supersededFirst = supersededWhilePreparing()
+      if (supersededFirst) throw supersededFirst
+      let payload = structuredClone(stored)
+      for (let attempt = 0; ; attempt++) {
+        if (expected && !sameTeamLifecycle(payload, expected)) {
+          const refusal = new ChatSessionLifecycleChangedError()
+          noteAttempt(refusal, current)
+          throw refusal
+        }
+        try {
+          await saveSessionToDB(payload, scope, {
+            expectedSession: expected,
+            pendingSaveOwner: null,
+            shouldUpdate: () =>
+              epochIsCurrent() &&
+              resolveLatest() === current &&
+              normalizedSessionsEqual(stored, payload, scope)
+          })
+          break
+        } catch (error) {
+          this.acknowledgementObservations.set(
+            key,
+            (this.acknowledgementObservations.get(key) ?? 0) + 1
+          )
+          noteAttempt(error, current)
+          if (
+            !(error instanceof ChatSessionSaveSupersededError) ||
+            !retrySuperseded ||
+            attempt >= 2 ||
+            !epochIsCurrent()
+          )
+            throw error
+          const latest = resolveLatest()
+          if (!latest || latest.id !== sessionId || latest === current) throw error
+          current = latest
+          const retryPrepared = this.prepareStored(scope, current)
+          stored = isPromiseLike(retryPrepared) ? await retryPrepared : retryPrepared
+          const supersededRetry = supersededWhilePreparing()
+          if (supersededRetry) throw supersededRetry
+          payload = structuredClone(stored)
+        }
+      }
+      // A prepared form was written: the owner's live object becomes that form, and the
+      // acknowledgement belongs to the object that now stands for the write.
+      let saved = current
+      if (stored !== current && this.storedForm) {
+        try {
+          saved = this.storedForm.adopt(scope, current, stored)
+        } catch (error) {
+          console.warn('[ChatSessionSaveBaseline] The owner did not adopt the written form:', error)
+          saved = stored
+        }
+        // The written form stands for `current` from now on: a save still bound to it follows.
+        this.noteReplaced(current, saved)
+      }
+      const savedKeys = this.savedSnapshots.get(saved) ?? new Map<string, ChatSession>()
+      savedKeys.set(key, payload)
+      this.savedSnapshots.set(saved, savedKeys)
+      const acknowledgements =
+        this.saveAcks.get(saved) ??
+        new Map<string, { epoch: number; keyEpoch: number; observation: number }>()
+      acknowledgements.set(key, {
+        epoch: callEpoch,
+        keyEpoch,
+        observation: this.acknowledgementObservations.get(key) ?? 0
+      })
+      this.saveAcks.set(saved, acknowledgements)
+      if (epochIsCurrent()) this.baselines.set(key, payload)
+      // Notify the owner in the same turn as the baseline change. A later debounce callback can
+      // arrive after an older storage read has already been accepted.
+      onAcknowledged?.()
+      return saved
     })
   }
 }

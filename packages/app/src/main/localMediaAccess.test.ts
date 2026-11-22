@@ -3,14 +3,21 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  authorizeLocalMediaImportSourcePathAsync,
+  authorizeLocalMediaPathAsync,
   authorizeScopedLocalMediaDirectory,
   authorizeScopedLocalMediaPath,
   clearScopedLocalMediaPathsForTest,
   flushLocalMediaAccessGrants,
   hasLocalMediaTraversal,
   initializeLocalMediaAccess,
-  resolveAuthorizedLocalMediaPath
+  isLexicallyCoveredLocalMediaPath,
+  isWindowsNetworkLocalMediaPath,
+  recordLocalMediaImportGrant,
+  resolveAuthorizedLocalMediaPath,
+  setLocalMediaGrantExcludedFolders
 } from './localMediaAccess'
+import { normalizeLocalFilePath } from './utils/localFileUrl'
 
 const cleanupPaths: string[] = []
 
@@ -78,6 +85,79 @@ describe('local media access policy', () => {
       path.resolve(fs.realpathSync.native(selectedFile))
     )
     expect(resolveAuthorizedLocalMediaPath(outsideFile, [])).toBeNull()
+  })
+
+  it('never lets a grant reach into the app data folder: only its roots serve files there', async () => {
+    const home = makeTempDir('magicpot-home-')
+    const userData = path.join(home, 'Library', 'MagicPot')
+    const write = (filePath: string) => {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true })
+      fs.writeFileSync(filePath, 'x')
+      return filePath
+    }
+    const config = write(path.join(userData, 'config.json'))
+    const media = write(path.join(userData, '.chat_media', 'a.png'))
+    const picture = write(path.join(home, 'Pictures', 'b.png'))
+    const roots = [path.join(userData, '.chat_media')]
+    setLocalMediaGrantExcludedFolders([userData])
+    // The user granted their home folder, and dropped config.json itself once.
+    expect(authorizeScopedLocalMediaDirectory(home)).toBe(true)
+    expect(authorizeScopedLocalMediaPath(config)).toBe(true)
+
+    expect(resolveAuthorizedLocalMediaPath(config, roots)).toBeNull()
+    await expect(authorizeLocalMediaPathAsync(config, roots)).resolves.toEqual({
+      canonicalPath: null,
+      reason: 'refused'
+    })
+    await expect(authorizeLocalMediaImportSourcePathAsync(config, roots)).resolves.toBeNull()
+    expect(isLexicallyCoveredLocalMediaPath(config, roots)).toBe(false)
+    // Its media folder is a root; the rest of the grant is untouched.
+    for (const file of [media, picture]) {
+      expect(resolveAuthorizedLocalMediaPath(file, roots)).toBe(
+        path.resolve(fs.realpathSync.native(file))
+      )
+      await expect(authorizeLocalMediaPathAsync(file, roots)).resolves.toEqual({
+        canonicalPath: path.resolve(fs.realpathSync.native(file))
+      })
+    }
+    // A one-use import grant is for the very file the user just picked or dropped.
+    recordLocalMediaImportGrant(path.resolve(fs.realpathSync.native(config)))
+    await expect(authorizeLocalMediaImportSourcePathAsync(config, roots)).resolves.toMatchObject({
+      viaImportGrant: true
+    })
+  })
+
+  it('never lets a root that holds the app data folder serve into it, only roots inside it', async () => {
+    const home = makeTempDir('magicpot-home-root-')
+    const userData = path.join(home, 'Library', 'MagicPot')
+    const write = (filePath: string) => {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true })
+      fs.writeFileSync(filePath, 'x')
+      return filePath
+    }
+    const config = write(path.join(userData, 'config.json'))
+    const media = write(path.join(userData, '.chat_media', 'a.png'))
+    const project = write(path.join(home, 'Projects', 'board.png'))
+    // A storage or project folder configured as the home folder, beside the media root.
+    const roots = [home, path.join(userData, '.chat_media')]
+    setLocalMediaGrantExcludedFolders([userData])
+
+    expect(resolveAuthorizedLocalMediaPath(config, roots)).toBeNull()
+    await expect(authorizeLocalMediaPathAsync(config, roots)).resolves.toEqual({
+      canonicalPath: null,
+      reason: 'refused'
+    })
+    await expect(authorizeLocalMediaImportSourcePathAsync(config, roots)).resolves.toBeNull()
+    expect(isLexicallyCoveredLocalMediaPath(config, roots)).toBe(false)
+    for (const file of [media, project]) {
+      expect(resolveAuthorizedLocalMediaPath(file, roots)).toBe(
+        path.resolve(fs.realpathSync.native(file))
+      )
+      await expect(authorizeLocalMediaPathAsync(file, roots)).resolves.toEqual({
+        canonicalPath: path.resolve(fs.realpathSync.native(file))
+      })
+      expect(isLexicallyCoveredLocalMediaPath(file, roots)).toBe(true)
+    }
   })
 
   it('does not turn a file path into a directory grant', () => {
@@ -173,13 +253,78 @@ describe('local media access policy', () => {
     })
   })
 
-  it('rejects unscoped network paths before application-root fallback', () => {
+  function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...descriptor, value: platform })
+    try {
+      return run()
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor)
+    }
+  }
+
+  it('rejects unscoped network paths before application-root fallback on Windows', () => {
     const networkPath = '//server/share/image.png'
     const canonical = path.resolve(networkPath)
     const realpathSpy = vi.spyOn(fs.realpathSync, 'native').mockReturnValue(canonical)
 
-    expect(resolveAuthorizedLocalMediaPath(networkPath, [canonical])).toBeNull()
+    withPlatform('win32', () => {
+      expect(resolveAuthorizedLocalMediaPath(networkPath, [canonical])).toBeNull()
+      expect(
+        resolveAuthorizedLocalMediaPath('\\\\server\\share\\image.png', [canonical])
+      ).toBeNull()
+    })
     realpathSpy.mockRestore()
+  })
+
+  it('recognises every Windows network spelling, separators of either kind', () => {
+    for (const networkPath of [
+      '\\\\server\\share\\image.png',
+      '//server/share/image.png',
+      '/\\server\\share\\image.png',
+      '\\/server/share/image.png',
+      '\\\\?\\UNC\\server\\share\\image.png',
+      // The NT object-namespace prefix reaches the host too.
+      '\\??\\UNC\\server\\share\\image.png',
+      '/??/UNC/server/share/image.png',
+      '\\??\\GLOBALROOT\\Device\\Mup\\server\\share\\image.png'
+    ]) {
+      expect(isWindowsNetworkLocalMediaPath(networkPath)).toBe(true)
+    }
+    for (const localPath of ['C:\\images\\image.png', 'C:/images/image.png', '/images/image.png']) {
+      expect(isWindowsNetworkLocalMediaPath(localPath)).toBe(false)
+    }
+  })
+
+  it('refuses an unscoped Windows network path before any filesystem call', async () => {
+    const root = makeTempDir('magicpot-media-root-')
+    const realpathSpy = vi.spyOn(fs.realpathSync, 'native')
+    const statSpy = vi.spyOn(fs, 'statSync')
+    const asyncRealpath = vi.fn(async (value: string) => value)
+
+    withPlatform('win32', () => {
+      // Both spellings are absolute for the path module these tests run with.
+      expect(resolveAuthorizedLocalMediaPath('//server/share/image.png', [root])).toBeNull()
+      expect(resolveAuthorizedLocalMediaPath('/\\server\\share\\image.png', [root])).toBeNull()
+    })
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+    try {
+      await expect(
+        authorizeLocalMediaImportSourcePathAsync('//server/share/image.png', [root], {
+          realpath: asyncRealpath
+        })
+      ).resolves.toBeNull()
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor)
+    }
+
+    // No SMB contact: the host is never resolved.
+    expect(realpathSpy).not.toHaveBeenCalled()
+    expect(statSpy).not.toHaveBeenCalled()
+    expect(asyncRealpath).not.toHaveBeenCalled()
+    realpathSpy.mockRestore()
+    statSpy.mockRestore()
   })
 
   it('allows an exact network path only after a trusted picker grant', () => {
@@ -187,10 +332,86 @@ describe('local media access policy', () => {
     const canonical = path.resolve(networkPath)
     const realpathSpy = vi.spyOn(fs.realpathSync, 'native').mockReturnValue(canonical)
 
-    expect(authorizeScopedLocalMediaPath(networkPath)).toBe(true)
-    expect(resolveAuthorizedLocalMediaPath(networkPath, [])).toBe(canonical)
+    withPlatform('win32', () => {
+      expect(resolveAuthorizedLocalMediaPath(networkPath, [])).toBeNull()
+      expect(authorizeScopedLocalMediaPath(networkPath)).toBe(true)
+      expect(resolveAuthorizedLocalMediaPath(networkPath, [])).toBe(canonical)
+    })
     realpathSpy.mockRestore()
   })
+
+  // Chromium reads `local-media:///dir/file` (a standard scheme) with `dir` as the host, so on
+  // POSIX an application-root file is asked for as `//dir/file`: the same local file.
+  it.skipIf(process.platform === 'win32')(
+    'reads the double-slash form of a POSIX path as the local file it is',
+    () => {
+      const root = makeTempDir('magicpot-media-root-')
+      const outside = makeTempDir('magicpot-media-outside-')
+      const mediaPath = path.join(root, 'canvas-thumbnails', '512.webp')
+      const secretPath = path.join(outside, 'secret.txt')
+      const linkedPath = path.join(root, 'linked.txt')
+      fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+      fs.writeFileSync(mediaPath, 'image')
+      fs.writeFileSync(secretPath, 'secret')
+      fs.symlinkSync(secretPath, linkedPath, 'file')
+      const canonicalMediaPath = path.resolve(fs.realpathSync.native(mediaPath))
+
+      withPlatform('linux', () => {
+        // Inside an application root: allowed, and answered with the canonical single-slash path.
+        expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}`, [root])).toBe(canonicalMediaPath)
+        // Every refusal of the single-slash form still holds for the double-slash form.
+        expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}`, [])).toBeNull()
+        expect(resolveAuthorizedLocalMediaPath(`/${secretPath}`, [root])).toBeNull()
+        expect(resolveAuthorizedLocalMediaPath(`/${linkedPath}`, [root])).toBeNull()
+        // A literal '..' (path.join would have removed it before the call).
+        const escape = `/${root}/../${path.basename(outside)}/secret.txt`
+        expect(escape).toContain('/../')
+        expect(resolveAuthorizedLocalMediaPath(escape, [root])).toBeNull()
+        expect(
+          resolveAuthorizedLocalMediaPath(`/${path.join(root, 'missing.png')}`, [root])
+        ).toBeNull()
+      })
+      // The same request is still a network path on Windows, refused before the root check.
+      withPlatform('win32', () => {
+        expect(resolveAuthorizedLocalMediaPath(`/${mediaPath}`, [root])).toBeNull()
+      })
+    }
+  )
+
+  // The protocol handler's whole check on POSIX, from the URL Chromium hands over (the first
+  // path segment as the host) to the policy answer.
+  it.skipIf(process.platform === 'win32')(
+    'keeps encoded separators and traversal in a POSIX local-media URL inside the roots',
+    () => {
+      const root = makeTempDir('magicpot-media-root-')
+      const outside = makeTempDir('magicpot-media-outside-')
+      const mediaPath = path.join(root, 'canvas-thumbnails', '512 level.webp')
+      const secretPath = path.join(outside, 'secret.txt')
+      fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+      fs.writeFileSync(mediaPath, 'image')
+      fs.writeFileSync(secretPath, 'secret')
+      const canonicalMediaPath = path.resolve(fs.realpathSync.native(mediaPath))
+      const encodePath = (filePath: string) => filePath.split('/').map(encodeURIComponent).join('/')
+      const authorize = (url: string) =>
+        hasLocalMediaTraversal(url)
+          ? null
+          : resolveAuthorizedLocalMediaPath(normalizeLocalFilePath(url), [root])
+
+      for (const platform of ['linux', 'darwin'] as const) {
+        withPlatform(platform, () => {
+          expect(authorize(`local-media:/${encodePath(mediaPath)}`)).toBe(canonicalMediaPath)
+          // A whole outside path packed into the host with encoded separators.
+          expect(authorize(`local-media://${encodeURIComponent(secretPath.slice(1))}`)).toBeNull()
+          expect(authorize(`local-media:/${encodePath(secretPath)}`)).toBeNull()
+          // Traversal out of the root, plain, encoded and double-encoded.
+          const escape = `${path.basename(outside)}/secret.txt`
+          expect(authorize(`local-media:/${encodePath(root)}/../${escape}`)).toBeNull()
+          expect(authorize(`local-media:/${encodePath(root)}%2F..%2F${escape}`)).toBeNull()
+          expect(authorize(`local-media:/${encodePath(root)}/%252e%252e/${escape}`)).toBeNull()
+        })
+      }
+    }
+  )
 
   it('rejects symlink escapes from an allowed root', () => {
     const root = makeTempDir('magicpot-media-root-')

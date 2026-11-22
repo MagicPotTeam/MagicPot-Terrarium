@@ -31,10 +31,42 @@ import { getMcpRuntimeStatus } from '../mcp/status'
 import { getLlmProxyAccessUsageSnapshot } from '../llmProxy/accessUsage'
 import { getLLMProxyServerStatus } from '../llmProxy/server'
 import { app } from 'electron'
+import { startupStorageSnapshot } from '../config/startupStorageSnapshot'
 import fs from 'node:fs'
 import path from 'node:path'
+import { isProxy } from 'node:util/types'
+import type { ServiceInvocationContext } from '@shared/api/apiUtils/serviceInvocation'
+import { getIpcInvocationOrigin } from '@shared/api/createServer/ipcInvocationOrigin'
+import { cancelStartupStoragePublication, STARTUP_STORAGE_PUBLICATION_METHOD } from '@shared/api/createServer/startupStoragePublication'
+import { parseStartupStorageMetadataRequest, parseStartupStorageMetadataResponse, startupStorageMetadataUnavailable as storageUnavailable, type StartupStorageMetadataRequest, type StartupStorageMetadataResponse } from '@shared/api/startupStorageMetadata'
+import type { StartupStorageReadDelegate } from '../storageMetadata/startupStorageReadBinding'
+
+type StateSvcImplDeps = { startupStorageRead?: StartupStorageReadDelegate }
 
 export class StateSvcImpl implements StateSvc {
+  constructor(private readonly deps: StateSvcImplDeps = {}) {}
+
+  async readStartupStorageMetadata(req: StartupStorageMetadataRequest, invocation?: ServiceInvocationContext): Promise<StartupStorageMetadataResponse> {
+    try {
+      if (!getIpcInvocationOrigin(invocation) || invocation?.methodName !== STARTUP_STORAGE_PUBLICATION_METHOD) return storageUnavailable
+      if (req && (typeof req === 'object' || typeof req === 'function') && isProxy(req)) return storageUnavailable
+      parseStartupStorageMetadataRequest(req)
+      const read = this.deps.startupStorageRead
+      if (!read) return storageUnavailable
+      const candidate = await read(req, invocation)
+      if (candidate && (typeof candidate === 'object' || typeof candidate === 'function') && isProxy(candidate)) {
+        cancelStartupStoragePublication(invocation); return storageUnavailable
+      }
+      const response = parseStartupStorageMetadataResponse(candidate)
+      if (response.status !== 'available') cancelStartupStoragePublication(invocation)
+      // Freshness is NOT granted here: the exact IPC final transform must consume its capsule.
+      return response
+    } catch {
+      cancelStartupStoragePublication(invocation)
+      return storageUnavailable
+    }
+  }
+
   async getConfig(_req: GetConfigReq): Promise<GetConfigResp> {
     return { config: getConfig() }
   }
@@ -71,6 +103,8 @@ export class StateSvcImpl implements StateSvc {
   }
 
   async setUserDataDirectory(req: SetUserDataDirectoryReq): Promise<SetUserDataDirectoryResp> {
+    // Service preflight can throw or migrate bootstrap before the canonical change helper runs.
+    startupStorageSnapshot.invalidate()
     const currentConfig = getConfig()
     const currentDirectoryState = getCurrentUserDataDirectoryState()
     const configuredProjectRoot = currentConfig.download_dir?.trim()
@@ -124,7 +158,7 @@ export class StateSvcImpl implements StateSvc {
     }
   }
 
-  async getMcpStatus(_req: GetMcpStatusReq): Promise<GetMcpStatusResp> {
-    return getMcpRuntimeStatus(getConfig())
+  async getMcpStatus(req: GetMcpStatusReq): Promise<GetMcpStatusResp> {
+    return getMcpRuntimeStatus(getConfig(), undefined, req.passive === true)
   }
 }

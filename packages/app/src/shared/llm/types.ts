@@ -38,6 +38,11 @@ export interface ChatAttachment {
   reportBundleLabel?: string
   /** Optional pre-discovered image count for a provider-owned report bundle; no I/O is implied. */
   reportBundleImageCount?: number
+  /**
+   * MAIN-issued bearer secret for a registered primary report (see shared/reportBundle.ts).
+   * Only MAIN's verification honours it; it must never enter prompt text, logs or errors.
+   */
+  reportBundleBinding?: string
   /** Optional content-addressed binary payload used at the main-process LLM boundary. */
   binary?: {
     transport: 'chunked-binary-v1'
@@ -73,6 +78,10 @@ export interface ChatMessage {
   hiddenContext?: string
   preferredDownloadBaseName?: string
   modelName?: string
+  /** Local display state; never add transport diagnostics to assistant prose. */
+  responseInterrupted?: boolean
+  /** See ChatMessage.runState in svcLLMProxy: set while the reply is being written. */
+  runState?: 'streaming'
   /** Structured tool-loop records persisted separately from visible assistant prose. */
   toolHistory?: ToolHistoryEntry[]
 }
@@ -87,6 +96,10 @@ export interface GeneratePromptParams {
 export type LLMChatFinishReason = 'stop' | 'length' | 'tool_call' | 'cancelled' | 'error'
 
 export type LLMChatMetadata = Record<string, unknown>
+
+/** The Agent loop budget that ended a turn. The turn is then answered by one final model call
+ * without tools, returned with finishReason 'length' and metadata.limitReached set to this value. */
+export type LLMAgentLoopLimit = 'tool_calls' | 'model_steps' | 'transcript'
 
 export type LLMChatTokenUsage = {
   promptTokens?: number
@@ -215,6 +228,12 @@ export interface LLMChatParams {
   toolTurns?: LLMToolTurn[]
   /** Main-owned interactive Agent policy, not a permission or remote retry directive. */
   retryCapacity?: boolean
+  /** MAIN-only review of a selected image: no discovery, auth refresh, tools or replay. */
+  readOnlyImageReview?: true
+  /** Main-owned isolated helper mode: forbid provider-hosted tools/uploads/media. */
+  disableProviderTools?: boolean
+  /** Main-owned ordinary image tool routing: suppress text-intent auto-generation only. */
+  disableAutomaticImageGeneration?: boolean
   messages: ChatMessage[]
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
@@ -348,6 +367,16 @@ export const normalizeLLMChatResult = (value: string | LLMChatResult): LLMChatRe
 
 /** Common LLM client interface chat only (shared) */
 export interface LLMCli {
+  /** Transport opt-in for one inline user image, hosted/local tools off, text output only.
+   * Not evidence that an arbitrary upstream model supports vision. */
+  readonly supportsToolFreeImageReview?: boolean
+  /** Exact model POST endpoint, declared without discovery by this client, never by chat IPC. */
+  readonly toolFreeImageReviewEndpoint?: string
+  /** Explicit opt-in: fresh stateless turns, honoring disableProviderTools and cancellation. */
+  readonly supportsIsolatedReadOnlyTurns?: boolean
+  /** Independent opt-in: bounded stateless text turns, provider-hosted tools off,
+   * supplied calls returned to MAIN for validation. Grants no execution/write authority. */
+  readonly supportsIsolatedMainToolTurns?: boolean
   readonly supportsNativeTools?: boolean
   chat(params: LLMChatParams): Promise<LLMChatResult>
 }

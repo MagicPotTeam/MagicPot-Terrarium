@@ -32,7 +32,7 @@ type UseCanvasExternalDropOptions = {
   handleSendCanvasItemsToAgent: (
     targetItems: CanvasItem[],
     targetScope?: string
-  ) => Promise<void> | void
+  ) => Promise<boolean> | void
 }
 
 function isExternalDropItem(item: CanvasItem | undefined): item is ExternalDropItem {
@@ -149,14 +149,22 @@ export function useCanvasExternalDrop({
         return true
       }
 
-      const handled = dispatchSyntheticCanvasDrop(
-        clientX,
-        clientY,
-        buildCanvasDragPayload([targetItem], {
+      let payload: CanvasDragPayload
+      try {
+        payload = buildCanvasDragPayload([targetItem], {
           objectUrl,
           promptId: resolveCanvasDragPromptId(targetItem)
         })
-      )
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'CANVAS_CROP_EXPORT_UNAVAILABLE') {
+          throw error
+        }
+        // The payload builder has already notified the user. Consume the drop
+        // and restore the item rather than falling back to another drop path.
+        resetDraggedItemNode(targetItem)
+        return true
+      }
+      const handled = dispatchSyntheticCanvasDrop(clientX, clientY, payload)
       if (handled) {
         resetDraggedItemNode(targetItem)
       }

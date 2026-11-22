@@ -3,11 +3,14 @@ import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import type { LLMChatReq, LLMChatResp } from '@shared/api/svcLLMProxy'
+import * as configModule from '../config/config'
 import { createNodeTestArtifactDir } from '../testSupport/nodeTestArtifacts'
 
 const { buildDataDirRef } = vi.hoisted(() => ({
   buildDataDirRef: { current: process.cwd() }
 }))
+
+vi.mock(import('../config/config'), async (original) => ({ ...(await original()), getConfig: vi.fn() }))
 
 vi.mock('../config/buildEnv', () => ({
   getBuildEnv: () => ({
@@ -17,6 +20,8 @@ vi.mock('../config/buildEnv', () => ({
   })
 }))
 
+import { CooperativeExecutionController, type CooperativeOperationGate } from '../magicAgentPlatform2/agents/cooperativeExecutionController'
+import type { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
 import { AssistantRuntime } from './runtime'
 import { AssistantSessionStore } from './sessionStore'
 import {
@@ -36,7 +41,10 @@ describe('AssistantRuntime', () => {
   }
 
   beforeEach(async () => {
-    tempDir = await createNodeTestArtifactDir('assistant-runtime')
+    // The shared MCP connector revalidates the authoritative config, not only
+    // this runtime's injected request snapshot. No real app config is loaded here.
+    vi.mocked(configModule.getConfig).mockReturnValue(createConfig())
+    tempDir = await fs.realpath(await createNodeTestArtifactDir('assistant-runtime'))
     buildDataDirRef.current = tempDir
     store = new AssistantSessionStore(path.join(tempDir, 'chat-sessions.json'))
   })
@@ -71,6 +79,57 @@ describe('AssistantRuntime', () => {
       sessionStore: store,
       configProvider: createConfig
     })
+
+  it.each(['mcp_list', 'mcp_connect', 'mcp_disconnect', 'info', 'skill', 'search_memory', 'scratchpad', 'memory_read', 'memory_write', 'memory.files.write'])('does not globally sync or auto-launch MCP servers for thread-owned %s', async (name) => {
+    const mcp = await import('../mcp/runtime')
+    const sync = vi.spyOn(mcp, 'syncMcpClientManager').mockResolvedValue(undefined)
+    try {
+      const runtime = createRuntime({ chatService: { chat: vi.fn() } })
+      const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'mcp-project', threadId: 'pane' } as const
+      const callTool = vi.fn(async () => ({ content: '{"services":[]}' }))
+      await runtime.callTool(route, name, {}, { allowedToolNames: [name], runId: 'passive-discovery-run', toolCallId: 'passive-discovery-call', toolProvider: { listTools: () => [{ name, description: 'passive discovery only', inputSchema: { type: 'object' } }], callTool } })
+      expect(sync).not.toHaveBeenCalled(); expect(callTool).toHaveBeenCalledOnce()
+    } finally { sync.mockRestore() }
+  })
+
+  it('passes a thread-owned tool provider through callTool and journals a single effect across replay', async () => {
+    const runtime = createRuntime({ chatService: { chat: vi.fn() } })
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'provider-project', threadId: 'pane' } as const
+    const effect = vi.fn(async () => ({ content: '{"status":"submitted","taskId":"one"}' }))
+    const options = {
+      allowedToolNames: ['image.create'],
+      runId: 'thread-provider-run',
+      toolCallId: 'thread-provider-call',
+      toolProvider: {
+        listTools: () => [{ name: 'image.create', description: 'Submit workflow', inputSchema: { type: 'object' } }],
+        callTool: effect
+      }
+    }
+    const first = await runtime.callTool(route, 'image.create', { qAppKey: 'saved' }, options)
+    expect(effect).toHaveBeenCalledWith('image.create', { qAppKey: 'saved' }, expect.objectContaining({ route, runId: options.runId, toolCallId: options.toolCallId }))
+    expect(await runtime.callTool(route, 'image.create', { qAppKey: 'saved' }, options)).toEqual(first)
+    expect(effect).toHaveBeenCalledOnce()
+    const session = await store.getSession(route)
+    expect(session?.eventLog.map((event) => (event.metadata?.agentAction as { type: string })?.type)).toEqual(['tool.invoke', 'tool.result'])
+    await expect(runtime.callTool(route, 'image.create', { qAppKey: 'changed' }, options)).rejects.toMatchObject({ code: 'TOOL_REPLAY_CONFLICT' })
+    expect(effect).toHaveBeenCalledOnce()
+    await expect(runtime.callTool(route, 'image.create', {}, { ...options, runId: 'blocked', allowedToolNames: [] })).rejects.toThrow('not bound')
+    expect(effect).toHaveBeenCalledOnce()
+  })
+
+  it('refuses an unresolved thread provider invocation instead of replaying its possible effects', async () => {
+    const { buildAssistantToolInvokeAction } = await import('./executionAdapter')
+    const runtime = createRuntime({ chatService: { chat: vi.fn() } })
+    const route = { channel: 'canvas', scopeType: 'thread', scopeId: 'unknown-project', threadId: 'pane' } as const
+    const action = buildAssistantToolInvokeAction({ runId: 'unknown-run', toolCallId: 'unknown-call', toolCallIndex: 0, toolName: 'image.create', args: { qAppKey: 'saved' } })
+    await store.appendEvents(route, [{ eventId: action.actionId, runId: 'unknown-run', sessionKey: 'canvas:thread:unknown-project:thread:pane', route, type: 'tool', level: 'info', message: 'Requested', createdAt: Date.now(), metadata: { agentAction: action } }])
+    const effect = vi.fn()
+    await expect(runtime.callTool(route, 'image.create', { qAppKey: 'saved' }, {
+      allowedToolNames: ['image.create'], runId: 'unknown-run', toolCallId: 'unknown-call',
+      toolProvider: { listTools: () => [{ name: 'image.create', description: '', inputSchema: {} }], callTool: effect }
+    })).rejects.toMatchObject({ code: 'TOOL_REPLAY_REQUIRES_REVIEW' })
+    expect(effect).not.toHaveBeenCalled()
+  })
 
   it('forwards runtime inference limits to the LLM chat service', async () => {
     const chat = vi.fn(async (_req: LLMChatReq): Promise<LLMChatResp> => ({ content: 'bounded' }))
@@ -134,7 +193,11 @@ describe('AssistantRuntime', () => {
     const route = { channel: 'telegram', scopeType: 'dm' as const, scopeId: '99' }
 
     await runtime.handleMessage({ route, text: 'old message' })
+    const workspace = getAssistantWorkspaceState(route), namespace = path.join(workspace.memoryDir, '.agent-memory-v1')
+    await fs.mkdir(namespace); await fs.writeFile(path.join(namespace, '.owner.json'), 'OPAQUE_RESET_OWNER'); await fs.writeFile(path.join(namespace, '.writer-lock'), 'RESET_UNKNOWN_REVIEW')
     await runtime.handleMessage({ route, text: 'fresh start', resetHistory: true })
+    expect(await fs.readFile(path.join(namespace, '.owner.json'), 'utf8')).toBe('OPAQUE_RESET_OWNER')
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('RESET_UNKNOWN_REVIEW')
 
     expect(requests).toHaveLength(2)
     expect(requests[1].messages).toEqual([{ role: 'user', content: 'fresh start' }])
@@ -459,6 +522,20 @@ describe('AssistantRuntime', () => {
       }
     })
 
+    // Match the queue-start record that a real source run persists before execution.
+    await store.appendEvents(route, [
+      {
+        eventId: 'task-group-1-failed:queued',
+        runId: 'task-group-1-failed',
+        sessionKey: 'generic:group:task-room:thread:task-thread',
+        route,
+        type: 'queued',
+        level: 'info',
+        message: 'Message queued for chat execution.',
+        createdAt: 10
+      }
+    ])
+
     const replay = await runtime.handleCommand(route, 'task', 'replay task-group-1')
     const retry = await runtime.handleCommand(route, 'task', 'retry task-group-1')
 
@@ -552,7 +629,11 @@ describe('AssistantRuntime', () => {
     const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'cleanup-1' }
 
     await runtime.handleMessage({ route, text: 'hello' })
+    const namespace = path.join(getAssistantWorkspaceState(route).memoryDir, '.agent-memory-v1')
+    await fs.mkdir(namespace); await fs.writeFile(path.join(namespace, 'facts.md'), 'OPAQUE_CLEAR_MEMORY'); await fs.writeFile(path.join(namespace, '.writer-lock'), 'CLEAR_UNKNOWN_REVIEW')
     const cleanup = await runtime.handleCommand(route, 'cleanup')
+    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe('OPAQUE_CLEAR_MEMORY')
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('CLEAR_UNKNOWN_REVIEW')
     const retention = await runtime.getRetentionState()
     const session = await runtime.getSession(route)
 
@@ -595,6 +676,8 @@ describe('AssistantRuntime', () => {
     oldSession.workspace = workspace
     await fs.mkdir(workspace.memoryDir, { recursive: true })
     await fs.writeFile(workspace.taskContextFile, 'custom task context')
+    const namespace = path.join(workspace.memoryDir, '.agent-memory-v1')
+    await fs.mkdir(namespace); await fs.writeFile(path.join(namespace, 'facts.md'), 'PERSISTED_ROOT_MEMORY'); await fs.writeFile(path.join(namespace, '.writer-lock'), 'PRUNE_UNKNOWN_REVIEW')
     const retainedWorkspace = getAssistantWorkspaceState(retainedRoute, workspaceId)
     await fs.writeFile(retainedWorkspace.taskContextFile, 'retained task context')
     oldSession.updatedAt = Date.now() - 24 * 60 * 60 * 1_000
@@ -604,6 +687,8 @@ describe('AssistantRuntime', () => {
       olderThanDays: 0.00001
     })
     expect(firstPrune.prunedCount).toBe(1)
+    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe('PERSISTED_ROOT_MEMORY')
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('PRUNE_UNKNOWN_REVIEW')
     await expect(fs.access(workspace.taskContextFile)).rejects.toMatchObject({ code: 'ENOENT' })
     // The retained route still owns the shared workspace identity, so pruning
     // the old session must not erase its route-scoped durable context.
@@ -790,6 +875,116 @@ describe('AssistantRuntime', () => {
     expect(removeResult.reply.content).toContain('Pinned note removed.')
     expect(requests).toHaveLength(2)
     expect(requests[1].systemPrompt).not.toContain('Prefer CSV exports for tabular responses.')
+  })
+
+  it('uses a callback-only assistant-turn gate without legacy fallback and preserves normal durable completion', async () => {
+    const execution = new CooperativeExecutionController(), run = vi.fn(execution.run.bind(execution))
+    const chat = vi.fn(async () => ({ content: 'done' })), runtime = createRuntime({ chatService: { chat } })
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'scoped-only-turn' }
+    const result = await runtime.handleMessage({ route, text: 'only callback gate', cooperativeExecution: { run } } as never)
+    expect(result.status).toBe('completed'); expect(chat).toHaveBeenCalledOnce()
+    expect(run).toHaveBeenCalledWith('assistant-turn', expect.any(AbortSignal), expect.any(Function))
+    expect(execution.isQuiescent()).toBe(true)
+    expect((await store.listRuns(10, route))[0]).toMatchObject({ status: 'completed', responseText: 'done' })
+  })
+
+  it('drains a real turn through nested model tools during pause but blocks a different route root', async () => {
+    const execution = new CooperativeExecutionController(), checkpoint = vi.spyOn(execution, 'checkpoint'), enter = vi.spyOn(execution, 'enter')
+    const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done }); return { promise, resolve } }
+    const started = deferred(), child = deferred(), finishEffect = deferred()
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'scoped-turn' }, independentRoute = { ...route, scopeId: 'independent-root' }
+    let modelCalls = 0, acknowledged = false
+    const effect = vi.fn(async () => { await finishEffect.promise; return { content: 'nested tool' } })
+    const runtime = createRuntime({ chatService: { chat: async (_req, options?: Parameters<LLMProxySvcImpl['chat']>[1]) => { modelCalls++; if (modelCalls === 1) { started.resolve(); await child.promise; await options!.executeTool!({ toolName: 'scoped.echo', args: {}, runId: options!.runId!, toolCallId: 'nested' }) } return { content: 'done' } } } })
+    const toolProvider = { listTools: () => [{ name: 'scoped.echo', description: 'Local fixture', inputSchema: { type: 'object' } }], callTool: effect }
+    const first = runtime.handleMessage({ route, text: 'nested', cooperativeExecution: execution, execution: { allowedToolNames: ['scoped.echo'] }, toolProvider }), observed = first.catch(error => error)
+    let pause: Promise<unknown> | undefined, independent: Promise<unknown> | undefined
+    try {
+      await started.promise; pause = execution.requestPause().then(ticket => { acknowledged = true; return ticket }, error => error)
+      independent = runtime.handleMessage({ route: independentRoute, text: 'separate', cooperativeExecution: execution }).catch(error => error)
+      child.resolve(); await vi.waitFor(() => expect(effect).toHaveBeenCalledOnce(), { timeout: 500 })
+      expect(acknowledged).toBe(false); expect(execution.isQuiescent()).toBe(false); expect(modelCalls).toBe(1)
+      finishEffect.resolve(); expect(await observed).not.toBeInstanceOf(Error); await pause
+      expect(modelCalls).toBe(1); expect(execution.isPaused()).toBe(true)
+      expect((await store.getSession(route))?.eventLog.filter(event => event.metadata?.agentAction).map(event => (event.metadata?.agentAction as { type: string }).type)).toEqual(['tool.invoke', 'tool.result'])
+      execution.resume(); expect(await independent).toMatchObject({ status: 'completed' }); expect(modelCalls).toBe(2)
+      expect(checkpoint).not.toHaveBeenCalled(); expect(enter).not.toHaveBeenCalled()
+    } finally { child.resolve(); finishEffect.resolve(); execution.resume(); await observed; await independent; await pause }
+  })
+
+  it.each(['external', 'route'])('cancels an assistant-turn paused checkpoint via %s without resume and releases the route queue/listener', async kind => {
+    const execution = new CooperativeExecutionController(), controller = new AbortController()
+    await execution.requestPause()
+    const gate = vi.spyOn(execution, 'run'), enter = vi.spyOn(execution, 'enter'), remove = vi.spyOn(controller.signal, 'removeEventListener')
+    const chat = vi.fn(async () => ({ content: 'next turn only' })), runtime = createRuntime({ chatService: { chat } })
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: `paused-${kind}` }
+    let settled = false
+    const pending = runtime.handleMessage({ route, text: 'stop before first model', signal: controller.signal, cooperativeExecution: execution }).catch(error => error).finally(() => { settled = true })
+    try {
+      await vi.waitFor(() => expect(gate).toHaveBeenCalledOnce())
+      if (kind === 'external') controller.abort(new Error('user stop'))
+      else await runtime.cancelRoute(route)
+      await vi.waitFor(() => expect(settled).toBe(true), { timeout: 200 })
+      expect(await pending).toMatchObject({ status: 'cancelled' })
+      expect(execution.isPaused()).toBe(true); expect(enter).not.toHaveBeenCalled(); expect(chat).not.toHaveBeenCalled()
+      expect(gate.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal)
+      expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
+      expect(await runtime.handleMessage({ route, text: 'next independent turn' })).toMatchObject({ status: 'completed' })
+      expect(chat).toHaveBeenCalledOnce()
+    } finally { execution.resume(); await pending }
+  })
+
+  it.each(['stop', 'close'])('lifecycle %s cancels a real AssistantRuntime paused checkpoint without unpausing or calling a model', async action => {
+    const [{ MagicAgentEventStore }, { PersistentAgentInstanceStore }, { ProductionAgentInstanceLifecycleService }] = await Promise.all([
+      import('../magicAgentPlatform2/persistence/eventStore'), import('../magicAgentPlatform2/agents/persistentAgentInstanceStore'), import('../magicAgentPlatform2/agents/productionAgentInstanceLifecycle')
+    ])
+    const events = new MagicAgentEventStore(':memory:'), instances = new PersistentAgentInstanceStore(events)
+    const instance = instances.create({ instance: { id: 'paused-worker', name: 'Paused worker', definitionId: 'bounded-worker', depth: 0, configVersion: 'v1', status: 'created', limits: { maxChildren: 0, maxDepth: 0, maxConcurrency: 1, maxRuntimeMs: 1000, allowedToolNames: [], workspaceRoots: [] } }, createdAt: 1, idempotencyKey: 'create' })
+    const chat = vi.fn(async () => ({ content: 'must not run' })), runtime = createRuntime({ chatService: { chat } })
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: `lifecycle-${action}` }
+    let gate: CooperativeExecutionController | undefined, inner: ReturnType<AssistantRuntime['handleMessage']> | undefined, checkpointReached = false
+    const lifecycle = new ProductionAgentInstanceLifecycleService(instances, { authorize: () => ({ status: 'authorized', permit: {} }), consumeExecutionPermit: vi.fn() } as never, async (request, options) => {
+      gate = options.cooperativeExecution
+      await gate.requestPause()
+      const run = gate.run.bind(gate)
+      vi.spyOn(gate, 'run').mockImplementation((kind, signal, operation) => { checkpointReached = true; return run(kind, signal, operation) })
+      expect(request.route).toEqual(route)
+      const result = await (inner = runtime.handleMessage({ route, text: request.text, signal: options.signal, cooperativeExecution: gate }))
+      return { runId: result.runId!, agentId: 'bounded-worker', status: result.status === 'cancelled' ? 'aborted' as const : 'completed' as const, content: result.reply.content || '', messages: [], toolCalls: [], events: [], startedAt: 1, finishedAt: 2 }
+    })
+    let settled = false
+    try {
+      await lifecycle.start({ instanceId: instance.id, expectedRevision: instance.revision, actor: { kind: 'user', id: 'owner' }, request: { text: 'paused before any model', route, allowedToolNames: [] }, idempotencyKey: 'start' })
+      await vi.waitFor(() => expect(checkpointReached).toBe(true))
+      const pending = (action === 'close' ? lifecycle.close() : lifecycle.stop({ instanceId: instance.id, expectedRevision: instances.get(instance.id)!.revision, actor: { kind: 'user', id: 'owner' }, idempotencyKey: 'stop' })).finally(() => { settled = true })
+      await vi.waitFor(() => expect(settled).toBe(true), { timeout: 300 })
+      await pending
+      expect(gate?.isPaused()).toBe(true); expect(gate?.isQuiescent()).toBe(true); expect(chat).not.toHaveBeenCalled()
+      expect(instances.get(instance.id)?.state.status).toBe('stopped')
+      expect(await inner).toMatchObject({ status: 'cancelled' })
+    } finally { gate?.resume(); await inner; await lifecycle.close(); events.close() }
+  })
+
+  it('does not enter an assistant-turn when a custom gate resolves after cancellation and detaches the external listener on rejection', async () => {
+    const controller = new AbortController(), chat = vi.fn(async () => ({ content: 'forbidden' }))
+    const remove = vi.spyOn(controller.signal, 'removeEventListener')
+    const gate: CooperativeOperationGate = { run: async (_kind, _signal, operation) => { controller.abort(new Error('cancel before enter')); await operation(gate) } }
+    const runtime = createRuntime({ chatService: { chat } }), route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'custom-paused' }
+    expect(await runtime.handleMessage({ route, text: 'do not execute', signal: controller.signal, cooperativeExecution: gate })).toMatchObject({ status: 'cancelled' })
+    expect(chat).not.toHaveBeenCalled(); expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
+  })
+
+  it('keeps a non-cancellation checkpoint failure classified as failed and removes its forwarding listener', async () => {
+    const controller = new AbortController(), chat = vi.fn(async () => ({ content: 'forbidden' }))
+    const remove = vi.spyOn(controller.signal, 'removeEventListener')
+    const run = vi.fn(async () => { throw new Error('gate failure') })
+    const runtime = createRuntime({ chatService: { chat } }), route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'failed-gate' }
+    await expect(runtime.handleMessage({ route, text: 'not cancelled', signal: controller.signal, cooperativeExecution: { run } })).rejects.toThrow('gate failure')
+    expect(controller.signal.aborted).toBe(false); expect(chat).not.toHaveBeenCalled()
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
+    const [failed] = await store.listRuns(10, route)
+    expect(failed).toMatchObject({ status: 'failed', errorMessage: 'gate failure' })
+    expect(await runtime.handleMessage({ route, text: 'next turn' })).toMatchObject({ status: 'completed' })
   })
 
   it('emits run events and returns a cancelled result when active execution is aborted', async () => {
@@ -1191,6 +1386,89 @@ describe('AssistantRuntime', () => {
       ])
     )
     expect((await runtime.getSession(route))?.workspace.workspaceId).toBe('workspace-resume-1')
+  })
+
+  it.each(['resumeFromRunId', 'continueFromRunId'] as const)(
+    'rejects foreign-route %s before copying its context',
+    async (reference) => {
+      const chat = vi.fn(async (): Promise<LLMChatResp> => {
+        throw new Error('failed before output')
+      })
+      const runtime = createRuntime({ chatService: { chat } })
+      const owner = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'owner' }
+      const foreign = { ...owner, scopeId: 'foreign' }
+      const source = await runtime.submitMessage({
+        route: owner,
+        text: 'PRIVATE original request',
+        workspaceId: 'owner-workspace'
+      })
+      await flushQueue(4)
+      expect((await runtime.getRun(source.runId!, owner))?.status).toBe('failed')
+      await expect(
+        runtime.handleMessage({ route: foreign, text: 'continue', [reference]: source.runId })
+      ).rejects.toThrow()
+      expect(chat).toHaveBeenCalledTimes(1)
+      expect(await runtime.listRuns(10, foreign)).toHaveLength(0)
+    }
+  )
+
+  it.each(['handleMessage', 'submitMessage'] as const)(
+    'checks unknown tool effects on direct %s recovery requests',
+    async (method) => {
+      const chat = vi.fn(async (): Promise<LLMChatResp> => {
+        throw new Error('failed before output')
+      })
+      const runtime = createRuntime({ chatService: { chat } })
+      const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'recovery-review' }
+      const source = await runtime.submitMessage({ route, text: 'original request' })
+      await flushQueue(4)
+      await store.appendEvents(route, [
+        {
+          eventId: 'pending-effect',
+          runId: source.runId!,
+          sessionKey: 'generic:dm:recovery-review',
+          route,
+          type: 'tool',
+          level: 'info',
+          message: 'Tool requested',
+          createdAt: Date.now(),
+          metadata: {
+            agentAction: {
+              type: 'tool.invoke',
+              correlationId: source.runId,
+              payload: {
+                invocationId: 'pending-effect',
+                toolName: 'files.write',
+                args: { path: 'owned.txt' }
+              }
+            }
+          }
+        }
+      ])
+      await expect(runtime[method]({ route, resumeFromRunId: source.runId })).rejects.toMatchObject(
+        { code: 'TOOL_REPLAY_REQUIRES_REVIEW' }
+      )
+      expect(chat).toHaveBeenCalledTimes(1)
+      expect(await runtime.listRuns(10, route)).toHaveLength(1)
+    }
+  )
+
+  it('requires review instead of replay when the source journal was evicted', async () => {
+    const chat = vi.fn(async (): Promise<LLMChatResp> => {
+      throw new Error('failed')
+    })
+    const runtime = createRuntime({ chatService: { chat } })
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'evicted-journal' }
+    const source = await runtime.submitMessage({ route, text: 'original request' })
+    await flushQueue(4)
+    const session = await store.getSession(route)
+    expect(session?.eventLog.some((event) => event.type === 'queued')).toBe(true)
+    session!.eventLog = []
+    await expect(runtime.resumeRun(route, source.runId!)).rejects.toMatchObject({
+      code: 'TOOL_REPLAY_REQUIRES_REVIEW'
+    })
+    expect(chat).toHaveBeenCalledTimes(1)
+    expect(await runtime.listRuns(10, route)).toHaveLength(1)
   })
 
   it('rejects resume control for completed runs', async () => {

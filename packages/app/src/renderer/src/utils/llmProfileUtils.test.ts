@@ -35,6 +35,19 @@ const createConfig = (): Config => ({
 })
 
 describe('buildChatAvailableProfiles', () => {
+  it('does not list or restore retired browser records and leaves saved data unchanged', () => {
+    const kind = ['chat', 'gpt', '-web-playwright'].join('')
+    const profile: LLMAPIProfile = { id: 'retired', model_name: kind, call_type: kind, api_key: 'old-key', base_url: 'https://example.com/v1' }
+    const config = createConfig(); config.llm_config.api_profiles = [profile]
+    const before = JSON.stringify(config)
+    expect(buildChatAvailableProfiles(config, [])).toEqual([])
+    expect(isChatProfileDiscoveryCandidate(profile)).toBe(false)
+    expect(resolveAvailableChatProfileId([], profile.id, [profile])).toBeNull()
+    config.use_remote_llm = true
+    expect(buildChatAvailableProfiles(config, [profile])).toEqual([])
+    config.use_remote_llm = false
+    expect(JSON.stringify(config)).toBe(before)
+  })
   it('keeps generic profiles out of discovery unless an extension claims them', () => {
     const profile: LLMAPIProfile = {
       id: 'openai-profile',

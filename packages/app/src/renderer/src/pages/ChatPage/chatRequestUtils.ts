@@ -1,13 +1,16 @@
+import i18next from 'i18next'
 import { normalizeModelRetryStatus, type LLMRetryStatus } from '@shared/llm/modelCapacityRetry'
 import type { Config, CustomSkill, LLMAPIProfile, LLMOpenAIApiMode } from '@shared/config/config'
 import type {
   LLMChatSkillRuntime,
   LLMChatStreamResp,
+  LLMTeamMember,
   LLMExternalAgentStreamReq,
   LLMToolStatus,
   OCRResult
 } from '@shared/api/svcLLMProxy'
 import { newAbortHandler } from '@shared/api/apiUtils/abortHandler'
+import { readAgentToolFailurePayload } from '@shared/api/agentThreadToolFailure'
 import { getServiceErrorMessage } from '@shared/api/apiUtils/serviceValidation'
 import type { AgentRouteLike } from '@shared/agent'
 import {
@@ -29,8 +32,13 @@ import type {
 } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import {
   augmentMessageContentWithFileAttachments,
-  expandReportBundleAttachments
+  expandReportBundleAttachments,
+  previewAugmentedMessageContentWithoutReads
 } from './chatAttachmentPromptUtils'
+import {
+  assertRequestImageBytesWithinBudget,
+  type ChatRequestImageByteBudgetRoute
+} from './chatRequestImageBudget'
 import { generateUUID, getBaseProfileId, HUNYUAN_3D_PROFILE_ID } from './chatPageShared'
 import {
   buildRemoteLlmServerErrorMessage,
@@ -38,16 +46,53 @@ import {
   getRemoteLlmServerOrigin
 } from '@renderer/utils/llmProfileUtils'
 import { normalizeLocalMediaUrl } from './chatPageShared'
+import { assertExplicitUserImageCount } from './chatExplicitImageCount'
+import {
+  assertNoUnverifiedPrimaryReports,
+  hasWellFormedReportBundleBinding,
+  isPrimaryReportFileDescriptor,
+  UNVERIFIED_REPORT_BUNDLE_MESSAGE
+} from '@shared/llm/unverifiedReport'
+import { REPORT_BUNDLE_VERIFY_MAX_ITEMS } from '@shared/reportBundle'
+import type { ReportBundlesSvc, VerifyReportBundlesResp } from '@shared/api/svcReportBundles'
 import { api } from '@renderer/utils/windowUtils'
+import { noteReportBundleVerifyResults } from './reportBundleRefusals'
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference } from '@shared/mediaReference'
 import {
   applySkillOutputModeContract,
   resolveSkillOutputImageGenerationOptions
 } from './chatSkillOutputMode'
-import { selectMessagesForImageHistoryPolicy } from '@shared/llm/imageHistory'
-import { isRunnableProfile, usesOpenAIResponsesImagePolicy } from '@shared/llm/utils'
-import { DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY } from '@shared/llm/openaiResponses'
+import {
+  DEFAULT_LLM_IMAGE_HISTORY_POLICY,
+  selectMessagesForImageHistoryPolicy
+} from '@shared/llm/imageHistory'
+import {
+  isOpencodeZenUrl,
+  isRunnableProfile,
+  usesOpenAIResponsesImagePolicy
+} from '@shared/llm/utils'
+import {
+  DEFAULT_OPENAI_RESPONSES_IMAGE_POLICY,
+  shouldUseOpenAIImageGeneration
+} from '@shared/llm/openaiResponses'
+import {
+  MAX_LLM_CHUNKED_BINARY_BYTES,
+  MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES
+} from '@shared/llm/chatAttachmentTransportLimits'
+import { readBoundedLocalChatImageBlob } from './boundedLocalChatImageReader'
+import {
+  failedChatSendStage,
+  summarizeChatSendStage,
+  type ChatSendStage,
+  type ChatSendStageBreadcrumb
+} from '@shared/utils/chatSendStageBreadcrumb'
+import {
+  projectImageToolArgs,
+  projectImageToolId,
+  summarizeCompletedImageToolReceipt
+} from '@shared/llm/imageToolReceipt'
+import type { ThreadImageHistoryEntry } from '@shared/llm/imageHistory'
 export { resolveChatPageRequestExecutionImagePolicy } from './imageRequestPolicy'
 
 type ChatRequestPayload = {
@@ -59,6 +104,8 @@ type ChatRequestPayload = {
   }>
   route?: AgentRouteLike
   profileId?: string
+  /** Main-issued configuration identity; local IPC only, never provider-facing. */
+  expectedProfileRevision?: string
   stream?: boolean
   systemPrompt?: string
   reasoningEffort?: LLMReasoningEffort
@@ -66,8 +113,14 @@ type ChatRequestPayload = {
   imageGenerationOptions?: OpenAIImageGenerationOptions
   imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
+  threadImageHistory?: (ThreadImageHistoryEntry | null)[]
+  threadImageReview?: 'last-output'
   apiMode?: LLMOpenAIApiMode
   skillRuntime?: LLMChatSkillRuntime
+  teamMember?: LLMTeamMember
+  teamMessageHop?: 1 | 2
+  teamMessageDelivery?: { id: string; lease: string }
+  goalProgressToken?: string
   sessionUrl?: string
   conversationId?: string
   isEdit?: boolean
@@ -100,6 +153,15 @@ type RemoteRequestProfile = Pick<
 > & { openai_api_modes?: RemoteOpenAIModeMap }
 
 type RequestChatCompletionInput = {
+  teamMember?: LLMTeamMember
+  teamMessageHop?: 1 | 2
+  /** The claim of the member message this request delivers; sent to the local MAIN only, beside teamMessageHop. */
+  teamMessageDelivery?: { id: string; lease: string }
+  /** In-memory host callbacks only; never serialized into IPC or model input. */
+  beforeLocalDispatch?: () => void | Promise<void>
+  onLocalDispatch?: () => void
+  goalProgressToken?: string
+  expectedProfileRevision?: string
   config: Config
   messages: ChatMessage[]
   // Discovery metadata from the selected remote destination; never serialized.
@@ -114,6 +176,8 @@ type RequestChatCompletionInput = {
   imageGenerationOptions?: OpenAIImageGenerationOptions
   imageRequest?: ImageRequestContract
   imageHistoryPolicy?: LLMImageHistoryPolicy
+  threadImageHistory?: (ThreadImageHistoryEntry | null)[]
+  threadImageReview?: 'last-output'
   apiMode?: LLMOpenAIApiMode
   skillRuntime?: LLMChatSkillRuntime
   externalAgentSkill?: CustomSkill | null
@@ -347,6 +411,18 @@ const normalizeLocalChatRequestError = (value: unknown): LocalChatRequestError =
   )
   if (typeof record?.code === 'string') error.code = record.code
   if (typeof record?.name === 'string' && record.name.trim()) error.name = record.name
+  const receipt = readAgentToolFailurePayload(
+    record ? Object.getOwnPropertyDescriptor(record, 'payload')?.value : undefined
+  )
+  if (receipt) {
+    const metadata =
+      'receiptOmitted' in receipt
+        ? { toolReceiptOmitted: true }
+        : { toolHistory: receipt.toolHistory, toolResult: receipt.toolResult }
+    error.finishReason = 'error'
+    error.metadata = metadata
+    error.partialResult = { content: '', finishReason: 'error', metadata }
+  }
   return error
 }
 
@@ -377,15 +453,24 @@ const attachStreamPartialToError = (
   return diagnostic
 }
 
+const INCOMPLETE_CHAT_STREAM_MESSAGE =
+  'incomplete-stream: the IPC stream ended before a terminal done event.'
+
+export const isIncompleteChatStreamError = (error: unknown): boolean =>
+  error instanceof Error &&
+  ((error as LocalChatRequestError).code === 'INCOMPLETE_CHAT_STREAM' ||
+    error.message === INCOMPLETE_CHAT_STREAM_MESSAGE ||
+    error.message === 'incomplete-stream: External Agent stream ended without a terminal event.')
+
 const createIncompleteStreamError = (
   partialContent: string,
   finishReason?: LLMChatStreamResp['finishReason'],
   metadata?: Record<string, unknown>
 ): LocalChatRequestError =>
   attachStreamPartialToError(
-    createLocalChatRequestError(
-      'incomplete-stream: the IPC stream ended before a terminal done event.'
-    ),
+    Object.assign(createLocalChatRequestError(INCOMPLETE_CHAT_STREAM_MESSAGE), {
+      code: 'INCOMPLETE_CHAT_STREAM'
+    }),
     partialContent,
     finishReason,
     metadata
@@ -400,10 +485,14 @@ const mapLocalChatRequestErrorMessage = (message: string): string => {
   return normalized
 }
 
-const responseToBlob = async (response: Response): Promise<Blob> => {
-  if (typeof response.blob === 'function') return response.blob()
+const responseToBlob = async (response: Response, signal?: AbortSignal): Promise<Blob> => {
+  throwIfAborted(signal)
+  if (typeof response.blob === 'function') return awaitWithAbort(response.blob(), signal)
   if (typeof response.arrayBuffer === 'function') {
-    const bytes = await response.arrayBuffer()
+    const bytes = await awaitWithAbort(response.arrayBuffer(), signal)
+    // A producer may ignore cancellation and settle late; do not allocate a Blob
+    // after the caller has already stopped preparing this request.
+    throwIfAborted(signal)
     return new Blob([bytes], {
       type: response.headers?.get?.('content-type') || 'application/octet-stream'
     })
@@ -411,12 +500,50 @@ const responseToBlob = async (response: Response): Promise<Blob> => {
   throw new Error('Response body cannot be read as a blob')
 }
 
-const blobToDataUrl = (blob: Blob): Promise<string> =>
+const blobToDataUrl = (blob: Blob, signal?: AbortSignal): Promise<string> =>
   new Promise((resolve, reject) => {
+    throwIfAborted(signal)
     const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(reader.error || new Error('Failed to read blob as data URL'))
-    reader.readAsDataURL(blob)
+    const cleanup = (): void => {
+      signal?.removeEventListener('abort', onAbort)
+      reader.onload = null
+      reader.onerror = null
+      reader.onabort = null
+    }
+    const onAbort = (): void => {
+      const reason = resolveAbortReason(signal?.reason)
+      cleanup()
+      try {
+        if (reader.readyState === FileReader.LOADING) reader.abort()
+      } catch {
+        // The caller must settle even if a reader cannot be interrupted.
+      }
+      reject(reason)
+    }
+    reader.onload = () => {
+      if (signal?.aborted) return onAbort()
+      const result = String(reader.result || '')
+      cleanup()
+      resolve(result)
+    }
+    reader.onerror = () => {
+      if (signal?.aborted) return onAbort()
+      const error = reader.error || new Error('Failed to read blob as data URL')
+      cleanup()
+      reject(error)
+    }
+    reader.onabort = () => {
+      cleanup()
+      reject(createAbortError('Reading the image was aborted.'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) return onAbort()
+    try {
+      reader.readAsDataURL(blob)
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
 
 const isRequestDataImageUrl = (value: string): boolean =>
@@ -457,6 +584,7 @@ const normalizeImageAttachmentForRequest = async (
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
     preserveRemoteUrl?: boolean
+    signal?: AbortSignal
   }
 ): Promise<ChatAttachment> => {
   if (
@@ -476,13 +604,30 @@ const normalizeImageAttachmentForRequest = async (
   }
 
   try {
-    const response = await fetch(normalizeLocalMediaUrl(attachment.url))
+    throwIfAborted(options.signal)
+    const url = normalizeLocalMediaUrl(attachment.url)
+    const response = await awaitWithAbort(
+      options.signal ? fetch(url, { signal: options.signal }) : fetch(url),
+      options.signal
+    )
+    throwIfAborted(options.signal)
     if (!response.ok) {
       throw new Error(`Failed to load image attachment (${response.status})`)
     }
 
-    const blob = await responseToBlob(response)
-    const dataUrl = await blobToDataUrl(blob)
+    // Every request image is read chunk by chunk from the response body under a
+    // hard per-image cap. A response without a readable body (no body, or a body
+    // without getReader) is refused by the reader before blob() or arrayBuffer()
+    // could read it uncapped. A null body (HEAD, or an HTTP 204/205 from native
+    // fetch) is refused here; an empty body stream (a 204 from a custom scheme
+    // such as local-media) reads as zero bytes and main refuses the empty data URL.
+    const blob = await readBoundedLocalChatImageBlob(response, {
+      maxBytes: MAX_LLM_REQUEST_IMAGE_SOURCE_BYTES,
+      ...(options.signal ? { signal: options.signal } : {})
+    })
+    throwIfAborted(options.signal)
+    const dataUrl = await blobToDataUrl(blob, options.signal)
+    throwIfAborted(options.signal)
 
     return {
       ...attachment,
@@ -494,6 +639,7 @@ const normalizeImageAttachmentForRequest = async (
           : blob.size
     }
   } catch (error) {
+    throwIfAborted(options.signal)
     const reason = error instanceof Error ? error.message : String(error)
     throw new Error(
       `Unable to prepare image attachment "${attachment.fileName || 'image'}" for the model: ${reason}`
@@ -503,7 +649,7 @@ const normalizeImageAttachmentForRequest = async (
 
 const normalizeFileAttachmentForRequest = async (
   attachment: ChatAttachment,
-  options: { allowRequestDataUrl?: boolean }
+  options: { allowRequestDataUrl?: boolean; signal?: AbortSignal }
 ): Promise<ChatAttachment> => {
   if (
     attachment.type !== 'file' ||
@@ -521,13 +667,21 @@ const normalizeFileAttachmentForRequest = async (
   }
 
   try {
-    const response = await fetch(normalizeLocalMediaUrl(attachment.url))
+    throwIfAborted(options.signal)
+    const url = normalizeLocalMediaUrl(attachment.url)
+    const response = await awaitWithAbort(
+      options.signal ? fetch(url, { signal: options.signal }) : fetch(url),
+      options.signal
+    )
+    throwIfAborted(options.signal)
     if (!response.ok) {
       throw new Error(`Failed to load file attachment (${response.status})`)
     }
 
-    const blob = await responseToBlob(response)
-    const dataUrl = await blobToDataUrl(blob)
+    const blob = await responseToBlob(response, options.signal)
+    throwIfAborted(options.signal)
+    const dataUrl = await blobToDataUrl(blob, options.signal)
+    throwIfAborted(options.signal)
 
     return {
       ...attachment,
@@ -539,6 +693,7 @@ const normalizeFileAttachmentForRequest = async (
           : blob.size
     }
   } catch (error) {
+    throwIfAborted(options.signal)
     const reason = error instanceof Error ? error.message : String(error)
     throw new Error(
       `Unable to prepare file attachment "${attachment.fileName || 'file'}" for the model: ${reason}`
@@ -552,28 +707,38 @@ export const normalizeChatAttachmentsForRequest = async (
     managedMediaService?: ManagedMediaSvc
     allowManagedRequestDataUrl?: boolean
     allowManagedChunkedBinary?: boolean
+    managedChunkedBinaryMaxBytes?: number
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
     preserveRemoteUrl?: boolean
     imageHistoryPolicy?: LLMImageHistoryPolicy
+    signal?: AbortSignal
   } = {}
 ): Promise<ChatAttachment[] | undefined> => {
   if (!attachments?.length) {
     return undefined
   }
 
-  return Promise.all(
-    attachments.map(async (attachment) => {
+  const normalized: ChatAttachment[] = []
+  for (const attachment of [...attachments]) {
+    throwIfAborted(options.signal)
+    const result = await (async (): Promise<ChatAttachment> => {
       const media = normalizeMediaReference(attachment.media)
       if (media?.kind === 'managed') {
         if (
           options.allowManagedChunkedBinary &&
           typeof options.managedMediaService?.materializeForRequest === 'function'
         ) {
-          const materialized = await options.managedMediaService.materializeForRequest({
-            reference: media,
-            transport: 'chunked-binary-v1'
-          })
+          const materialized = await awaitWithAbort(
+            options.managedMediaService.materializeForRequest({
+              reference: media,
+              transport: 'chunked-binary-v1',
+              ...(options.managedChunkedBinaryMaxBytes !== undefined
+                ? { maxBytes: options.managedChunkedBinaryMaxBytes }
+                : {})
+            }),
+            options.signal
+          )
           if (materialized.transport !== 'chunked-binary-v1') {
             throw new Error('Managed media request transport returned an unexpected protocol')
           }
@@ -594,10 +759,13 @@ export const normalizeChatAttachmentsForRequest = async (
             `Unable to prepare attachment "${attachment.fileName || 'attachment'}" for the model: no supported managed-media request transport`
           )
         }
-        const materialized = await options.managedMediaService.materializeForRequest({
-          reference: media,
-          transport: 'request-data-url'
-        })
+        const materialized = await awaitWithAbort(
+          options.managedMediaService.materializeForRequest({
+            reference: media,
+            transport: 'request-data-url'
+          }),
+          options.signal
+        )
         if (materialized.transport !== 'request-data-url') {
           throw new Error('Managed media request transport returned an unexpected protocol')
         }
@@ -615,8 +783,11 @@ export const normalizeChatAttachmentsForRequest = async (
         : attachment.type === 'file'
           ? normalizeFileAttachmentForRequest(attachment, options)
           : attachment
-    })
-  )
+    })()
+    throwIfAborted(options.signal)
+    normalized.push(result)
+  }
+  return normalized
 }
 
 type ReportInlineCapability = {
@@ -1007,18 +1178,30 @@ const projectToolHistoryForProvider = (
     return { content: message.content }
   }
 
-  const preservedToolHistory = history.map((entry) => ({
-    ...entry,
-    args: { ...entry.args },
-    ...(entry.metadata ? { metadata: { ...entry.metadata } } : {})
-  }))
+  const providerHistory: NonNullable<ChatMessage['toolHistory']> = history.map((entry) => {
+    if (entry.toolName === 'image_gen' && entry.status === 'completed') {
+      return {
+        runId: projectImageToolId(entry.runId),
+        toolCallId: projectImageToolId(entry.toolCallId),
+        toolName: entry.toolName,
+        status: entry.status,
+        args: projectImageToolArgs(entry.args),
+        content: summarizeCompletedImageToolReceipt(entry.content)
+      }
+    }
+    return {
+      ...entry,
+      args: { ...entry.args },
+      ...(entry.metadata ? { metadata: { ...entry.metadata } } : {})
+    }
+  })
   if (history.length === 0) {
-    return { content: message.content, toolHistory: preservedToolHistory }
+    return { content: message.content, toolHistory: providerHistory }
   }
 
   const projection = [
     '[assistant.toolHistory]',
-    ...history.map((entry, index) => {
+    ...providerHistory.map((entry, index) => {
       const lines = [
         `entry[${index + 1}].runId=${JSON.stringify(entry.runId)}`,
         `entry[${index + 1}].toolCallId=${JSON.stringify(entry.toolCallId)}`,
@@ -1044,10 +1227,59 @@ const projectToolHistoryForProvider = (
 
   return {
     content: message.content ? `${message.content}\n\n${projection}` : projection,
-    toolHistory: preservedToolHistory
+    toolHistory: providerHistory
   }
 }
-const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequestPayload => {
+const withoutReportBundleBinding = (attachment: ChatAttachment): ChatAttachment => {
+  if (attachment.reportBundleBinding === undefined) return attachment
+  const copy = { ...attachment }
+  delete copy.reportBundleBinding
+  return copy
+}
+
+/**
+ * Outbound, for a destination that is not the local MAIN chat boundary. The binding is
+ * removed, and a bound primary report (MAIN verified it earlier in this request, which refuses
+ * otherwise; its text is inlined and its images expanded by now) goes as a plain file
+ * attachment: a remote MagicPot server's own MAIN chat boundary refuses every unbound
+ * primary-report descriptor, and nothing but this app's MAIN can check a binding. A primary
+ * without a well-formed binding keeps its role, so every boundary still refuses it. Never used
+ * for attachments that arrive in a reply: those only lose the binding.
+ */
+const asUnboundOutboundAttachment = (attachment: ChatAttachment): ChatAttachment => {
+  if (attachment.reportBundleBinding === undefined) return attachment
+  const copy = withoutReportBundleBinding(attachment)
+  if (isPrimaryReportFileDescriptor(attachment) && hasWellFormedReportBundleBinding(attachment)) {
+    delete copy.reportBundleRole
+    delete copy.reportBundleManifestUrl
+    delete copy.reportBundleImageCount
+  }
+  return copy
+}
+const withoutReportBundleBindings = (
+  attachments: ChatAttachment[] | undefined
+): ChatAttachment[] | undefined =>
+  attachments?.some((attachment) => attachment.reportBundleBinding !== undefined)
+    ? attachments.map(withoutReportBundleBinding)
+    : attachments
+const asUnboundOutboundAttachments = (
+  attachments: ChatAttachment[] | undefined
+): ChatAttachment[] | undefined =>
+  attachments?.some((attachment) => attachment.reportBundleBinding !== undefined)
+    ? attachments.map(asUnboundOutboundAttachment)
+    : attachments
+
+/**
+ * Builds the request body. A report binding is a bearer secret for the local MAIN chat boundary
+ * (svcLLMProxy.chat / chatStream), which checks it and strips it before any provider, remote
+ * server or log sees the request. Every other destination (the remote LLM server fetched from
+ * the renderer, an external agent endpoint) must never receive it, so it is kept only when the
+ * caller dispatches to that MAIN boundary and says so.
+ */
+const buildChatRequestPayload = (
+  input: RequestChatCompletionInput,
+  destination: { localMainBoundary?: boolean } = {}
+): ChatRequestPayload => {
   const resolvedSystemPrompt =
     input.externalAgentSkill?.type === 'agent'
       ? input.externalAgentSkill.prompt?.trim() || input.systemPrompt?.trim() || undefined
@@ -1065,18 +1297,25 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
       (explicitApiMode === 'auto' ? undefined : explicitApiMode))
     : undefined
 
+  const keepReportBundleBinding =
+    destination.localMainBoundary === true && input.externalAgentSkill?.type !== 'agent'
   return {
     messages: input.messages.map((message) => {
       const projected = projectToolHistoryForProvider(message)
       return {
         role: message.role,
         content: projected.content,
-        attachments: message.attachments,
+        attachments: keepReportBundleBinding
+          ? message.attachments
+          : asUnboundOutboundAttachments(message.attachments),
         ...(projected.toolHistory !== undefined ? { toolHistory: projected.toolHistory } : {})
       }
     }),
     ...(input.route ? { route: input.route } : {}),
     profileId: input.profileId || (input.config.use_remote_llm ? selectedProfile?.id : undefined),
+    ...(input.expectedProfileRevision !== undefined
+      ? { expectedProfileRevision: input.expectedProfileRevision }
+      : {}),
     ...(input.stream ? { stream: true } : {}),
     ...(input.config.use_remote_llm
       ? remoteApiMode
@@ -1096,11 +1335,48 @@ const buildChatRequestPayload = (input: RequestChatCompletionInput): ChatRequest
     ...(input.imageRequest ? { imageRequest: input.imageRequest } : {}),
     ...(input.imageHistoryPolicy ? { imageHistoryPolicy: input.imageHistoryPolicy } : {}),
     ...(input.skillRuntime ? { skillRuntime: input.skillRuntime } : {}),
+    ...(input.teamMember ? { teamMember: input.teamMember } : {}),
+    ...(input.teamMessageHop ? { teamMessageHop: input.teamMessageHop } : {}),
+    ...(input.teamMessageHop && input.teamMessageDelivery && destination.localMainBoundary === true
+      ? {
+          teamMessageDelivery: {
+            id: input.teamMessageDelivery.id,
+            lease: input.teamMessageDelivery.lease
+          }
+        }
+      : {}),
+    ...(input.goalProgressToken ? { goalProgressToken: input.goalProgressToken } : {}),
     sessionUrl: input.sessionUrl,
     conversationId: input.conversationId,
     isEdit: input.isEdit
   }
 }
+
+// Keep the edit sidecar out of external-agent/remote requests (including probes).
+const buildLocalChatRequestPayload = (input: RequestChatCompletionInput): ChatRequestPayload => ({
+  ...buildChatRequestPayload(input, { localMainBoundary: true }),
+  ...(!input.config.use_remote_llm &&
+  !input.externalAgentSkill &&
+  !input.skillRuntime &&
+  !input.goalProgressToken &&
+  input.route?.channel === 'canvas' &&
+  input.route.scopeType === 'thread' &&
+  input.threadImageHistory?.length
+    ? {
+        threadImageHistory: input.threadImageHistory,
+        ...(input.threadImageReview === 'last-output' &&
+        !input.teamMember &&
+        !input.teamMessageHop &&
+        !input.isEdit &&
+        !input.imageRequest &&
+        !input.imageGenerationOptions?.enabled &&
+        input.messages.at(-1)?.role === 'user' &&
+        !input.messages.at(-1)?.attachments?.length
+          ? { threadImageReview: 'last-output' as const }
+          : {})
+      }
+    : {})
+})
 
 const hasPrimaryReportBundleInMessages = (messages: ChatMessage[]): boolean =>
   messages.some(
@@ -1330,37 +1606,250 @@ const mergeHiddenContextIntoMessageContent = (message: ChatMessage, content: str
   return visibleContent ? `${hiddenContext}\n\n${visibleContent}` : hiddenContext
 }
 
+const readAttachmentTextForRequest = async (url: string, signal?: AbortSignal): Promise<string> => {
+  throwIfAborted(signal)
+  const normalizedUrl = normalizeLocalMediaUrl(url)
+  const response = await awaitWithAbort(
+    signal ? fetch(normalizedUrl, { signal }) : fetch(normalizedUrl),
+    signal
+  )
+  throwIfAborted(signal)
+  if (!response.ok) throw new Error(`Failed to read attachment text (${response.status})`)
+  return awaitWithAbort(response.text(), signal)
+}
+
+const expandReportBundleAttachmentsForRequest = async (
+  attachments: ChatMessage['attachments'],
+  signal?: AbortSignal
+): Promise<ChatMessage['attachments']> => {
+  try {
+    // Only projected messages reach here: every primary was verified by MAIN.
+    return await expandReportBundleAttachments(
+      attachments,
+      (url) => readAttachmentTextForRequest(url, signal),
+      signal,
+      { verifiedBundles: true }
+    )
+  } catch (error) {
+    // The generic helper preserves the raw AbortSignal reason; requests use
+    // their existing normalizer so string cancellation remains an AbortError.
+    throwIfAborted(signal)
+    throw error
+  }
+}
+
+type VerifiedReportBundle = { manifestUrl?: string; imageCount: number }
+
+const refuseUnverifiedReportBundle = (): never => {
+  throw new Error(UNVERIFIED_REPORT_BUNDLE_MESSAGE)
+}
+
+/**
+ * Copy of the messages in which every verified primary report carries only what MAIN vouched
+ * for: MAIN's own manifest URL (the descriptor's is never read) and MAIN's image count, and no
+ * `media` / `binary` payload that could replace the verified url as the report body. The
+ * caller's messages are not mutated.
+ */
+const projectVerifiedPrimaryReports = (
+  messages: ChatMessage[],
+  verified: ReadonlyMap<string, VerifiedReportBundle>
+): ChatMessage[] =>
+  messages.map((message) => {
+    if (!message.attachments?.some(isPrimaryReportFileDescriptor)) return message
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) => {
+        if (!isPrimaryReportFileDescriptor(attachment)) return attachment
+        const bundle = verified.get(attachment.reportBundleBinding ?? '')
+        if (!bundle) return refuseUnverifiedReportBundle()
+        const projected: ChatAttachment = { ...attachment }
+        // MAIN's count replaces the descriptor's hint. countProviderBoundImages takes the
+        // larger of hint and expanded children only within one reportBundleId group, so a
+        // primary without an id gets no hint: its children are counted once expanded,
+        // never twice.
+        if (attachment.reportBundleId) projected.reportBundleImageCount = bundle.imageCount
+        else delete projected.reportBundleImageCount
+        delete projected.media
+        delete projected.binary
+        if (bundle.manifestUrl) projected.reportBundleManifestUrl = bundle.manifestUrl
+        else delete projected.reportBundleManifestUrl
+        return projected
+      })
+    }
+  })
+
+/**
+ * Authoritative step for primary reports of every role, after the synchronous shape guard and
+ * before any manifest, report or image is read. MAIN verifies each distinct binding against
+ * this conversation, the registered primary and the unchanged bundle files. Every failure is
+ * the same refusal: no conversation, a primary carrying `media` / `binary`, more than
+ * REPORT_BUNDLE_VERIFY_MAX_ITEMS distinct bindings, one binding with two urls, a missing
+ * service, an IPC error, a missing result or any status other than 'verified'. An abort keeps
+ * its own reason. Returns the projection every later stage uses; without primaries it returns
+ * the messages unchanged and never touches the bridge. The binding never enters an error.
+ */
+const verifyPrimaryReportBundles = async (
+  messages: ChatMessage[],
+  conversation: { conversationId?: string; storageScope?: string },
+  signal?: AbortSignal
+): Promise<ChatMessage[]> => {
+  const items = new Map<string, string>()
+  for (const message of messages) {
+    for (const attachment of message.attachments ?? []) {
+      if (!isPrimaryReportFileDescriptor(attachment)) continue
+      const binding = attachment.reportBundleBinding
+      if (
+        !hasWellFormedReportBundleBinding(attachment) ||
+        typeof binding !== 'string' ||
+        attachment.media !== undefined ||
+        attachment.binary !== undefined ||
+        typeof attachment.url !== 'string' ||
+        !attachment.url
+      ) {
+        return refuseUnverifiedReportBundle()
+      }
+      const knownUrl = items.get(binding)
+      if (knownUrl !== undefined && knownUrl !== attachment.url)
+        return refuseUnverifiedReportBundle()
+      items.set(binding, attachment.url)
+    }
+  }
+  if (items.size === 0) return messages
+  const { conversationId, storageScope } = conversation
+  if (typeof conversationId !== 'string' || !conversationId) return refuseUnverifiedReportBundle()
+  if (items.size > REPORT_BUNDLE_VERIFY_MAX_ITEMS) return refuseUnverifiedReportBundle()
+  const service = (api() as unknown as { svcReportBundles?: Partial<ReportBundlesSvc> } | undefined)
+    ?.svcReportBundles
+  const verify = service?.verify
+  if (typeof verify !== 'function') return refuseUnverifiedReportBundle()
+  throwIfAborted(signal)
+  let response: VerifyReportBundlesResp | undefined
+  try {
+    response = await awaitWithAbort(
+      Promise.resolve().then(() =>
+        verify.call(service, {
+          conversation: {
+            conversationId,
+            ...(typeof storageScope === 'string' && storageScope ? { storageScope } : {})
+          },
+          items: Array.from(items, ([binding, primaryUrl]) => ({ binding, primaryUrl }))
+        })
+      ),
+      signal
+    )
+  } catch {
+    throwIfAborted(signal)
+    return refuseUnverifiedReportBundle()
+  }
+  throwIfAborted(signal)
+  const verified = new Map<string, VerifiedReportBundle>()
+  // Per-binding outcome for the cards: a report MAIN refused is shown unavailable.
+  noteReportBundleVerifyResults(
+    (Array.isArray(response?.results) ? response.results : []).filter(
+      (result) => typeof result?.binding === 'string' && items.has(result.binding)
+    )
+  )
+  for (const result of Array.isArray(response?.results) ? response.results : []) {
+    if (
+      !result ||
+      result.status !== 'verified' ||
+      typeof result.binding !== 'string' ||
+      !items.has(result.binding) ||
+      typeof result.imageCount !== 'number' ||
+      !Number.isSafeInteger(result.imageCount) ||
+      result.imageCount < 0 ||
+      (result.manifestUrl !== undefined &&
+        (typeof result.manifestUrl !== 'string' ||
+          !result.manifestUrl.startsWith('local-media://')))
+    ) {
+      continue
+    }
+    verified.set(result.binding, {
+      ...(result.manifestUrl ? { manifestUrl: result.manifestUrl } : {}),
+      imageCount: result.imageCount
+    })
+  }
+  for (const binding of items.keys()) {
+    if (!verified.has(binding)) return refuseUnverifiedReportBundle()
+  }
+  return projectVerifiedPrimaryReports(messages, verified)
+}
+
 const expandMessagesForImagePreflight = async (
   messages: ChatMessage[],
   imageHistoryPolicy: LLMImageHistoryPolicy | undefined,
-  maxImages: number | undefined
-): Promise<ChatMessage[]> => {
-  if (maxImages === undefined) return messages
+  maxImages: number | undefined,
+  signal?: AbortSignal,
+  options: {
+    /**
+     * Also expand the history bundles that prepareMessagesForRequest would expand later
+     * (all-history policy), so that the request image byte budget counts their images.
+     */
+    expandHistoryBundles?: boolean
+  } = {}
+): Promise<{
+  messages: ChatMessage[]
+  expandedIndexes: ReadonlySet<number>
+  /** Image attachments this expansion added from manifests MAIN verified for this send. */
+  verifiedManifestImages: ReadonlySet<ChatAttachment>
+}> => {
   // Metadata may reveal more images. Check the aggregate again before report
   // capability probes, uploads or image materialization, and do not resurrect
   // images excluded by the history policy when expanding an older bundle.
   const expandedMessages: ChatMessage[] = []
+  // Indexes are stable: the history policy selection maps messages one to one.
+  const expandedIndexes = new Set<number>()
+  const verifiedManifestImages = new Set<ChatAttachment>()
   const messagesSelectedForExpansion = selectMessagesForImageHistoryPolicy(
     messages,
     imageHistoryPolicy
   )
-  for (const message of messagesSelectedForExpansion) {
-    const canExpandReportBundle = message.role === 'user'
-    expandedMessages.push({
-      ...message,
-      attachments: canExpandReportBundle
-        ? await expandReportBundleAttachments(message.attachments)
-        : message.attachments
-    })
+  const latestUserIndex = messagesSelectedForExpansion.findLastIndex(
+    (message) => message.role === 'user'
+  )
+  for (const [index, message] of messagesSelectedForExpansion.entries()) {
+    throwIfAborted(signal)
+    // Expand before the probe only what the count checks need: every user message
+    // when the route has a provider limit, otherwise the latest user message (its
+    // explicit lower bound). Older all-history bundles on routes without a limit are
+    // expanded by prepareMessagesForRequest, after the probe, unless the request image
+    // byte budget must count their images (the same bundles, only read earlier).
+    const canExpandReportBundle =
+      message.role === 'user' &&
+      (maxImages !== undefined ||
+        index === latestUserIndex ||
+        (options.expandHistoryBundles === true && imageHistoryPolicy === 'all'))
+    if (canExpandReportBundle) expandedIndexes.add(index)
+    const attachments = canExpandReportBundle
+      ? await expandReportBundleAttachmentsForRequest(message.attachments, signal)
+      : message.attachments
+    if (attachments !== message.attachments && attachments?.length) {
+      // Only verified primaries reach the expansion (projectVerifiedPrimaryReports), and it
+      // only appends: every attachment that is not one of the message's own came from
+      // MAIN's verified manifest.
+      const own = new Set(message.attachments ?? [])
+      for (const attachment of attachments) {
+        if (attachment.type === 'image' && !own.has(attachment))
+          verifiedManifestImages.add(attachment)
+      }
+    }
+    expandedMessages.push({ ...message, attachments })
   }
+  throwIfAborted(signal)
   const selectedMessages = selectMessagesForImageHistoryPolicy(expandedMessages, imageHistoryPolicy)
-  if (maxImages !== Infinity) {
-    const imageCount = countProviderBoundImages(selectedMessages)
+  // This only rejects images already exposed by the legacy best-effort expansion.
+  // Expansion may have failed or deduplicated entries, so success is not evidence
+  // that the true bundle count or its authorization is safe.
+  assertExplicitUserImageCount(
+    selectedMessages.findLast((message) => message.role === 'user')?.attachments
+  )
+  if (maxImages !== undefined && maxImages !== Infinity) {
+    const imageCount = countProviderBoundImages(selectedMessages, imageHistoryPolicy)
     if (imageCount > maxImages) {
       throw new Error(`Too many images; the limit is ${maxImages}.`)
     }
   }
-  return selectedMessages
+  return { messages: selectedMessages, expandedIndexes, verifiedManifestImages }
 }
 
 const prepareMessagesForRequest = async (
@@ -1372,11 +1861,14 @@ const prepareMessagesForRequest = async (
     managedMediaService?: ManagedMediaSvc
     allowManagedRequestDataUrl?: boolean
     allowManagedChunkedBinary?: boolean
+    managedChunkedBinaryMaxBytes?: number
     allowRequestDataUrl?: boolean
     allowAccessibleUrl?: boolean
     preserveRemoteUrl?: boolean
     imageHistoryPolicy?: LLMImageHistoryPolicy
-    reportBundlesExpanded?: boolean
+    /** Messages whose report bundles the preflight already expanded; never read twice. */
+    expandedReportBundleIndexes?: ReadonlySet<number>
+    signal?: AbortSignal
   } = {}
 ): Promise<ChatMessage[]> => {
   const prepared: ChatMessage[] = []
@@ -1384,11 +1876,12 @@ const prepareMessagesForRequest = async (
   const latestUserIndex = messages.findLastIndex((message) => message.role === 'user')
 
   for (const [index, message] of selectedMessages.entries()) {
+    throwIfAborted(options.signal)
     const canExpandReportBundle =
       message.role === 'user' && (options.imageHistoryPolicy === 'all' || index === latestUserIndex)
     const attachments =
-      canExpandReportBundle && !options.reportBundlesExpanded
-        ? await expandReportBundleAttachments(message.attachments)
+      canExpandReportBundle && !options.expandedReportBundleIndexes?.has(index)
+        ? await expandReportBundleAttachmentsForRequest(message.attachments, options.signal)
         : message.attachments
     const normalizedAttachments = await normalizeChatAttachmentsForRequest(attachments, options)
     if (!normalizedAttachments?.length) {
@@ -1408,16 +1901,25 @@ const prepareMessagesForRequest = async (
       continue
     }
 
-    const nextContent = await augmentMessageContentWithFileAttachments(
-      normalizedAttachments,
-      message.content,
-      undefined,
-      {
-        role: message.role,
-        reportInlineCharLimit: options.reportInlineCharLimit,
-        skipAttachment: options.skipInlineAttachmentSummary
-      }
-    )
+    let nextContent: string
+    try {
+      nextContent = await augmentMessageContentWithFileAttachments(
+        normalizedAttachments,
+        message.content,
+        (url) => readAttachmentTextForRequest(url, options.signal),
+        {
+          role: message.role,
+          reportInlineCharLimit: options.reportInlineCharLimit,
+          skipAttachment: options.skipInlineAttachmentSummary,
+          signal: options.signal
+        }
+      )
+    } catch (error) {
+      // Preserve normal request cancellation semantics for string reasons.
+      throwIfAborted(options.signal)
+      throw error
+    }
+    throwIfAborted(options.signal)
     prepared.push({
       ...message,
       attachments: normalizedAttachments,
@@ -1495,8 +1997,10 @@ const normalizeResponse = (response: {
   usage?: Record<string, unknown>
   finishReason?: LLMChatStreamResp['finishReason']
 }): RequestChatCompletionResult => {
+  // A report binding is issued by MAIN to the canvas producer only; one that arrives in a
+  // model, tool or remote reply is never trusted and is not kept.
   const normalizedAttachments = normalizeAttachmentOcrResults(
-    response.attachments,
+    withoutReportBundleBindings(response.attachments),
     response.ocrResult
   )
   const imageAttachments = response.imageUrl?.trim()
@@ -1835,11 +2339,18 @@ const requestLocalChatCompletion = async (
   }
 
   try {
-    const response = await awaitWithAbort(
-      window.api.svcLLMProxy.chat({ ...buildChatRequestPayload(input), cancellationId }),
-      input.signal,
-      handleAbort
-    )
+    const request = { ...buildLocalChatRequestPayload(input), cancellationId }
+    if (input.beforeLocalDispatch)
+      await awaitWithAbort(Promise.resolve().then(input.beforeLocalDispatch), input.signal)
+    throwIfAborted(input.signal)
+    const pending = window.api.svcLLMProxy.chat(request)
+    void pending.catch(() => undefined)
+    try {
+      input.onLocalDispatch?.()
+    } catch {
+      /* observer cannot alter a started request */
+    }
+    const response = await awaitWithAbort(pending, input.signal, handleAbort)
     throwIfAborted(input.signal)
     return normalizeResponse(response)
   } catch (error) {
@@ -1889,6 +2400,7 @@ const requestLocalChatCompletionStream = async (
 
   const [abortSender, abortReceiver] = newAbortHandler()
   let streamActive = true
+  let dispatchStarted = false
   let resolveControl: (() => void) | undefined
   let rejectControl: ((reason: unknown) => void) | undefined
   const control = new Promise<void>((resolve, reject) => {
@@ -1903,7 +2415,7 @@ const requestLocalChatCompletionStream = async (
   const handleAbort = () => {
     const reason = input.signal?.reason
     abortSender.abort()
-    void cancelConversationSilently(input.conversationId, cancellationId)
+    if (dispatchStarted) void cancelConversationSilently(input.conversationId, cancellationId)
     rejectStream(reason instanceof Error ? reason : createAbortError('The request was aborted.'))
   }
   if (input.signal) {
@@ -1944,7 +2456,7 @@ const requestLocalChatCompletionStream = async (
         'Local IPC chat stream timed out after 15 minutes without activity.'
       )
       abortSender.abort()
-      void cancelConversationSilently(input.conversationId, cancellationId)
+      if (dispatchStarted) void cancelConversationSilently(input.conversationId, cancellationId)
       rejectStream(timeoutError)
     }
     checkIdleDeadline()
@@ -1955,9 +2467,13 @@ const requestLocalChatCompletionStream = async (
     const streamInvoker =
       invoke || (window.api.svcLLMProxy.chatStream as unknown as RendererStreamInvoker)
     const streamRequest = {
-      ...((request ?? buildChatRequestPayload(input)) as object),
+      ...((request ?? buildLocalChatRequestPayload(input)) as object),
       cancellationId
     }
+    if (input.beforeLocalDispatch)
+      await Promise.race([Promise.resolve().then(input.beforeLocalDispatch), control])
+    throwIfAborted(input.signal)
+    dispatchStarted = true
     const streamPromise = streamInvoker(streamRequest, {
       abortReceiver,
       onData: (chunk) => {
@@ -1978,9 +2494,10 @@ const requestLocalChatCompletionStream = async (
 
         if (chunk.type === 'attachment' && chunk.attachment) {
           refreshStreamDeadline()
+          // A streamed model or tool attachment never carries a trusted report binding.
           input.onEvent({
             type: 'attachment',
-            attachment: chunk.attachment
+            attachment: withoutReportBundleBinding(chunk.attachment)
           })
         }
 
@@ -2064,20 +2581,22 @@ const requestLocalChatCompletionStream = async (
         }
       }
     })
-
     void streamPromise.catch(() => undefined)
+    try {
+      input.onLocalDispatch?.()
+    } catch {
+      /* observer cannot alter a started request */
+    }
     await Promise.race([streamPromise, control])
 
     if (input.signal?.aborted) {
       throwIfAborted(input.signal)
     }
 
+    // Preserve an explicit provider error even if the transport closed before done.
+    if (observedError) throw observedError
     if (!receivedTerminalDone) {
       throw createIncompleteStreamError(partialContent, partialFinishReason, partialMetadata)
-    }
-
-    if (observedError) {
-      throw observedError
     }
 
     return streamedResponse
@@ -2179,7 +2698,7 @@ const dispatchChatCompletionStreamRequest = async (
     throwIfAborted(input.signal)
     input.onEvent({
       type: 'attachment',
-      attachment
+      attachment: withoutReportBundleBinding(attachment)
     })
     throwIfAborted(input.signal)
   }
@@ -2222,6 +2741,8 @@ const ensureReportInlineCapability = async (
     const probeResult = await dispatchChatCompletionRequest({
       ...input,
       messages: [{ role: 'user', content: REPORT_INLINE_CAPABILITY_PROBE }],
+      threadImageHistory: undefined,
+      threadImageReview: undefined,
       systemPrompt: undefined,
       sessionUrl: undefined,
       // Keep capability discovery independent from the user turn while still
@@ -2358,6 +2879,9 @@ const resolveManagedMediaRequestOptions = (input: RequestChatCompletionInput) =>
   return {
     managedMediaService: (api() as unknown as { svcManagedMedia?: ManagedMediaSvc })
       .svcManagedMedia,
+    ...(!input.config.use_remote_llm && input.externalAgentSkill?.type !== 'agent'
+      ? { managedChunkedBinaryMaxBytes: MAX_LLM_CHUNKED_BINARY_BYTES }
+      : {}),
     ...resolveAttachmentRequestCapabilities(
       input.config,
       input.profileId,
@@ -2389,45 +2913,66 @@ const resolveRemoteResponsesImagePolicy = (
   return undefined
 }
 
-const countProviderBoundImages = (messages: readonly ChatMessage[]): number => {
-  const expandedReportBundleIds = new Set(
-    messages.flatMap((message) =>
-      (message.attachments || [])
-        .filter(
-          (attachment) =>
-            attachment.type === 'image' &&
-            attachment.reportBundleRole === 'report-image' &&
-            Boolean(attachment.reportBundleId)
-        )
-        .map((attachment) => attachment.reportBundleId as string)
-    )
-  )
-
-  return messages.reduce(
-    (total, message) =>
-      total +
-      (message.role === 'system'
-        ? 0
-        : (message.attachments || []).reduce((count, attachment) => {
-            if (attachment.type === 'image') return count + 1
-            if (
-              expandedReportBundleIds.has(attachment.reportBundleId || '') ||
-              typeof attachment.reportBundleImageCount !== 'number' ||
-              !Number.isSafeInteger(attachment.reportBundleImageCount) ||
-              attachment.reportBundleImageCount < 0
-            ) {
-              return count
-            }
-            return count + attachment.reportBundleImageCount
-          }, 0)),
-    0
-  )
+/**
+ * Images the request sends, from `messages` as selectMessagesForImageHistoryPolicy left them
+ * for `imageHistoryPolicy`. A primary report's image-count hint counts only for a message whose
+ * images the policy sends (the latest user message, every user message under 'all', assistant
+ * messages only under 'all'): an older bundle whose images were left out sends none.
+ */
+const countProviderBoundImages = (
+  messages: readonly ChatMessage[],
+  imageHistoryPolicy: LLMImageHistoryPolicy = DEFAULT_LLM_IMAGE_HISTORY_POLICY
+): number => {
+  let total = 0
+  const latestUserIndex = messages.findLastIndex((message) => message.role === 'user')
+  for (const [index, message] of messages.entries()) {
+    if (message.role === 'system') continue
+    const sendsBundleImages =
+      (message.role === 'user' && (imageHistoryPolicy === 'all' || index === latestUserIndex)) ||
+      (message.role === 'assistant' && imageHistoryPolicy === 'all')
+    const groups = new Map<string, { images: number; hint: number; primaries: number }>()
+    for (const attachment of message.attachments || []) {
+      const id = attachment.reportBundleId
+      if (
+        id &&
+        ((attachment.reportBundleRole === 'report-image' && attachment.type === 'image') ||
+          (attachment.reportBundleRole === 'primary-report' && attachment.type !== 'image'))
+      ) {
+        const group = groups.get(id) ?? { images: 0, hint: 0, primaries: 0 }
+        if (attachment.type === 'image') group.images++
+        else {
+          group.primaries++
+          const hint = attachment.reportBundleImageCount
+          if (
+            sendsBundleImages &&
+            typeof hint === 'number' &&
+            Number.isSafeInteger(hint) &&
+            hint >= 0
+          )
+            group.hint = Math.max(group.hint, hint)
+        }
+        groups.set(id, group)
+      } else if (attachment.type === 'image') total++
+      else if (sendsBundleImages) {
+        const hint = attachment.reportBundleImageCount
+        if (typeof hint === 'number' && Number.isSafeInteger(hint) && hint >= 0) total += hint
+      }
+    }
+    for (const group of groups.values()) {
+      // Weak IDs cannot prove multiple primary manifests describe the same images.
+      if (group.primaries > 1) return Infinity
+      total += Math.max(group.images, group.hint)
+    }
+  }
+  return total
 }
 
 const preflightRequestImageCount = (
   input: RequestChatCompletionInput,
   profile: RemoteRequestProfile | undefined
 ): number | undefined => {
+  const latestUser = input.messages.findLast((message) => message.role === 'user')
+  assertExplicitUserImageCount(latestUser?.attachments)
   if (input.externalAgentSkill?.type === 'agent') return undefined
   const selectedMessages = selectMessagesForImageHistoryPolicy(
     input.messages,
@@ -2444,7 +2989,7 @@ const preflightRequestImageCount = (
       message.role !== 'system' &&
       message.attachments?.some((attachment) => attachment.type === 'image')
   )
-  const knownImageCount = countProviderBoundImages(selectedMessages)
+  const knownImageCount = countProviderBoundImages(selectedMessages, input.imageHistoryPolicy)
   const hasSelectedReportBundle = selectedUserMessages.some((message) =>
     message.attachments?.some((attachment) => attachment.reportBundleRole === 'primary-report')
   )
@@ -2480,6 +3025,262 @@ const preflightRequestImageCount = (
   return maxImages
 }
 
+type RequestImageByteBudgetInput = Pick<
+  RequestChatCompletionInput,
+  | 'config'
+  | 'messages'
+  | 'profileId'
+  | 'remoteProfile'
+  | 'externalAgentSkill'
+  | 'imageHistoryPolicy'
+  | 'apiMode'
+  | 'imageGenerationOptions'
+  | 'imageRequest'
+  | 'skillRuntime'
+  | 'goalProgressToken'
+  | 'sessionUrl'
+>
+
+/** How the request image byte budget applies to one request; see resolveRequestImageByteBudget. */
+type RequestImageByteBudget = {
+  route: ChatRequestImageByteBudgetRoute
+  /** Count only the latest user message (a continuation, or the composer preflight). */
+  latestUserOnly: boolean
+  /** Managed media travels as chunked binary, outside the forwarded JSON. */
+  skipManagedMedia: boolean
+  imageHistoryPolicy: LLMImageHistoryPolicy | undefined
+}
+
+// The attachment exactly as normalizeChatAttachmentsForRequest will hand it to the content
+// augmentation, or undefined when that depends on bytes not yet read.
+const projectRequestImageForAugmentation = (
+  attachment: ChatAttachment
+): ChatAttachment | undefined => {
+  if (attachment.type !== 'image') return undefined
+  const media = normalizeMediaReference(attachment.media)
+  if (media?.kind === 'managed') {
+    const projected: ChatAttachment = {
+      ...attachment,
+      mimeType: media.mimeType,
+      sizeBytes: media.sizeBytes
+    }
+    delete projected.media
+    return projected
+  }
+  return !media && attachment.url && isRequestDataImageUrl(attachment.url) ? attachment : undefined
+}
+
+// MAIN's OpenAI client switches to hosted image generation (which skips the image
+// preparation and its limits) when the final text of the latest user message asks for an
+// image. Recompute that text from descriptors; when it cannot be known (a report or text
+// file whose content is inlined, an image of unknown shape), assume it may.
+const mayUseAutomaticImageGeneration = (
+  input: RequestImageByteBudgetInput,
+  modelUse: ReturnType<typeof resolveProfileModelUse>,
+  imageGenerationOptions: OpenAIImageGenerationOptions | undefined,
+  // Images still to be attached, already in the form the augmentation sees (composer only).
+  projectedIncomingImages: readonly ChatAttachment[] = []
+): boolean => {
+  const latestUser = input.messages.findLast((message) => message.role === 'user')
+  if (!latestUser) return false
+  let content = latestUser.content
+  if (latestUser.attachments?.length || projectedIncomingImages.length) {
+    const projected: ChatAttachment[] = []
+    for (const attachment of latestUser.attachments || []) {
+      const requestAttachment = projectRequestImageForAugmentation(attachment)
+      if (!requestAttachment) return true
+      projected.push(requestAttachment)
+    }
+    projected.push(...projectedIncomingImages)
+    const preview = previewAugmentedMessageContentWithoutReads(projected, content, { role: 'user' })
+    if (preview === undefined) return true
+    content = preview
+  }
+  return shouldUseOpenAIImageGeneration({
+    messages: [
+      { ...latestUser, content: mergeHiddenContextIntoMessageContent(latestUser, content) }
+    ],
+    modelUse,
+    imageGenerationOptions
+  })
+}
+
+// The route on which MAIN certainly applies a size limit to this request's images, or
+// undefined when no limit applies with certainty. Image-generation requests, external
+// agents, goal progress, skill runtimes (tool commands and special routes) and every
+// route not listed here keep today's behaviour.
+const resolveRequestImageByteBudgetRoute = (
+  input: RequestImageByteBudgetInput,
+  profile: RemoteRequestProfile | undefined,
+  dispatch: 'stream' | 'unary' | 'preflight',
+  projectedIncomingImages: readonly ChatAttachment[] = []
+): ChatRequestImageByteBudgetRoute | undefined => {
+  if (
+    input.externalAgentSkill?.type === 'agent' ||
+    input.goalProgressToken !== undefined ||
+    input.skillRuntime ||
+    input.imageRequest ||
+    !profile
+  ) {
+    return undefined
+  }
+  const imageGenerationOptions = input.imageGenerationOptions
+  const modelUse = resolveProfileModelUse(profile)
+  if (
+    modelUse === 'image' ||
+    modelUse === 'video' ||
+    modelUse === 'ocr' ||
+    imageGenerationOptions?.enabled === true ||
+    isGPTImageProfile(profile, input.apiMode) ||
+    shouldUseOpenAIImageGeneration({
+      messages: [],
+      modelUse,
+      imageGenerationOptions,
+      disableAutomaticImageGeneration: true
+    })
+  ) {
+    return undefined
+  }
+  if (input.config.use_remote_llm) {
+    // Only a streamed remote request goes through MAIN; the unary one is fetched here.
+    return dispatch !== 'unary' && supportsStreamingChatCompletion(input)
+      ? 'remote-stream'
+      : undefined
+  }
+  // Without an explicit profile MAIN picks its own default, which may differ from ours.
+  if (!getBaseProfileId(input.profileId)) return undefined
+  const baseUrl = profile.base_url || ''
+  if (isOpencodeZenUrl(baseUrl) || (profile.model_name || '').toLowerCase().includes('glm-ocr')) {
+    return undefined
+  }
+  const provider = resolveProfileProvider(profile)
+  if (provider === 'gemini' || provider === 'claude') return 'provider-json'
+  if (provider === 'openai' && usesOpenAIResponsesImagePolicy(profile, input.apiMode)) {
+    return mayUseAutomaticImageGeneration(
+      input,
+      modelUse,
+      imageGenerationOptions,
+      projectedIncomingImages
+    )
+      ? undefined
+      : 'prepared-source'
+  }
+  return undefined
+}
+
+/**
+ * Whether and how MAIN certainly limits the size of this request's images (see
+ * chatRequestImageBudget.ts), decided from descriptors before anything is read. The route
+ * depends only on the request's own descriptors, so the same decision holds for the
+ * messages after MAIN's report verification and the manifest expansion.
+ */
+const resolveRequestImageByteBudget = (
+  input: RequestImageByteBudgetInput,
+  profile: RemoteRequestProfile | undefined,
+  dispatch: 'stream' | 'unary' | 'preflight'
+): RequestImageByteBudget | undefined => {
+  const route = resolveRequestImageByteBudgetRoute(input, profile, dispatch)
+  // The composer preflight runs before the message's final text is known, and the
+  // Responses preparation limit depends on it: that one is left to the request entry.
+  if (!route || (dispatch === 'preflight' && route === 'prepared-source')) return undefined
+  return {
+    route,
+    // With a continuation MAIN may send only the newest turn; the composer preflight runs
+    // before context compression may replace older turns.
+    latestUserOnly: dispatch === 'preflight' || Boolean(input.sessionUrl?.trim()),
+    skipManagedMedia:
+      route === 'remote-stream' &&
+      resolveAttachmentRequestCapabilities(
+        input.config,
+        input.profileId,
+        input.apiMode,
+        input.remoteProfile
+      ).allowManagedChunkedBinary === true,
+    imageHistoryPolicy: input.imageHistoryPolicy
+  }
+}
+
+/**
+ * The route on which MAIN would certainly limit the size of the images of the message the
+ * composer holds now, decided from the composer's route and its draft so far, or undefined
+ * when no limit applies with certainty (external agents, skills, image generation, a
+ * profile that cannot be resolved, ...). For the composer's attach-time image budget only:
+ * the final text may still change the route, and the send path checks the final message.
+ */
+export const resolveComposerImageByteBudgetRoute = (
+  input: Pick<
+    RequestChatCompletionInput,
+    | 'config'
+    | 'profileId'
+    | 'remoteProfile'
+    | 'externalAgentSkill'
+    | 'apiMode'
+    | 'imageGenerationOptions'
+    | 'skillRuntime'
+  > & {
+    /** The composer's draft: its text, hidden context and attachments (incoming ones too). */
+    draft: Pick<ChatMessage, 'content' | 'attachments' | 'hiddenContext'>
+    /** Image files about to be imported, known only from their file descriptors. */
+    incomingImageFiles?: ReadonlyArray<{ fileName: string; mimeType?: string; sizeBytes: number }>
+  }
+): ChatRequestImageByteBudgetRoute | undefined => {
+  if (input.externalAgentSkill || input.skillRuntime) return undefined
+  let profile: RemoteRequestProfile | undefined
+  try {
+    profile = resolveSelectedRequestProfile(input)
+  } catch {
+    return undefined
+  }
+  const { draft, incomingImageFiles, ...route } = input
+  // As projectRequestImageForAugmentation projects the managed reference each file becomes.
+  const projectedIncomingImages = (incomingImageFiles || []).map((file): ChatAttachment => ({
+    type: 'image',
+    url: '',
+    fileName: file.fileName,
+    ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+    sizeBytes: file.sizeBytes
+  }))
+  return resolveRequestImageByteBudgetRoute(
+    { ...route, messages: [{ role: 'user', ...draft }] },
+    profile,
+    'stream',
+    projectedIncomingImages
+  )
+}
+
+/**
+ * Refuses, before any image is fetched, materialized or base64-encoded and before the chat
+ * IPC, a request whose images MAIN would certainly refuse for their size. Counts every
+ * occurrence of an image that will certainly be sent: user messages the history policy
+ * keeps (only the latest one when later steps may still drop history). Run once on the
+ * descriptors, and again on the expanded messages, where the images from MAIN's verified
+ * report manifests (`verifiedManifestImages`) count with the sizes MAIN recorded.
+ */
+const assertRequestImageBytes = (
+  messages: ChatMessage[],
+  budget: RequestImageByteBudget | undefined,
+  verifiedManifestImages?: ReadonlySet<ChatAttachment>
+): void => {
+  if (!budget) return
+  const selectedMessages = selectMessagesForImageHistoryPolicy(messages, budget.imageHistoryPolicy)
+  const latestUserIndex = selectedMessages.findLastIndex((message) => message.role === 'user')
+  const images: ChatAttachment[] = []
+  for (const [index, message] of selectedMessages.entries()) {
+    if (message.role !== 'user' || (budget.latestUserOnly && index !== latestUserIndex)) continue
+    for (const attachment of message.attachments || []) {
+      if (attachment.type !== 'image') continue
+      if (
+        budget.skipManagedMedia &&
+        normalizeMediaReference(attachment.media)?.kind === 'managed'
+      ) {
+        continue
+      }
+      images.push(attachment)
+    }
+  }
+  assertRequestImageBytesWithinBudget(images, budget.route, { verifiedManifestImages })
+}
+
 // Pure descriptor-only guard for UI planning before blob persistence or resource reads.
 // Request entrypoints still recheck their final selected/expanded attachments.
 export const preflightChatRequestImages = (
@@ -2492,86 +3293,413 @@ export const preflightChatRequestImages = (
     | 'externalAgentSkill'
     | 'imageHistoryPolicy'
     | 'apiMode'
-  >
+  > & {
+    /**
+     * Also refuse, from descriptors, images of the new message that MAIN would certainly
+     * refuse for their size. Only for a caller that sends this message's images in one
+     * model request (no attachment batching, no tool command, no image generation, no
+     * skill runtime); history images are left to the request entry, which sees the
+     * messages after context compression.
+     */
+    checkNewMessageImageBytes?: boolean
+  }
 ): number | undefined => {
+  // An already known oversized explicit selection is rejected independently of
+  // report availability, without reading either images or the manifest.
+  assertExplicitUserImageCount(
+    input.messages.findLast((message) => message.role === 'user')?.attachments
+  )
+  // Non-image report files remain in history when image history is narrowed. Shape only:
+  // the request path still has MAIN verify every bound primary before reading it.
+  assertNoUnverifiedPrimaryReports(input.messages)
   validateCustomSkillForSend(input.externalAgentSkill)
-  return preflightRequestImageCount(input, resolveSelectedRequestProfile(input))
+  const profile = resolveSelectedRequestProfile(input)
+  const maxImages = preflightRequestImageCount(input, profile)
+  if (input.checkNewMessageImageBytes) {
+    assertRequestImageBytes(
+      input.messages,
+      resolveRequestImageByteBudget(input, profile, 'preflight')
+    )
+  }
+  return maxImages
 }
 
-export const requestChatCompletion = async (
+type ChatRequestReportRoute = Pick<
+  RequestChatCompletionInput,
+  'config' | 'profileId' | 'remoteProfile' | 'externalAgentSkill' | 'imageHistoryPolicy' | 'apiMode'
+>
+
+export type PreflightChatRequestReportsInput = Pick<
+  RequestChatCompletionInput,
+  'messages' | 'conversationId' | 'storageScope' | 'signal'
+> &
+  Partial<ChatRequestReportRoute> & {
+    /** Bound on MAIN's verify and the manifest reads; the default is REPORT_PREFLIGHT_TIMEOUT_MS. */
+    timeoutMs?: number
+  }
+
+/**
+ * The page holds the conversation's send lock (or the edit form its Save) while MAIN verifies,
+ * and MAIN may be rehashing files on a slow or disconnected network share. Past this bound the
+ * send is refused and the draft is kept.
+ */
+export const REPORT_PREFLIGHT_TIMEOUT_MS = 30_000
+
+const REPORT_PREFLIGHT_TIMED_OUT_FALLBACK =
+  'Checking the report took too long. Your message was kept; try again.'
+// i18next returns nothing, not the default value, before it is initialised.
+const reportPreflightTimedOutMessage = (): string =>
+  i18next.t('chat.report_check_timed_out', { defaultValue: REPORT_PREFLIGHT_TIMED_OUT_FALLBACK }) ||
+  REPORT_PREFLIGHT_TIMED_OUT_FALLBACK
+
+/** `signal` aborted by the caller's signal or after `timeoutMs`; `expired` tells which. */
+const createPreflightDeadline = (outer: AbortSignal | undefined, timeoutMs: number) => {
+  const controller = new AbortController()
+  let expired = false
+  const onOuterAbort = () => controller.abort(outer?.reason)
+  if (outer?.aborted) onOuterAbort()
+  else outer?.addEventListener('abort', onOuterAbort, { once: true })
+  const timer = setTimeout(() => {
+    expired = true
+    controller.abort(createAbortError(reportPreflightTimedOutMessage()))
+  }, timeoutMs)
+  return {
+    signal: controller.signal,
+    expired: () => expired,
+    dispose: () => {
+      clearTimeout(timer)
+      outer?.removeEventListener('abort', onOuterAbort)
+    }
+  }
+}
+
+/**
+ * The first stage of the request path for primary reports, run by the page before it gives up
+ * the draft (video frames, blob persistence, the placeholder message): the synchronous shape
+ * guards, MAIN's verify of every bound primary for this conversation, the projection onto what
+ * MAIN vouched for and, when the route is given (`config`), the expansion the image history
+ * policy selects with the image count re-check. The request path repeats all of it, so a
+ * successful send reads each verified manifest twice (once here, once in the request);
+ * nothing read here is passed on.
+ *
+ * Returns null, synchronously, when the messages hold no primary report: no bridge call, no
+ * read, no extra await for ordinary sends. Synchronous guard failures throw synchronously;
+ * every later failure rejects with the same messages as the request path.
+ */
+export const preflightChatRequestReports = (
+  input: PreflightChatRequestReportsInput
+): Promise<void> | null => {
+  const routeInput = input.config
+    ? projectRequestInputForTransport(input as RequestChatCompletionInput)
+    : undefined
+  const messages = routeInput?.messages ?? input.messages
+  assertExplicitUserImageCount(messages.findLast((message) => message.role === 'user')?.attachments)
+  assertNoUnverifiedPrimaryReports(messages)
+  if (!messages.some((message) => message.attachments?.some(isPrimaryReportFileDescriptor))) {
+    return null
+  }
+  let maxImages: number | undefined
+  let imageByteBudget: RequestImageByteBudget | undefined
+  if (routeInput) {
+    validateCustomSkillForSend(routeInput.externalAgentSkill)
+    const profile = resolveSelectedRequestProfile(routeInput)
+    maxImages = preflightRequestImageCount(routeInput, profile)
+    // The composer's byte check, now with the images of MAIN's verified manifests: a refusal
+    // for their size comes here, before the draft is given up, not at the request entry.
+    imageByteBudget = resolveRequestImageByteBudget(routeInput, profile, 'preflight')
+  }
+  const deadline = createPreflightDeadline(
+    input.signal,
+    Math.max(1, input.timeoutMs ?? REPORT_PREFLIGHT_TIMEOUT_MS)
+  )
+  return (async () => {
+    try {
+      const verifiedMessages = await verifyPrimaryReportBundles(messages, input, deadline.signal)
+      if (!routeInput) return
+      const { messages: preflightMessages, verifiedManifestImages } =
+        await expandMessagesForImagePreflight(
+          verifiedMessages,
+          routeInput.imageHistoryPolicy,
+          maxImages,
+          deadline.signal
+        )
+      throwIfAborted(deadline.signal)
+      assertRequestImageBytes(preflightMessages, imageByteBudget, verifiedManifestImages)
+    } catch (error) {
+      if (deadline.expired() && !input.signal?.aborted)
+        throw new Error(reportPreflightTimedOutMessage())
+      throw error
+    } finally {
+      deadline.dispose()
+    }
+  })()
+}
+
+const assertLocalProfileRevisionInput = (input: RequestChatCompletionInput): void => {
+  if (input.expectedProfileRevision === undefined) return
+  if (
+    input.config.use_remote_llm ||
+    input.externalAgentSkill?.type === 'agent' ||
+    typeof input.profileId !== 'string' ||
+    !input.profileId.trim() ||
+    typeof input.expectedProfileRevision !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(input.expectedProfileRevision)
+  ) {
+    throw new Error('Invalid local profile revision request.')
+  }
+}
+
+const assertGoalProgressInput = (input: RequestChatCompletionInput): void => {
+  if (input.goalProgressToken === undefined) return
+  if (
+    typeof input.goalProgressToken !== 'string' ||
+    !input.goalProgressToken ||
+    input.config.use_remote_llm ||
+    input.externalAgentSkill ||
+    input.skillRuntime ||
+    input.sessionUrl ||
+    input.isEdit ||
+    input.imageRequest ||
+    (input.imageGenerationOptions && input.imageGenerationOptions.enabled !== false) ||
+    input.messages.some((message) => message.attachments?.length || message.hiddenContext)
+  )
+    throw new Error(
+      'Goal progress sharing supports only the explicit plain local text request; no remote/skill/media/continuation fallback.'
+    )
+}
+/**
+ * Local diagnostics: tells the main process which send stage this renderer reached, so that a
+ * renderer death can be placed in the send. Counts, sizes and enumerated names only (never text,
+ * error messages, names or paths); it never changes the request or the visible status, and a
+ * missing bridge is a no-op.
+ */
+const sendChatSendStage = (breadcrumb: ChatSendStageBreadcrumb): void => {
+  try {
+    const report =
+      typeof window === 'undefined' ? undefined : window.appDiagnostics?.reportChatSendStage
+    if (report) report(breadcrumb)
+  } catch {
+    // Diagnostics must never affect a send.
+  }
+}
+type ChatSendStageMessages = Parameters<typeof summarizeChatSendStage>[1]
+type ReportChatSendStage = (stage: ChatSendStage, messages: ChatSendStageMessages) => void
+// Numbers the requests of this page, so that main can tell overlapping sends apart (a background
+// request that ends must not hide an image send that is still running). Restarts with the page.
+let chatSendSeq = 0
+/**
+ * One request's reporter. Every stage of the request carries the same number. A request that ends
+ * with an error or an abort reports 'reply-failed' with the stage it had reached, the counts of
+ * that stage and the error's enumerated name, so that main closes exactly this send; one that
+ * failed before it reported anything reports nothing. The error itself is passed on untouched.
+ */
+const createChatSendStageReporter = () => {
+  const sendSeq = ++chatSendSeq
+  let last: ChatSendStageBreadcrumb | null = null
+  const report: ReportChatSendStage = (stage, messages) => {
+    try {
+      last = summarizeChatSendStage(stage, messages, sendSeq)
+    } catch {
+      return
+    }
+    sendChatSendStage(last)
+  }
+  const fail = (error: unknown): never => {
+    const failed = last ? failedChatSendStage(last, error) : null
+    if (failed) sendChatSendStage(failed)
+    throw error
+  }
+  return { report, fail }
+}
+export const requestChatCompletion = (
   input: RequestChatCompletionInput
 ): Promise<RequestChatCompletionResult> => {
+  const stages = createChatSendStageReporter()
+  return requestChatCompletionInStages(input, stages.report).catch(stages.fail)
+}
+const requestChatCompletionInStages = async (
+  input: RequestChatCompletionInput,
+  reportChatSendStage: ReportChatSendStage
+): Promise<RequestChatCompletionResult> => {
+  if (
+    input.teamMessageHop &&
+    (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')
+  )
+    throw new Error('Team messages require local transport.')
+  assertLocalProfileRevisionInput(input)
+  assertGoalProgressInput(input)
   validateCustomSkillForSend(input.externalAgentSkill)
+  throwIfAborted(input.signal)
   const requestInput = projectRequestInputForTransport(input)
+  reportChatSendStage('request-start', requestInput.messages)
+  assertExplicitUserImageCount(
+    requestInput.messages.findLast((message) => message.role === 'user')?.attachments
+  )
+  // Shape only: refuse primary reports without a binding before any IPC, I/O or probe.
+  assertNoUnverifiedPrimaryReports(requestInput.messages)
   const profile = resolveSelectedRequestProfile(requestInput)
   const maxImages = preflightRequestImageCount(requestInput, profile)
-  const preflightMessages = await expandMessagesForImagePreflight(
-    requestInput.messages,
-    requestInput.imageHistoryPolicy,
-    maxImages
+  // Nothing is verified, read or sent for a request MAIN would refuse for the size of its
+  // images: first from the descriptors, before MAIN's report verification.
+  const imageByteBudget = resolveRequestImageByteBudget(requestInput, profile, 'unary')
+  assertRequestImageBytes(requestInput.messages, imageByteBudget)
+  // MAIN verifies every bound primary report before any manifest is read. Every later stage
+  // (preflight expansion, probe, preparation and dispatch) sees only its projection.
+  const verifiedInput = {
+    ...requestInput,
+    messages: await verifyPrimaryReportBundles(
+      requestInput.messages,
+      requestInput,
+      requestInput.signal
+    )
+  }
+  const {
+    messages: preflightMessages,
+    expandedIndexes,
+    verifiedManifestImages
+  } = await expandMessagesForImagePreflight(
+    verifiedInput.messages,
+    verifiedInput.imageHistoryPolicy,
+    maxImages,
+    verifiedInput.signal,
+    { expandHistoryBundles: imageByteBudget !== undefined && !imageByteBudget.latestUserOnly }
   )
+  throwIfAborted(verifiedInput.signal)
+  // Again with the images of MAIN's verified report manifests, before any image is read.
+  assertRequestImageBytes(preflightMessages, imageByteBudget, verifiedManifestImages)
+  reportChatSendStage('images-checked', preflightMessages)
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
-    !useNativeOpenAIFileSearch && hasPrimaryReportBundleInMessages(requestInput.messages)
-      ? await ensureReportInlineCapability(requestInput)
+    !useNativeOpenAIFileSearch &&
+    !verifiedInput.teamMember &&
+    !verifiedInput.teamMessageHop &&
+    verifiedInput.expectedProfileRevision === undefined &&
+    hasPrimaryReportBundleInMessages(verifiedInput.messages)
+      ? await ensureReportInlineCapability({
+          ...verifiedInput,
+          expectedProfileRevision: undefined,
+          beforeLocalDispatch: undefined,
+          onLocalDispatch: undefined
+        })
       : null
   const skipAttachmentContentAugmentation =
-    getBaseProfileId(requestInput.profileId) === HUNYUAN_3D_PROFILE_ID
+    getBaseProfileId(verifiedInput.profileId) === HUNYUAN_3D_PROFILE_ID
   const requestMessages = await prepareMessagesForRequest(preflightMessages, {
-    reportBundlesExpanded: maxImages !== undefined,
+    expandedReportBundleIndexes: expandedIndexes,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
-    ...resolveManagedMediaRequestOptions(requestInput),
-    imageHistoryPolicy: requestInput.imageHistoryPolicy,
+    ...resolveManagedMediaRequestOptions(verifiedInput),
+    imageHistoryPolicy: verifiedInput.imageHistoryPolicy,
+    signal: verifiedInput.signal,
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
-  return dispatchChatCompletionRequest({
-    ...requestInput,
+  reportChatSendStage('request-built', requestMessages)
+  const result = await dispatchChatCompletionRequest({
+    ...verifiedInput,
     messages: requestMessages
   })
+  reportChatSendStage('reply-finished', requestMessages)
+  return result
 }
 
-export const requestChatCompletionStream = async (
+export const requestChatCompletionStream = (
   input: RequestChatCompletionStreamInput
 ): Promise<RequestChatCompletionStreamResult> => {
+  const stages = createChatSendStageReporter()
+  return requestChatCompletionStreamInStages(input, stages.report).catch(stages.fail)
+}
+const requestChatCompletionStreamInStages = async (
+  input: RequestChatCompletionStreamInput,
+  reportChatSendStage: ReportChatSendStage
+): Promise<RequestChatCompletionStreamResult> => {
+  if (
+    input.teamMessageHop &&
+    (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')
+  )
+    throw new Error('Team messages require local transport.')
+  assertLocalProfileRevisionInput(input)
+  assertGoalProgressInput(input)
   validateCustomSkillForSend(input.externalAgentSkill)
+  throwIfAborted(input.signal)
   const requestInput = projectRequestInputForTransport(input)
+  reportChatSendStage('request-start', requestInput.messages)
+  assertExplicitUserImageCount(
+    requestInput.messages.findLast((message) => message.role === 'user')?.attachments
+  )
+  // Shape only: refuse primary reports without a binding before any IPC, I/O or probe.
+  assertNoUnverifiedPrimaryReports(requestInput.messages)
   const profile = resolveSelectedRequestProfile(requestInput)
   const maxImages = preflightRequestImageCount(requestInput, profile)
-  const preflightMessages = await expandMessagesForImagePreflight(
-    requestInput.messages,
-    requestInput.imageHistoryPolicy,
-    maxImages
+  // Nothing is verified, read or sent for a request MAIN would refuse for the size of its
+  // images: first from the descriptors, before MAIN's report verification.
+  const imageByteBudget = resolveRequestImageByteBudget(requestInput, profile, 'stream')
+  assertRequestImageBytes(requestInput.messages, imageByteBudget)
+  // MAIN verifies every bound primary report before any manifest is read. Every later stage
+  // (preflight expansion, probe, preparation and dispatch) sees only its projection.
+  const verifiedInput = {
+    ...requestInput,
+    messages: await verifyPrimaryReportBundles(
+      requestInput.messages,
+      requestInput,
+      requestInput.signal
+    )
+  }
+  const {
+    messages: preflightMessages,
+    expandedIndexes,
+    verifiedManifestImages
+  } = await expandMessagesForImagePreflight(
+    verifiedInput.messages,
+    verifiedInput.imageHistoryPolicy,
+    maxImages,
+    verifiedInput.signal,
+    { expandHistoryBundles: imageByteBudget !== undefined && !imageByteBudget.latestUserOnly }
   )
+  throwIfAborted(verifiedInput.signal)
+  // Again with the images of MAIN's verified report manifests, before any image is read.
+  assertRequestImageBytes(preflightMessages, imageByteBudget, verifiedManifestImages)
+  reportChatSendStage('images-checked', preflightMessages)
 
   const useNativeOpenAIFileSearch = supportsNativeOpenAIFileSearch(profile)
   const reportInlineCapability =
-    !useNativeOpenAIFileSearch && hasPrimaryReportBundleInMessages(requestInput.messages)
-      ? await ensureReportInlineCapability(requestInput)
+    !useNativeOpenAIFileSearch &&
+    !verifiedInput.teamMember &&
+    !verifiedInput.teamMessageHop &&
+    verifiedInput.expectedProfileRevision === undefined &&
+    hasPrimaryReportBundleInMessages(verifiedInput.messages)
+      ? await ensureReportInlineCapability({
+          ...verifiedInput,
+          expectedProfileRevision: undefined,
+          beforeLocalDispatch: undefined,
+          onLocalDispatch: undefined
+        })
       : null
   const skipAttachmentContentAugmentation =
-    getBaseProfileId(requestInput.profileId) === HUNYUAN_3D_PROFILE_ID
+    getBaseProfileId(verifiedInput.profileId) === HUNYUAN_3D_PROFILE_ID
   const requestMessages = await prepareMessagesForRequest(preflightMessages, {
-    reportBundlesExpanded: maxImages !== undefined,
+    expandedReportBundleIndexes: expandedIndexes,
     reportInlineCharLimit: reportInlineCapability?.maxInlineChars,
     skipAttachmentContentAugmentation,
-    ...resolveManagedMediaRequestOptions(requestInput),
-    imageHistoryPolicy: requestInput.imageHistoryPolicy,
+    ...resolveManagedMediaRequestOptions(verifiedInput),
+    imageHistoryPolicy: verifiedInput.imageHistoryPolicy,
+    signal: verifiedInput.signal,
     skipInlineAttachmentSummary: (attachment) =>
       shouldSkipInlineAttachmentSummary(profile, attachment)
   })
 
+  reportChatSendStage('request-built', requestMessages)
   const result = await dispatchChatCompletionStreamRequest({
-    ...requestInput,
+    ...verifiedInput,
     messages: requestMessages
   })
+  reportChatSendStage('reply-finished', requestMessages)
 
   const normalizedResult = applySkillOutputModeContract(
     result.result,
-    requestInput.skillRuntime?.execution?.outputMode
+    verifiedInput.skillRuntime?.execution?.outputMode
   )
 
   return {

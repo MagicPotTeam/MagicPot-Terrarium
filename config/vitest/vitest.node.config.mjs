@@ -6,12 +6,18 @@ export default defineConfig({
   test: {
     name: 'node',
     environments: 'node',
-    setupFiles: ['packages/app/src/main/tests/setup/memfs.setup.ts'],
+    setupFiles: [
+      'packages/app/src/main/tests/setup/memfs.setup.ts',
+      'packages/app/src/main/tests/setup/installedCatalogStorage.setup.ts'
+    ],
     exclude: [
       'scripts/prepare-embedded-staging.test.js',
       'scripts/verify-packaged-runtime-dependencies.test.js',
       'packages/app/src/main/appUpdate/safeZipExtractor.test.ts',
-      'packages/app/src/main/appUpdate/artifactPreparer.test.ts'
+      'packages/app/src/main/appUpdate/artifactPreparer.test.ts',
+      // This unfinished virtual-startup fixture has not established isolation at
+      // module-import time. Do not load it in the default node suite.
+      'packages/app/src/main/config/userDataDirectory.virtualStartup.test.ts'
     ],
     include: [
       'scripts/check-text-encoding.test.mjs',

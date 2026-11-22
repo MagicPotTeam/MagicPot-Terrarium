@@ -1,7 +1,9 @@
 /* eslint-disable react-refresh/only-export-components */
 // packages/app/src/renderer/src/components/Layout.tsx
 import React, { Suspense, useState, useCallback, useRef, useEffect } from 'react'
+import { flushSync } from 'react-dom'
 import { Box } from '@mui/material'
+import './projectWorkbench.css'
 import TitleBar from './TitleBar'
 import ActivityBar from './ActivityBar'
 import MainArea from './MainArea'
@@ -11,6 +13,7 @@ import { useAppDispatch, useAppSelector } from '../store'
 import {
   toggleRightPanel,
   setLastRoutePath,
+  openTab,
   closeTab,
   closeSidePanel,
   clearProjectEntrySidePanelIntent,
@@ -20,14 +23,29 @@ import {
   type TabItem
 } from '../store/slices/layoutSlice'
 import { useNavigate, useLocation } from 'react-router-dom'
+import { useExistingConversationLayout } from './useExistingConversationLayout'
+import ExistingConversationOpenStatus from './ExistingConversationOpenStatus'
+import {
+  AGENT_MANAGEMENT_ROUTE_PATH,
+  isAgentManagementRoute
+} from '../utils/agentManagementRouting'
 import {
   isProjectCanvasRoutePath,
   normalizeProjectCanvasRoutePath
 } from '../pages/ProjectCanvasPage/projectCanvasRouting'
+import { emitCanvasLayoutResizeInteraction } from '../pages/ProjectCanvasPage/canvasLayoutResizeInteraction'
 
 const SidePanel = lazyWithRetry(() => import('./SidePanel'))
 const BottomPanel = lazyWithRetry(() => import('./BottomPanel'))
 const AgentWorkspace = lazyWithRetry(() => import('./AgentWorkspace'))
+// Layout re-renders when a panel is resized (the Agent column commits its width once at the end of a
+// drag, the side and bottom panels on every frame). None of these children depends on the panel
+// sizes, so memoise them: a drag then re-renders the layout frame only, not the title bar, the
+// activity bar or the Agent column with its conversations.
+const MemoizedTitleBar = React.memo(TitleBar)
+const MemoizedActivityBar = React.memo(ActivityBar)
+const MemoizedExistingConversationOpenStatus = React.memo(ExistingConversationOpenStatus)
+const MemoizedAgentWorkspace = React.memo(AgentWorkspace)
 const prefetchPrimaryWorkspaceModules = () => Promise.allSettled([import('./SidePanel')])
 
 const RIGHT_PANEL_DEFAULT_WIDTH = 420
@@ -62,6 +80,7 @@ export function dispatchMaxSizeLayoutRemeasure() {
 const SYSTEM_ROUTE_TAB_IDS: Record<string, string> = {
   '/': 'tab-home',
   '/settings': 'tab-settings',
+  '/agent-management': 'tab-agent-management',
   '/qappdesign': 'tab-design',
   '/target-manager': 'tab-design',
   '/custom-skill-manager': 'tab-design',
@@ -74,6 +93,7 @@ export const resolveTabIdForCurrentRoute = (
   search: string,
   openTabs: TabItem[]
 ): string | null => {
+  if (isAgentManagementRoute(pathname)) return 'tab-agent-management'
   const canonicalRoute = normalizeProjectCanvasRoutePath(currentRoute)
   const matchedTab = openTabs.find((tab) => resolveTabRoutePath(tab) === canonicalRoute)
   if (matchedTab) {
@@ -103,6 +123,7 @@ export const resolveStartupRouteTarget = (
   currentRoute: string,
   fallbackRoutePath = ''
 ): string | null => {
+  if (isAgentManagementRoute(currentRoute)) return null
   const normalizedSavedRoute = normalizeProjectCanvasRoutePath(lastRoutePath)
   const normalizedCurrentRoute = normalizeProjectCanvasRoutePath(currentRoute)
   const normalizedFallbackRoute = normalizeProjectCanvasRoutePath(fallbackRoutePath)
@@ -235,6 +256,7 @@ const ResizeHandle: React.FC<ResizeHandleProps> = ({ direction, onMouseDown }) =
   const isH = direction === 'horizontal'
   return (
     <Box
+      data-workbench-sash={direction}
       onMouseDown={onMouseDown}
       sx={(theme) => ({
         [isH ? 'width' : 'height']: LAYOUT_RESIZE_HANDLE_SIZE,
@@ -277,8 +299,8 @@ const Layout: React.FC = () => {
   const dispatch = useAppDispatch()
   const activeSidePanel = useAppSelector((s) => s.layout.activeSidePanel)
   const projectEntrySidePanelIntent = useAppSelector((s) => s.layout.projectEntrySidePanelIntent)
-  const bottomPanelVisible = useAppSelector((s) => s.layout.bottomPanelVisible)
-  const bottomPanelMaximized = useAppSelector((s) => s.layout.bottomPanelMaximized)
+  const bottomPanelRequested = useAppSelector((s) => s.layout.bottomPanelVisible)
+  const bottomPanelMaximizedRequested = useAppSelector((s) => s.layout.bottomPanelMaximized)
   const rightPanelVisible = useAppSelector((s) => s.layout.rightPanelVisible)
   const lastRoutePath = useAppSelector((s) => s.layout.lastRoutePath)
   const activeTabId = useAppSelector((s) => s.layout.activeTabId)
@@ -288,7 +310,24 @@ const Layout: React.FC = () => {
 
   const navigate = useNavigate()
   const location = useLocation()
+  // A saved terminal/log panel must not mount or hide this local-config overview.
+  // Keep preferences intact for the project when the user returns.
+  const managementRoute = isAgentManagementRoute(location.pathname)
+  const bottomPanelVisible = !managementRoute && bottomPanelRequested
+  const bottomPanelMaximized = !managementRoute && bottomPanelMaximizedRequested
   const currentRoute = `${location.pathname}${location.search}${location.hash}`
+  const conversationOpenLayout = useExistingConversationLayout({
+    activeTabId,
+    openTabs,
+    rightPanelVisible,
+    bottomPanelVisible: bottomPanelRequested,
+    bottomPanelMaximized: bottomPanelMaximizedRequested,
+    startupRestorePending,
+    route: currentRoute,
+    dispatch,
+    navigate
+  })
+  const { reconcileRouteTab } = conversationOpenLayout
 
   const hasRestoredRoute = useRef(false)
   const pendingStartupRoutePathRef = useRef(
@@ -302,6 +341,16 @@ const Layout: React.FC = () => {
   )
   useEffect(() => {
     if (hasRestoredRoute.current) {
+      return undefined
+    }
+
+    // Explicit management deep links must not navigate through the saved project.
+    // Restore its tab list first; the route-sync effect below materializes/activates
+    // the management tab after the snapshot is applied, so it cannot be overwritten.
+    if (managementRoute) {
+      hasRestoredRoute.current = true
+      pendingStartupRoutePathRef.current = null
+      if (startupRestorePending) dispatch(completeStartupRestore())
       return undefined
     }
 
@@ -371,6 +420,26 @@ const Layout: React.FC = () => {
         return
       }
 
+      if (isAgentManagementRoute(location.pathname)) {
+        if (!openTabs.some((tab) => tab.id === 'tab-agent-management')) {
+          reconcileRouteTab(currentRoute, 'tab-agent-management', () =>
+            dispatch(
+              openTab({
+                id: 'tab-agent-management',
+                label: 'Agent management',
+                routePath: AGENT_MANAGEMENT_ROUTE_PATH,
+                closable: true
+              })
+            )
+          )
+        } else if (activeTabId !== 'tab-agent-management') {
+          reconcileRouteTab(currentRoute, 'tab-agent-management', () =>
+            dispatch(setActiveTab('tab-agent-management'))
+          )
+        }
+        return
+      }
+
       const routeTabId = resolveTabIdForCurrentRoute(
         currentRoute,
         location.pathname,
@@ -378,7 +447,7 @@ const Layout: React.FC = () => {
         openTabs
       )
       if (routeTabId && routeTabId !== activeTabId) {
-        dispatch(setActiveTab(routeTabId))
+        reconcileRouteTab(currentRoute, routeTabId, () => dispatch(setActiveTab(routeTabId)))
       }
     }, ROUTE_TAB_SYNC_DELAY_MS)
 
@@ -393,6 +462,7 @@ const Layout: React.FC = () => {
     location.search,
     navigate,
     openTabs,
+    reconcileRouteTab,
     startupRestorePending
   ])
 
@@ -457,6 +527,37 @@ const Layout: React.FC = () => {
   const startSizeRef = useRef(0)
   const pendingResizeSizeRef = useRef<number | null>(null)
   const resizeFrameRef = useRef<number | null>(null)
+  // While the Agent column is dragged its width is written straight to the three elements that
+  // depend on it, and committed to state once at the end: no React render per mouse move.
+  const mainAreaElementRef = useRef<HTMLDivElement | null>(null)
+  const rightPanelElementRef = useRef<HTMLDivElement | null>(null)
+  const bottomPanelElementRef = useRef<HTMLDivElement | null>(null)
+  const liveRightPanelWidthRef = useRef<number | null>(null)
+
+  const writeLiveRightPanelWidth = useCallback((width: number | null) => {
+    const rightPanel = rightPanelElementRef.current
+    const mainArea = mainAreaElementRef.current
+    const bottomPanel = bottomPanelElementRef.current
+    if (width === null) {
+      rightPanel?.style.removeProperty('width')
+      rightPanel?.style.removeProperty('min-width')
+      mainArea?.style.removeProperty('right')
+      bottomPanel?.style.removeProperty('right')
+      return
+    }
+
+    const px = `${width}px`
+    if (rightPanel) {
+      rightPanel.style.width = px
+      rightPanel.style.minWidth = px
+    }
+    if (mainArea) {
+      mainArea.style.right = px
+    }
+    if (bottomPanel) {
+      bottomPanel.style.right = px
+    }
+  }, [])
 
   const applyPendingResizeSize = useCallback(() => {
     resizeFrameRef.current = null
@@ -470,13 +571,14 @@ const Layout: React.FC = () => {
     if (dir === 'side') {
       setSidePanelWidth((previousWidth) => (previousWidth === nextSize ? previousWidth : nextSize))
     } else if (dir === 'right') {
-      setRightPanelWidth((previousWidth) => (previousWidth === nextSize ? previousWidth : nextSize))
+      liveRightPanelWidthRef.current = nextSize
+      writeLiveRightPanelWidth(nextSize)
     } else if (dir === 'bottom') {
       setBottomPanelHeight((previousHeight) =>
         previousHeight === nextSize ? previousHeight : nextSize
       )
     }
-  }, [])
+  }, [writeLiveRightPanelWidth])
 
   const scheduleResizeSizeUpdate = useCallback(
     (nextSize: number) => {
@@ -494,20 +596,41 @@ const Layout: React.FC = () => {
     [applyPendingResizeSize]
   )
 
-  const finishResizeInteraction = useCallback(() => {
-    const dir = resizingRef.current
-    if (!dir) {
-      return
-    }
+  const finishResizeInteraction = useCallback(
+    (options: { flush?: boolean } = {}) => {
+      const dir = resizingRef.current
+      if (!dir) {
+        return
+      }
 
-    if (resizeFrameRef.current !== null) {
-      window.cancelAnimationFrame(resizeFrameRef.current)
-      resizeFrameRef.current = null
-    }
-    applyPendingResizeSize()
-    resizingRef.current = null
-    pendingResizeSizeRef.current = null
-  }, [applyPendingResizeSize])
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current)
+        resizeFrameRef.current = null
+      }
+      applyPendingResizeSize()
+      resizingRef.current = null
+      pendingResizeSizeRef.current = null
+      if (dir === 'right') {
+        const finalWidth = liveRightPanelWidthRef.current
+        liveRightPanelWidthRef.current = null
+        if (finalWidth !== null) {
+          const commitWidth = () =>
+            setRightPanelWidth((previousWidth) =>
+              previousWidth === finalWidth ? previousWidth : finalWidth
+            )
+          // Commit before the inline width is dropped, so no frame shows the old width.
+          if (options.flush === false) {
+            commitWidth()
+          } else {
+            flushSync(commitWidth)
+          }
+        }
+        writeLiveRightPanelWidth(null)
+      }
+      emitCanvasLayoutResizeInteraction(false)
+    },
+    [applyPendingResizeSize, writeLiveRightPanelWidth]
+  )
 
   const handleMouseDown = useCallback(
     (dir: ResizeDirection) => (e: React.MouseEvent) => {
@@ -516,6 +639,10 @@ const Layout: React.FC = () => {
       }
 
       e.preventDefault()
+      if (resizingRef.current) {
+        // A press without a release seen in between: close the earlier drag first.
+        finishResizeInteraction()
+      }
       resizingRef.current = dir
       if (dir === 'side' || dir === 'right') {
         startPosRef.current = e.clientX
@@ -524,14 +651,20 @@ const Layout: React.FC = () => {
         startPosRef.current = e.clientY
         startSizeRef.current = bottomPanelHeight
       }
+      emitCanvasLayoutResizeInteraction(true, dir)
     },
-    [sidePanelWidth, rightPanelWidth, bottomPanelHeight]
+    [finishResizeInteraction, sidePanelWidth, rightPanelWidth, bottomPanelHeight]
   )
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       const dir = resizingRef.current
       if (!dir) return
+      if (e.buttons === 0) {
+        // The button was released where this window did not see the mouseup.
+        finishResizeInteraction()
+        return
+      }
 
       if (dir === 'side') {
         const delta = e.clientX - startPosRef.current
@@ -547,12 +680,16 @@ const Layout: React.FC = () => {
       }
     }
 
+    const handleMouseUp = () => finishResizeInteraction()
+    const handleWindowBlur = () => finishResizeInteraction()
     window.addEventListener('mousemove', handleMouseMove)
-    window.addEventListener('mouseup', finishResizeInteraction)
+    window.addEventListener('mouseup', handleMouseUp)
+    window.addEventListener('blur', handleWindowBlur)
     return () => {
       window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', finishResizeInteraction)
-      finishResizeInteraction()
+      window.removeEventListener('mouseup', handleMouseUp)
+      window.removeEventListener('blur', handleWindowBlur)
+      finishResizeInteraction({ flush: false })
     }
   }, [finishResizeInteraction, scheduleResizeSizeUpdate])
 
@@ -589,7 +726,10 @@ const Layout: React.FC = () => {
   }, [activeSidePanel, dispatch, isProjectRoute, isProjectTab, projectEntrySidePanelIntent])
 
   const effectSidePanel = isProjectTab && isProjectRoute ? activeSidePanel : null
-  const effectRightPanelVisible = isProjectTab && isProjectRoute ? rightPanelVisible : false
+  const effectRightPanelVisible =
+    isProjectTab && isProjectRoute && conversationOpenLayout.allowWorkspace
+      ? rightPanelVisible
+      : false
   const sidePanelVisible = Boolean(effectSidePanel)
   const mainAreaInsets = resolveMainAreaOverlayInsets({
     sidePanelVisible,
@@ -645,15 +785,29 @@ const Layout: React.FC = () => {
         overflow: 'hidden'
       }}
     >
-      <TitleBar />
+      <MemoizedTitleBar />
+      <MemoizedExistingConversationOpenStatus />
 
       <Box
-        sx={{ display: 'flex', flexDirection: 'row', flex: 1, overflow: 'hidden', minHeight: 0 }}
+        data-project-frame={isProjectRoute && isProjectTab ? '' : undefined}
+        sx={(theme) => ({
+          display: 'flex',
+          flexDirection: 'row',
+          flex: 1,
+          overflow: 'hidden',
+          minHeight: 0,
+          '--workbench-seam': theme.palette.mode === 'dark' ? '#141416' : '#e3e6eb',
+          '--workbench-outline':
+            theme.palette.mode === 'dark' ? 'rgba(255,255,255,.085)' : 'rgba(28,34,48,.14)'
+        })}
       >
-        <ActivityBar />
+        <MemoizedActivityBar />
 
         <Box sx={{ position: 'relative', flex: 1, overflow: 'hidden', minWidth: 0, minHeight: 0 }}>
           <Box
+            ref={mainAreaElementRef}
+            data-workbench-module="canvas"
+            data-agent-open={effectRightPanelVisible || undefined}
             sx={{
               position: 'absolute',
               ...mainAreaInsets,
@@ -693,6 +847,8 @@ const Layout: React.FC = () => {
 
           {bottomPanelVisible && (
             <Box
+              ref={bottomPanelElementRef}
+              data-agent-open={effectRightPanelVisible || undefined}
               data-canvas-document-drop-bypass="bottom-panel"
               sx={{
                 position: 'absolute',
@@ -723,6 +879,8 @@ const Layout: React.FC = () => {
 
           {effectRightPanelVisible && (
             <Box
+              ref={rightPanelElementRef}
+              data-workbench-module="agent"
               data-canvas-document-drop-bypass="right-panel"
               sx={(theme) => ({
                 width: rightPanelWidth,
@@ -761,10 +919,11 @@ const Layout: React.FC = () => {
                 })}
               />
               <Suspense fallback={<Box sx={{ flex: 1 }} />}>
-                <AgentWorkspace
+                <MemoizedAgentWorkspace
                   key={activeTabId}
                   projectId={activeTabId}
                   projectName={openTabs.find((tab) => tab.id === activeTabId)?.label}
+                  existingConversationOpen={conversationOpenLayout.workspaceAdapter}
                 />
               </Suspense>
             </Box>

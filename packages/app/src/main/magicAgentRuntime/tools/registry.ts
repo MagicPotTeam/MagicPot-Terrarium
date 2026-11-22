@@ -8,7 +8,13 @@ import { projectTraceToolAdapter } from './projectTrace'
 import { qAppToolAdapter } from './qapp'
 import { terminalToolAdapter } from './terminal'
 import { videoToolAdapter } from './video'
-import { permissionDeniedResult } from './helpers'
+import {
+  permissionDeniedResult,
+  prepareCreativeToolDispatch,
+  requiresCreativeMutationAuthorization,
+  revokeCreativeToolDispatch,
+  unavailableResult
+} from './helpers'
 import type {
   MagicAgentCreativeToolAdapter,
   MagicAgentCreativeToolContext,
@@ -52,8 +58,8 @@ export class MagicAgentCreativeToolRegistry {
     this.adapters = options.adapters || defaultAdapters
   }
 
-  listTools(): MagicAgentCreativeToolDefinition[] {
-    return this.adapters.flatMap((adapter) => adapter.definitions()).map(cloneToolDefinition)
+  listTools(context?: MagicAgentCreativeToolContext): MagicAgentCreativeToolDefinition[] {
+    return this.adapters.flatMap((adapter) => adapter.definitions(context)).map(cloneToolDefinition)
   }
 
   async dispatch(
@@ -62,7 +68,7 @@ export class MagicAgentCreativeToolRegistry {
     context?: MagicAgentCreativeToolContext
   ): Promise<MagicAgentCreativeToolResult> {
     const requestedName = normalizeToolName(name)
-    const definition = this.listTools().find(
+    const definition = this.listTools(context).find(
       (tool) => normalizeToolName(tool.name) === requestedName
     )
 
@@ -76,15 +82,25 @@ export class MagicAgentCreativeToolRegistry {
       }
     }
 
-    if (definition.requiresConfirmation || definition.disabledByDefault) {
+    if (
+      requiresCreativeMutationAuthorization(definition) &&
+      typeof context?.authorizeMutation !== 'function'
+    ) {
       return permissionDeniedResult(definition)
     }
+    if (definition.status === 'unavailable') return unavailableResult(definition)
 
-    for (const adapter of this.adapters) {
-      const result = await adapter.callTool(definition.name, args || {}, context)
-      if (result) {
-        return result
+    const dispatch = await prepareCreativeToolDispatch(definition, args || {}, context)
+    if (!dispatch.prepared) return dispatch.result
+    try {
+      for (const adapter of this.adapters) {
+        const result = await adapter.callTool(definition.name, dispatch.args, dispatch.context)
+        if (result) {
+          return result
+        }
       }
+    } finally {
+      revokeCreativeToolDispatch(dispatch.context)
     }
 
     return {

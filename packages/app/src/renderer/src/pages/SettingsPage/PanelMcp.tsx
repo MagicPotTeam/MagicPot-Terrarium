@@ -1,11 +1,13 @@
 ﻿import React from 'react'
 import { Add as AddIcon } from '@mui/icons-material'
-import { Box, Button, Card, CardContent, Chip, Stack, TextField, Typography } from '@mui/material'
+import { Alert, Box, Button, Card, CardContent, Chip, FormControlLabel, MenuItem, Stack, Switch, TextField, Typography } from '@mui/material'
 import {
   DEFAULT_CONFIG,
   type McpExternalServerConfig,
   type McpExternalServerTransport
 } from '@shared/config/config'
+import { api } from '@renderer/utils/windowUtils'
+import type { McpClientConnectionSnapshot } from '@shared/api/svcState'
 import InputSelect from '@renderer/components/inputs/InputSelect'
 import type { resources } from '../../i18n'
 import { useTranslation } from 'react-i18next'
@@ -84,6 +86,9 @@ const createDefaultServerId = (servers: McpExternalServerConfig[]): string => {
 const createExternalServer = (servers: McpExternalServerConfig[]): McpExternalServerConfig => ({
   id: createDefaultServerId(servers),
   enabled: true,
+  agentThreadAccess: 'off',
+  agentThreadManage: false,
+  autoConnect: true,
   transport: 'stdio',
   command: '',
   args: [],
@@ -131,6 +136,24 @@ const PanelMcp: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
     () => settingsValue.mcp_config?.client?.servers ?? [],
     [settingsValue.mcp_config?.client?.servers]
   )
+
+  const [connectionStatus, setConnectionStatus] = React.useState<McpClientConnectionSnapshot[]>([])
+  const [statusLoading, setStatusLoading] = React.useState(false)
+  const [statusFailed, setStatusFailed] = React.useState(false)
+  const statusGeneration = React.useRef(0)
+  React.useEffect(() => {
+    statusGeneration.current++; setConnectionStatus([]); setStatusLoading(false)
+    return () => { statusGeneration.current++ }
+  }, [clientServers])
+  const refreshStatus = async () => {
+    const generation = ++statusGeneration.current
+    setStatusLoading(true); setStatusFailed(false)
+    try {
+      const response = await api().svcState.getMcpStatus({ passive: true })
+      if (generation === statusGeneration.current) setConnectionStatus(response.client.connections)
+    } catch { if (generation === statusGeneration.current) setStatusFailed(true) }
+    finally { if (generation === statusGeneration.current) setStatusLoading(false) }
+  }
 
   const qt = React.useCallback<QtFn>(
     (key, fallback) => {
@@ -186,6 +209,10 @@ const PanelMcp: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
   return (
     <Box sx={{ p: 3 }}>
       <Stack spacing={3}>
+        <Alert severity="warning">{t('mcp.thread_access_notice')}</Alert>
+        <Alert severity="warning">{t('mcp.connection_management_notice')}</Alert>
+        <Button disabled={statusLoading} onClick={() => void refreshStatus()}>{t('mcp.refresh_passive_status')}</Button>
+        {statusFailed && <Alert severity="error">{t('mcp.status_failed')}</Alert>}
         <Box>
           <Stack spacing={1.5}>
             {clientServers.map((server, index) => {
@@ -220,6 +247,7 @@ const PanelMcp: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
                             {serverName}
                           </Typography>
                           <Chip label={transport} size="small" variant="outlined" />
+                          {connectionStatus.filter((item) => item.id === server.id).map((item) => <Chip key={item.id} size="small" color={item.status === 'connected' ? 'success' : item.status === 'error' || item.status === 'close-unconfirmed' ? 'error' : 'default'} label={t(`mcp.connection_state_${item.status}`)} />)}
                         </Stack>
 
                         <Button
@@ -232,6 +260,18 @@ const PanelMcp: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
                         </Button>
                       </Box>
 
+                      <FormControlLabel label={t('mcp.auto_connect')} control={<Switch checked={server.autoConnect !== false} onChange={(_, autoConnect) => saveClientServers(clientServers.map((item, itemIndex) => itemIndex === index ? { ...item, autoConnect } : item))} />} />
+                      <FormControlLabel label={t('mcp.thread_manage')} control={<Switch checked={server.agentThreadManage === true} disabled={!['discover', 'call'].includes(server.agentThreadAccess ?? '')} onChange={(_, agentThreadManage) => saveClientServers(clientServers.map((item, itemIndex) => itemIndex === index ? { ...item, agentThreadManage } : item))} />} />
+                      <TextField select fullWidth size="small" label={t('mcp.thread_access')}
+                        value={['discover', 'call'].includes(server.agentThreadAccess ?? '') ? server.agentThreadAccess : 'off'}
+                        onChange={(event) => {
+                          const access = event.target.value as NonNullable<McpExternalServerConfig['agentThreadAccess']>
+                          if (['off', 'discover', 'call'].includes(access)) saveClientServers(clientServers.map((item, itemIndex) => itemIndex === index ? { ...item, agentThreadAccess: access, ...(access === 'off' ? { agentThreadManage: false } : {}) } : item))
+                        }}>
+                        <MenuItem value="off">{t('mcp.thread_access_off')}</MenuItem>
+                        <MenuItem value="discover">{t('mcp.thread_access_discover')}</MenuItem>
+                        <MenuItem value="call">{t('mcp.thread_access_call')}</MenuItem>
+                      </TextField>
                       <Typography
                         color="text.secondary"
                         sx={{
@@ -357,6 +397,7 @@ const PanelMcp: React.FC<PanelProps> = ({ settingsValue, saveSettings }) => {
                 )}
               </Box>
 
+              <FormControlLabel label={t('mcp.new_auto_connect')} control={<Switch checked={draftServer.autoConnect !== false} onChange={(_, autoConnect) => setDraftServer((previous) => ({ ...previous, autoConnect }))} />} />
               <Box>
                 <Button
                   disabled={!canCreateServer}

@@ -63,6 +63,7 @@ export function createCanvasImageItemDraft(
     src: string
     image?: CanvasImageAsset
     fileName?: string
+    teamImageLabel?: string
     sourceFile?: Blob
     sourceUrlOwned?: boolean
     sizeBytes?: number
@@ -86,6 +87,7 @@ export function createCanvasImageItemDraft(
     type: 'image',
     src: options.src,
     ...(options.fileName ? { fileName: options.fileName } : {}),
+    ...(options.teamImageLabel ? { teamImageLabel: options.teamImageLabel } : {}),
     ...(options.sourceFile ? { sourceFile: options.sourceFile } : {}),
     ...(options.sourceUrlOwned ? { sourceUrlOwned: true } : {}),
     ...(typeof options.sizeBytes === 'number' ? { sizeBytes: options.sizeBytes } : {}),

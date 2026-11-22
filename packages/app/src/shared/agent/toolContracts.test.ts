@@ -47,6 +47,13 @@ describe('agent tool contracts', () => {
     expect(() => throwIfAborted(controller.signal)).toThrow('stop now')
   })
 
+  it('keeps an explicitly empty failed result body distinct from absent content', () => {
+    const request: AgentToolInvocationRequest = { toolName: 'demo.tool', args: {}, session }
+    const error = { message: 'failed without display text', code: 'E_EMPTY' }
+    expect(createAgentToolInvocationResult(request, { ok: false, content: '', error })).toMatchObject({ ok: false, content: '', error })
+    expect(createAgentToolInvocationResult(request, { ok: false, error })).not.toHaveProperty('content')
+  })
+
   it('normalizes invocation results with defaults and optional payloads', () => {
     const request: AgentToolInvocationRequest = {
       invocationId: 'invoke-1',

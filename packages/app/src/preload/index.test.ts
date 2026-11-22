@@ -90,11 +90,77 @@ describe('preload capability boundary', () => {
     expect(sendSyncMock).not.toHaveBeenCalled()
   })
 
+  it('asks for an import grant only with the webUtils path of a real File', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const file = { name: 'picked.png' }
+    getPathForFileMock.mockReturnValue('/picked/picked.png')
+    invokeMock.mockResolvedValue({ path: '/canonical/picked.png', sizeBytes: 3 })
+
+    await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toEqual(
+      {
+        path: '/canonical/picked.png'
+      }
+    )
+    expect(getPathForFileMock).toHaveBeenCalledWith(file)
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith(
+      'local-media:authorize-import-path',
+      '/picked/picked.png',
+      'image/png'
+    )
+
+    // A page cannot name the path: a string or a forged object has no webUtils path.
+    invokeMock.mockClear()
+    getPathForFileMock.mockImplementation((target: unknown) => {
+      if (typeof target === 'string') throw new TypeError('not a File')
+      return ''
+    })
+    await expect(
+      electronFile.authorizeLocalMediaFileForImport('/home/user/.ssh/id_rsa', 'image/png')
+    ).resolves.toEqual({ refused: 'denied' })
+    await expect(
+      electronFile.authorizeLocalMediaFileForImport(
+        { name: 'forged.png', path: '/etc/shadow' },
+        'image/png'
+      )
+    ).resolves.toEqual({ refused: 'denied' })
+    expect(invokeMock).not.toHaveBeenCalled()
+    // A malformed answer from main is never passed on as a path.
+    getPathForFileMock.mockReturnValue('/picked/picked.png')
+    for (const answer of [
+      '/etc/shadow',
+      { path: '/etc/shadow' },
+      { path: 7, sizeBytes: 1 },
+      { refused: 'anything' },
+      null
+    ]) {
+      invokeMock.mockResolvedValue(answer)
+      await expect(
+        electronFile.authorizeLocalMediaFileForImport(file, 'image/png')
+      ).resolves.toEqual({
+        refused: 'denied'
+      })
+    }
+    // main's reasons pass through: no answer in time, or a network path (bytes only).
+    for (const refused of ['timeout', 'network'] as const) {
+      invokeMock.mockResolvedValue({ refused, sizeBytes: 9 })
+      await expect(
+        electronFile.authorizeLocalMediaFileForImport(file, 'image/png')
+      ).resolves.toEqual({ refused })
+    }
+    invokeMock.mockRejectedValue(new Error('ipc failed'))
+    await expect(electronFile.authorizeLocalMediaFileForImport(file, 'image/png')).resolves.toEqual(
+      { refused: 'denied' }
+    )
+    expect(sendSyncMock).not.toHaveBeenCalled()
+  })
+
   it('captures trusted drops before bridge exposure without exposing a trust setter', () => {
     const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
     expect(Object.keys(electronFile).sort()).toEqual([
       'authorizeDroppedLocalImage',
+      'authorizeDroppedLocalImageForImport',
       'authorizeLocalMediaFile',
+      'authorizeLocalMediaFileForImport',
       'getPathForFile',
       'resolveAuthorizedLocalMediaPath'
     ])
@@ -139,6 +205,65 @@ describe('preload capability boundary', () => {
     )
     expect(getPathForFileMock).not.toHaveBeenCalled()
     expect(sendSyncMock).not.toHaveBeenCalled()
+  })
+
+  it('asks main for a one-use import grant for the exact captured URL, once per drop', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const url =
+      process.platform === 'win32'
+        ? 'file:///C:/Synthetic%20Lark/import.png'
+        : 'file:///tmp/Synthetic%20Lark/import.png'
+    invokeMock.mockResolvedValue({ path: fileURLToPath(url), sizeBytes: 42 })
+    // Nothing without a trusted drop that carried this URL.
+    await expect(electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')).resolves.toBe(
+      null
+    )
+    windowListeners.get('drop')?.({
+      isTrusted: true,
+      dataTransfer: { getData: (type: string) => (type === 'text/uri-list' ? url : '') }
+    } as unknown as Event)
+    await expect(
+      electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')
+    ).resolves.toEqual({ path: fileURLToPath(url), sizeBytes: 42 })
+    // The URL is used up: no second grant of either kind from the same drop.
+    await expect(electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')).resolves.toBe(
+      null
+    )
+    await expect(electronFile.authorizeDroppedLocalImage(url)).resolves.toBe('')
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith(
+      'local-media:authorize-import-path',
+      fileURLToPath(url),
+      'image/png',
+      expect.stringMatching(/^drop-[a-z0-9-]+$/)
+    )
+    // Never the persisted grant channel.
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'local-media:authorize-picker-path',
+      expect.anything()
+    )
+  })
+
+  it('turns a mapped-drive answer for a dropped URL into a one-time bytes read of the dropped path', async () => {
+    const electronFile = exposeMock.mock.calls.find(([name]) => name === 'electronFile')?.[1]
+    const url =
+      process.platform === 'win32' ? 'file:///Z:/pics/mapped.png' : 'file:///tmp/pics/mapped.png'
+    invokeMock.mockResolvedValue({ refused: 'network', sizeBytes: 4321 })
+    windowListeners.get('drop')?.({
+      isTrusted: true,
+      dataTransfer: { getData: (type: string) => (type === 'text/uri-list' ? url : '') }
+    } as unknown as Event)
+    await expect(
+      electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')
+    ).resolves.toEqual({ path: fileURLToPath(url), sizeBytes: 4321, bytesOnly: true })
+    // Without a size from main there is nothing to check the limits against: refused.
+    invokeMock.mockResolvedValue({ refused: 'network' })
+    windowListeners.get('drop')?.({
+      isTrusted: true,
+      dataTransfer: { getData: (type: string) => (type === 'text/uri-list' ? url : '') }
+    } as unknown as Event)
+    await expect(electronFile.authorizeDroppedLocalImageForImport(url, 'image/png')).resolves.toBe(
+      null
+    )
   })
 
   it('invalidates an unconsumed trusted drop on navigation', async () => {
@@ -191,7 +316,8 @@ describe('preload capability boundary', () => {
     canvasScreenshot.closeFloatingWindow('floating-1')
     canvasScreenshot.sendFloatingToCanvas('floating-1')
     const remove = canvasScreenshot.onAddImage(callback)
-    const listener = onMock.mock.calls[0]?.[1]
+    // Found by channel: the preload also listens for the renderer recovery notice from the start.
+    const listener = onMock.mock.calls.find(([channel]) => channel === 'canvas:add-image')?.[1]
     listener({}, 'data:image/png;base64,abc')
     remove()
 
@@ -213,5 +339,125 @@ describe('preload capability boundary', () => {
     expect(onMock).toHaveBeenCalledWith('canvas:add-image', listener)
     expect(callback).toHaveBeenCalledWith('data:image/png;base64,abc')
     expect(removeListenerMock).toHaveBeenCalledWith('canvas:add-image', listener)
+  })
+
+  it('keeps the renderer recovery notice until the app shell subscribes and delivers it once', () => {
+    const appEvents = exposeMock.mock.calls.find(([name]) => name === 'appEvents')?.[1]
+    const recoveryListener = onMock.mock.calls.find(
+      ([channel]) => channel === 'app:renderer-recovered'
+    )?.[1]
+    expect(recoveryListener).toBeTypeOf('function')
+    // Listening starts before the page can subscribe (the event comes on did-finish-load).
+    expect(onMock.mock.invocationCallOrder[0]).toBeLessThan(exposeMock.mock.invocationCallOrder[0])
+
+    recoveryListener({}, { reason: 'crashed', exitCode: 5, diedAt: 1000 })
+    const first = vi.fn()
+    const unsubscribe = appEvents.onRendererRecovered(first)
+    expect(first).toHaveBeenCalledExactlyOnceWith({ reason: 'crashed', exitCode: 5, diedAt: 1000 })
+
+    const second = vi.fn()
+    appEvents.onRendererRecovered(second)
+    expect(second).not.toHaveBeenCalled()
+
+    recoveryListener({}, { reason: 'oom', exitCode: -536870904, diedAt: 2000 })
+    expect(first).toHaveBeenCalledTimes(2)
+    expect(second).toHaveBeenCalledExactlyOnceWith({ reason: 'oom', exitCode: -536870904, diedAt: 2000 })
+    unsubscribe()
+    recoveryListener({}, { reason: 'crashed', exitCode: 5, diedAt: 3000 })
+    expect(first).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    null,
+    'crashed',
+    { reason: 'crashed', exitCode: 5 },
+    { reason: 'crashed', exitCode: 1.5, diedAt: 1 },
+    { reason: '<b>x</b>', exitCode: 1, diedAt: 1 },
+    { reason: 'x'.repeat(65), exitCode: 1, diedAt: 1 }
+  ])('drops a recovery notice of the wrong shape: %j', (payload) => {
+    const appEvents = exposeMock.mock.calls.find(([name]) => name === 'appEvents')?.[1]
+    const recoveryListener = onMock.mock.calls.find(
+      ([channel]) => channel === 'app:renderer-recovered'
+    )?.[1]
+    recoveryListener({}, payload)
+    const callback = vi.fn()
+    appEvents.onRendererRecovered(callback)
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it('forwards only exact send-stage breadcrumbs on their one channel', () => {
+    const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
+    expect(Object.keys(appDiagnostics)).toEqual(['reportChatSendStage'])
+    const breadcrumb = { stage: 'request-built', sendSeq: 3, messageCount: 1, imageCount: 8, imageBytes: 10, dataUrlCount: 8, dataUrlChars: 99 }
+
+    appDiagnostics.reportChatSendStage(breadcrumb)
+    appDiagnostics.reportChatSendStage({ ...breadcrumb, content: 'secret' })
+    // A symbol key is refused here, in the preload (main does not look for one: IPC cannot carry it).
+    appDiagnostics.reportChatSendStage({ ...breadcrumb, [Symbol('content')]: 'secret' })
+    appDiagnostics.reportChatSendStage('request-built')
+
+    expect(sendMock).toHaveBeenCalledExactlyOnceWith('app:chat-send-stage', breadcrumb)
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('forwards the send number and a failure\'s stage and enumerated error name, and nothing that is not one', () => {
+    const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
+    const counts = { messageCount: 1, imageCount: 8, imageBytes: 10, dataUrlCount: 8, dataUrlChars: 99 }
+    const failed = { stage: 'reply-failed', sendSeq: 4, ...counts, failedAfter: 'images-checked', errorName: 'RangeError' }
+    appDiagnostics.reportChatSendStage(failed)
+    // A number that is not a count, a message in the name, a free-text stage, failure fields on a running stage.
+    for (const forged of [
+      { stage: 'request-start', sendSeq: '4', ...counts },
+      { stage: 'request-start', sendSeq: -1, ...counts },
+      { stage: 'request-start', sendSeq: 1.5, ...counts },
+      { stage: 'request-start', ...counts },
+      { ...failed, errorName: 'Error: C:\\Users\\secret\\a.png not found' },
+      { ...failed, failedAfter: 'while reading secret.png' },
+      { ...failed, errorName: undefined },
+      { stage: 'request-built', sendSeq: 4, ...counts, errorName: 'TypeError' }
+    ]) {
+      appDiagnostics.reportChatSendStage(forged)
+    }
+    expect(sendMock).toHaveBeenCalledExactlyOnceWith('app:chat-send-stage', failed)
+  })
+
+  it('adds the JS heap size from V8 itself and never forwards a heap number the page supplied', () => {
+    const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
+    const breadcrumb = { stage: 'request-built', sendSeq: 1, messageCount: 9, imageCount: 40, imageBytes: 10, dataUrlCount: 40, dataUrlChars: 99 }
+    // Electron reports the heap statistics in KB.
+    const getHeapStatistics = vi.fn(() => ({ usedHeapSize: 1_887_346, heapSizeLimit: 2_195_456 }))
+    Object.defineProperty(process, 'getHeapStatistics', { configurable: true, value: getHeapStatistics })
+    try {
+      appDiagnostics.reportChatSendStage(breadcrumb)
+      // performance.memory is quantised and cached (26 MB during a real out-of-memory death):
+      // a page that sends its own heap number is not forwarded at all.
+      appDiagnostics.reportChatSendStage({ ...breadcrumb, usedJSHeapSize: 26_000_000, jsHeapSizeLimit: 2_330_000_000 })
+
+      expect(sendMock).toHaveBeenCalledExactlyOnceWith('app:chat-send-stage', {
+        ...breadcrumb,
+        usedJSHeapSize: 1_932_642_304,
+        jsHeapSizeLimit: 2_248_146_944
+      })
+      expect(getHeapStatistics).toHaveBeenCalledTimes(1)
+    } finally {
+      delete (process as { getHeapStatistics?: unknown }).getHeapStatistics
+    }
+  })
+
+  it('still forwards the counts when the heap statistics cannot be read', () => {
+    const appDiagnostics = exposeMock.mock.calls.find(([name]) => name === 'appDiagnostics')?.[1]
+    const breadcrumb = { stage: 'reply-failed', sendSeq: 2, messageCount: 2, imageCount: 0, imageBytes: 0, dataUrlCount: 0, dataUrlChars: 0, failedAfter: 'request-start', errorName: 'AbortError' }
+    Object.defineProperty(process, 'getHeapStatistics', { configurable: true, value: () => { throw new Error('synthetic') } })
+    try {
+      expect(() => appDiagnostics.reportChatSendStage(breadcrumb)).not.toThrow()
+      Object.defineProperty(process, 'getHeapStatistics', { configurable: true, value: () => ({ usedHeapSize: Number.NaN, heapSizeLimit: undefined }) })
+      appDiagnostics.reportChatSendStage(breadcrumb)
+    } finally {
+      delete (process as { getHeapStatistics?: unknown }).getHeapStatistics
+    }
+    expect(sendMock.mock.calls).toEqual([
+      ['app:chat-send-stage', breadcrumb],
+      ['app:chat-send-stage', breadcrumb]
+    ])
   })
 })

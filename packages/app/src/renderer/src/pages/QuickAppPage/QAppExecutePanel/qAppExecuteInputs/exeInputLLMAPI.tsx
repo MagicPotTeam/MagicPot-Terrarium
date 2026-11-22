@@ -4,6 +4,7 @@ import { ExeInputBuilder, ExeInputProps } from './types'
 import { valueIsJsonDict } from '@shared/utils/utilTypes'
 import { Config, LLMAPIProfile } from '@shared/config/config'
 import { isVisionCapableApiProfile } from '@shared/config/apiProfileSelectors'
+import { retiredProfileKind } from '@shared/llm'
 import InputSelect from '@renderer/components/inputs/InputSelect'
 import { useQAppInputState } from '../../components/QAppContext'
 import { getQAppApiProfiles } from './qAppApiProfiles'
@@ -18,7 +19,7 @@ const llmProfiles = (config: Config, needVisionModel?: boolean) => {
     return []
   }
   return profiles
-    .filter((profile) => !!profile.model_name)
+    .filter((profile) => !!profile.model_name && !retiredProfileKind(profile))
     .filter((profile) => {
       if (needVisionModel) {
         return isVisionCapableApiProfile(profile)

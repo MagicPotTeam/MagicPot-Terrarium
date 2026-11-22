@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { Box, Chip, Typography, Button, Menu, MenuItem } from '@mui/material'
-import type { Theme } from '@mui/material/styles'
+import { Box, ButtonBase, Chip, Typography, Button, Menu, MenuItem } from '@mui/material'
+import { alpha, useTheme, type Theme } from '@mui/material/styles'
 import BoltIcon from '@mui/icons-material/Bolt'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import CheckIcon from '@mui/icons-material/Check'
@@ -10,8 +10,11 @@ import {
   normalizeReasoningEffort,
   type LLMReasoningEffort
 } from '@shared/llm'
+import { getAgentColumnTokens } from '@renderer/components/agentColumnTokens'
+import ChatModelSwitcher, { type ChatModelSwitcherProfile } from './ChatModelSwitcher'
+import { getModelSwitcherDetail, type ChatModelSwitcherSource } from './chatModelSwitcherDetail'
 
-export type ChatPrimarySelectionProfile = {
+export type ChatPrimarySelectionProfile = ChatModelSwitcherSource & {
   id: string
   model_name: string
 }
@@ -25,6 +28,43 @@ type ChatPrimarySelectionProps = {
   availableReasoningEfforts?: LLMReasoningEffort[]
   selectedSkillLabel: string
   active?: boolean
+  /** The owner explicitly opts in only after member persistence and dispatch are supported. */
+  memberModel?: (
+    | { state: 'inherited' | 'selected'; label: string; profileId?: string }
+    | { state: 'unavailable' }
+  ) & {
+    onSelectProfile?: (profileId: string) => void
+    /** Display filter only; the caller must revalidate every selection at commit. */
+    selectableProfileIds?: readonly string[]
+    disabled?: boolean
+    pending?: boolean
+    /**
+     * The "inherit the lead" row (the lead's model is usable). onSelect clears the member's own
+     * choice; it is absent when the member has none.
+     */
+    inheritLead?: { profileId: string; modelName: string; onSelect?: () => void }
+  }
+  composerStyle?: boolean
+  /**
+   * The Agent column's header pill: one bordered button (model, effort, chevron) that opens one
+   * menu with the models and the reasoning efforts. Nothing is shown for an agent skill.
+   */
+  headerPill?: boolean
+  /** The Agent column's overlay layer, where the header pill opens the model switcher. */
+  overlayHost?: HTMLElement | null
+  /** Efforts of another model and the one its preference holds (for the model switcher). */
+  getProfileReasoning?: (
+    profileId: string
+  ) => { efforts: LLMReasoningEffort[]; effort: LLMReasoningEffort | null } | null
+  /** Stores the effort preference of the given model (used when the model changes too). */
+  onSelectProfileReasoningEffort?: (
+    profileId: string,
+    effort: LLMReasoningEffort | undefined
+  ) => void
+  /** All three must be supplied for the caller-resolved effective member profile. */
+  memberReasoningEffort?: LLMReasoningEffort | null
+  memberAvailableReasoningEfforts?: LLMReasoningEffort[]
+  onSelectMemberReasoningEffort?: (effort: LLMReasoningEffort | undefined) => void
   onSelectProfile: (profileId: string | null) => void
   onSelectReasoningEffort?: (effort: LLMReasoningEffort | undefined) => void
 }
@@ -38,10 +78,24 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   availableReasoningEfforts = [],
   selectedSkillLabel,
   active = true,
+  memberModel,
+  composerStyle = false,
+  headerPill = false,
+  overlayHost,
+  getProfileReasoning,
+  onSelectProfileReasoningEffort,
+  memberReasoningEffort,
+  memberAvailableReasoningEfforts,
+  onSelectMemberReasoningEffort,
   onSelectProfile,
   onSelectReasoningEffort
 }) => {
   const { t } = useTranslation()
+  const translate = (key: string, fallback: string) => {
+    const value = t(key, { defaultValue: fallback })
+    return value === key ? fallback : value
+  }
+  const theme = useTheme()
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null)
   const [reasoningAnchorEl, setReasoningAnchorEl] = useState<null | HTMLElement>(null)
 
@@ -59,28 +113,35 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   }
 
   useEffect(() => {
-    if (active) return
     setAnchorEl(null)
     setReasoningAnchorEl(null)
-  }, [active])
+  }, [
+    active,
+    Boolean(memberModel),
+    memberModel?.state,
+    memberModel?.disabled,
+    memberModel?.pending
+  ])
 
   const selectedProfile = availableProfiles.find((profile) => profile.id === selectedProfileId)
-  const displayLabel = selectedProfile ? selectedProfile.model_name : 'No model'
+  const displayLabel = selectedProfile
+    ? selectedProfile.model_name
+    : translate('chat.model_none', 'No model')
   // Legacy preferences/remote clients may still send Ultra; never render it as an option.
   const reasoningEfforts = Array.from(
     new Set(
-      availableReasoningEfforts
+      (memberModel ? (memberAvailableReasoningEfforts ?? []) : availableReasoningEfforts)
         .map((effort) => normalizeReasoningEffort(effort))
         .filter((effort): effort is LLMReasoningEffort => Boolean(effort))
     )
   )
   const normalizedSelectedEffort = normalizeReasoningEffort(
-    selectedReasoningEffort,
+    memberModel ? memberReasoningEffort : selectedReasoningEffort,
     reasoningEfforts
   )
   const displayReasoningLabel = normalizedSelectedEffort
     ? getReasoningEffortLabel(normalizedSelectedEffort)
-    : 'Default'
+    : translate('chat.reasoning_default', 'Default')
   const buildSelectorButtonSx = (theme: Theme) =>
     compact
       ? {
@@ -142,6 +203,340 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           }
         }
 
+  if (headerPill) {
+    if (!memberModel && isAgentSkillSelected) return null
+    const tokens = getAgentColumnTokens(theme)
+    // Dormant for members: ChatPage keeps modelInHeader off, so members use the composer menu
+    // below. This pill has neither the re-pick of a member whose model can no longer be used
+    // (memberUsable excludes 'unavailable') nor the "inherit the lead" row (inheritLead is
+    // ignored here). Port both before the pill carries a member again; the headerPill tests and
+    // the channel bed's member model cases pin this.
+    const memberUsable =
+      Boolean(memberModel) &&
+      active &&
+      memberModel?.state !== 'unavailable' &&
+      !memberModel?.disabled &&
+      !memberModel?.pending
+    const memberSelectableIds = memberModel?.selectableProfileIds
+    // The models and efforts this pill may change; the caller revalidates every choice.
+    const pickableProfiles = memberModel
+      ? memberUsable && memberModel.onSelectProfile
+        ? memberSelectableIds
+          ? availableProfiles.filter((profile) => memberSelectableIds.includes(profile.id))
+          : availableProfiles
+        : []
+      : availableProfiles
+    const showsEffort = memberModel
+      ? memberReasoningEffort !== undefined &&
+        memberAvailableReasoningEfforts !== undefined &&
+        Boolean(onSelectMemberReasoningEffort) &&
+        reasoningEfforts.length > 0
+      : reasoningEfforts.length > 0 && Boolean(onSelectReasoningEffort)
+    const pickableEfforts = showsEffort && (!memberModel || memberUsable) ? reasoningEfforts : []
+    const pillText = memberModel
+      ? memberModel.state === 'unavailable'
+        ? t('chat.member_model_unavailable', { defaultValue: 'Member model unavailable' })
+        : memberModel.state === 'inherited'
+          ? t('chat.member_model_inherited', {
+              defaultValue: 'Inherits lead: {{model}}',
+              model: memberModel.label
+            })
+          : t('chat.member_model_selected', {
+              defaultValue: 'Member model: {{model}}',
+              model: memberModel.label
+            })
+      : displayLabel
+    const pillName = memberModel ? pillText : t('chat.model_pill.label', { model: pillText })
+    const pillLabel = showsEffort
+      ? t('chat.model_pill.with_effort', { label: pillName, effort: displayReasoningLabel })
+      : pillName
+    const pillDisabled = pickableProfiles.length === 0 && pickableEfforts.length === 0
+    const switcherOpen = active && Boolean(anchorEl) && !pillDisabled
+    // The model in use: a member's own or inherited model, else the conversation's.
+    const currentProfileId = memberModel
+      ? memberModel.state === 'unavailable'
+        ? null
+        : (memberModel.profileId ??
+          availableProfiles.find((profile) => profile.model_name === memberModel.label)?.id ??
+          null)
+      : selectedProfileId
+    const switcherProfiles: ChatModelSwitcherProfile[] = pickableProfiles.map((profile) => {
+      const row = {
+        id: profile.id,
+        model_name: profile.model_name,
+        detail: getModelSwitcherDetail(profile)
+      }
+      if (profile.id === currentProfileId) {
+        return { ...row, efforts: pickableEfforts, effort: normalizedSelectedEffort ?? null }
+      }
+      // Another model's efforts can only be set through the per-model preference.
+      const other = onSelectProfileReasoningEffort ? getProfileReasoning?.(profile.id) : undefined
+      return { ...row, efforts: other?.efforts ?? [], effort: other?.effort ?? null }
+    })
+    // Only the efforts are pickable (a member that cannot change its model): list its model.
+    if (
+      pickableEfforts.length > 0 &&
+      currentProfileId &&
+      !switcherProfiles.some((profile) => profile.id === currentProfileId)
+    ) {
+      const own = availableProfiles.find((profile) => profile.id === currentProfileId)
+      if (own) {
+        switcherProfiles.push({
+          id: own.id,
+          model_name: own.model_name,
+          detail: getModelSwitcherDetail(own),
+          efforts: pickableEfforts,
+          effort: normalizedSelectedEffort ?? null
+        })
+      }
+    }
+    const handleSwitch = (profileId: string, effort: LLMReasoningEffort | undefined) => {
+      const target = switcherProfiles.find((profile) => profile.id === profileId)
+      if (!target) return
+      const effortChanged = (effort ?? null) !== (target.effort ?? null)
+      if (profileId !== currentProfileId) {
+        if (memberModel) memberModel.onSelectProfile?.(profileId)
+        else onSelectProfile(profileId)
+        if (effortChanged) onSelectProfileReasoningEffort?.(profileId, effort)
+        return
+      }
+      if (!effortChanged) return
+      if (memberModel) onSelectMemberReasoningEffort?.(effort)
+      else onSelectReasoningEffort?.(effort)
+    }
+
+    return (
+      <>
+        <ButtonBase
+          type="button"
+          disableRipple
+          data-testid="chat-model-pill"
+          aria-label={pillLabel}
+          aria-haspopup="dialog"
+          aria-expanded={switcherOpen}
+          aria-busy={memberModel?.pending || undefined}
+          disabled={pillDisabled}
+          title={pillText}
+          onClick={handleOpen}
+          sx={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: `${tokens.space.md}px`,
+            minWidth: 0,
+            maxWidth: '100%',
+            minHeight: 28,
+            padding: '4px 10px',
+            border: `1px solid ${alpha(tokens.muted, 0.25)}`,
+            borderRadius: `${tokens.radius.pill}px`,
+            backgroundColor: 'transparent',
+            color: tokens.text,
+            fontFamily: 'inherit',
+            transition: 'border-color 100ms ease, background-color 100ms ease',
+            '&:hover': {
+              borderColor: alpha(tokens.muted, 0.5),
+              backgroundColor: alpha(tokens.muted, 0.06)
+            },
+            '&.Mui-focusVisible': tokens.focusRing,
+            '&.Mui-disabled': { opacity: tokens.disabledOpacity }
+          }}
+        >
+          <Box
+            component="span"
+            sx={{
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              fontFamily: tokens.monoFont,
+              fontSize: tokens.fontSize.caption,
+              lineHeight: '18px'
+            }}
+          >
+            {pillText}
+          </Box>
+          {showsEffort ? (
+            <Box
+              component="span"
+              data-testid="chat-model-pill-effort"
+              sx={{
+                flex: 'none',
+                fontSize: tokens.fontSize.micro,
+                lineHeight: '18px',
+                color: tokens.muted
+              }}
+            >
+              {displayReasoningLabel}
+            </Box>
+          ) : null}
+          <ExpandMoreIcon aria-hidden sx={{ flex: 'none', fontSize: 13, color: tokens.muted }} />
+        </ButtonBase>
+        <ChatModelSwitcher
+          open={switcherOpen}
+          container={overlayHost}
+          profiles={switcherProfiles}
+          currentProfileId={currentProfileId}
+          onClose={handleClose}
+          onSwitch={handleSwitch}
+        />
+      </>
+    )
+  }
+
+  if (memberModel) {
+    const label =
+      memberModel.state === 'unavailable'
+        ? t('chat.member_model_unavailable', { defaultValue: 'Member model unavailable' })
+        : memberModel.state === 'inherited'
+          ? t('chat.member_model_inherited', {
+              defaultValue: 'Inherits lead: {{model}}',
+              model: memberModel.label
+            })
+          : t('chat.member_model_selected', {
+              defaultValue: 'Member model: {{model}}',
+              model: memberModel.label
+            })
+    // A member whose model can no longer be used may pick again when the caller offers it.
+    const canSelect =
+      active &&
+      !memberModel.disabled &&
+      !memberModel.pending &&
+      Boolean(memberModel.onSelectProfile)
+    const inheritLead = memberModel.inheritLead
+    const inheriting = memberModel.state === 'inherited'
+    // The model in use is marked (none when it can no longer be used; the inherit row while the
+    // member inherits); the member's own choice is not stored again. The rows are one radio group:
+    // `selected` only tints the row, so aria-checked tells a screen reader which one is in use.
+    const currentProfileId =
+      memberModel.state === 'unavailable' || (inheriting && inheritLead)
+        ? null
+        : (memberModel.profileId ?? null)
+    const ownChoiceId = memberModel.state === 'selected' ? currentProfileId : null
+    const selectableProfileIds = memberModel.selectableProfileIds
+    const selectableMemberProfiles = selectableProfileIds
+      ? availableProfiles.filter((profile) => selectableProfileIds.includes(profile.id))
+      : availableProfiles
+    const showReasoning =
+      memberReasoningEffort !== undefined &&
+      memberAvailableReasoningEfforts !== undefined &&
+      Boolean(onSelectMemberReasoningEffort) &&
+      reasoningEfforts.length > 0
+    const canReason =
+      active && memberModel.state !== 'unavailable' && !memberModel.disabled && !memberModel.pending
+    return (
+      <>
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            minWidth: 0,
+            ...(composerStyle
+              ? { borderRadius: 999, bgcolor: 'action.hover', px: 0.75, maxWidth: '100%' }
+              : {})
+          }}
+        >
+          <Button
+            disabled={!canSelect}
+            aria-busy={memberModel.pending || undefined}
+            size="small"
+            aria-label={label}
+            onClick={handleOpen}
+            sx={{ minWidth: 0, maxWidth: 200, borderRadius: 999, textTransform: 'none' }}
+          >
+            <Box
+              component="span"
+              sx={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                minWidth: 0
+              }}
+            >
+              {label}
+            </Box>
+            <ExpandMoreIcon
+              data-testid="member-model-arrow"
+              sx={{ flexShrink: 0, fontSize: 15, ml: 0.25 }}
+            />
+          </Button>
+          {showReasoning ? (
+            <Button
+              size="small"
+              disabled={!canReason}
+              aria-label={translate('chat.reasoning_label', 'Reasoning effort')}
+              onClick={handleOpenReasoning}
+              sx={(theme) => buildReasoningButtonSx(theme)}
+            >
+              {displayReasoningLabel}
+              <ExpandMoreIcon sx={{ fontSize: 15, flexShrink: 0 }} />
+            </Button>
+          ) : null}
+        </Box>
+        <Menu
+          anchorEl={reasoningAnchorEl}
+          open={Boolean(reasoningAnchorEl) && canReason && showReasoning}
+          onClose={handleCloseReasoning}
+        >
+          {[undefined, ...reasoningEfforts].map((effort) => (
+            <MenuItem
+              key={effort ?? 'default'}
+              selected={effort === normalizedSelectedEffort}
+              onClick={() => {
+                if (canReason) onSelectMemberReasoningEffort?.(effort)
+                handleCloseReasoning()
+              }}
+            >
+              {effort
+                ? getReasoningEffortLabel(effort)
+                : translate('chat.reasoning_default', 'Default')}
+            </MenuItem>
+          ))}
+        </Menu>
+        <Menu anchorEl={anchorEl} open={Boolean(anchorEl) && canSelect} onClose={handleClose}>
+          {inheritLead ? (
+            // Its key cannot equal a model row's key, and it never hands a profile id on.
+            <MenuItem
+              key="inherit-lead"
+              role="menuitemradio"
+              aria-checked={inheriting}
+              selected={inheriting}
+              onClick={() => {
+                if (canSelect && !inheriting) inheritLead.onSelect?.()
+                handleClose()
+              }}
+            >
+              <Box component="span" sx={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <Box component="span">
+                  {t('chat.member_model_inherit', { defaultValue: 'Inherit lead' })}
+                </Box>
+                <Box
+                  component="span"
+                  sx={{ fontSize: 11, color: 'text.secondary', overflowWrap: 'anywhere' }}
+                >
+                  {inheritLead.modelName}
+                </Box>
+              </Box>
+            </MenuItem>
+          ) : null}
+          {selectableMemberProfiles.map((profile) => (
+            <MenuItem
+              key={`profile:${profile.id}`}
+              role="menuitemradio"
+              aria-checked={profile.id === currentProfileId}
+              selected={profile.id === currentProfileId}
+              onClick={() => {
+                if (canSelect && profile.id !== ownChoiceId)
+                  memberModel.onSelectProfile?.(profile.id)
+                handleClose()
+              }}
+            >
+              {profile.model_name}
+            </MenuItem>
+          ))}
+        </Menu>
+      </>
+    )
+  }
+
   return !isAgentSkillSelected ? (
     <>
       <Box
@@ -149,7 +544,11 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           display: 'flex',
           alignItems: 'center',
           gap: compact ? 0.75 : 1,
-          flexWrap: 'wrap'
+          minWidth: 0,
+          flexWrap: composerStyle ? 'nowrap' : 'wrap',
+          ...(composerStyle
+            ? { borderRadius: 999, bgcolor: 'action.hover', px: 0.75, maxWidth: '100%' }
+            : {})
         }}
       >
         {!compact && (
@@ -163,9 +562,11 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           disabled={availableProfiles.length === 0}
           sx={(theme) => buildSelectorButtonSx(theme)}
         >
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
             <BoltIcon sx={{ fontSize: compact ? 14 : 16, opacity: compact ? 0.85 : 1 }} />
             <Typography
+              noWrap
+              title={displayLabel}
               sx={{
                 fontSize: compact ? 12 : 14,
                 fontWeight: 700,
@@ -183,7 +584,8 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
           <Button
             size="small"
             onClick={handleOpenReasoning}
-            aria-label="Reasoning effort"
+            style={{ flexShrink: 0 }}
+            aria-label={translate('chat.reasoning_label', 'Reasoning effort')}
             sx={(theme) => buildReasoningButtonSx(theme)}
           >
             <Typography
@@ -230,7 +632,9 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             {'\u9009\u62e9\u6a21\u578b'}
           </Typography>
         </Box>
-        {availableProfiles.length === 0 && <MenuItem disabled>No model</MenuItem>}
+        {availableProfiles.length === 0 && (
+          <MenuItem disabled>{translate('chat.model_none', 'No model')}</MenuItem>
+        )}
         {availableProfiles.map((profile) => {
           const isSelected = profile.id === selectedProfileId
           return (
@@ -291,7 +695,7 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
       >
         <Box sx={{ px: 2, py: 1 }}>
           <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600 }}>
-            Reasoning Effort
+            {translate('chat.reasoning_label', 'Reasoning effort')}
           </Typography>
         </Box>
         {[undefined, ...reasoningEfforts].map((effort) => {
@@ -321,7 +725,9 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 {isSelected ? <BoltIcon sx={{ fontSize: 16 }} /> : <Box sx={{ width: 16 }} />}
-                {effort ? getReasoningEffortLabel(effort) : 'Default'}
+                {effort
+                  ? getReasoningEffortLabel(effort)
+                  : translate('chat.reasoning_default', 'Default')}
               </Box>
               {isSelected && <CheckIcon sx={{ fontSize: 16 }} />}
             </MenuItem>

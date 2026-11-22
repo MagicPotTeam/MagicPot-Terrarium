@@ -1,3 +1,4 @@
+import { hideCanvasItemsTransiently, showCanvasItemsTransiently } from './canvasTransientVisibility'
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
@@ -26,6 +27,8 @@ type OverlayAssemblyProps = {
     liveMultiSelectionBounds?: { x: number; y: number; width: number; height: number } | null
   }
   visualOverlaysProps: {
+    teamLabelImageItems: Array<{ id: string }>
+    items: Array<{ id: string }>
     annotationItems: CanvasAnnotationItem[]
     textItems: CanvasTextItem[]
     fileItems: CanvasFileItem[]
@@ -147,6 +150,46 @@ describe('ProjectCanvasPageShell visual overlay routing', () => {
     latestOverlayAssemblyProps = null
     latestStageSceneProps.current = null
     vi.clearAllMocks()
+  })
+
+  it('routes only visible non-hidden labelled images and rechecks on rerender', () => {
+    const image = { id: 'visible', type: 'image' as const, src: 'fixture', teamImageLabel: '文案·图1', x: 0, y: 0, width: 100, height: 100, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+    const outside = { ...image, id: 'outside' }, hidden = { ...image, id: 'hidden' }, ordinary = { ...image, id: 'ordinary', teamImageLabel: undefined }
+    const visible = [image, hidden, ordinary], all = [image, hidden, ordinary, outside]
+    const props = { canvasContainerRef: { current: document.createElement('div') }, stagePos: { x: 0, y: 0 }, stageScale: 1, stageSize: { width: 1280, height: 720 }, selectedIds: new Set<string>(), videoItems: [], htmlItems: [], renderedModel3DItems: [], visibleItems: visible, items: all, inlineTextEdit: null, activeOcrHover: null, tool: 'select', selectionOverlayGroups: [], lastClickedIdRef: { current: null }, isLegacySelectionToolbarEnabled: () => false, t: (key: string) => key }
+    hideCanvasItemsTransiently(['hidden'])
+    try {
+      const page = render(<ProjectCanvasPageShell {...props} />)
+      expect(latestOverlayAssemblyProps?.visualOverlaysProps.teamLabelImageItems.map(x => x.id)).toEqual(['visible'])
+      expect(latestOverlayAssemblyProps?.visualOverlaysProps.items).toBe(all)
+      act(() => showCanvasItemsTransiently(['hidden']))
+      page.rerender(<ProjectCanvasPageShell {...props} isViewportInteracting />)
+      expect(latestOverlayAssemblyProps?.visualOverlaysProps.teamLabelImageItems.map(x => x.id)).toEqual(['visible', 'hidden'])
+    } finally { showCanvasItemsTransiently(['hidden']) }
+  })
+
+  it.fails('P6: updates labelled images on visibility changes without prop rerenders or duplicate notifications', () => {
+    const image = { id: 'subscription-image', type: 'image' as const, src: 'fixture', teamImageLabel: '甲·图1', x: 0, y: 0, width: 100, height: 100, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false }
+    const props = { canvasContainerRef: { current: document.createElement('div') }, stagePos: { x: 0, y: 0 }, stageScale: 1, stageSize: { width: 1280, height: 720 }, selectedIds: new Set<string>(), videoItems: [], htmlItems: [], renderedModel3DItems: [], visibleItems: [image], items: [image], inlineTextEdit: null, activeOcrHover: null, tool: 'select', selectionOverlayGroups: [], lastClickedIdRef: { current: null }, isLegacySelectionToolbarEnabled: () => false, t: (key: string) => key }
+    const renders = vi.fn()
+    const page = render(<React.Profiler id="shell" onRender={renders}><ProjectCanvasPageShell {...props} /></React.Profiler>)
+    try {
+      expect(latestOverlayAssemblyProps?.visualOverlaysProps.teamLabelImageItems.map(item => item.id)).toEqual([image.id])
+      act(() => hideCanvasItemsTransiently([image.id, image.id]))
+      expect(latestOverlayAssemblyProps?.visualOverlaysProps.teamLabelImageItems).toEqual([])
+      const afterHide = renders.mock.calls.length
+      act(() => hideCanvasItemsTransiently([image.id]))
+      expect(renders).toHaveBeenCalledTimes(afterHide)
+      act(() => showCanvasItemsTransiently([image.id, image.id]))
+      expect(latestOverlayAssemblyProps?.visualOverlaysProps.teamLabelImageItems.map(item => item.id)).toEqual([image.id])
+      const afterShow = renders.mock.calls.length
+      act(() => showCanvasItemsTransiently([image.id]))
+      expect(renders).toHaveBeenCalledTimes(afterShow)
+      page.unmount()
+      const afterUnmount = renders.mock.calls.length
+      act(() => { hideCanvasItemsTransiently([image.id]); showCanvasItemsTransiently([image.id]) })
+      expect(renders).toHaveBeenCalledTimes(afterUnmount)
+    } finally { page.unmount(); showCanvasItemsTransiently([image.id]) }
   })
 
   it('keeps visual overlays mounted during viewport interaction and forwards the shared viewport driver', () => {

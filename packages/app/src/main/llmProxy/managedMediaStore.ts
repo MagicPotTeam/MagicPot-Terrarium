@@ -3,6 +3,7 @@ import { constants as fsConstants } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE } from '../../shared/api/svcManagedMedia'
 import {
   MEDIA_REFERENCE_VERSION,
   isNormalizedMediaRelativePath,
@@ -19,6 +20,8 @@ const MAX_JPEG_HEADER_BYTES = 1024 * 1024
 const IO_CHUNK_BYTES = 64 * 1024
 const MAX_STRUCTURAL_CHUNKS = 16_384
 const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0
+/** Opening a FIFO swapped in for a checked file returns at once instead of waiting for a writer. */
+const NONBLOCK = fsConstants.O_NONBLOCK ?? 0
 
 type SupportedMimeType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
 type FileHandle = Awaited<ReturnType<typeof fs.open>>
@@ -49,7 +52,11 @@ export type ImportManagedMediaInput = {
   signal?: AbortSignal
 }
 type ImportManagedMediaCommon = Omit<ImportManagedMediaInput, 'bytes'> & { chatMediaRoot: string }
-export type ImportManagedMediaFileInput = ImportManagedMediaCommon & { sourcePath: string }
+export type ImportManagedMediaFileInput = ImportManagedMediaCommon & {
+  sourcePath: string
+  /** Deadlines for a source the renderer named; main-owned callers leave it unset. */
+  sourceGuard?: ImportSourceGuard
+}
 export type ImportManagedMediaStreamInput = ImportManagedMediaCommon & {
   stream: AsyncIterable<Uint8Array | string> | NodeJS.ReadableStream
 }
@@ -91,6 +98,7 @@ export type ManagedMediaImportErrorCode =
   | 'MANAGED_MEDIA_UNSUPPORTED'
   | 'MANAGED_MEDIA_TOO_LARGE'
   | 'MANAGED_MEDIA_IO'
+  | 'MANAGED_MEDIA_IMPORT_TIMEOUT'
 export class ManagedMediaImportError extends Error {
   constructor(
     public readonly code: ManagedMediaImportErrorCode,
@@ -110,6 +118,430 @@ export function isPathInsideRoot(root: string, candidate: string): boolean {
   const relative = path.relative(comparisonPath(root), comparisonPath(candidate))
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
+
+// An import and the orphan cleanup of the same media ID never run at the same time. The import
+// publishes (or reuses) the files and refreshes their timestamps under this lock; the cleanup
+// checks an ID again under it just before each delete. Without it a cleanup planned while an
+// old orphan was unreferenced could delete the file an import has just handed out again.
+const mediaIdLocks = new Map<string, Promise<void>>()
+// When this process last imported each media ID, newest last. An import counts as a reference
+// for the cleanup's retention time, also when the file's timestamp could not be refreshed.
+const recentImports = new Map<string, number>()
+const RECENT_IMPORTS_MAX = 4096
+const RECENT_IMPORTS_KEEP_MS = 7 * 24 * 60 * 60 * 1_000
+
+/** Runs `task` while no import and no cleanup of `mediaId` runs. */
+export async function withManagedMediaIdLock<T>(
+  mediaId: string,
+  task: () => Promise<T>
+): Promise<T> {
+  const previous = mediaIdLocks.get(mediaId) ?? Promise.resolve()
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const tail = previous.then(() => held)
+  mediaIdLocks.set(mediaId, tail)
+  try {
+    await previous
+    return await task()
+  } finally {
+    release()
+    if (mediaIdLocks.get(mediaId) === tail) mediaIdLocks.delete(mediaId)
+  }
+}
+
+function noteManagedMediaImport(mediaId: string): void {
+  const now = Date.now()
+  recentImports.delete(mediaId)
+  recentImports.set(mediaId, now)
+  for (const [id, at] of recentImports) {
+    if (recentImports.size <= RECENT_IMPORTS_MAX && now - at <= RECENT_IMPORTS_KEEP_MS) break
+    recentImports.delete(id)
+  }
+}
+
+/** When this process last imported `mediaId` (wall-clock milliseconds), if it did. */
+export function lastManagedMediaImportAt(mediaId: string): number | undefined {
+  return recentImports.get(mediaId)
+}
+
+/**
+ * Sets the timestamps of a file an import reuses to now, so the orphan cleanup's retention time
+ * counts from this import. Best effort: the in-process import record keeps protecting the file
+ * when this fails.
+ */
+async function refreshReusedFileTimes(
+  filePath: string,
+  fileSystem: typeof fs,
+  now: Date
+): Promise<void> {
+  try {
+    await fileSystem.lutimes(filePath, now, now)
+  } catch {
+    // Kept as it is; see above.
+  }
+}
+/**
+ * Deadlines for reading a source the renderer named, which may sit on a stalled network
+ * mount. A filesystem call that never returns holds one of libuv's four threadpool threads
+ * whatever main does, so these calls also run through a gate keyed by the source's root (a
+ * drive or mount, see importSourceRootKey): at most IMPORT_SOURCE_MAX_CALLS_PER_ROOT calls
+ * on one root and IMPORT_SOURCE_MAX_CALLS in all, stalled ones included (a slot is freed only
+ * when its call really returns). A call's deadline starts when it gets its slot, so waiting
+ * behind other calls never counts. A file with a call past its deadline does not respond: its
+ * next calls are refused at once. A root whose slots are all held by such calls is refused at
+ * once too, unless it answered since the first of them stalled (a drive with slow cloud
+ * placeholders) and the app has a slot to spare: then its other files get one slot more, but
+ * never the last slot that no stalled call holds, so another drive can always run (with the
+ * default limits there is no such slot to spare). When every slot of the app is held by calls
+ * past their deadline, every call is refused.
+ */
+export type ImportSourceGuard = {
+  /**
+   * Deadline for each filesystem call on the source (lstat, realpath, open, stat, each read),
+   * from when the call gets its slot: a copy that delivers no bytes for this long stops.
+   */
+  operationTimeoutMs: number
+  /**
+   * Absolute cap of a copy that keeps delivering bytes, from when its open gets a slot: this
+   * plus one second per copyMinBytesPerSecond bytes of the file.
+   */
+  copyBaseTimeoutMs: number
+  copyMinBytesPerSecond: number
+  /**
+   * Ceiling of that cap whatever size the source reports (default
+   * IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS): a source that trickles a byte now and then holds its
+   * slots no longer than this.
+   */
+  copyMaxTimeoutMs?: number
+}
+export const IMPORT_SOURCE_MAX_CALLS_PER_ROOT = 2
+export const IMPORT_SOURCE_MAX_CALLS = 3
+/** 20 minutes: more than the base gave a 1 GiB source (about 18 min); no real import needs more. */
+export const IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS = 20 * 60_000
+/** A call waits for a slot at most this many times its own deadline, then it is refused. */
+export const IMPORT_SOURCE_WAIT_TIMEOUT_FACTOR = 4
+export const DEFAULT_IMPORT_SOURCE_GUARD: ImportSourceGuard = {
+  operationTimeoutMs: 15_000,
+  copyBaseTimeoutMs: 60_000,
+  // Generous: four copies that share a 256 KiB/s link still finish.
+  copyMinBytesPerSecond: 64 * 1024,
+  copyMaxTimeoutMs: IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS
+}
+
+/** Monotonic: a clock step or a suspend/resume never ends a copy as a timeout. */
+const monotonicNow = (): number => performance.now()
+
+function importSourceTimeoutError(): ManagedMediaImportError {
+  return new ManagedMediaImportError(
+    'MANAGED_MEDIA_IMPORT_TIMEOUT',
+    MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE
+  )
+}
+
+/** Mount parents whose next segments name one mount: /Volumes/<name>, /media/<user>/<name>. */
+const MOUNT_PARENT_DEPTH: Readonly<Record<string, number>> = {
+  Volumes: 2,
+  mnt: 2,
+  media: 3,
+  net: 2,
+  Network: 3,
+  nfs: 2,
+  smb: 2,
+  afp: 2,
+  cifs: 2
+}
+
+/**
+ * The gate key of a source path, from its text alone (a call on the path itself may stall):
+ * the drive on Windows, the share of a UNC path, a mount under a usual mount parent, else the
+ * first directory. Two paths on one mount may get different keys and two mounts one key; the
+ * total limit still bounds the stalled calls either way.
+ */
+export function importSourceRootKey(filePath: string): string {
+  const value = String(filePath || '')
+  const drive = /^([a-zA-Z]):(?:[\\/]|$)/u.exec(value)
+  if (drive) return `${drive[1].toLowerCase()}:`
+  const segments = value.split(/[\\/]+/u).filter(Boolean)
+  if (/^[\\/]{2}/u.test(value)) return `//${segments.slice(0, 2).join('/').toLowerCase()}`
+  let depth = MOUNT_PARENT_DEPTH[segments[0] ?? ''] ?? 1
+  if (segments[0] === 'run' && segments[1] === 'media') depth = 4
+  if (segments[0] === 'run' && segments[1] === 'user' && segments[3] === 'gvfs') depth = 5
+  return `/${segments.slice(0, depth).join('/')}`
+}
+
+/** One call holding a slot of the gate. */
+export type ImportSourceGateSlot = {
+  /** The call passed its deadline; it keeps its slot until it returns. */
+  markOverdue(): void
+  /** The call returned (`ran`: its operation really ran), or ended before it ran (false). */
+  release(ran: boolean): void
+}
+
+export type ImportSourceGate = {
+  /**
+   * Calls start(slot) once a slot of `key` is free, or refuse() when the call would not be
+   * answered: its `file` (a comparison form of the source path, when given) already has a
+   * call past its deadline, its root does not respond, or every slot of the app is held by
+   * calls past their deadline. Returns cancel(), which takes a call that is still waiting out
+   * of the queue (true) and does nothing once it has started or been refused (false).
+   */
+  acquire(
+    key: string,
+    start: (slot: ImportSourceGateSlot) => void,
+    refuse: () => void,
+    file?: string
+  ): () => boolean
+  /** Calls holding a slot, stalled ones included. */
+  readonly active: number
+  /** Calls past their deadline that have not returned yet. */
+  readonly overdue: number
+}
+
+export function createImportSourceGate({
+  perRoot = IMPORT_SOURCE_MAX_CALLS_PER_ROOT,
+  total = IMPORT_SOURCE_MAX_CALLS,
+  onSaturated = () =>
+    console.warn(
+      '[ManagedMedia] Every import source slot is held by a call past its deadline; imports are refused until one returns'
+    )
+}: { perRoot?: number; total?: number; onSaturated?: () => void } = {}): ImportSourceGate {
+  type Waiter = {
+    key: string
+    file?: string
+    start: (slot: ImportSourceGateSlot) => void
+    refuse: () => void
+  }
+  /** `order` counts the calls in the order they started. */
+  type Call = { key: string; file?: string; order: number }
+  const inFlight = new Map<string, number>()
+  /** Calls past their deadline that have not returned. */
+  const late = new Set<Call>()
+  /** Root -> the order of the latest call there that returned within its deadline. */
+  const answered = new Map<string, number>()
+  let started = 0
+  let active = 0
+  let saturationLogged = false
+  const waiting: Waiter[] = []
+  const lateOn = (key: string): Call[] => Array.from(late).filter((call) => call.key === key)
+  // A root whose slots are all held by calls past their deadline gets one slot more, for its
+  // other files, only while it answers: a call there that started after the first of them
+  // returned within its deadline. A drive whose cloud placeholders are still downloading
+  // answers for its other files; a dead mount does not, so it never gets another thread.
+  // Only while it leaves the app a slot that no stalled call holds, even if the spare call
+  // stalls too: one root never takes every slot, so the other drives keep working. With the
+  // default limits (two per root, three in all) that slot is the spare one, so no root gets it.
+  const spare = (key: string): number => {
+    if (late.size + 1 >= total) return 0
+    const stalled = lateOn(key)
+    if (stalled.length < perRoot) return 0
+    const firstStall = Math.min(...stalled.map((call) => call.order))
+    return (answered.get(key) ?? 0) > firstStall ? 1 : 0
+  }
+  // A file with a call past its deadline does not respond (a cloud placeholder still
+  // downloading, a file on a share that stopped answering): a new call there would only hold
+  // another thread. When every slot of the app is held by such calls, nothing can run at all.
+  const refusesNow = ({ key, file }: Waiter): boolean =>
+    (file !== undefined && Array.from(late).some((call) => call.file === file)) ||
+    late.size >= total ||
+    lateOn(key).length >= perRoot + spare(key)
+  const pump = (): void => {
+    const run: Array<() => void> = []
+    for (let index = 0; index < waiting.length;) {
+      const waiter = waiting[index]
+      if (refusesNow(waiter)) {
+        waiting.splice(index, 1)
+        run.push(waiter.refuse)
+      } else if (active < total && (inFlight.get(waiter.key) ?? 0) < perRoot + spare(waiter.key)) {
+        waiting.splice(index, 1)
+        active += 1
+        inFlight.set(waiter.key, (inFlight.get(waiter.key) ?? 0) + 1)
+        const call: Call = { key: waiter.key, file: waiter.file, order: (started += 1) }
+        run.push(() => waiter.start(slotOf(call)))
+      } else {
+        index += 1
+      }
+    }
+    if (late.size >= total && !saturationLogged) {
+      saturationLogged = true
+      onSaturated()
+    } else if (late.size < total) {
+      saturationLogged = false
+    }
+    for (const next of run) next()
+  }
+  const slotOf = (call: Call): ImportSourceGateSlot => {
+    let released = false
+    return {
+      markOverdue() {
+        if (released || late.has(call)) return
+        late.add(call)
+        pump()
+      },
+      release(ran) {
+        if (released) return
+        released = true
+        active = Math.max(0, active - 1)
+        const wasLate = late.delete(call)
+        const left = (inFlight.get(call.key) ?? 1) - 1
+        if (left > 0) {
+          inFlight.set(call.key, left)
+          if (!wasLate && ran)
+            answered.set(call.key, Math.max(answered.get(call.key) ?? 0, call.order))
+        } else {
+          // No call left on the root: a later stall starts after every answer so far.
+          inFlight.delete(call.key)
+          answered.delete(call.key)
+        }
+        pump()
+      }
+    }
+  }
+  return {
+    acquire(key, start, refuse, file) {
+      const waiter: Waiter = { key, file, start, refuse }
+      waiting.push(waiter)
+      pump()
+      return () => {
+        const index = waiting.indexOf(waiter)
+        if (index < 0) return false
+        waiting.splice(index, 1)
+        return true
+      }
+    },
+    get active() {
+      return active
+    },
+    get overdue() {
+      return late.size
+    }
+  }
+}
+
+const defaultImportSourceGate = createImportSourceGate()
+
+/**
+ * Runs one filesystem call on an import source under the gate, rejecting with
+ * MANAGED_MEDIA_IMPORT_TIMEOUT once timeoutMs has passed since the call got its slot, once
+ * the monotonic time notAfter() has come (a copy's cap), when it waited waitTimeoutMs for a
+ * slot, or at once when its file does not respond (see ImportSourceGuard). The slot stays
+ * taken until the call really settles; a call still pending timeoutMs after it started is
+ * counted as overdue (its file does not respond), whatever cut it before. A result that
+ * arrives after the deadline goes to onLateResult (to close a late file handle).
+ */
+export function runImportSourceOperation<T>(
+  operation: () => Promise<T>,
+  {
+    key = '',
+    file,
+    timeoutMs,
+    waitTimeoutMs = Math.max(0, timeoutMs) * IMPORT_SOURCE_WAIT_TIMEOUT_FACTOR,
+    notAfter,
+    gate = defaultImportSourceGate,
+    onLateResult
+  }: {
+    key?: string
+    /** The source path the call is on: a file with an overdue call is refused at once. */
+    file?: string
+    timeoutMs: number
+    /** How long the call may wait for a slot (not counted in timeoutMs). */
+    waitTimeoutMs?: number
+    notAfter?: () => number
+    gate?: ImportSourceGate
+    onLateResult?: (value: T) => void
+  }
+): Promise<T> {
+  const fileId = file === undefined ? undefined : comparisonPath(file)
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    let started = false
+    let waitTimer: ReturnType<typeof setTimeout> | undefined
+    const start = (slot: ImportSourceGateSlot): void => {
+      started = true
+      clearTimeout(waitTimer)
+      const capLeft = notAfter ? notAfter() - monotonicNow() : Number.POSITIVE_INFINITY
+      const stallLimit = Math.max(0, timeoutMs)
+      if (capLeft <= 0) {
+        slot.release(false)
+        settled = true
+        reject(importSourceTimeoutError())
+        return
+      }
+      let returned = false
+      // Still pending a whole call deadline after it started: its file does not respond,
+      // even when the copy's cap cut the call first (it would otherwise hold its slot unseen).
+      const stallTimer = setTimeout(() => {
+        if (returned) return
+        slot.markOverdue()
+        if (settled) return
+        settled = true
+        reject(importSourceTimeoutError())
+      }, stallLimit)
+      const capTimer =
+        capLeft < stallLimit
+          ? setTimeout(() => {
+              if (returned || settled) return
+              settled = true
+              reject(importSourceTimeoutError())
+            }, capLeft)
+          : undefined
+      let pending: Promise<T>
+      try {
+        pending = Promise.resolve(operation())
+      } catch (error) {
+        pending = Promise.reject(error)
+      }
+      pending
+        .then(
+          (value) => {
+            returned = true
+            clearTimeout(stallTimer)
+            clearTimeout(capTimer)
+            if (!settled) {
+              settled = true
+              resolve(value)
+            } else {
+              onLateResult?.(value)
+            }
+          },
+          (error: unknown) => {
+            returned = true
+            clearTimeout(stallTimer)
+            clearTimeout(capTimer)
+            if (!settled) {
+              settled = true
+              reject(error)
+            }
+          }
+        )
+        .catch(() => undefined)
+        .finally(() => slot.release(true))
+    }
+    const cancel = gate.acquire(
+      key,
+      start,
+      () => {
+        clearTimeout(waitTimer)
+        settled = true
+        reject(importSourceTimeoutError())
+      },
+      fileId
+    )
+    // A call never waits for a slot without bound.
+    if (!started && !settled) {
+      waitTimer = setTimeout(
+        () => {
+          if (!cancel()) return
+          settled = true
+          reject(importSourceTimeoutError())
+        },
+        Math.max(0, waitTimeoutMs)
+      )
+    }
+  })
+}
+
 function abortError(): Error {
   return new ManagedMediaImportError('MANAGED_MEDIA_ABORTED', 'Managed media import aborted')
 }
@@ -152,6 +584,14 @@ function normalizeMime(value: string): SupportedMimeType {
       `Unsupported managed media MIME type: ${mime || '(empty)'}`
     )
   return mime as SupportedMimeType
+}
+/** True for the MIME types the store can hold; lets callers refuse others before copying bytes. */
+export function isManagedMediaMimeTypeSupported(value: string): boolean {
+  const mime = String(value || '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase()
+  return mime in extensions
 }
 function dimensionsAreSafe(width: number, height: number): boolean {
   return width > 0 && height > 0
@@ -906,83 +1346,94 @@ async function publishImport(
   await prepareContainedDirectory(canonicalRoot, metadataDirectory, fileSystem)
   const absolutePath = path.join(canonicalRoot, ...relativePath.split('/'))
   const metadataPath = path.join(metadataDirectory, `${staged.sha256}.json`)
-  const originalPublication = await publishStagedNoClobber(
-    canonicalRoot,
-    absolutePath,
-    staged.stagedPath,
-    staged.size,
-    fileSystem
-  )
-  let metadataCreated = false
-  try {
-    const originalHandle = await fileSystem.open(absolutePath, fsConstants.O_RDONLY | NOFOLLOW)
-    try {
-      const stat = await originalHandle.stat()
-      if (
-        !stat.isFile() ||
-        stat.size !== staged.size ||
-        (await hashHandle(originalHandle, staged.size)) !== staged.sha256
-      )
-        throw new Error('Managed media destination conflicts with existing content')
-    } finally {
-      await originalHandle.close()
-    }
-    const metadata: ManagedMediaMetadata = {
-      schema: METADATA_SCHEMA,
-      version: MANAGED_MEDIA_METADATA_VERSION,
-      sha256: staged.sha256,
-      sizeBytes: staged.size,
-      mimeType,
-      extension,
-      relativePath
-    }
-    const metadataBytes = Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`)
-    if (metadataBytes.length > MAX_METADATA_BYTES)
-      throw new Error('Managed media metadata is too large')
-    const metadataPublication = await publishBytesNoClobber(
+  return withManagedMediaIdLock(staged.sha256, async () => {
+    noteManagedMediaImport(staged.sha256)
+    const originalPublication = await publishStagedNoClobber(
       canonicalRoot,
-      metadataPath,
-      metadataBytes,
-      fileSystem,
-      randomId
+      absolutePath,
+      staged.stagedPath,
+      staged.size,
+      fileSystem
     )
-    metadataCreated = metadataPublication === 'created'
-    if (metadataPublication === 'exists') {
-      let valid = false
+    let metadataCreated = false
+    try {
+      const originalHandle = await fileSystem.open(absolutePath, fsConstants.O_RDONLY | NOFOLLOW)
       try {
-        valid = metadataIsConsistent(
-          JSON.parse(
-            (await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)).toString()
-          ),
-          metadata
+        const stat = await originalHandle.stat()
+        if (
+          !stat.isFile() ||
+          stat.size !== staged.size ||
+          (await hashHandle(originalHandle, staged.size)) !== staged.sha256
         )
-      } catch {
-        valid = false
+          throw new Error('Managed media destination conflicts with existing content')
+      } finally {
+        await originalHandle.close()
       }
-      if (!valid) throw new Error('Managed media metadata conflicts with existing content')
+      // Wall-clock time: the cleanup's retention time is measured against it.
+      const reusedAt = new Date()
+      // The same bytes were stored before (perhaps as an orphan past its retention time): this
+      // import hands them out again, so their retention time starts again too.
+      if (originalPublication === 'exists')
+        await refreshReusedFileTimes(absolutePath, fileSystem, reusedAt)
+      const metadata: ManagedMediaMetadata = {
+        schema: METADATA_SCHEMA,
+        version: MANAGED_MEDIA_METADATA_VERSION,
+        sha256: staged.sha256,
+        sizeBytes: staged.size,
+        mimeType,
+        extension,
+        relativePath
+      }
+      const metadataBytes = Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`)
+      if (metadataBytes.length > MAX_METADATA_BYTES)
+        throw new Error('Managed media metadata is too large')
+      const metadataPublication = await publishBytesNoClobber(
+        canonicalRoot,
+        metadataPath,
+        metadataBytes,
+        fileSystem,
+        randomId
+      )
+      metadataCreated = metadataPublication === 'created'
+      if (metadataPublication === 'exists') {
+        let valid = false
+        try {
+          valid = metadataIsConsistent(
+            JSON.parse(
+              (await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)).toString()
+            ),
+            metadata
+          )
+        } catch {
+          valid = false
+        }
+        if (!valid) throw new Error('Managed media metadata conflicts with existing content')
+        await refreshReusedFileTimes(metadataPath, fileSystem, reusedAt)
+      }
+      const stored = JSON.parse(
+        (await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)).toString()
+      ) as unknown
+      if (!metadataIsConsistent(stored, metadata))
+        throw new Error('Managed media metadata conflicts with existing content')
+      const reference = normalizeMediaReference({
+        version: MEDIA_REFERENCE_VERSION,
+        kind: 'managed',
+        relativePath: referencePath,
+        sha256: staged.sha256,
+        sizeBytes: staged.size,
+        mimeType,
+        originalFileName
+      })
+      if (!reference) throw new Error('Failed to construct managed media reference')
+      noteManagedMediaImport(staged.sha256)
+      return { reference, absolutePath, localMediaUrl: localUrl(absolutePath), metadataPath }
+    } catch (error) {
+      if (originalPublication === 'created')
+        await fileSystem.unlink(absolutePath).catch(() => undefined)
+      if (metadataCreated) await fileSystem.unlink(metadataPath).catch(() => undefined)
+      throw error
     }
-    const stored = JSON.parse(
-      (await readRegularFile(metadataPath, MAX_METADATA_BYTES, fileSystem)).toString()
-    ) as unknown
-    if (!metadataIsConsistent(stored, metadata))
-      throw new Error('Managed media metadata conflicts with existing content')
-    const reference = normalizeMediaReference({
-      version: MEDIA_REFERENCE_VERSION,
-      kind: 'managed',
-      relativePath: referencePath,
-      sha256: staged.sha256,
-      sizeBytes: staged.size,
-      mimeType,
-      originalFileName
-    })
-    if (!reference) throw new Error('Failed to construct managed media reference')
-    return { reference, absolutePath, localMediaUrl: localUrl(absolutePath), metadataPath }
-  } catch (error) {
-    if (originalPublication === 'created')
-      await fileSystem.unlink(absolutePath).catch(() => undefined)
-    if (metadataCreated) await fileSystem.unlink(metadataPath).catch(() => undefined)
-    throw error
-  }
+  })
 }
 
 export async function importManagedMediaStream(
@@ -1012,6 +1463,132 @@ export async function importManagedMediaStream(
   }
 }
 
+/**
+ * The calls of one read of a source (which may be a stalled or hostile mount), each with a
+ * deadline from when it gets its slot: no more than operationTimeoutMs, nor past the copy's
+ * cap once startCopy() set it. Without a guard (main-owned callers) a call runs as it is.
+ */
+function guardedSourceCalls(
+  guard: ImportSourceGuard | undefined,
+  { key, file, gate }: { key: string; file: string; gate?: ImportSourceGate }
+) {
+  // Monotonic time; set when the open gets its slot (see ImportSourceGuard).
+  let copyDeadline = Number.POSITIVE_INFINITY
+  let timedOut = false
+  return {
+    /** Whether a call hit its deadline (its handle may still wait for a stalled call). */
+    get timedOut() {
+      return timedOut
+    },
+    /** The copy's cap starts now, for a source of sizeBytes. */
+    startCopy(sizeBytes: number): void {
+      if (!guard) return
+      copyDeadline =
+        monotonicNow() +
+        Math.min(
+          guard.copyMaxTimeoutMs ?? IMPORT_SOURCE_COPY_MAX_TIMEOUT_MS,
+          guard.copyBaseTimeoutMs + Math.ceil((sizeBytes / guard.copyMinBytesPerSecond) * 1000)
+        )
+    },
+    call<T>(operation: () => Promise<T>, onLateResult?: (value: T) => void): Promise<T> {
+      if (!guard) return operation()
+      return runImportSourceOperation(operation, {
+        key,
+        file,
+        timeoutMs: guard.operationTimeoutMs,
+        notAfter: () => copyDeadline,
+        gate,
+        onLateResult
+      }).catch((error: unknown) => {
+        if ((error as ManagedMediaImportError)?.code === 'MANAGED_MEDIA_IMPORT_TIMEOUT')
+          timedOut = true
+        throw error
+      })
+    }
+  }
+}
+
+/**
+ * Reads one source file main granted for a single read (a file the user dropped from a
+ * mapped network drive) into memory, at most maxBytes, with the guards of an import's source
+ * calls: the open, the stat and every read run under the import-source gate, each with its
+ * own deadline, and the whole read under the copy's cap from when the open got its slot; a
+ * handle that opens late is closed, and one whose call stalled is closed in the background.
+ * Refused: anything but a regular file, and more than maxBytes (also bytes that appear while
+ * it is read). Errors never contain the path.
+ */
+export async function readImportSourceFile(
+  sourcePath: string,
+  {
+    maxBytes,
+    guard = DEFAULT_IMPORT_SOURCE_GUARD,
+    key = importSourceRootKey(sourcePath),
+    file = sourcePath,
+    gate,
+    fs: fileSystem = fs
+  }: {
+    maxBytes: number
+    guard?: ImportSourceGuard
+    /** The gate key and file of the path the user named (default: of sourcePath). */
+    key?: string
+    file?: string
+    gate?: ImportSourceGate
+    fs?: typeof fs
+  }
+): Promise<Buffer> {
+  const tooLarge = () =>
+    new ManagedMediaImportError(
+      'MANAGED_MEDIA_TOO_LARGE',
+      `Managed media source exceeds the ${maxBytes} byte limit`
+    )
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+    throw new ManagedMediaImportError('MANAGED_MEDIA_INVALID', 'Invalid managed media read limit')
+  const source = guardedSourceCalls(guard, { key, file, gate })
+  let handle: FileHandle
+  try {
+    handle = await source.call(
+      () => {
+        source.startCopy(maxBytes)
+        return fileSystem.open(sourcePath, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK)
+      },
+      (lateHandle) => void lateHandle.close().catch(() => undefined)
+    )
+  } catch (error) {
+    if (error instanceof ManagedMediaImportError) throw error
+    throw new ManagedMediaImportError('MANAGED_MEDIA_IO', 'Unable to read managed media source')
+  }
+  try {
+    const opened = await source.call(() => handle.stat())
+    if (!opened.isFile())
+      throw new ManagedMediaImportError(
+        'MANAGED_MEDIA_INVALID',
+        'Managed media source is not a file'
+      )
+    if (opened.size > maxBytes) throw tooLarge()
+    const chunk = Buffer.allocUnsafe(Math.min(IO_CHUNK_BYTES, maxBytes + 1))
+    const chunks: Buffer[] = []
+    let total = 0
+    // One byte more than the limit detects growth without reading an unbounded file.
+    for (;;) {
+      const length = Math.min(chunk.length, maxBytes + 1 - total)
+      const { bytesRead } = await source.call(() => handle.read(chunk, 0, length, total))
+      if (!bytesRead) break
+      total += bytesRead
+      if (total > maxBytes) throw tooLarge()
+      chunks.push(Buffer.from(chunk.subarray(0, bytesRead)))
+    }
+    return Buffer.concat(chunks, total)
+  } catch (error) {
+    if (error instanceof ManagedMediaImportError) throw error
+    throw new ManagedMediaImportError('MANAGED_MEDIA_IO', 'Unable to read managed media source')
+  } finally {
+    // FileHandle.close() waits for the handle's pending calls: after a deadline it would wait
+    // for the stalled call, so it is then left to finish in the background.
+    if (source.timedOut) void handle.close().catch(() => undefined)
+    else await handle.close().catch(() => undefined)
+  }
+}
+
 export async function importManagedMediaFile(
   input: ImportManagedMediaFileInput,
   dependencies: ManagedMediaStoreDependencies
@@ -1022,10 +1599,16 @@ export async function importManagedMediaFile(
   const canonicalRoot = await prepareStoreRoot(input.chatMediaRoot, authorizedRoot, fileSystem)
   throwIfAborted(input.signal)
   const resolvedSource = path.resolve(input.sourcePath)
-  const sourceLstat = await fileSystem.lstat(resolvedSource)
+  const source = guardedSourceCalls(input.sourceGuard, {
+    key: importSourceRootKey(resolvedSource),
+    file: resolvedSource
+  })
+  const onSource = <T>(operation: () => Promise<T>, onLateResult?: (value: T) => void) =>
+    source.call(operation, onLateResult)
+  const sourceLstat = await onSource(() => fileSystem.lstat(resolvedSource))
   if (sourceLstat.isSymbolicLink() || !sourceLstat.isFile())
     throw new Error('Managed media source must be a regular non-symlink file')
-  const canonicalSource = await fileSystem.realpath(resolvedSource)
+  const canonicalSource = await onSource(() => fileSystem.realpath(resolvedSource))
   if (comparisonPath(canonicalSource) !== comparisonPath(resolvedSource))
     throw new Error('Managed media source must be canonical')
   if (isPathInsideRoot(canonicalRoot, canonicalSource))
@@ -1033,11 +1616,21 @@ export async function importManagedMediaFile(
   const maxBytes = sizeLimit(input.maxBytes)
   if (!sourceLstat.size) throw new Error('Managed media cannot be empty')
   if (maxBytes !== undefined && sourceLstat.size > maxBytes)
-    throw new Error(`Managed media exceeds the ${maxBytes} byte limit`)
-  const sourceHandle = await fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW)
+    throw new ManagedMediaImportError(
+      'MANAGED_MEDIA_TOO_LARGE',
+      `Managed media exceeds the ${maxBytes} byte limit`
+    )
+  const sourceHandle = await onSource(
+    () => {
+      // The copy's cap starts now that its open has a slot, not when the import was asked.
+      source.startCopy(sourceLstat.size)
+      return fileSystem.open(resolvedSource, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK)
+    },
+    (lateHandle) => void lateHandle.close().catch(() => undefined)
+  )
   let staged: { stagedPath: string; size: number; sha256: string } | undefined
   try {
-    const opened = await sourceHandle.stat()
+    const opened = await onSource(() => sourceHandle.stat())
     if (
       !opened.isFile() ||
       opened.dev !== sourceLstat.dev ||
@@ -1046,21 +1639,22 @@ export async function importManagedMediaFile(
       opened.mtimeMs !== sourceLstat.mtimeMs
     )
       throw new Error('Managed media source changed before import')
+    // Read to the end of the file, not just the stat size: bytes that appear during the copy
+    // count against maxBytes in stageIterable (which stops the copy there), and a size that
+    // differs from the stat is refused below and by the after-copy stat.
     async function* chunks(): AsyncGenerator<Buffer> {
       const buffer = Buffer.allocUnsafe(Math.min(IO_CHUNK_BYTES, opened.size))
       let position = 0
-      while (position < opened.size) {
+      for (;;) {
         throwIfAborted(input.signal)
-        const { bytesRead } = await sourceHandle.read(
-          buffer,
-          0,
-          Math.min(buffer.length, opened.size - position),
-          position
+        const { bytesRead } = await onSource(() =>
+          sourceHandle.read(buffer, 0, buffer.length, position)
         )
-        if (!bytesRead) throw new Error('Managed media source changed during import')
+        if (!bytesRead) break
         position += bytesRead
         yield Buffer.from(buffer.subarray(0, bytesRead))
       }
+      if (position !== opened.size) throw new Error('Managed media source changed during import')
     }
     staged = await stageIterable(
       canonicalRoot,
@@ -1070,7 +1664,7 @@ export async function importManagedMediaFile(
       fileSystem,
       randomId
     )
-    const after = await sourceHandle.stat()
+    const after = await onSource(() => sourceHandle.stat())
     if (
       after.dev !== opened.dev ||
       after.ino !== opened.ino ||
@@ -1081,7 +1675,10 @@ export async function importManagedMediaFile(
       throw new Error('Managed media source changed during import')
     return await publishImport(canonicalRoot, staged, input, dependencies)
   } finally {
-    await sourceHandle.close().catch(() => undefined)
+    // FileHandle.close() waits for the handle's pending calls: after a deadline it would wait
+    // for the stalled read, so it is then left to finish in the background.
+    if (source.timedOut) void sourceHandle.close().catch(() => undefined)
+    else await sourceHandle.close().catch(() => undefined)
     if (staged) await fileSystem.unlink(staged.stagedPath).catch(() => undefined)
   }
 }
@@ -1262,7 +1859,12 @@ export async function resolveManagedMediaReference(
     const handle = await fileSystem.open(absolutePath, fsConstants.O_RDONLY | NOFOLLOW)
     try {
       const opened = await handle.stat()
-      const contentHash = await hashHandle(handle, opened.size)
+      if (!sameFileState(before, opened))
+        throw new ManagedMediaResolutionError(
+          'MANAGED_MEDIA_CORRUPT',
+          'Managed media changed before hashing'
+        )
+      const contentHash = await hashHandle(handle, before.size)
       const after = await handle.stat()
       const current = await fileSystem.lstat(absolutePath)
       if (

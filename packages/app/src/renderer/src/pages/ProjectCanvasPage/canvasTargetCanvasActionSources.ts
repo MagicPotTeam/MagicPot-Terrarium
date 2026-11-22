@@ -63,6 +63,55 @@ export function canvasTargetSemanticCanvasActionRequiresResolvedSource(
   return canvasTargetCanvasActionRequiresResolvedSource(action)
 }
 
+// Every item id an action names, before anything is dropped: ids that do not
+// exist on the canvas stay in `ids`, and a stage or artifact reference that
+// maps to no canvas item is reported in `unresolved`. Authorization checks
+// use this so a reference that cannot be resolved is refused, not silently
+// narrowed. Same precedence as resolveCanvasTargetSemanticCanvasActionSourceIds.
+export function collectCanvasTargetCanvasActionReferencedIds(
+  action: CanvasTargetCanvasAction,
+  state: CanvasTargetSemanticCanvasActionState
+): { ids: string[]; unresolved: string[] } {
+  const sourceStageIds = [
+    ...(action.sourceStageId ? [action.sourceStageId] : []),
+    ...(action.sourceStageIds || [])
+  ]
+  if (sourceStageIds.length > 0) {
+    const mapped = sourceStageIds.map((stageId) => state.stageCanvasItemIds?.get(stageId))
+    return {
+      ids: Array.from(new Set(mapped.flatMap((ids) => ids || []))),
+      unresolved: sourceStageIds.filter((_, index) => !mapped[index]?.length)
+    }
+  }
+
+  const artifactIds = [
+    ...(action.artifactId ? [action.artifactId] : []),
+    ...(action.artifactIds || [])
+  ]
+  if (artifactIds.length > 0) {
+    const mapped = artifactIds.map((artifactId) => state.artifactCanvasItemIds?.get(artifactId))
+    return {
+      ids: Array.from(new Set(mapped.flatMap((ids) => ids || []))),
+      unresolved: artifactIds.filter((_, index) => !mapped[index]?.length)
+    }
+  }
+
+  if (action.itemIds?.length) {
+    return { ids: Array.from(new Set(action.itemIds)), unresolved: [] }
+  }
+
+  switch (action.source) {
+    case 'item_ids':
+      return { ids: Array.from(new Set(action.itemIds || [])), unresolved: [] }
+    case 'all_canvas':
+      return { ids: state.items.map((item) => item.id), unresolved: [] }
+    case 'current_selection':
+      return { ids: Array.from(state.selectedIds), unresolved: [] }
+    default:
+      return { ids: [], unresolved: [] }
+  }
+}
+
 export function resolveCanvasTargetSemanticCanvasActionSourceIds(
   action: CanvasTargetCanvasAction,
   state: CanvasTargetSemanticCanvasActionState

@@ -12,6 +12,12 @@ import i18next from 'i18next'
 import type { Config } from '@shared/config/config'
 import type { CanvasFigmaBinding } from '@shared/figma'
 import { clearCanvasItems, loadCanvasItems, saveCanvasItems } from './canvasStorage'
+import { rememberPendingCanvasSave, waitForPendingCanvasSave } from './canvasPendingSaves'
+import {
+  areCanvasPersistenceSignaturesEqual,
+  buildCanvasPersistenceSignature,
+  type CanvasPersistenceSignature
+} from './canvasItemSerialization'
 import { releaseCanvasImageObjectUrl } from './canvasImageObjectUrlRegistry'
 import { getExactSelectedGroupBounds, resolveCanvasFitBounds } from './canvasFitBoundsUtils'
 import type { CanvasExportBounds } from './groupPlaybackUtils'
@@ -69,6 +75,18 @@ type UseCanvasViewportPersistenceOptions = {
   addModel3DToCanvas: (file: File) => Promise<unknown> | unknown
   addVideoToCanvas: (file: File) => Promise<unknown> | unknown
   suspendAutoSave?: boolean
+  restoreGenerationRef?: MutableRefObject<number>
+  isCanvasSceneImporting?: () => boolean
+  /** Read-only: the item lists of the undo history and the redo stack. */
+  getUndoRedoItemLists?: () => Iterable<readonly CanvasItem[]>
+  /** Called once per board open, after the items are loaded and hydrated. */
+  onCanvasItemsLoaded?: (event: CanvasItemsLoadedEvent) => void
+}
+
+/** A board's items are on the canvas: the items as stored, before hydration. */
+export type CanvasItemsLoadedEvent = {
+  canvasId: string
+  storedItems: readonly CanvasItem[]
 }
 
 type CanvasPersistenceSnapshot = {
@@ -79,48 +97,34 @@ type CanvasPersistenceSnapshot = {
   figmaBinding: CanvasFigmaBinding | null
 }
 
-const pendingCanvasSaveById = new Map<string, Promise<void>>()
+const CANVAS_AUTOSAVE_DELAY_MS = import.meta.env.MODE === 'test' ? 250 : 1500
+// While a pointer is down or the viewport is moving the autosave waits; it is
+// re-checked at this interval and never held back longer than the maximum.
+const CANVAS_AUTOSAVE_GESTURE_RECHECK_MS = 250
+const CANVAS_AUTOSAVE_GESTURE_MAX_POSTPONE_MS = 10_000
+const CANVAS_VIEWPORT_INTERACTION_QUIET_MS = 250
 
-function rememberPendingCanvasSave(canvasId: string, promise: Promise<void>) {
-  pendingCanvasSaveById.set(canvasId, promise)
-  void promise
-    .finally(() => {
-      if (pendingCanvasSaveById.get(canvasId) === promise) {
-        pendingCanvasSaveById.delete(canvasId)
-      }
-    })
-    .catch(() => {
-      // waitForPendingCanvasSave handles the original promise; this only consumes finally().
-    })
+type CanvasSaveMode = 'full' | 'metadata-only' | 'metadata-first'
+
+const CANVAS_SAVE_MODE_STRENGTH: Record<CanvasSaveMode, number> = {
+  'metadata-only': 0,
+  'metadata-first': 1,
+  full: 2
 }
 
-async function waitForPendingCanvasSave(canvasId: string): Promise<void> {
-  const pendingSave = pendingCanvasSaveById.get(canvasId)
-  if (!pendingSave) return
-
-  try {
-    await pendingSave
-  } catch {
-    // saveCanvasItems normalizes failures internally; keep restore best-effort if that changes.
-  }
+function strongerCanvasSaveMode(
+  left: CanvasSaveMode | null,
+  right: CanvasSaveMode
+): CanvasSaveMode {
+  return left !== null && CANVAS_SAVE_MODE_STRENGTH[left] >= CANVAS_SAVE_MODE_STRENGTH[right]
+    ? left
+    : right
 }
 
 function areArrayItemsSame<T>(left: readonly T[], right: readonly T[]): boolean {
   return (
     left.length === right.length && left.every((value, index) => Object.is(value, right[index]))
   )
-}
-
-function buildCanvasPersistenceSignature(
-  items: CanvasItem[],
-  groups: CanvasGroup[],
-  groupBranches: CanvasGroupBranch[],
-  figmaBinding: CanvasFigmaBinding | null
-): string {
-  return JSON.stringify({ items, groups, groupBranches, figmaBinding }, (key, value) => {
-    if (key === 'image' || key === 'sourceFile' || key === 'deferRender') return undefined
-    return value
-  })
 }
 
 export function useCanvasViewportPersistence({
@@ -151,7 +155,11 @@ export function useCanvasViewportPersistence({
   handleImportFiles,
   addModel3DToCanvas,
   addVideoToCanvas,
-  suspendAutoSave = false
+  suspendAutoSave = false,
+  restoreGenerationRef: sharedRestoreGenerationRef,
+  isCanvasSceneImporting,
+  getUndoRedoItemLists,
+  onCanvasItemsLoaded
 }: UseCanvasViewportPersistenceOptions) {
   const latestPersistedCanvasStateRef = useRef<CanvasPersistenceSnapshot>({
     canvasId,
@@ -164,13 +172,22 @@ export function useCanvasViewportPersistence({
   const hasPendingCanvasChangesRef = useRef(false)
   const canvasSaveInFlightRef = useRef<{ canvasId: string; promise: Promise<void> } | null>(null)
   const saveAgainAfterInFlightRef = useRef(false)
+  // The strongest mode asked for by callers that joined the save in flight.
+  const joinedCanvasSaveModeRef = useRef<CanvasSaveMode | null>(null)
   const lastCanvasSaveErrorRef = useRef<unknown>(null)
-  const lastPersistedCanvasSignatureRef = useRef<string | null>(null)
+  const lastPersistedCanvasSignatureRef = useRef<CanvasPersistenceSignature | null>(null)
   const isRestoringRef = useRef(true)
   const activeCanvasIdRef = useRef(canvasId)
-  const restoreGenerationRef = useRef(0)
+  const localRestoreGenerationRef = useRef(0)
+  const restoreGenerationRef = sharedRestoreGenerationRef ?? localRestoreGenerationRef
   const shouldClearCanvasBeforeRestoreRef = useRef(false)
   const suspendAutoSaveRef = useRef(suspendAutoSave)
+  const getUndoRedoItemListsRef = useRef(getUndoRedoItemLists)
+  getUndoRedoItemListsRef.current = getUndoRedoItemLists
+  const onCanvasItemsLoadedRef = useRef(onCanvasItemsLoaded)
+  onCanvasItemsLoadedRef.current = onCanvasItemsLoaded
+  const activePointerIdsRef = useRef(new Set<number>())
+  const lastViewportInteractionAtRef = useRef(0)
   const latestHydrateCanvasImageItemForCanvasRef = useRef(hydrateCanvasImageItemForCanvas)
   const latestNextZIndexRefRef = useRef(nextZIndexRef)
   const documentTitleRef = useRef(documentTitle)
@@ -197,6 +214,7 @@ export function useCanvasViewportPersistence({
     shouldClearCanvasBeforeRestoreRef.current = true
     hasPendingCanvasChangesRef.current = false
     saveAgainAfterInFlightRef.current = false
+    joinedCanvasSaveModeRef.current = null
     lastCanvasSaveErrorRef.current = null
     lastPersistedCanvasSignatureRef.current = null
   }
@@ -304,8 +322,9 @@ export function useCanvasViewportPersistence({
   ])
 
   const openClearConfirmDialog = useCallback(() => {
+    if (isCanvasSceneImporting?.()) return
     setClearConfirmOpen(true)
-  }, [])
+  }, [isCanvasSceneImporting])
 
   const closeClearConfirmDialog = useCallback(() => {
     setClearConfirmOpen(false)
@@ -327,8 +346,10 @@ export function useCanvasViewportPersistence({
         groupBranches,
         figmaBinding
       )
-      hasPendingCanvasChangesRef.current =
-        currentSignature !== lastPersistedCanvasSignatureRef.current
+      hasPendingCanvasChangesRef.current = !areCanvasPersistenceSignaturesEqual(
+        currentSignature,
+        lastPersistedCanvasSignatureRef.current
+      )
       if (hasPendingCanvasChangesRef.current) lastCanvasSaveErrorRef.current = null
       void publishUnsavedState()
     }
@@ -342,12 +363,12 @@ export function useCanvasViewportPersistence({
   }, [])
 
   const handleClear = useCallback(async () => {
-    clearPendingCanvasSave()
-    const clearGeneration = restoreGenerationRef.current + 1
-    restoreGenerationRef.current = clearGeneration
+    if (isCanvasSceneImporting?.()) return
+    const clearGeneration = ++restoreGenerationRef.current
     isRestoringRef.current = true
 
     try {
+      clearPendingCanvasSave()
       await waitForPendingCanvasSave(canvasId)
       if (restoreGenerationRef.current !== clearGeneration) return
       await clearCanvasItems(canvasId)
@@ -376,6 +397,8 @@ export function useCanvasViewportPersistence({
     }
   }, [
     canvasId,
+    isCanvasSceneImporting,
+    restoreGenerationRef,
     clearPendingCanvasSave,
     items,
     setFigmaBinding,
@@ -389,14 +412,37 @@ export function useCanvasViewportPersistence({
     void handleClear()
   }, [handleClear])
 
-  const persistLatestCanvasState = useCallback(() => {
+  const isCanvasGestureActive = useCallback(
+    () =>
+      activePointerIdsRef.current.size > 0 ||
+      Date.now() - lastViewportInteractionAtRef.current < CANVAS_VIEWPORT_INTERACTION_QUIET_MS,
+    []
+  )
+
+  const armCanvasSaveTimerRef = useRef<() => void>(() => {})
+
+  /**
+   * 'full' saves whatever it takes. 'metadata-only' saves only when no asset
+   * byte has to move and otherwise leaves the board to the autosave timer.
+   * 'metadata-first' tries the same and falls back to a full save at once.
+   */
+  const persistLatestCanvasState = useCallback((mode: CanvasSaveMode = 'full') => {
     if (isRestoringRef.current) return Promise.resolve()
 
-    clearPendingCanvasSave()
+    // A metadata-only flush keeps the timer: it is the fallback when bytes are needed.
+    if (mode !== 'metadata-only') clearPendingCanvasSave()
 
     const saveInFlight = canvasSaveInFlightRef.current
     if (saveInFlight?.canvasId === canvasId) {
       if (hasPendingCanvasChangesRef.current) saveAgainAfterInFlightRef.current = true
+      // The run in flight may be a metadata-only flush. A caller that needs the
+      // board saved (close, page hide, unmount) makes it fall back to a full save.
+      if (mode !== 'metadata-only') {
+        joinedCanvasSaveModeRef.current = strongerCanvasSaveMode(
+          joinedCanvasSaveModeRef.current,
+          mode
+        )
+      }
       return saveInFlight.promise
     }
 
@@ -406,22 +452,57 @@ export function useCanvasViewportPersistence({
 
     const saveCanvasId = canvasId
     let savePromise: Promise<void> | null = null
+    let runMode = mode
+    let metadataOnly = mode !== 'full'
+    let needsTimer = false
+    joinedCanvasSaveModeRef.current = null
+    const absorbJoinedSaveMode = () => {
+      const joinedMode = joinedCanvasSaveModeRef.current
+      joinedCanvasSaveModeRef.current = null
+      if (joinedMode === null) return
+      runMode = strongerCanvasSaveMode(runMode, joinedMode)
+      if (runMode === 'full') metadataOnly = false
+    }
     const drainCanvasSaves = async () => {
       try {
         do {
+          absorbJoinedSaveMode()
           saveAgainAfterInFlightRef.current = false
           hasPendingCanvasChangesRef.current = false
           const snapshot = latestPersistedCanvasStateRef.current
           if (snapshot.canvasId !== saveCanvasId) {
             break
           }
-          await saveCanvasItems(
+          const outcome = await saveCanvasItems(
             snapshot.items,
             saveCanvasId,
             snapshot.groups,
             snapshot.groupBranches,
-            snapshot.figmaBinding
+            snapshot.figmaBinding,
+            {
+              // Assets that the live items (they may be newer than this
+              // snapshot), an undo or a redo can still bring back are kept.
+              getProtectedItems: () => {
+                const latest = latestPersistedCanvasStateRef.current
+                return [
+                  ...(latest.canvasId === saveCanvasId ? [latest.items] : []),
+                  ...(getUndoRedoItemListsRef.current?.() ?? [])
+                ]
+              },
+              ...(metadataOnly ? { metadataOnly: true } : {})
+            }
           )
+          if (outcome === 'needs-bytes') {
+            // Nothing was written. The board stays dirty for a save that may move bytes.
+            hasPendingCanvasChangesRef.current = true
+            absorbJoinedSaveMode()
+            if (runMode !== 'metadata-only') {
+              metadataOnly = false
+              continue
+            }
+            needsTimer = true
+            break
+          }
           lastPersistedCanvasSignatureRef.current = buildCanvasPersistenceSignature(
             snapshot.items,
             snapshot.groups,
@@ -437,6 +518,9 @@ export function useCanvasViewportPersistence({
       } finally {
         if (savePromise && canvasSaveInFlightRef.current?.promise === savePromise) {
           canvasSaveInFlightRef.current = null
+        }
+        if (needsTimer && pendingCanvasSaveTimerRef.current === null) {
+          armCanvasSaveTimerRef.current()
         }
         void publishUnsavedState()
       }
@@ -454,10 +538,12 @@ export function useCanvasViewportPersistence({
 
     const restore = async () => {
       isRestoringRef.current = true
+      let loadedItems: readonly CanvasItem[] | null = null
       try {
         clearPendingCanvasSave()
         hasPendingCanvasChangesRef.current = false
         saveAgainAfterInFlightRef.current = false
+        joinedCanvasSaveModeRef.current = null
         lastPersistedCanvasSignatureRef.current = null
         if (shouldClearCanvasBeforeRestoreRef.current) {
           shouldClearCanvasBeforeRestoreRef.current = false
@@ -559,6 +645,7 @@ export function useCanvasViewportPersistence({
               return changed ? nextItems : currentItems
             })
           }
+          loadedItems = saved.items
         }
       } catch (error) {
         console.error('[Canvas] Failed to restore canvas state.', error)
@@ -566,6 +653,9 @@ export function useCanvasViewportPersistence({
         if (restoreGenerationRef.current === restoreGeneration) {
           isRestoringRef.current = false
         }
+      }
+      if (loadedItems && !cancelled && restoreGenerationRef.current === restoreGeneration) {
+        onCanvasItemsLoadedRef.current?.({ canvasId, storedItems: loadedItems })
       }
     }
 
@@ -577,6 +667,7 @@ export function useCanvasViewportPersistence({
     }
   }, [
     canvasId,
+    restoreGenerationRef,
     clearPendingCanvasSave,
     setFigmaBinding,
     setGroupBranches,
@@ -584,6 +675,65 @@ export function useCanvasViewportPersistence({
     setItems,
     setSelectedIds
   ])
+
+  const armCanvasSaveTimer = useCallback(() => {
+    const schedule = (delayMs: number, postponedSince: number | null) => {
+      pendingCanvasSaveTimerRef.current = window.setTimeout(() => {
+        pendingCanvasSaveTimerRef.current = null
+        if (suspendAutoSaveRef.current) return
+        const now = Date.now()
+        if (
+          isCanvasGestureActive() &&
+          (postponedSince === null || now - postponedSince < CANVAS_AUTOSAVE_GESTURE_MAX_POSTPONE_MS)
+        ) {
+          // Not in the middle of a drag, a pan or a zoom; look again shortly.
+          schedule(CANVAS_AUTOSAVE_GESTURE_RECHECK_MS, postponedSince ?? now)
+          return
+        }
+        void persistLatestCanvasState().catch(() => {
+          // The dirty/error refs keep unload protection active until a later save succeeds.
+        })
+      }, delayMs)
+    }
+    clearPendingCanvasSave()
+    schedule(CANVAS_AUTOSAVE_DELAY_MS, null)
+  }, [clearPendingCanvasSave, isCanvasGestureActive, persistLatestCanvasState])
+  armCanvasSaveTimerRef.current = armCanvasSaveTimer
+
+  useEffect(() => {
+    const activePointerIds = activePointerIdsRef.current
+    const handlePointerDown = (event: PointerEvent) => {
+      activePointerIds.add(event.pointerId)
+    }
+    const handlePointerEnd = (event: PointerEvent) => {
+      activePointerIds.delete(event.pointerId)
+    }
+    const handleReset = () => {
+      activePointerIds.clear()
+    }
+    const handleWheel = () => {
+      lastViewportInteractionAtRef.current = Date.now()
+    }
+    const options = { capture: true, passive: true } as const
+    window.addEventListener('pointerdown', handlePointerDown, options)
+    window.addEventListener('pointerup', handlePointerEnd, options)
+    window.addEventListener('pointercancel', handlePointerEnd, options)
+    window.addEventListener('blur', handleReset)
+    window.addEventListener('wheel', handleWheel, options)
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown, options)
+      window.removeEventListener('pointerup', handlePointerEnd, options)
+      window.removeEventListener('pointercancel', handlePointerEnd, options)
+      window.removeEventListener('blur', handleReset)
+      window.removeEventListener('wheel', handleWheel, options)
+      activePointerIds.clear()
+    }
+  }, [])
+
+  useEffect(() => {
+    // The committed viewport moved: a pan or a zoom is in progress or has just ended.
+    lastViewportInteractionAtRef.current = Date.now()
+  }, [stagePos, stageScale])
 
   useEffect(() => {
     if (!hasPendingCanvasChangesRef.current) return
@@ -593,14 +743,7 @@ export function useCanvasViewportPersistence({
       return clearPendingCanvasSave
     }
 
-    pendingCanvasSaveTimerRef.current = window.setTimeout(
-      () => {
-        void persistLatestCanvasState().catch(() => {
-          // The dirty/error refs keep unload protection active until a later save succeeds.
-        })
-      },
-      import.meta.env.MODE === 'test' ? 250 : 1500
-    )
+    armCanvasSaveTimerRef.current()
 
     return clearPendingCanvasSave
   }, [
@@ -609,15 +752,18 @@ export function useCanvasViewportPersistence({
     groupBranches,
     groups,
     items,
-    persistLatestCanvasState,
     suspendAutoSave
   ])
 
   useEffect(() => {
+    // Losing focus or visibility never starts moving asset bytes: the board is
+    // flushed when its record alone is enough, and left to the autosave timer
+    // otherwise. A page that is going away gets the full save as a fallback.
     const flushPendingCanvasSave = (force = false) => {
-      if (!hasPendingCanvasChangesRef.current) return
+      // A save in flight may be a metadata-only flush that still needs bytes moved.
+      if (!hasPendingCanvasChangesRef.current && canvasSaveInFlightRef.current === null) return
       if (!force && suspendAutoSaveRef.current) return
-      void persistLatestCanvasState().catch(() => {
+      void persistLatestCanvasState(force ? 'metadata-first' : 'metadata-only').catch(() => {
         // The native close flow reports the error and keeps the window open.
       })
     }

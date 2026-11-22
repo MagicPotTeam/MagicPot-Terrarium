@@ -95,7 +95,7 @@ export const createAgentToolInvocationResult = (
     startedAt,
     finishedAt,
     durationMs: 0,
-    ...(result.content ? { content: result.content } : {}),
+    ...(result.content !== undefined ? { content: result.content } : {}),
     ...(result.metadata ? { metadata: result.metadata } : {}),
     ...(result.error ? { error: result.error } : {})
   }

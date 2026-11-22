@@ -420,6 +420,21 @@ describe('CustomSkillManagerPage', () => {
     slowTestTimeoutMs
   )
 
+  it('persists procedural opt-in and path filters through the real skill editor without enabling external agents', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByTestId('custom-skill-card-skill-1'))
+    const editDialog = await screen.findByTestId('custom-skill-edit-dialog')
+    const toggle = within(editDialog).getByRole('switch', { name: 'custom_workshop.procedural_enable' })
+    expect(toggle).not.toBeChecked(); fireEvent.click(toggle)
+    const paths = within(editDialog).getByLabelText('custom_workshop.procedural_paths')
+    fireEvent.change(paths, { target: { value: '*.ts\n**/*.md' } }); fireEvent.blur(paths)
+    await waitFor(() => expect(getPersistedSkills().find((skill) => skill.id === 'skill-1')).toMatchObject({ procedural: { enabled: true, paths: ['*.ts', '**/*.md'] } }))
+    expect(batchSaveCustomSkillsMock).toHaveBeenLastCalledWith(expect.objectContaining({ skills: expect.arrayContaining([expect.objectContaining({ id: 'skill-1', procedural: { enabled: true, paths: ['*.ts', '**/*.md'] } })]) }))
+    fireEvent.change(within(editDialog).getByLabelText('Skill type'), { target: { value: 'agent' } })
+    await waitFor(() => expect(within(editDialog).queryByRole('switch', { name: 'custom_workshop.procedural_enable' })).toBeNull())
+    expect(getPersistedSkills().find((skill) => skill.id === 'skill-1')?.procedural).toBeUndefined()
+  }, slowTestTimeoutMs)
+
   it(
     'persists the renamed simplified execution options from the edit dialog',
     async () => {

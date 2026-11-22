@@ -16,6 +16,7 @@ import { loadImageFromSrc } from '@renderer/pages/ProjectCanvasPage/canvasAssetI
 import { resolveCanvasLocalFilePathFromSource } from '@renderer/pages/ProjectCanvasPage/canvasLocalImageSource'
 import { stripHtmlToText } from './htmlText'
 import { parseExternalImageDrop } from '@shared/externalImageDrop'
+import { MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS } from '@shared/api/svcManagedMedia'
 import { getChatAttachmentMaxSizeMB } from '@renderer/features/chat/chatAttachmentUtils'
 
 export const QAPP_IMAGE_DRAG_MIME = 'application/x-qapp-image'
@@ -23,6 +24,58 @@ export const AGENT_IMAGE_DRAG_MIME = 'application/x-ai-image'
 export const INTERNAL_IMAGE_DRAG_PREFIX = 'MAGICPOT_DRAG::'
 export const CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY = 'magicpotCanvasCropSource'
 export const UNSUPPORTED_INTERNAL_FILE_DROP_MESSAGE = '提交的元素含有该功能不知道格式，请重新选择。'
+
+/**
+ * A report's MAIN binding (a bearer secret) never enters a DataTransfer: a drag of a bound
+ * report carries only a short-lived token under the app-private MIME, and a drop in this same
+ * window swaps the token back for the binding. Drops from anywhere else (another app, another
+ * window, text/plain) never bring a binding in.
+ */
+const REPORT_BUNDLE_DRAG_TOKEN_TTL_MS = 2 * 60_000
+const REPORT_BUNDLE_DRAG_TOKEN_LIMIT = 8
+const reportBundleDragTokens = new Map<
+  string,
+  { binding: string; url: string; expiresAt: number }
+>()
+
+const pruneReportBundleDragTokens = (now: number): void => {
+  for (const [token, entry] of reportBundleDragTokens) {
+    if (entry.expiresAt <= now) reportBundleDragTokens.delete(token)
+  }
+  while (reportBundleDragTokens.size >= REPORT_BUNDLE_DRAG_TOKEN_LIMIT) {
+    const oldest = reportBundleDragTokens.keys().next().value
+    if (oldest === undefined) break
+    reportBundleDragTokens.delete(oldest)
+  }
+}
+
+/** Keeps `binding` in this window's memory for a drag of `url`; returns the token to carry. */
+export const createReportBundleDragToken = (binding: string, url: string): string => {
+  const now = Date.now()
+  pruneReportBundleDragTokens(now)
+  const token = `rbd.${crypto.randomUUID()}`
+  reportBundleDragTokens.set(token, {
+    binding,
+    url,
+    expiresAt: now + REPORT_BUNDLE_DRAG_TOKEN_TTL_MS
+  })
+  return token
+}
+
+const resolveReportBundleDragToken = (token: unknown, url: string): string | undefined => {
+  if (typeof token !== 'string') return undefined
+  const entry = reportBundleDragTokens.get(token)
+  if (!entry) return undefined
+  if (entry.expiresAt <= Date.now()) {
+    reportBundleDragTokens.delete(token)
+    return undefined
+  }
+  return entry.url === url ? entry.binding : undefined
+}
+
+export const clearReportBundleDragTokensForTest = (): void => {
+  reportBundleDragTokens.clear()
+}
 
 type InternalDragItemType = 'annotation' | 'file' | 'html' | 'image' | 'model3d' | 'text' | 'video'
 type InternalAttachmentType = ChatAttachment['type']
@@ -224,7 +277,10 @@ const parseHy3dParams = (value: unknown): Hy3dParams | undefined => {
   }
 }
 
-const parsePayload = (raw: string): InternalImageDragPayload | null => {
+const parsePayload = (
+  raw: string,
+  source: 'app-private' | 'text' = 'text'
+): InternalImageDragPayload | null => {
   try {
     const parsed = JSON.parse(raw) as InternalImageDragPayload
     if (!parsed || typeof parsed !== 'object') return null
@@ -290,6 +346,17 @@ const parsePayload = (raw: string): InternalImageDragPayload | null => {
                 typeof (attachment as ChatAttachment).reportBundleLabel === 'string'
                   ? (attachment as ChatAttachment).reportBundleLabel
                   : undefined,
+              // A report dragged from a bubble into the composer of this window keeps its MAIN
+              // binding through the in-memory drag token; MAIN still checks it against the
+              // conversation and the files. A binding inside the drag data is never accepted.
+              ...(() => {
+                if (source !== 'app-private') return {}
+                const binding = resolveReportBundleDragToken(
+                  (attachment as { reportBundleDragToken?: unknown }).reportBundleDragToken,
+                  attachment.url
+                )
+                return binding ? { reportBundleBinding: binding } : {}
+              })(),
               ...(isPlainRecord((attachment as ChatAttachment).metadata)
                 ? { metadata: { ...(attachment as ChatAttachment).metadata } }
                 : {})
@@ -349,7 +416,7 @@ export const parseInternalImageDragPayload = (
   dataTransfer: DragDataReader
 ): InternalImageDragPayload | null => {
   const directPayload = dataTransfer.getData(QAPP_IMAGE_DRAG_MIME).trim()
-  if (directPayload) return parsePayload(directPayload)
+  if (directPayload) return parsePayload(directPayload, 'app-private')
 
   const textPayload = dataTransfer.getData('text/plain').trim()
   if (!textPayload.startsWith(INTERNAL_IMAGE_DRAG_PREFIX)) return null
@@ -757,15 +824,27 @@ const materializeBlobImageAttachment = async (
   }
 }
 
+export type InternalImageDragMaterializeOptions = {
+  /**
+   * Leave blob: image URLs as they are instead of copying them into a base64 data: URL.
+   * Chat receivers set this and import the blob into managed media themselves; the
+   * canvas sender keeps the default so a borrowed blob survives its owner's release.
+   */
+  keepBlobImageUrl?: boolean
+}
+
 export const materializeInternalImageDragAttachment = async (
-  attachment: ChatAttachment
+  attachment: ChatAttachment,
+  options: InternalImageDragMaterializeOptions = {}
 ): Promise<ChatAttachment | null> => {
   if (attachment.type !== 'image') return attachment
 
   const cropSource = parseCanvasImageCropSourceMetadata(
     attachment.metadata?.[CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]
   )
-  if (!cropSource) return materializeBlobImageAttachment(attachment)
+  if (!cropSource) {
+    return options.keepBlobImageUrl ? attachment : materializeBlobImageAttachment(attachment)
+  }
 
   try {
     const croppedAttachment = await cropImageAttachmentFromSource(
@@ -796,7 +875,9 @@ export const materializeInternalImageDragAttachment = async (
 export const materializeInternalImageDragAttachments = async (
   attachments: ChatAttachment[]
 ): Promise<ChatAttachment[]> => {
-  const materialized = await Promise.all(attachments.map(materializeInternalImageDragAttachment))
+  const materialized = await Promise.all(
+    attachments.map((attachment) => materializeInternalImageDragAttachment(attachment))
+  )
   return materialized.filter((attachment): attachment is ChatAttachment => Boolean(attachment))
 }
 
@@ -890,40 +971,81 @@ export const getDroppedLocalImageContent = (dataTransfer: DragDataReader) => {
   })
 }
 
-/** Read only the explicitly dropped file bytes; do not infer another original or path grant. */
-export const getDroppedLocalImageFiles = async (
+/** One image of a URL-only drop, granted for one import by its path. */
+export type DroppedLocalImage = {
+  /** The dropped file URL (for messages; never stored). */
+  url: string
+  fileName: string
+  /** Canonical path main granted for one import (the dropped path when readBytes). */
+  sourcePath: string
+  /** Size main measured when it granted the import. */
+  sizeBytes: number
+  mimeType: string
+  /**
+   * On a network path main does not import by path (a mapped drive): main reads it once for
+   * the composer instead (readDroppedLocalImageBytes), within the image limit.
+   */
+  readBytes?: true
+}
+
+/** The bytes of a read-granted dropped image (a mapped network drive), at most `maxBytes`. */
+export const readDroppedLocalImageBytes = (image: DroppedLocalImage, maxBytes: number) =>
+  readDroppedLocalImage(image.sourcePath, image.fileName, maxBytes)
+
+/**
+ * Ask main for a one-use import grant for each explicitly dropped file URL (the preload's
+ * private drop lease decides which URLs qualify): no persisted grant, and no bytes enter the
+ * renderer. The composer then imports each one by its path. A URL that is not granted or is
+ * larger than the composer's image limit is reported in failedUrls.
+ */
+export const getDroppedLocalImages = async (
   content: ReturnType<typeof getDroppedLocalImageContent>,
   options: { isCurrent?: () => boolean } = {}
-): Promise<{ files: File[]; failedUrls: string[] }> => {
+): Promise<{ images: DroppedLocalImage[]; failedUrls: string[] }> => {
   const isCurrent = options.isCurrent ?? (() => true)
-  const files: File[] = []
-  const failedUrls: string[] = []
-  if (!isCurrent()) return { files, failedUrls }
-  // Consume short-lived drop leases together; large reads then proceed sequentially.
-  const paths = await Promise.all(
-    content.fileUrls.map((url) => resolveAuthorizedDroppedLocalPath(url, isCurrent))
-  )
-  if (!isCurrent()) return { files, failedUrls }
+  if (!isCurrent()) return { images: [], failedUrls: [] }
   const maxBytes = getChatAttachmentMaxSizeMB('image') * 1024 * 1024
-  for (let index = 0; index < content.fileUrls.length; index++) {
-    if (!isCurrent()) return { files: [], failedUrls: [] }
-    const url = content.fileUrls[index]
-    try {
-      const authorizedPath = paths[index]
-      if (!authorizedPath) throw new Error('Local image path is not authorized')
-      const file = await readDroppedLocalImage(
-        authorizedPath,
-        inferFileNameFromUrl(url, 'dropped-image.png'),
-        maxBytes
-      )
-      if (!isCurrent()) return { files: [], failedUrls: [] }
-      files.push(file)
-    } catch {
-      if (!isCurrent()) return { files: [], failedUrls: [] }
+  // Every short drop lease is used at once, before any import starts.
+  const granted = await Promise.all(
+    content.fileUrls.map(async (url) => {
+      const fileName = inferFileNameFromUrl(url, 'dropped-image.png')
+      const mimeType = inferMimeTypeFromFileName(fileName)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        // Bounded like a pick's grant: a source that never answers counts as not granted.
+        const grant = await Promise.race([
+          window.electronFile?.authorizeDroppedLocalImageForImport?.(url, mimeType),
+          new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS)
+          })
+        ])
+        return grant?.path ? { url, fileName, mimeType, grant } : null
+      } catch {
+        return null
+      } finally {
+        clearTimeout(timer)
+      }
+    })
+  )
+  if (!isCurrent()) return { images: [], failedUrls: [] }
+  const images: DroppedLocalImage[] = []
+  const failedUrls: string[] = []
+  content.fileUrls.forEach((url, index) => {
+    const entry = granted[index]
+    if (!entry || !(entry.grant.sizeBytes > 0) || entry.grant.sizeBytes > maxBytes) {
       failedUrls.push(url)
+      return
     }
-  }
-  return { files, failedUrls }
+    images.push({
+      url,
+      fileName: entry.fileName,
+      sourcePath: entry.grant.path,
+      sizeBytes: entry.grant.sizeBytes,
+      mimeType: entry.mimeType,
+      ...(entry.grant.bytesOnly ? { readBytes: true as const } : {})
+    })
+  })
+  return { images, failedUrls }
 }
 
 export const getDroppedAttachmentFile = async (

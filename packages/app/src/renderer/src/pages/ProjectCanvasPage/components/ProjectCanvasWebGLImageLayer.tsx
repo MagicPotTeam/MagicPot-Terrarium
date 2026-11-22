@@ -1,5 +1,15 @@
 import { Box } from '@mui/material'
-import { Application, Container, Rectangle, Sprite, Texture } from 'pixi.js'
+import {
+  Application,
+  Container,
+  GlProgram,
+  Mesh,
+  MeshGeometry,
+  Rectangle,
+  Shader,
+  Sprite,
+  Texture
+} from 'pixi.js'
 import {
   forwardRef,
   memo,
@@ -14,6 +24,11 @@ import {
 import type { CanvasImageAsset, CanvasImageItem } from '../types'
 import { buildCanvasSpatialIndex, queryCanvasSpatialIndex } from '../canvasSpatialIndex'
 import { getCanvasViewportBounds } from '../canvasViewportPlacementUtils'
+import {
+  CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
+  getCanvasLayoutResizeInteractionState,
+  type CanvasLayoutResizeInteractionDetail
+} from '../canvasLayoutResizeInteraction'
 import { getCanvasItemBounds } from '../projectCanvasPageShared'
 import {
   buildProjectCanvasRenderableImage,
@@ -42,11 +57,13 @@ import { isCanvasThumbnailSetFresh, pickBestCanvasThumbnailLevel } from '../canv
 import type { CanvasImageThumbnailLevel, CanvasImageThumbnailSet } from '../canvasThumbnailTypes'
 import { PROJECT_CANVAS_MIN_STAGE_SCALE } from '../projectCanvasViewportScale'
 import {
-  PROJECT_CANVAS_ADAPTIVE_QUALITY_DOWNGRADE_DEBOUNCE_MS,
   PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS,
+  PROJECT_CANVAS_DISPLAY_INTERVAL_PROBE_FRAMES,
   createProjectCanvasRenderQualityGovernor,
+  estimateProjectCanvasDisplayIntervalMs,
   isProjectCanvasAdaptiveQualityEnabled,
   resolveProjectCanvasRenderDpr,
+  shouldUseProjectCanvasWorldRenderGroup,
   type ProjectCanvasRenderQuality
 } from '../canvasRenderQuality'
 import { useCanvasSpatialIndexLifecycle } from '../useCanvasSpatialIndexLifecycle'
@@ -97,6 +114,13 @@ import {
   getCanvasImageObjectUrlRegistryMetrics
 } from '../canvasImageObjectUrlRegistry'
 import { withProjectCanvasWebGLTimeout } from './projectCanvasWebGLTimeout'
+import { CanvasImageLoadRetries } from '../canvasImageLoadRetry'
+import {
+  PROJECT_CANVAS_WEBGL_STRIP_UPLOAD_METHOD_ID,
+  PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES,
+  getRegisteredProjectCanvasStripTextureUploader,
+  registerProjectCanvasStripTextureUploader
+} from './projectCanvasWebGLStripUpload'
 import { PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } from '@shared/config/viteEnv'
 
 export { PROJECT_CANVAS_WEBGL_SPATIAL_TILE_ENABLED } from '@shared/config/viteEnv'
@@ -130,6 +154,24 @@ type CachedImageRecord = {
   itemId: string
   decodedAssetReleaseId?: string
   decodedAssetRefCount: number
+  // Raised when the same level is decoded again to replace a texture that cannot be
+  // refreshed in place; it gives the replacement its own shared texture.
+  textureGeneration: number
+  // Bookkeeping for the cache of decodes that are not on the GPU (yet): the reconcile pass
+  // that was running or last started when the record was created, the last pass that wanted
+  // to draw it, and a recency counter.
+  createdGeneration: number
+  wantedGeneration: number
+  lastTouchedAt: number
+  // When the record was first found to hold pixels that no reconcile pass wants.
+  unusedSinceMs: number | null
+}
+
+function getProjectCanvasDecodedVariantKey(record: CachedImageRecord): string {
+  const baseKey = record.cacheKind === 'source' ? 'source' : `thumbnail:${record.src}`
+  return record.textureGeneration > 0
+    ? `${baseKey}#reacquired:${record.textureGeneration}`
+    : baseKey
 }
 
 function isCachedImageRecordCurrent(
@@ -183,7 +225,9 @@ type SpatialTileItemRuntime = {
 }
 
 type SpriteRecord = {
-  sprite: Sprite
+  // A Sprite, or the edge-antialiased mesh while the image is rotated.
+  sprite: Sprite | Mesh<MeshGeometry, Shader>
+  edgeAntialiasShader?: Shader
   texture: Texture
   sourceTexture?: Texture
   textureKey: string
@@ -237,6 +281,7 @@ type PixiRendererWithWebGLContext = {
   gl?: ProjectCanvasWebGLRenderingContext
   context?: {
     gl?: ProjectCanvasWebGLRenderingContext
+    webGLVersion?: number
   }
 }
 
@@ -244,11 +289,60 @@ export const PROJECT_CANVAS_WEBGL_IMAGE_RESIDENT_LIMIT = 512
 export const PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES = 768 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES = 128 * 1024 * 1024
 export const PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET = 128
+// Chromium stages an upload in the context's transfer buffer (16 MiB at most). An upload that
+// does not fit there gets a shared-memory chunk of its own size, and the context keeps every
+// chunk it ever needed at once for its whole life. Eager uploads of several large textures in
+// one task (5 x 48 MiB for 4096 x 3072) therefore stay as staging memory. All eager uploads of
+// one display frame together stay within this many bytes (no more than the transfer buffer),
+// and the first one of a frame starts only when the previous frame's uploads have finished on
+// the GPU. A single texture above the budget gets a frame of its own. The rest waits for the
+// next frame, with what is on screen kept meanwhile.
+// Measured on a fitted 100 x 2048 px board: the fit burst of 512 px previews (1 MiB each,
+// uploaded by Pixi on their first draw, one sprite batch per frame) stays in the transfer
+// buffer and adds no chunk; the layer's context holds 0 bytes of chunks after it. The ~104 MB
+// once seen right after an import belonged to the thumbnail workers' accelerated canvases,
+// not to this layer; the workers now draw on CPU canvases and no longer hold it.
+// The item's own preview image (the page's 512 px bitmap of an import) goes through the same
+// budget: it is uploaded here, eagerly, and never by Pixi on its first draw.
+export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_BYTES = 16 * 1024 * 1024
+// The eager uploads of one display frame also stay within this much main-thread time. The
+// time of the next upload is estimated from the measured time per byte of the earlier ones;
+// the first upload of a frame always goes, so every texture gets its turn.
+export const PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_MS = 4
+// If the GPU never reports the previous frame's uploads as finished (no fence support, a lost
+// fence), the next frame's uploads wait at most this long.
+export const PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_MAX_WAIT_MS = 1000
+// The display interval is measured once, this long after the layer started (when the first
+// images are on screen and the page is calmer), again after a monitor change, and after a
+// gesture when a probe was interrupted or found no refresh rate.
+export const PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS = 5000
+export const PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_RETRY_DELAY_MS = 1000
+// A probe during which the layer drew or reconciled measured the page's pace, not the
+// display's: it is thrown away and tried again this many times, a probe delay apart.
+export const PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_BUSY_RETRY_LIMIT = 12
+// A panel drag whose end event got lost stops deferring renderer resizes after this long
+// without a resize.
+export const PROJECT_CANVAS_WEBGL_LAYOUT_RESIZE_DEFERRAL_MAX_IDLE_MS = 3000
 export const PROJECT_CANVAS_WEBGL_SELECTED_RESIDENT_LIMIT = 64
 export const PROJECT_CANVAS_WEBGL_SELECTED_PROTECTED_LIMIT = 32
+// Decoded images that no texture needs right now (a decode that finished after the zoom or
+// the selection moved on) are kept for a quick return, but only a few and only so many bytes.
+export const PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_ENTRIES = 4
+export const PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_BYTES = 128 * 1024 * 1024
+// ...and only for this long. The quick return matters right after the zoom or the selection
+// changed; later the pixels (16 MiB per 2048 px image) are worth more than the saved decode.
+export const PROJECT_CANVAS_WEBGL_UNUSED_DECODE_MAX_AGE_MS = 15_000
+// Hard limit for every decoded image the layer holds, including the ones waiting for their
+// first upload.
+export const PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES = 256 * 1024 * 1024
 const PROJECT_CANVAS_WEBGL_IMAGE_VISIBLE_OVERSCAN_PX = 320
 const VIEWPORT_RECONCILE_DEBOUNCE_MS = 48
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS = 180
+// While the view is being panned or zoomed, the frame is drawn inside the viewport sync call
+// (the stage's requestAnimationFrame callback), in the same frame as the DOM layers. Renders
+// requested by background work wait this long for that draw, which includes them, before
+// they ask for a frame of their own (two frames at 60 Hz).
+const PROJECT_CANVAS_WEBGL_GESTURE_BACKGROUND_RENDER_YIELD_MS = 34
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_VIEWPORT_RECONCILE_MS = 240
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_IMAGE_VERSION_MAX_DEFER_MS = 750
 const PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_INITIAL_IMAGE_LOAD_CONCURRENCY = 2
@@ -320,7 +414,7 @@ export type ProjectCanvasWebGLImageLayerHandle = {
 }
 
 function applySpriteTransform(
-  sprite: Sprite,
+  sprite: SpriteRecord['sprite'],
   metrics: { textureWidth: number; textureHeight: number },
   item: ProjectCanvasImagePreview
 ) {
@@ -330,6 +424,18 @@ function applySpriteTransform(
     (item.height / metrics.textureHeight) * item.scaleY
   )
   sprite.rotation = (item.rotation * Math.PI) / 180
+}
+
+function syncProjectCanvasWorldRenderGroup(
+  world: Container,
+  pos: { x: number; y: number },
+  stageSize: { width: number; height: number } | null | undefined
+) {
+  const enabled = world.isRenderGroup === true
+  const nextEnabled = shouldUseProjectCanvasWorldRenderGroup(pos, stageSize, enabled)
+  if (nextEnabled !== enabled) {
+    world.isRenderGroup = nextEnabled
+  }
 }
 
 function getProjectCanvasTextureByteSize(
@@ -384,6 +490,213 @@ function closeCanvasImageAssetIfPossible(value: unknown) {
   }
 }
 
+// Decoded images whose pixels already live in a GPU texture and were released on the CPU
+// side. They stay in the decoded caches only as size and identity handles for that texture:
+// nothing may upload or draw them again.
+const releasedProjectCanvasDecodedImages = new WeakSet<object>()
+
+function isProjectCanvasDecodedImageReleased(image: unknown): boolean {
+  return (
+    typeof image === 'object' && image !== null && releasedProjectCanvasDecodedImages.has(image)
+  )
+}
+
+/**
+ * A closed ImageBitmap reports 0 x 0. The level-of-detail and texture-key code keeps reading
+ * the size of a decoded image after its pixels were uploaded, so pin the size on the object
+ * before it is closed. Returns false when the size cannot be pinned; the caller then keeps
+ * the pixels.
+ */
+function pinProjectCanvasDecodedImageSize(image: CanvasImageAsset): boolean {
+  if (!isCanvasImageBitmapLike(image)) {
+    return true
+  }
+
+  const { width, height } = getCanvasImageAssetSize(image)
+  if (!(width > 0) || !(height > 0)) {
+    return false
+  }
+
+  try {
+    Object.defineProperty(image, 'width', { configurable: true, enumerable: true, value: width })
+    Object.defineProperty(image, 'height', {
+      configurable: true,
+      enumerable: true,
+      value: height
+    })
+  } catch {
+    return false
+  }
+
+  const pinned = getCanvasImageAssetSize(image)
+  return pinned.width === width && pinned.height === height
+}
+
+type ProjectCanvasWebGLFenceContext = {
+  fenceSync?: (condition: number, flags: number) => unknown
+  getSyncParameter?: (sync: unknown, pname: number) => unknown
+  deleteSync?: (sync: unknown) => void
+  flush?: () => void
+}
+
+// WebGL 2 constants (also on WebGL2RenderingContext; spelled out for contexts that lack them).
+const PROJECT_CANVAS_WEBGL_SYNC_GPU_COMMANDS_COMPLETE = 0x9117
+const PROJECT_CANVAS_WEBGL_SYNC_STATUS = 0x9114
+const PROJECT_CANVAS_WEBGL_SIGNALED = 0x9119
+
+type ProjectCanvasLargeTextureUploadPacer = {
+  // Fence after the last frame's uploads; null when they finished or no fence could be made.
+  sync: unknown
+  startedAt: number
+  // Bytes of eager uploads since the last display frame.
+  bytesThisFrame: number
+  // Main-thread milliseconds of those uploads.
+  uploadMsThisFrame: number
+  // Measured upload time per byte (moving average); 0 until the first upload.
+  uploadMsPerByte: number
+  // Uploads ran since the fence was made; the next fence is made at the end of the pass.
+  fencePending: boolean
+  // An upload was held back and waits for the next reconcile pass.
+  waiting: boolean
+}
+
+function getProjectCanvasWebGLFenceContext(app: Application | null) {
+  const renderer = app?.renderer as PixiRendererWithWebGLContext | null | undefined
+  return (renderer?.gl ?? renderer?.context?.gl ?? null) as ProjectCanvasWebGLFenceContext | null
+}
+
+function releaseProjectCanvasLargeUploadFence(
+  gl: ProjectCanvasWebGLFenceContext | null,
+  pacer: ProjectCanvasLargeTextureUploadPacer
+) {
+  if (pacer.sync !== null) {
+    try {
+      gl?.deleteSync?.(pacer.sync)
+    } catch {
+      // The context is gone; so is the fence.
+    }
+  }
+  pacer.sync = null
+}
+
+/**
+ * True when a texture of this size may be uploaded now: it fits the rest of this display
+ * frame's upload budget, or it is the first upload of the frame and the previous frame's
+ * uploads finished on the GPU (or waited long enough).
+ */
+function isProjectCanvasLargeTextureUploadReady(
+  gl: ProjectCanvasWebGLFenceContext | null,
+  pacer: ProjectCanvasLargeTextureUploadPacer,
+  now: number,
+  textureByteSize = 0
+) {
+  if (pacer.bytesThisFrame > 0) {
+    return (
+      pacer.bytesThisFrame + textureByteSize <= PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_BYTES &&
+      pacer.uploadMsThisFrame + pacer.uploadMsPerByte * Math.max(1, textureByteSize) <=
+        PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_FRAME_MS
+    )
+  }
+  if (pacer.sync === null) {
+    return true
+  }
+  let finished = false
+  try {
+    finished =
+      typeof gl?.getSyncParameter !== 'function' ||
+      gl.getSyncParameter(pacer.sync, PROJECT_CANVAS_WEBGL_SYNC_STATUS) ===
+        PROJECT_CANVAS_WEBGL_SIGNALED
+  } catch {
+    finished = true
+  }
+  if (!finished && now - pacer.startedAt < PROJECT_CANVAS_WEBGL_LARGE_TEXTURE_UPLOAD_MAX_WAIT_MS) {
+    return false
+  }
+  releaseProjectCanvasLargeUploadFence(gl, pacer)
+  return true
+}
+
+function noteProjectCanvasLargeTextureUpload(
+  pacer: ProjectCanvasLargeTextureUploadPacer,
+  textureByteSize: number,
+  elapsedMs: number
+) {
+  const bytes = Math.max(1, textureByteSize)
+  const safeElapsedMs = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0
+  pacer.bytesThisFrame += bytes
+  pacer.uploadMsThisFrame += safeElapsedMs
+  const msPerByte = safeElapsedMs / bytes
+  pacer.uploadMsPerByte =
+    pacer.uploadMsPerByte > 0 ? pacer.uploadMsPerByte * 0.75 + msPerByte * 0.25 : msPerByte
+  pacer.fencePending = true
+}
+
+function resetProjectCanvasTextureUploadFrame(pacer: ProjectCanvasLargeTextureUploadPacer) {
+  pacer.bytesThisFrame = 0
+  pacer.uploadMsThisFrame = 0
+}
+
+// One fence after the last upload of a pass covers all of them (fences pass in order).
+function fenceProjectCanvasTextureUploads(
+  gl: ProjectCanvasWebGLFenceContext | null,
+  pacer: ProjectCanvasLargeTextureUploadPacer,
+  now: number
+) {
+  if (!pacer.fencePending) {
+    return
+  }
+  pacer.fencePending = false
+  releaseProjectCanvasLargeUploadFence(gl, pacer)
+  pacer.startedAt = now
+  try {
+    pacer.sync =
+      typeof gl?.fenceSync === 'function'
+        ? (gl.fenceSync(PROJECT_CANVAS_WEBGL_SYNC_GPU_COMMANDS_COMPLETE, 0) ?? null)
+        : null
+    // Send the upload now, so that the fence can pass before the next frame.
+    gl?.flush?.()
+  } catch {
+    pacer.sync = null
+  }
+}
+
+type PixiRendererWithEagerTextureUpload = {
+  texture?: {
+    initSource?: (source: unknown) => void
+  }
+}
+
+/**
+ * Uploads a texture now instead of on its first draw, so that the decoded pixels can be
+ * released in the same step. Returns false when the renderer offers no eager upload.
+ */
+function uploadProjectCanvasTextureNow(app: Application | null, texture: Texture): boolean {
+  const textureSystem = (app?.renderer as PixiRendererWithEagerTextureUpload | undefined)?.texture
+  if (!textureSystem || typeof textureSystem.initSource !== 'function') {
+    return false
+  }
+
+  textureSystem.initSource(texture.source)
+  return true
+}
+
+function getProjectCanvasWebGLResourceBudgetLimits(limitDecodedResidentBytes: boolean) {
+  return {
+    sourceTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+    thumbnailTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+    gpuTextureBytesTotal: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
+    // Without an eager upload a texture keeps its decoded input for its whole life; those
+    // bytes then follow the texture budget and must not block new work here.
+    ...(limitDecodedResidentBytes
+      ? { decodedResidentBytes: PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES }
+      : {}),
+    decodedInFlightBytes: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
+    gpuUploadBytesInFlight: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
+    objectUrlCount: PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET,
+    activeSourceUpgrades: PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY
+  }
+}
+
 function getProjectCanvasCachedImageReleaseId(
   cacheKind: 'source' | 'thumbnail' | 'transient',
   resourceKind: 'imageBitmap' | 'objectUrl',
@@ -431,9 +744,113 @@ function destroyProjectCanvasTexture(texture: Texture | null | undefined, destro
   texture.destroy(destroySource)
 }
 
+// The layer's drawing buffer has no multisampling (it cost four times the colour buffer plus a
+// multisampled depth and stencil buffer, for a scene of flat textured quads). Edges of
+// axis-aligned images do not need it. A rotated image does: it is drawn by this program, which
+// fades the alpha over the last screen pixel towards each edge of the quad, so its edges stay
+// smooth at any zoom. It needs screen-space derivatives, which are core in GLSL ES 3.00.
+const PROJECT_CANVAS_WEBGL_EDGE_ANTIALIAS_VERTEX = `#version 300 es
+in vec2 aPosition;
+in vec2 aUV;
+uniform mat3 uProjectionMatrix;
+uniform mat3 uWorldTransformMatrix;
+uniform vec4 uWorldColorAlpha;
+uniform mat3 uTransformMatrix;
+uniform vec4 uColor;
+uniform mat3 uTextureMatrix;
+out vec4 vColor;
+out vec2 vUV;
+out vec2 vEdge;
+void main(void) {
+  vEdge = aUV;
+  vUV = (uTextureMatrix * vec3(aUV, 1.0)).xy;
+  mat3 modelViewProjectionMatrix = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+  gl_Position = vec4((modelViewProjectionMatrix * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
+  vColor = uColor * uWorldColorAlpha;
+}
+`
+const PROJECT_CANVAS_WEBGL_EDGE_ANTIALIAS_FRAGMENT = `#version 300 es
+in vec4 vColor;
+in vec2 vUV;
+in vec2 vEdge;
+uniform sampler2D uTexture;
+out vec4 finalColor;
+void main(void) {
+  vec4 color = texture(uTexture, vUV) * vColor;
+  vec2 pixel = max(fwidth(vEdge), vec2(0.000001));
+  vec2 coverage = clamp(min(vEdge, 1.0 - vEdge) / pixel, 0.0, 1.0);
+  color.a *= coverage.x * coverage.y;
+  finalColor = color;
+}
+`
+
+/** Rotated by something other than a multiple of 90 degrees: the edges are diagonal on screen. */
+function needsProjectCanvasEdgeAntialias(rotationDegrees: number) {
+  if (!Number.isFinite(rotationDegrees)) {
+    return false
+  }
+
+  const quarterTurns = rotationDegrees / 90
+  return Math.abs(quarterTurns - Math.round(quarterTurns)) > 0.0001
+}
+
+function createProjectCanvasEdgeAntialiasGeometry() {
+  // A unit quad shared by every rotated image; the display object's scale gives it its size.
+  return new MeshGeometry({
+    positions: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+    uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3])
+  })
+}
+
+function createProjectCanvasEdgeAntialiasShader(texture: Texture) {
+  return new Shader({
+    glProgram: GlProgram.from({
+      name: 'project-canvas-edge-antialias',
+      vertex: PROJECT_CANVAS_WEBGL_EDGE_ANTIALIAS_VERTEX,
+      fragment: PROJECT_CANVAS_WEBGL_EDGE_ANTIALIAS_FRAGMENT
+    }),
+    resources: {
+      uTexture: texture.source,
+      textureUniforms: {
+        // Maps the quad's 0..1 coordinates into the texture frame (the crop).
+        uTextureMatrix: { type: 'mat3x3<f32>', value: texture.textureMatrix.mapCoord }
+      }
+    }
+  })
+}
+
+/**
+ * The display object of one image and the size of its local quad: a Sprite (texture pixels),
+ * or the edge-antialiased mesh (unit quad) when `edgeAntialiasGeometry` is given.
+ */
+function createProjectCanvasImageDisplayObject(
+  texture: Texture,
+  edgeAntialiasGeometry: MeshGeometry | null
+): Pick<SpriteRecord, 'sprite' | 'edgeAntialiasShader' | 'textureWidth' | 'textureHeight'> {
+  if (!edgeAntialiasGeometry) {
+    return {
+      sprite: new Sprite(texture),
+      edgeAntialiasShader: undefined,
+      textureWidth: Math.max(1, texture.width),
+      textureHeight: Math.max(1, texture.height)
+    }
+  }
+
+  const shader = createProjectCanvasEdgeAntialiasShader(texture)
+  return {
+    sprite: new Mesh<MeshGeometry, Shader>({ geometry: edgeAntialiasGeometry, shader, texture }),
+    edgeAntialiasShader: shader,
+    textureWidth: 1,
+    textureHeight: 1
+  }
+}
+
 function destroyProjectCanvasSpriteRecord(record: SpriteRecord, releaseSourceTexture: () => void) {
   record.sprite.removeFromParent()
   record.sprite.destroy()
+  record.edgeAntialiasShader?.destroy()
+  record.edgeAntialiasShader = undefined
 
   if (record.texture !== record.sourceTexture) {
     destroyProjectCanvasTexture(record.texture, false)
@@ -445,14 +862,47 @@ function getProjectCanvasTextureScaleMode(): 'linear' {
   return 'linear'
 }
 
-function createProjectCanvasTexture(image: CanvasImageAsset): Texture {
-  return Texture.from(
+/** True when this renderer can upload large sources in strips (WebGL 2, method registered). */
+function canProjectCanvasRendererUploadInStrips(app: Application | null) {
+  const renderer = app?.renderer as
+    | (PixiRendererWithWebGLContext & {
+        texture?: { _uploads?: Record<string, unknown> }
+      })
+    | null
+    | undefined
+  const uploader = getRegisteredProjectCanvasStripTextureUploader()
+  return Boolean(
+    uploader &&
+    renderer?.context?.webGLVersion === 2 &&
+    renderer.texture?._uploads?.[PROJECT_CANVAS_WEBGL_STRIP_UPLOAD_METHOD_ID] === uploader
+  )
+}
+
+function createProjectCanvasTexture(image: CanvasImageAsset, uploadInStrips = false): Texture {
+  const texture = Texture.from(
     {
       resource: image,
       alphaMode: PROJECT_CANVAS_WEBGL_TEXTURE_ALPHA_MODE
     },
     true
   )
+  if (uploadInStrips && isCanvasImageBitmapLike(image)) {
+    // A decoded bitmap above the strip size goes up in strips (see the upload method). Image
+    // elements keep Pixi's single upload: a row range of an element may decode it again.
+    const { width, height } = getCanvasImageAssetSize(image)
+    const stripSource = texture.source as { uploadMethodId?: string } | null | undefined
+    if (stripSource && width * height * 4 > PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_STRIP_BYTES) {
+      stripSource.uploadMethodId = PROJECT_CANVAS_WEBGL_STRIP_UPLOAD_METHOD_ID
+    }
+  }
+  // The layer's own residency code (sprite destroy, texture budget) decides what stays on
+  // the GPU. Pixi's collector must never unload one of these textures on its own schedule:
+  // the decoded input of an uploaded texture is released, so it could not be uploaded again.
+  const textureSource = texture.source as { autoGarbageCollect?: boolean } | null | undefined
+  if (textureSource) {
+    textureSource.autoGarbageCollect = false
+  }
+  return texture
 }
 
 function applyProjectCanvasTextureScaleMode(record: SpriteRecord) {
@@ -486,30 +936,69 @@ function isProjectCanvasTinyPreview(preview: ProjectCanvasImagePreview, stageSca
   )
 }
 
+/**
+ * False only when the GPU copy of a texture is known to be gone: Pixi keeps one entry per
+ * renderer in `_gpuData` from the upload until an unload. Without that field (another Pixi
+ * build, a test double) nothing is known, and the copy counts as intact.
+ */
+function hasProjectCanvasTextureGpuCopy(textureSource: object): boolean {
+  const gpuData = (textureSource as { _gpuData?: unknown })._gpuData
+  if (!gpuData || typeof gpuData !== 'object') {
+    return true
+  }
+  for (const key in gpuData) {
+    if ((gpuData as Record<string, unknown>)[key]) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Tracks an image drawn tiny (24 px or less on screen) that grows back (48 px or more).
+ *
+ * A texture whose decoded pixels were released after the upload lives only on the GPU, and
+ * nothing unloads it there (Pixi's collector is off): it is kept. Only when its GPU copy is
+ * really gone does the function return true; the caller then has the level decoded again and
+ * swaps the texture when the new one is ready. A zoom cycle therefore reads no file.
+ *
+ * A texture whose input is still alive (a provided image, an image element) is unloaded and
+ * uploaded again from that input on the next draw, but only on the preview path: that is the
+ * fix for textures that turned black after a rapid resize (a resize preview). A zoom through
+ * the stage scale leaves it alone.
+ */
 function refreshProjectCanvasTextureAfterTinyPreview(
   record: SpriteRecord,
   preview: ProjectCanvasImagePreview,
-  stageScale: number
-) {
+  stageScale: number,
+  path: 'preview' | 'reconcile'
+): boolean {
   const screenMaxEdge = getProjectCanvasPreviewScreenMaxEdge(preview, stageScale)
   if (screenMaxEdge <= PROJECT_CANVAS_WEBGL_TINY_PREVIEW_SCREEN_EDGE_PX) {
     record.sawTinyPreview = true
-    return
+    return false
   }
 
   if (
     !record.sawTinyPreview ||
     screenMaxEdge < PROJECT_CANVAS_WEBGL_TINY_PREVIEW_RECOVERY_SCREEN_EDGE_PX
   ) {
-    return
+    return false
   }
 
+  record.sawTinyPreview = false
   const textureSource = (record.sourceTexture ?? record.texture).source as
-    { destroyed?: boolean; unload?: () => void } | undefined
-  if (textureSource && !textureSource.destroyed && typeof textureSource.unload === 'function') {
+    { destroyed?: boolean; resource?: unknown; unload?: () => void } | undefined
+  if (!textureSource || textureSource.destroyed) {
+    return false
+  }
+  if (isProjectCanvasDecodedImageReleased(textureSource.resource)) {
+    return !hasProjectCanvasTextureGpuCopy(textureSource)
+  }
+  if (path === 'preview' && typeof textureSource.unload === 'function') {
     textureSource.unload()
   }
-  record.sawTinyPreview = false
+  return false
 }
 
 function getProjectCanvasRenderDeviceScale(quality: ProjectCanvasRenderQuality = 'full') {
@@ -518,6 +1007,13 @@ function getProjectCanvasRenderDeviceScale(quality: ProjectCanvasRenderQuality =
       ? Math.min(2, Math.max(1, window.devicePixelRatio || 1))
       : 1
   return resolveProjectCanvasRenderDpr(baseDpr, quality)
+}
+
+/** False on a screen whose full resolution is already the lowered one: nothing to decide. */
+function canProjectCanvasLowerRenderResolution() {
+  return (
+    getProjectCanvasRenderDeviceScale('interactive') < getProjectCanvasRenderDeviceScale('full')
+  )
 }
 
 const areProjectCanvasWebGLMetricsEqual = areProjectCanvasWebGLRuntimeMetricsEqual
@@ -1073,7 +1569,28 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const imageIdentityIdsRef = useRef(new WeakMap<object, number>())
   const nextImageIdentityIdRef = useRef(1)
   const sharedTexturePoolRef = useRef(new CanvasImageSharedResourcePool<Texture>())
+  // Set when the renderer can run the edge-antialias program (WebGL 2). On a WebGL 1 context
+  // it stays null: the drawing buffer has no multisampling, so rotated images keep hard edges.
+  const edgeAntialiasGeometryRef = useRef<MeshGeometry | null>(null)
+  // Only used when the renderer cannot upload eagerly: the texture then keeps its decoded
+  // input alive, because Pixi uploads it on a later draw.
   const textureDecodedAssetRef = useRef(new WeakMap<Texture, CachedImageRecord>())
+  const eagerlyUploadedTexturesRef = useRef(new WeakSet<Texture>())
+  const largeTextureUploadPacerRef = useRef<ProjectCanvasLargeTextureUploadPacer>({
+    sync: null,
+    startedAt: 0,
+    bytesThisFrame: 0,
+    uploadMsThisFrame: 0,
+    uploadMsPerByte: 0,
+    fencePending: false,
+    waiting: false
+  })
+  const largeTextureUploadFrameRef = useRef<number | null>(null)
+  // Items whose texture has to be replaced by a fresh decode of the same level, and the
+  // generation that the replacing cache record gets.
+  const pendingTextureReacquireIdsRef = useRef(new Set<string>())
+  const textureGenerationByIdRef = useRef(new Map<string, number>())
+  const decodedRecordsByImageRef = useRef(new Map<object, Set<CachedImageRecord>>())
   const nextDecodedAssetReleaseIdRef = useRef(1)
   const sharedTextureByteTrackerRef = useRef(new CanvasImageSharedResourceByteTracker())
   const imageLoadRequestTokensRef = useRef(new CanvasImageRequestTokenTracker())
@@ -1081,6 +1598,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     new CanvasImageAsyncSharedResourcePool<CanvasImageAsset | null>()
   )
   const sharedDecodeBudgetReservationsRef = useRef(new CanvasImageSharedReservationTracker())
+  // Lifetime counters for the metrics snapshot: textures re-acquired after a loss, and image
+  // loads started (each one reads a file or URL and decodes it).
+  const textureReacquireCountRef = useRef(0)
+  const imageFileReadCountRef = useRef(0)
   const runtimeGenerationRef = useRef(0)
   const releaseManagerRef = useRef(new CanvasImageReleaseManager())
   const objectUrlReleaseHandlesRef = useRef(new Map<string, CanvasImageReleaseHandle>())
@@ -1113,16 +1634,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const spatialTileUploadReservationIdsRef = useRef(new Map<string, Set<string>>())
   const objectUrlRegistryConfiguredRef = useRef(false)
   const resourceBudgetTrackerRef = useRef(
-    new CanvasImageResourceBudgetTracker({
-      sourceTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-      thumbnailTextureBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-      gpuTextureBytesTotal: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-      decodedInFlightBytes: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
-      gpuUploadBytesInFlight: PROJECT_CANVAS_WEBGL_TEXTURE_UPLOAD_MAX_BYTES,
-      objectUrlCount: PROJECT_CANVAS_WEBGL_OBJECT_URL_BUDGET,
-      activeSourceUpgrades: PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_CONCURRENCY
-    })
+    new CanvasImageResourceBudgetTracker(getProjectCanvasWebGLResourceBudgetLimits(true))
   )
+  const decodedRecordTouchCounterRef = useRef(0)
+  const unusedDecodeExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textureBudgetEvictionCountRef = useRef(0)
   const previewStateRef = useRef(new Map<string, ProjectCanvasImagePreview>())
   const renderItemsRef = useRef(new Map<string, ProjectCanvasRenderableImage>())
@@ -1136,12 +1651,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
   const renderThrottleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const qualityTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const renderQualityGovernorRef = useRef(createProjectCanvasRenderQualityGovernor())
+  const renderQualityFrameSamplerRef = useRef<number | null>(null)
   const renderQualityRef = useRef<ProjectCanvasRenderQuality>('full')
   const lastRenderAtRef = useRef(0)
   const webglRenderCountRef = useRef(0)
   const webglErrorLastCheckedRenderRef = useRef(0)
   const webglErrorLastCheckedAtRef = useRef(Number.NEGATIVE_INFINITY)
   const webglErrorCheckRequestedRef = useRef(true)
+  const webglErrorCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The timed check came due in the middle of a gesture; the first render after it checks.
+  const webglErrorCheckAfterGestureRef = useRef(false)
+  const displayIntervalProbeFrameRef = useRef<number | null>(null)
+  const displayIntervalProbeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const displayIntervalProbeStateRef = useRef<'waiting' | 'running' | 'done' | 'failed'>('waiting')
+  const displayIntervalProbeBusyRetryCountRef = useRef(0)
   const activeItemCountRef = useRef(0)
   const stagePosRef = useRef(stagePos)
   const stageScaleRef = useRef(stageScale)
@@ -1228,6 +1751,68 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     hasDeferredImageVersionUpdateRef.current = false
     queueImageVersionFrame()
   }, [queueImageVersionFrame])
+
+  // A local image main could not answer for (503) loads again a few times, later each time: the
+  // drive or its breaker may answer by then, and the image should not stay broken.
+  const imageLoadRetriesRef = useRef<CanvasImageLoadRetries | null>(null)
+  if (!imageLoadRetriesRef.current) {
+    imageLoadRetriesRef.current = new CanvasImageLoadRetries((itemId, src) => {
+      if (failedLoadSrcByIdRef.current.get(itemId) !== src) return
+      failedLoadSrcByIdRef.current.delete(itemId)
+      scheduleImageVersionUpdate()
+    })
+  }
+  useEffect(() => () => imageLoadRetriesRef.current?.dispose(), [])
+
+  // One display frame after a large upload: the next one may start (once the GPU finished the
+  // previous one). A held-back upload asks for a reconcile pass then.
+  const armLargeTextureUploadFrame = useCallback(() => {
+    if (largeTextureUploadFrameRef.current !== null) {
+      return
+    }
+
+    largeTextureUploadFrameRef.current = window.requestAnimationFrame(() => {
+      largeTextureUploadFrameRef.current = null
+      const pacer = largeTextureUploadPacerRef.current
+      resetProjectCanvasTextureUploadFrame(pacer)
+      // A gesture ends with a reconcile pass of its own, which retries the held-back upload.
+      if (!pacer.waiting || isViewportInteractingRef.current) {
+        return
+      }
+      if (
+        !isProjectCanvasLargeTextureUploadReady(
+          getProjectCanvasWebGLFenceContext(appRef.current),
+          pacer,
+          window.performance.now()
+        )
+      ) {
+        armLargeTextureUploadFrame()
+        return
+      }
+      pacer.waiting = false
+      setViewportVersion((version) => version + 1)
+    })
+  }, [])
+
+  // The texture of this item cannot be uploaded again (its decoded input was released).
+  // Ask the next reconcile pass to decode the level again; the texture on screen stays
+  // until the replacement is uploaded.
+  const requestTextureReacquire = useCallback(
+    (itemId: string) => {
+      if (pendingTextureReacquireIdsRef.current.has(itemId)) {
+        return
+      }
+
+      textureReacquireCountRef.current += 1
+      pendingTextureReacquireIdsRef.current.add(itemId)
+      textureGenerationByIdRef.current.set(
+        itemId,
+        (textureGenerationByIdRef.current.get(itemId) ?? 0) + 1
+      )
+      scheduleImageVersionUpdate()
+    },
+    [scheduleImageVersionUpdate]
+  )
 
   const trackRuntimeObjectUrl = useCallback(
     (id: string, objectUrl: string): CanvasImageReleaseHandle => {
@@ -1450,6 +2035,43 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     []
   )
 
+  const forgetCachedImageRecord = useCallback((record: CachedImageRecord) => {
+    const records = decodedRecordsByImageRef.current.get(record.image)
+    if (!records) {
+      return
+    }
+
+    records.delete(record)
+    if (records.size === 0) {
+      decodedRecordsByImageRef.current.delete(record.image)
+    }
+  }, [])
+
+  /**
+   * The pixels of `image` are in a GPU texture now. Every cache record that holds this decoded
+   * object gives up its share, so the bitmap is closed, and the records stay as handles.
+   */
+  const releaseDecodedImagePixelsAfterUpload = useCallback(
+    (image: CanvasImageAsset) => {
+      if (isProjectCanvasDecodedImageReleased(image)) {
+        return
+      }
+
+      const records = decodedRecordsByImageRef.current.get(image)
+      if (!records || records.size === 0) {
+        // Not a decode this layer owns (for example the item's own preview image).
+        return
+      }
+      if (!pinProjectCanvasDecodedImageSize(image)) {
+        return
+      }
+
+      releasedProjectCanvasDecodedImages.add(image)
+      records.forEach((record) => releaseCachedImageRecord(record, 'uploaded'))
+    },
+    [releaseCachedImageRecord]
+  )
+
   const destroySharedTexture = useCallback(
     (texture: Texture) => {
       destroyProjectCanvasTexture(texture, true)
@@ -1472,18 +2094,143 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       releaseCachedImageRecord(record, reason)
+      forgetCachedImageRecord(record)
       cache.delete(itemId)
     },
-    [releaseCachedImageRecord]
+    [forgetCachedImageRecord, releaseCachedImageRecord]
   )
 
   const clearCachedImageRecords = useCallback(
     (cache: Map<string, CachedImageRecord>, reason: CanvasImageReleaseReason) => {
-      cache.forEach((record) => releaseCachedImageRecord(record, reason))
+      cache.forEach((record) => {
+        releaseCachedImageRecord(record, reason)
+        forgetCachedImageRecord(record)
+      })
       cache.clear()
     },
-    [releaseCachedImageRecord]
+    [forgetCachedImageRecord, releaseCachedImageRecord]
   )
+
+  const pruneDecodedPixelRecordsRef = useRef<() => void>(() => undefined)
+
+  /**
+   * Bounds the decoded images that are held on the CPU side. A decode that is on the GPU was
+   * released at its upload and costs nothing here. What is left is (a) decodes waiting for
+   * the next reconcile pass or for their turn in a batched sprite creation, which are kept,
+   * and (b) decodes no pass wants any more, which are a small LRU that also expires (a timer
+   * calls this function again when the oldest is due). Everything together stays
+   * under the hard limit; the newest decode is never evicted, so a pass always has one to
+   * upload and the queue cannot starve.
+   */
+  const pruneDecodedPixelRecords = useCallback(() => {
+    const generation = spriteReconcileGenerationRef.current
+    const holders: CachedImageRecord[] = []
+    const collect = (record: CachedImageRecord) => {
+      // refCount 0: released after upload. refCount > 1: kept alive by a texture.
+      if (record.decodedAssetReleaseId && record.decodedAssetRefCount === 1) {
+        holders.push(record)
+      }
+    }
+    imageCacheRef.current.forEach(collect)
+    thumbnailCacheRef.current.forEach(collect)
+    if (holders.length === 0) {
+      if (unusedDecodeExpiryTimerRef.current !== null) {
+        clearTimeout(unusedDecodeExpiryTimerRef.current)
+        unusedDecodeExpiryTimerRef.current = null
+      }
+      return
+    }
+
+    const evict = (record: CachedImageRecord) => {
+      const cache =
+        record.cacheKind === 'source' ? imageCacheRef.current : thumbnailCacheRef.current
+      if (cache.get(record.itemId) === record) {
+        deleteCachedImageRecord(cache, record.itemId, 'budget-pressure')
+      }
+    }
+    const isUnused = (record: CachedImageRecord) =>
+      record.createdGeneration < generation && record.wantedGeneration !== generation
+    const byRecency = (left: CachedImageRecord, right: CachedImageRecord) =>
+      right.lastTouchedAt - left.lastTouchedAt
+
+    const now = window.performance.now()
+    const kept: CachedImageRecord[] = []
+    let unusedCount = 0
+    let unusedBytes = 0
+    let nextExpiryAt = Number.POSITIVE_INFINITY
+    holders
+      .filter((record) => {
+        if (isUnused(record)) {
+          return true
+        }
+        record.unusedSinceMs = null
+        kept.push(record)
+        return false
+      })
+      .sort(byRecency)
+      .forEach((record) => {
+        record.unusedSinceMs ??= now
+        const expiresAt = record.unusedSinceMs + PROJECT_CANVAS_WEBGL_UNUSED_DECODE_MAX_AGE_MS
+        const bytes = getCanvasImageDecodedByteSize(record.image)
+        if (
+          now < expiresAt &&
+          unusedCount < PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_ENTRIES &&
+          unusedBytes + bytes <= PROJECT_CANVAS_WEBGL_UNUSED_DECODE_LRU_MAX_BYTES
+        ) {
+          unusedCount += 1
+          unusedBytes += bytes
+          nextExpiryAt = Math.min(nextExpiryAt, expiresAt)
+          kept.push(record)
+          return
+        }
+        evict(record)
+      })
+
+    if (unusedDecodeExpiryTimerRef.current !== null) {
+      clearTimeout(unusedDecodeExpiryTimerRef.current)
+      unusedDecodeExpiryTimerRef.current = null
+    }
+    if (Number.isFinite(nextExpiryAt)) {
+      unusedDecodeExpiryTimerRef.current = setTimeout(
+        () => {
+          unusedDecodeExpiryTimerRef.current = null
+          pruneDecodedPixelRecordsRef.current()
+          reportMetrics({})
+        },
+        Math.max(0, nextExpiryAt - now) + 1
+      )
+    }
+
+    let totalBytes = kept.reduce(
+      (total, record) => total + getCanvasImageDecodedByteSize(record.image),
+      0
+    )
+    if (totalBytes <= PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES) {
+      return
+    }
+    // Over the hard limit: oldest first, unused before waiting ones, never the newest.
+    const newest = kept.reduce((latest, record) =>
+      record.lastTouchedAt > latest.lastTouchedAt ? record : latest
+    )
+    const evictionOrder = [
+      ...kept.filter(isUnused).sort(byRecency).reverse(),
+      ...kept
+        .filter((record) => !isUnused(record))
+        .sort(byRecency)
+        .reverse()
+    ]
+    for (const record of evictionOrder) {
+      if (totalBytes <= PROJECT_CANVAS_WEBGL_DECODED_RESIDENT_BUDGET_BYTES) {
+        break
+      }
+      if (record === newest) {
+        continue
+      }
+      totalBytes -= getCanvasImageDecodedByteSize(record.image)
+      evict(record)
+    }
+  }, [deleteCachedImageRecord, getCanvasImageDecodedByteSize, reportMetrics])
+  pruneDecodedPixelRecordsRef.current = pruneDecodedPixelRecords
 
   const pruneDecodedImageCacheForResidentTargets = useCallback(
     ({
@@ -1555,6 +2302,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       releaseCachedImageRecord(existing, reason)
+      if (existing) {
+        forgetCachedImageRecord(existing)
+      }
       let decodedAssetReleaseId: string | undefined
       if (
         decodedAssetRelease ||
@@ -1586,10 +2336,18 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         cacheKind,
         itemId,
         decodedAssetReleaseId,
-        decodedAssetRefCount: 1
+        decodedAssetRefCount: 1,
+        textureGeneration: textureGenerationByIdRef.current.get(itemId) ?? 0,
+        createdGeneration: spriteReconcileGenerationRef.current,
+        wantedGeneration: -1,
+        lastTouchedAt: (decodedRecordTouchCounterRef.current += 1),
+        unusedSinceMs: null
       }
       cache.set(itemId, record)
       if (decodedAssetReleaseId) {
+        const recordsForImage = decodedRecordsByImageRef.current.get(image) ?? new Set()
+        recordsForImage.add(record)
+        decodedRecordsByImageRef.current.set(image, recordsForImage)
         resourceBudgetTrackerRef.current.upsert({
           id: `project-canvas-webgl:decoded-resident:${decodedAssetReleaseId}`,
           decodedResidentBytes: getCanvasImageDecodedByteSize(image),
@@ -1597,10 +2355,16 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           visible: true,
           lastAccessedAt: window.performance.now()
         })
+        pruneDecodedPixelRecords()
       }
       return record
     },
-    [getCanvasImageDecodedByteSize, releaseCachedImageRecord]
+    [
+      forgetCachedImageRecord,
+      getCanvasImageDecodedByteSize,
+      pruneDecodedPixelRecords,
+      releaseCachedImageRecord
+    ]
   )
 
   const setTextureBudgetReservation = useCallback(
@@ -1901,17 +2665,31 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
 
     const finishedAt = window.performance.now()
-    const shouldCheckWebGLRuntimeError =
-      webglErrorCheckRequestedRef.current ||
-      renderCount === 1 ||
-      renderCount - webglErrorLastCheckedRenderRef.current >=
+    // gl.getError waits until the GPU process has finished everything queued so far. In the
+    // middle of a pan or zoom that wait is a late frame (50 to 130 ms each on a software
+    // renderer, once a second), and a gesture uploads nothing new that could fail: the
+    // periodic sample waits for the first render after the gesture. A requested check and
+    // the timed check after a new texture are not held back.
+    const isPeriodicSampleDue =
+      !isViewportInteractingRef.current &&
+      (renderCount - webglErrorLastCheckedRenderRef.current >=
         PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_RENDER_INTERVAL ||
-      finishedAt - webglErrorLastCheckedAtRef.current >=
-        PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_INTERVAL_MS
+        finishedAt - webglErrorLastCheckedAtRef.current >=
+          PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_INTERVAL_MS)
+    const shouldCheckWebGLRuntimeError =
+      webglErrorCheckRequestedRef.current || renderCount === 1 || isPeriodicSampleDue
     if (shouldCheckWebGLRuntimeError) {
       webglErrorCheckRequestedRef.current = false
+      webglErrorCheckAfterGestureRef.current = false
       webglErrorLastCheckedRenderRef.current = renderCount
       webglErrorLastCheckedAtRef.current = finishedAt
+      if (webglErrorCheckTimerRef.current !== null) {
+        // This check sees every texture created so far (their uploads are done by now), so
+        // the timed check that was waiting for them would only wait for the GPU a second
+        // time. A texture created later asks for its own.
+        clearTimeout(webglErrorCheckTimerRef.current)
+        webglErrorCheckTimerRef.current = null
+      }
       const webglRuntimeFailure = getProjectCanvasWebGLRuntimeFailure(app)
       if (webglRuntimeFailure) {
         runtimeFailureHandlerRef.current?.(webglRuntimeFailure)
@@ -1933,6 +2711,257 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       lastRenderDurationMs
     })
   }, [reportMetrics])
+
+  const requestRenderFrame = useCallback(() => {
+    rafRef.current = window.requestAnimationFrame(() => {
+      rafRef.current = null
+      renderApp()
+    })
+  }, [renderApp])
+
+  /**
+   * Asks for a render in a coming animation frame. This is the path of background work (a
+   * reconcile pass that added or replaced sprites, tiles, start-up), and the only render path
+   * that a running ComfyUI job slows down. What the user moves is drawn by
+   * renderImmediateOrSchedule instead.
+   */
+  const scheduleRender = useCallback(() => {
+    if (!appRef.current || rafRef.current !== null || renderThrottleTimerRef.current !== null) {
+      return
+    }
+
+    let delayMs = 0
+    if (isPerformanceThrottledRef.current) {
+      const elapsedMs = window.performance.now() - lastRenderAtRef.current
+      delayMs = Math.max(
+        0,
+        PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS - elapsedMs
+      )
+    }
+    if (isViewportInteractingRef.current) {
+      // The gesture draws a frame every time the view moves, and that draw shows this change
+      // too. A frame requested here would be a second render in a frame the gesture draws
+      // anyway, so wait for the gesture and only draw alone when the pointer rests.
+      delayMs = Math.max(delayMs, PROJECT_CANVAS_WEBGL_GESTURE_BACKGROUND_RENDER_YIELD_MS)
+    }
+    if (delayMs > 0) {
+      renderThrottleTimerRef.current = setTimeout(() => {
+        renderThrottleTimerRef.current = null
+        if (!appRef.current || rafRef.current !== null) {
+          return
+        }
+        requestRenderFrame()
+      }, delayMs)
+      return
+    }
+
+    requestRenderFrame()
+  }, [requestRenderFrame])
+
+  const cancelScheduledRender = useCallback(() => {
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+    if (renderThrottleTimerRef.current !== null) {
+      clearTimeout(renderThrottleTimerRef.current)
+      renderThrottleTimerRef.current = null
+    }
+  }, [])
+
+  /**
+   * Draws now, in the caller's frame. The viewport sync runs inside the stage's
+   * requestAnimationFrame callback, after the DOM layers got their transform: rendering here
+   * keeps the images in the same frame as everything else, instead of one frame behind in a
+   * requestAnimationFrame of their own. A render that was already scheduled is cancelled,
+   * because this one shows the same state: one render per frame.
+   *
+   * This is what the user sees move (the view, an image being dragged, a resize), so it is
+   * never held back by the ComfyUI throttle: that would show the images at 5 frames per second
+   * under DOM layers moving at full rate. The render itself is a fraction of a millisecond.
+   */
+  const renderImmediateOrSchedule = useCallback(() => {
+    cancelScheduledRender()
+    renderApp()
+  }, [cancelScheduledRender, renderApp])
+
+  const resizeRendererToStage = useCallback(
+    (preferredSize?: { width: number; height: number }) => {
+      const app = appRef.current
+      const host = hostRef.current
+      if (!app || !host) {
+        return
+      }
+
+      const rect = preferredSize ? null : host.getBoundingClientRect()
+      const rawWidth = preferredSize?.width ?? rect?.width ?? 0
+      const rawHeight = preferredSize?.height ?? rect?.height ?? 0
+      const width = Number.isFinite(rawWidth) && rawWidth > 0 ? Math.round(rawWidth) : 1
+      const height = Number.isFinite(rawHeight) && rawHeight > 0 ? Math.round(rawHeight) : 1
+      const renderer = (app as ResizablePixiApplication).renderer
+      const nextResolution = getProjectCanvasRenderDeviceScale(renderQualityRef.current)
+      const resolutionChanged = Boolean(renderer && renderer.resolution !== nextResolution)
+      if (renderer && resolutionChanged) {
+        renderer.resolution = nextResolution
+      }
+      const lastSize = rendererSizeRef.current
+      if (lastSize?.width === width && lastSize.height === height && !resolutionChanged) {
+        return
+      }
+
+      rendererSizeRef.current = { width, height }
+      const canvas = app.canvas as HTMLCanvasElement
+      canvas.style.position = 'absolute'
+      canvas.style.inset = '0'
+      canvas.style.display = 'block'
+      canvas.style.width = '100%'
+      canvas.style.height = '100%'
+      renderer?.resize?.(width, height)
+      renderImmediateOrSchedule()
+    },
+    [renderImmediateOrSchedule]
+  )
+
+  const applyRenderQuality = useCallback(
+    (quality: ProjectCanvasRenderQuality) => {
+      const nextQuality = isProjectCanvasAdaptiveQualityEnabled() ? quality : 'full'
+      if (renderQualityRef.current === nextQuality) {
+        return
+      }
+      renderQualityRef.current = nextQuality
+      resizeRendererToStage(stageSizeRef.current)
+    },
+    [resizeRendererToStage]
+  )
+
+  /** Resizes the renderer when its resolution no longer matches the device pixel ratio. */
+  const resyncRendererResolution = useCallback(() => {
+    const renderer = (appRef.current as ResizablePixiApplication | null)?.renderer
+    if (
+      renderer &&
+      renderer.resolution !== getProjectCanvasRenderDeviceScale(renderQualityRef.current)
+    ) {
+      resizeRendererToStage(stageSizeRef.current)
+    }
+  }, [resizeRendererToStage])
+
+  const stopRenderQualityFrameSampler = useCallback(() => {
+    if (renderQualityFrameSamplerRef.current !== null) {
+      window.cancelAnimationFrame(renderQualityFrameSamplerRef.current)
+      renderQualityFrameSamplerRef.current = null
+    }
+  }, [])
+
+  /**
+   * Times the display frames of the running gesture, one requestAnimationFrame callback per
+   * frame, and lowers the resolution when enough of them in a row were slow. It runs only
+   * while the governor asks for it (the draws of the gesture came late), so a gesture that
+   * keeps up costs no callback here, and it stops by itself when the draws are on time again,
+   * the pointer rests, the resolution was lowered or the gesture ended.
+   */
+  const startRenderQualityFrameSampler = useCallback(() => {
+    if (renderQualityFrameSamplerRef.current !== null) {
+      return
+    }
+
+    const sampleFrame = (frameTime: number) => {
+      renderQualityFrameSamplerRef.current = null
+      const governor = renderQualityGovernorRef.current
+      if (
+        !appRef.current ||
+        !isViewportInteractingRef.current ||
+        !isProjectCanvasAdaptiveQualityEnabled()
+      ) {
+        return
+      }
+
+      applyRenderQuality(governor.recordFrame({ now: frameTime }))
+      if (governor.shouldMeasureFrames(window.performance.now())) {
+        renderQualityFrameSamplerRef.current = window.requestAnimationFrame(sampleFrame)
+      }
+    }
+    renderQualityFrameSamplerRef.current = window.requestAnimationFrame(sampleFrame)
+  }, [applyRenderQuality])
+
+  /**
+   * Brings the render quality in line with the gesture state. Starting or continuing a
+   * gesture never lowers the resolution; only measured slow display frames do (see the
+   * viewport transform). After a gesture that was lowered, the full resolution returns once
+   * the view has been still for the restore delay.
+   */
+  const syncRenderQualityToInteraction = useCallback(() => {
+    if (qualityTransitionTimerRef.current !== null) {
+      clearTimeout(qualityTransitionTimerRef.current)
+      qualityTransitionTimerRef.current = null
+    }
+    if (!isViewportInteractingRef.current) {
+      stopRenderQualityFrameSampler()
+      // The device pixel ratio may have changed while nothing was resized (the window moved
+      // to another monitor); a no-op when it did not.
+      resyncRendererResolution()
+    }
+
+    const governor = renderQualityGovernorRef.current
+    if (!isProjectCanvasAdaptiveQualityEnabled()) {
+      stopRenderQualityFrameSampler()
+      governor.reset()
+      applyRenderQuality('full')
+      return
+    }
+
+    // Only a gesture counts. A running ComfyUI job is not one: it must neither lower the
+    // resolution nor keep a lowered one for as long as the job runs.
+    const quality = governor.update({
+      now: window.performance.now(),
+      interactionActive: isViewportInteractingRef.current
+    })
+    applyRenderQuality(quality)
+    if (quality === 'interactive' && !isViewportInteractingRef.current) {
+      qualityTransitionTimerRef.current = setTimeout(() => {
+        qualityTransitionTimerRef.current = null
+        applyRenderQuality(
+          governor.update({
+            now: window.performance.now(),
+            interactionActive: isViewportInteractingRef.current
+          })
+        )
+      }, PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS)
+    }
+  }, [applyRenderQuality, resyncRendererResolution, stopRenderQualityFrameSampler])
+
+  /**
+   * A texture was created. Its upload may fail (out of memory), which only gl.getError
+   * reports, and that call waits for the GPU process to finish everything queued so far.
+   * Asking for it on the next render after every new texture made an import of 100 images
+   * spend seconds in that wait. So the check is sampled: one check, one interval after the
+   * first texture of a burst, which also covers a canvas that does not render again.
+   */
+  const requestSampledWebGLErrorCheck = useCallback(() => {
+    if (webglErrorCheckTimerRef.current !== null) {
+      return
+    }
+
+    webglErrorCheckTimerRef.current = setTimeout(() => {
+      webglErrorCheckTimerRef.current = null
+      const app = appRef.current
+      if (!app) {
+        return
+      }
+      if (isViewportInteractingRef.current) {
+        // gl.getError waits for the GPU process: in a pan or zoom that is a late frame. The
+        // first render after the gesture checks instead.
+        webglErrorCheckAfterGestureRef.current = true
+        return
+      }
+
+      webglErrorLastCheckedRenderRef.current = webglRenderCountRef.current
+      webglErrorLastCheckedAtRef.current = window.performance.now()
+      const webglRuntimeFailure = getProjectCanvasWebGLRuntimeFailure(app)
+      if (webglRuntimeFailure) {
+        runtimeFailureHandlerRef.current?.(webglRuntimeFailure)
+      }
+    }, PROJECT_CANVAS_WEBGL_ERROR_SAMPLE_INTERVAL_MS)
+  }, [])
 
   const scheduleViewportReconcile = useCallback(
     (options: { allowDuringInteraction?: boolean } = {}) => {
@@ -2001,6 +3030,90 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }, PROJECT_CANVAS_WEBGL_SOURCE_UPGRADE_VIEWPORT_IDLE_DELAY_MS)
   }, [])
 
+  const cancelDisplayIntervalProbe = useCallback(() => {
+    if (displayIntervalProbeTimerRef.current !== null) {
+      clearTimeout(displayIntervalProbeTimerRef.current)
+      displayIntervalProbeTimerRef.current = null
+    }
+    if (displayIntervalProbeFrameRef.current !== null) {
+      window.cancelAnimationFrame(displayIntervalProbeFrameRef.current)
+      displayIntervalProbeFrameRef.current = null
+    }
+  }, [])
+
+  /**
+   * Measures the display's frame interval on a few display frames outside any gesture, for
+   * the quality governor's frame budget. A gesture interrupts it; the end of the next gesture
+   * then schedules another one. The frames must be idle ones: when the layer drew, reconciled
+   * or waited to upload during the probe, its frames came at the page's pace (a board still
+   * filling), and the probe is repeated later. A probe never raises an interval measured
+   * before on the same monitor (a monitor change forgets it first).
+   */
+  const scheduleDisplayIntervalProbe = useCallback(
+    (delayMs: number) => {
+      displayIntervalProbeBusyRetryCountRef.current = 0
+      const schedule = (probeDelayMs: number) => {
+        cancelDisplayIntervalProbe()
+        displayIntervalProbeStateRef.current = 'waiting'
+        displayIntervalProbeTimerRef.current = setTimeout(() => {
+          displayIntervalProbeTimerRef.current = null
+          let lastFrameAt: number | null = null
+          const deltas: number[] = []
+          const getLayerWorkStamp = () =>
+            `${webglRenderCountRef.current}:${spriteReconcileGenerationRef.current}`
+          let layerWorkStamp = ''
+          const probeFrame = (frameTime: number) => {
+            displayIntervalProbeFrameRef.current = null
+            if (!appRef.current || isViewportInteractingRef.current) {
+              displayIntervalProbeStateRef.current = 'failed'
+              return
+            }
+            if (lastFrameAt !== null) {
+              deltas.push(frameTime - lastFrameAt)
+            } else {
+              layerWorkStamp = getLayerWorkStamp()
+            }
+            lastFrameAt = frameTime
+            if (deltas.length < PROJECT_CANVAS_DISPLAY_INTERVAL_PROBE_FRAMES) {
+              displayIntervalProbeFrameRef.current = window.requestAnimationFrame(probeFrame)
+              return
+            }
+            if (
+              getLayerWorkStamp() !== layerWorkStamp ||
+              largeTextureUploadPacerRef.current.waiting
+            ) {
+              if (
+                displayIntervalProbeBusyRetryCountRef.current <
+                PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_BUSY_RETRY_LIMIT
+              ) {
+                displayIntervalProbeBusyRetryCountRef.current += 1
+                schedule(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS)
+              } else {
+                displayIntervalProbeStateRef.current = 'failed'
+              }
+              return
+            }
+            const intervalMs = estimateProjectCanvasDisplayIntervalMs(deltas)
+            if (intervalMs === null) {
+              displayIntervalProbeStateRef.current = 'failed'
+              return
+            }
+            const governor = renderQualityGovernorRef.current
+            const previousIntervalMs = governor.getDisplayIntervalMs()
+            if (previousIntervalMs === null || intervalMs < previousIntervalMs) {
+              governor.setDisplayIntervalMs(intervalMs)
+            }
+            displayIntervalProbeStateRef.current = 'done'
+          }
+          displayIntervalProbeStateRef.current = 'running'
+          displayIntervalProbeFrameRef.current = window.requestAnimationFrame(probeFrame)
+        }, probeDelayMs)
+      }
+      schedule(delayMs)
+    },
+    [cancelDisplayIntervalProbe]
+  )
+
   const setViewportInteractingState = useCallback(
     (active: boolean) => {
       if (isViewportInteractingRef.current === active) {
@@ -2008,6 +3121,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       isViewportInteractingRef.current = active
+      syncRenderQualityToInteraction()
       if (active) {
         if (viewportReconcileTimerRef.current != null) {
           clearTimeout(viewportReconcileTimerRef.current)
@@ -2028,6 +3142,22 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      if (webglErrorCheckAfterGestureRef.current) {
+        webglErrorCheckAfterGestureRef.current = false
+        webglErrorCheckRequestedRef.current = true
+        scheduleRender()
+      }
+      if (displayIntervalProbeStateRef.current === 'failed') {
+        scheduleDisplayIntervalProbe(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_RETRY_DELAY_MS)
+      }
+
+      if (renderThrottleTimerRef.current !== null) {
+        // A background render was waiting for the next gesture frame. The gesture is over:
+        // ask again, now without that wait.
+        cancelScheduledRender()
+        scheduleRender()
+      }
+
       if (isPerformanceThrottledRef.current) {
         sourceUpgradeAllowedAtRef.current = 0
         forceViewportReconcile()
@@ -2044,11 +3174,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       forceViewportReconcile()
     },
     [
+      cancelScheduledRender,
       flushMetricsReport,
       forceViewportReconcile,
       scheduleImageVersionUpdate,
+      scheduleRender,
       clearSourceUpgradeQueue,
-      scheduleSourceUpgradeIdleReconcile
+      scheduleSourceUpgradeIdleReconcile,
+      scheduleDisplayIntervalProbe,
+      syncRenderQualityToInteraction
     ]
   )
 
@@ -2107,9 +3241,21 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(renderThrottleTimerRef.current)
         renderThrottleTimerRef.current = null
       }
+      if (webglErrorCheckTimerRef.current != null) {
+        clearTimeout(webglErrorCheckTimerRef.current)
+        webglErrorCheckTimerRef.current = null
+      }
+      if (unusedDecodeExpiryTimerRef.current != null) {
+        clearTimeout(unusedDecodeExpiryTimerRef.current)
+        unusedDecodeExpiryTimerRef.current = null
+      }
       if (qualityTransitionTimerRef.current != null) {
         clearTimeout(qualityTransitionTimerRef.current)
         qualityTransitionTimerRef.current = null
+      }
+      if (renderQualityFrameSamplerRef.current != null) {
+        window.cancelAnimationFrame(renderQualityFrameSamplerRef.current)
+        renderQualityFrameSamplerRef.current = null
       }
       if (sourceUpgradeIdleTimerRef.current != null) {
         clearTimeout(sourceUpgradeIdleTimerRef.current)
@@ -2126,145 +3272,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     }
   }, [])
 
-  const scheduleRender = useCallback(() => {
-    if (!appRef.current || rafRef.current !== null || renderThrottleTimerRef.current !== null) {
-      return
-    }
-
-    const requestRenderFrame = () => {
-      rafRef.current = window.requestAnimationFrame(() => {
-        rafRef.current = null
-        renderApp()
-      })
-    }
-
-    if (isPerformanceThrottledRef.current) {
-      const elapsedMs = window.performance.now() - lastRenderAtRef.current
-      const delayMs = Math.max(
-        0,
-        PROJECT_CANVAS_WEBGL_PERFORMANCE_THROTTLE_RENDER_INTERVAL_MS - elapsedMs
-      )
-      if (delayMs > 0) {
-        renderThrottleTimerRef.current = setTimeout(() => {
-          renderThrottleTimerRef.current = null
-          if (!appRef.current || rafRef.current !== null) {
-            return
-          }
-          requestRenderFrame()
-        }, delayMs)
-        return
-      }
-    }
-
-    requestRenderFrame()
-  }, [renderApp])
-
-  const cancelScheduledRender = useCallback(() => {
-    if (rafRef.current !== null) {
-      window.cancelAnimationFrame(rafRef.current)
-      rafRef.current = null
-    }
-    if (renderThrottleTimerRef.current !== null) {
-      clearTimeout(renderThrottleTimerRef.current)
-      renderThrottleTimerRef.current = null
-    }
-  }, [])
-
-  const renderImmediateOrSchedule = useCallback(() => {
-    if (isPerformanceThrottledRef.current || isViewportInteractingRef.current) {
-      scheduleRender()
-      return
-    }
-
-    cancelScheduledRender()
-    renderApp()
-  }, [cancelScheduledRender, renderApp, scheduleRender])
-
-  const resizeRendererToStage = useCallback(
-    (preferredSize?: { width: number; height: number }) => {
-      const app = appRef.current
-      const host = hostRef.current
-      if (!app || !host) {
-        return
-      }
-
-      const rect = preferredSize ? null : host.getBoundingClientRect()
-      const rawWidth = preferredSize?.width ?? rect?.width ?? 0
-      const rawHeight = preferredSize?.height ?? rect?.height ?? 0
-      const width = Number.isFinite(rawWidth) && rawWidth > 0 ? Math.round(rawWidth) : 1
-      const height = Number.isFinite(rawHeight) && rawHeight > 0 ? Math.round(rawHeight) : 1
-      const renderer = (app as ResizablePixiApplication).renderer
-      const nextResolution = getProjectCanvasRenderDeviceScale(renderQualityRef.current)
-      const resolutionChanged = Boolean(renderer && renderer.resolution !== nextResolution)
-      if (renderer && resolutionChanged) {
-        renderer.resolution = nextResolution
-      }
-      const lastSize = rendererSizeRef.current
-      if (lastSize?.width === width && lastSize.height === height && !resolutionChanged) {
-        return
-      }
-
-      rendererSizeRef.current = { width, height }
-      const canvas = app.canvas as HTMLCanvasElement
-      canvas.style.position = 'absolute'
-      canvas.style.inset = '0'
-      canvas.style.display = 'block'
-      canvas.style.width = '100%'
-      canvas.style.height = '100%'
-      renderer?.resize?.(width, height)
-      renderImmediateOrSchedule()
-    },
-    [renderImmediateOrSchedule]
-  )
-
-  const applyRenderQuality = useCallback(
-    (quality: ProjectCanvasRenderQuality) => {
-      const nextQuality = isProjectCanvasAdaptiveQualityEnabled() ? quality : 'full'
-      if (renderQualityRef.current === nextQuality) {
-        return
-      }
-      renderQualityRef.current = nextQuality
-      resizeRendererToStage(stageSizeRef.current)
-    },
-    [resizeRendererToStage]
-  )
-
   useEffect(() => {
-    if (qualityTransitionTimerRef.current !== null) {
-      clearTimeout(qualityTransitionTimerRef.current)
-      qualityTransitionTimerRef.current = null
-    }
-
-    const governor = renderQualityGovernorRef.current
-    const interactionActive = isViewportInteracting || isPerformanceThrottled
-    const now = window.performance.now()
-    if (!isProjectCanvasAdaptiveQualityEnabled()) {
-      governor.reset()
-      applyRenderQuality('full')
-      return
-    }
-
-    applyRenderQuality(governor.update({ now, interactionActive }))
-    const transitionDelayMs = interactionActive
-      ? PROJECT_CANVAS_ADAPTIVE_QUALITY_DOWNGRADE_DEBOUNCE_MS
-      : PROJECT_CANVAS_ADAPTIVE_QUALITY_RESTORE_DEBOUNCE_MS
-    qualityTransitionTimerRef.current = setTimeout(() => {
-      qualityTransitionTimerRef.current = null
-      applyRenderQuality(
-        governor.update({
-          now: window.performance.now(),
-          interactionActive
-        })
-      )
-    }, transitionDelayMs)
-
-    return () => {
-      if (qualityTransitionTimerRef.current !== null) {
-        clearTimeout(qualityTransitionTimerRef.current)
-        qualityTransitionTimerRef.current = null
-      }
-    }
-  }, [applyRenderQuality, isPerformanceThrottled, isViewportInteracting])
+    syncRenderQualityToInteraction()
+  }, [isViewportInteracting, syncRenderQualityToInteraction])
 
   const applyViewportTransform = useCallback(
     (pos: { x: number; y: number }, scale: number) => {
@@ -2287,12 +3297,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
 
       lastAppliedViewportRef.current = { x: pos.x, y: pos.y, scale }
+      syncProjectCanvasWorldRenderGroup(world, pos, stageSizeRef.current)
       world.position.set(pos.x, pos.y)
       world.scale.set(scale)
+      const frameStartedAt = window.performance.now()
       renderImmediateOrSchedule()
+      if (
+        isViewportInteractingRef.current &&
+        isProjectCanvasAdaptiveQualityEnabled() &&
+        canProjectCanvasLowerRenderResolution() &&
+        // A gesture frame. When these come late, the display frames are timed: only slow
+        // frames lower the resolution, not input that arrives slowly.
+        renderQualityGovernorRef.current.recordGestureFrame({ now: frameStartedAt })
+      ) {
+        startRenderQualityFrameSampler()
+      }
       return true
     },
-    [isInitialized, renderImmediateOrSchedule]
+    [isInitialized, renderImmediateOrSchedule, startRenderQualityFrameSampler]
   )
 
   const markSpriteRecordUsed = useCallback((record: SpriteRecord) => {
@@ -2300,8 +3322,45 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     record.lastUsedAt = spriteUsageCounterRef.current
   }, [])
 
+  /**
+   * Gives the image the display object its rotation needs: the edge-antialiased mesh while it
+   * is rotated, a plain sprite otherwise. The texture stays; only the object that draws it is
+   * replaced, at the same place in the world's child list. Returns true when it was replaced:
+   * the caller then has to apply the transform again.
+   */
+  const syncSpriteRecordEdgeAntialias = useCallback(
+    (record: SpriteRecord, rotationDegrees: number) => {
+      const geometry = needsProjectCanvasEdgeAntialias(rotationDegrees)
+        ? edgeAntialiasGeometryRef.current
+        : null
+      if (Boolean(geometry) === Boolean(record.edgeAntialiasShader)) {
+        return false
+      }
+
+      const previous = record.sprite
+      const previousShader = record.edgeAntialiasShader
+      const next = createProjectCanvasImageDisplayObject(record.texture, geometry)
+      next.sprite.label = previous.label
+      next.sprite.zIndex = previous.zIndex
+      const parent = previous.parent
+      if (parent) {
+        parent.addChildAt(next.sprite, parent.getChildIndex(previous))
+      }
+      previous.removeFromParent()
+      previous.destroy()
+      previousShader?.destroy()
+      record.sprite = next.sprite
+      record.edgeAntialiasShader = next.edgeAntialiasShader
+      record.textureWidth = next.textureWidth
+      record.textureHeight = next.textureHeight
+      record.transformKey = ''
+      return true
+    },
+    []
+  )
+
   const destroySpriteRecord = useCallback(
-    (itemId: string, options?: { retainPreview?: boolean }) => {
+    (itemId: string, options?: { retainPreview?: boolean; replaced?: boolean }) => {
       const record = spriteRecordsRef.current.get(itemId)
       if (!record) {
         return
@@ -2328,8 +3387,20 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       if (!options?.retainPreview) {
         previewStateRef.current.delete(itemId)
       }
+      if (!options?.replaced) {
+        // The item has no sprite any more. A decode that was released after its upload is
+        // only a handle for a texture this item no longer shows; without the sprite it would
+        // stay in the cache for nothing. (Decodes that still hold pixels are left to the LRU.)
+        for (const cache of [imageCacheRef.current, thumbnailCacheRef.current]) {
+          const cached = cache.get(itemId)
+          if (cached && isProjectCanvasDecodedImageReleased(cached.image)) {
+            deleteCachedImageRecord(cache, itemId, 'budget-pressure')
+          }
+        }
+        pendingTextureReacquireIdsRef.current.delete(itemId)
+      }
     },
-    [destroySharedTexture, removeTextureBudgetReservation]
+    [deleteCachedImageRecord, destroySharedTexture, removeTextureBudgetReservation]
   )
 
   const evictOldestResidentSprite = useCallback(
@@ -2413,14 +3484,37 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         clearTimeout(renderThrottleTimerRef.current)
         renderThrottleTimerRef.current = null
       }
+      if (webglErrorCheckTimerRef.current !== null) {
+        clearTimeout(webglErrorCheckTimerRef.current)
+        webglErrorCheckTimerRef.current = null
+      }
+      if (unusedDecodeExpiryTimerRef.current !== null) {
+        clearTimeout(unusedDecodeExpiryTimerRef.current)
+        unusedDecodeExpiryTimerRef.current = null
+      }
       if (imageVersionDeferredTimerRef.current !== null) {
         clearTimeout(imageVersionDeferredTimerRef.current)
         imageVersionDeferredTimerRef.current = null
+      }
+      if (renderQualityFrameSamplerRef.current !== null) {
+        window.cancelAnimationFrame(renderQualityFrameSamplerRef.current)
+        renderQualityFrameSamplerRef.current = null
       }
       if (spriteReconcileFrameRef.current !== null) {
         window.cancelAnimationFrame(spriteReconcileFrameRef.current)
         spriteReconcileFrameRef.current = null
       }
+      if (largeTextureUploadFrameRef.current !== null) {
+        window.cancelAnimationFrame(largeTextureUploadFrameRef.current)
+        largeTextureUploadFrameRef.current = null
+      }
+      releaseProjectCanvasLargeUploadFence(
+        getProjectCanvasWebGLFenceContext(appRef.current),
+        largeTextureUploadPacerRef.current
+      )
+      resetProjectCanvasTextureUploadFrame(largeTextureUploadPacerRef.current)
+      largeTextureUploadPacerRef.current.fencePending = false
+      largeTextureUploadPacerRef.current.waiting = false
       if (imageVersionFrameRef.current !== null) {
         window.cancelAnimationFrame(imageVersionFrameRef.current)
         imageVersionFrameRef.current = null
@@ -2459,6 +3553,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       skippedSourceUpgradeSrcByIdRef.current.clear()
       clearCachedImageRecords(imageCacheRef.current, 'component-unmount')
       clearCachedImageRecords(thumbnailCacheRef.current, 'component-unmount')
+      decodedRecordsByImageRef.current.clear()
+      pendingTextureReacquireIdsRef.current.clear()
+      textureGenerationByIdRef.current.clear()
       objectUrlReleaseHandlesRef.current.forEach((handle) => handle.release('component-unmount'))
       objectUrlReleaseHandlesRef.current.clear()
       resourceBudgetTrackerRef.current.remove('project-canvas-webgl:object-url-runtime')
@@ -2529,6 +3626,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       spatialTileSourceBlobByKeyRef.current.clear()
 
       try {
+        edgeAntialiasGeometryRef.current?.destroy(true)
+      } catch (error) {
+        console.warn('[Canvas WebGL] Failed to destroy the edge antialias geometry.', error)
+      }
+      edgeAntialiasGeometryRef.current = null
+      try {
         appRef.current?.destroy(true, { children: true })
       } catch (error) {
         console.warn('[Canvas WebGL] Failed to destroy Pixi runtime after GPU failure.', error)
@@ -2548,27 +3651,50 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
 
     const initialize = async () => {
       try {
+        registerProjectCanvasStripTextureUploader()
         const app = new Application()
         await app.init({
           resizeTo: host,
           backgroundAlpha: 0,
           clearBeforeRender: true,
-          antialias: true,
+          // No multisampled drawing buffer; rotated images antialias their own edges.
+          antialias: false,
           autoDensity: true,
           resolution: getProjectCanvasRenderDeviceScale(renderQualityRef.current),
           autoStart: false,
           sharedTicker: false,
           preference: 'webgl',
-          powerPreference: 'high-performance'
+          powerPreference: 'high-performance',
+          // No timed collection by Pixi (60 s unused, checked every 30 s): textures are
+          // created and destroyed by this layer only. `textureGCActive` is a deprecated
+          // alias of the same switch in Pixi 8.15+ and is not passed.
+          gcActive: false
         })
+        const pixiGarbageCollector = (
+          app.renderer as { gc?: { enabled?: boolean } } | null | undefined
+        )?.gc
+        if (pixiGarbageCollector?.enabled) {
+          pixiGarbageCollector.enabled = false
+        }
+        resourceBudgetTrackerRef.current.setLimits(
+          getProjectCanvasWebGLResourceBudgetLimits(
+            typeof (app.renderer as PixiRendererWithEagerTextureUpload | null | undefined)?.texture
+              ?.initSource === 'function'
+          )
+        )
 
         if (disposed) {
           app.destroy(true, { children: true })
           return
         }
 
+        edgeAntialiasGeometryRef.current =
+          (app.renderer as PixiRendererWithWebGLContext).context?.webGLVersion === 2
+            ? createProjectCanvasEdgeAntialiasGeometry()
+            : null
         const world = new Container()
         world.sortableChildren = true
+        syncProjectCanvasWorldRenderGroup(world, stagePosRef.current, stageSizeRef.current)
         const canvas = app.canvas as HTMLCanvasElement
         const handleContextLost = (event: Event) => {
           event.preventDefault()
@@ -2666,41 +3792,72 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           return
         }
 
+        // Moves the sprite to `transform`. False when nothing on screen changes: the hit
+        // proxies of all visible images reset their preview when a gesture starts, and none
+        // of those calls may cost a render.
+        const applyPreviewTransform = (transform: ProjectCanvasImagePreview) => {
+          const hadTinyPreview = record.sawTinyPreview
+          if (
+            refreshProjectCanvasTextureAfterTinyPreview(
+              record,
+              transform,
+              stageScaleRef.current,
+              'preview'
+            )
+          ) {
+            requestTextureReacquire(itemId)
+          }
+          const textureRefreshed = hadTinyPreview && !record.sawTinyPreview
+          const displayObjectReplaced = syncSpriteRecordEdgeAntialias(record, transform.rotation)
+          const transformKey = getProjectCanvasRenderTransformKey(transform)
+          const moved = record.transformKey !== transformKey
+          if (moved) {
+            applySpriteTransform(
+              record.sprite,
+              { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
+              transform
+            )
+            record.transformKey = transformKey
+          }
+          return moved || displayObjectReplaced || textureRefreshed
+        }
+
+        let changed = false
         if (!preview) {
           previewStateRef.current.delete(itemId)
           const renderItem = renderItemsRef.current.get(itemId)
           if (renderItem) {
-            refreshProjectCanvasTextureAfterTinyPreview(record, renderItem, stageScaleRef.current)
-            applySpriteTransform(
-              record.sprite,
-              { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
-              renderItem
-            )
-            record.transformKey = getProjectCanvasRenderTransformKey(renderItem)
+            changed = applyPreviewTransform(renderItem)
           }
-          markSpriteRecordUsed(record)
-          renderImmediateOrSchedule()
+        } else {
+          previewStateRef.current.set(itemId, preview)
+          changed = applyPreviewTransform(preview)
+        }
+        markSpriteRecordUsed(record)
+        if (!changed) {
           return
         }
-
-        previewStateRef.current.set(itemId, preview)
-        refreshProjectCanvasTextureAfterTinyPreview(record, preview, stageScaleRef.current)
-        applySpriteTransform(
-          record.sprite,
-          { textureWidth: record.textureWidth, textureHeight: record.textureHeight },
-          preview
-        )
-        record.transformKey = getProjectCanvasRenderTransformKey(preview)
-        markSpriteRecordUsed(record)
-        renderImmediateOrSchedule()
+        if (preview) {
+          renderImmediateOrSchedule()
+        } else {
+          // A preview ends when the move it showed is committed. The committed item reaches
+          // this layer in the reconcile pass that follows; until then the last reconciled
+          // place is the old one. Drawing it now would show the image back where it was
+          // (for a whole throttle interval while a ComfyUI job runs), so let the coming
+          // frame draw whatever the reconcile pass left.
+          scheduleRender()
+        }
       }
     }),
     [
       applyViewportTransform,
       markSpriteRecordUsed,
       renderImmediateOrSchedule,
+      requestTextureReacquire,
+      scheduleRender,
       scheduleViewportReconcile,
-      setViewportInteractingState
+      setViewportInteractingState,
+      syncSpriteRecordEdgeAntialias
     ]
   )
 
@@ -2719,17 +3876,153 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return
     }
 
-    const observer = new ResizeObserver(() => {
+    // While a panel next to the canvas is being dragged, the host changes its size on every
+    // mouse move. Resizing the renderer reallocates the drawing buffer and redraws; doing that
+    // per move made the drag stutter. During the drag the canvas keeps its buffer and its
+    // size on screen (the host clips it, or shows empty space where it grew), and the renderer
+    // is resized once when the drag ends.
+    let hasSkippedResize = false
+    let pinnedCanvas: HTMLCanvasElement | null = null
+    // The end event of a drag can get lost (the window lost focus before the mouse button
+    // came up). Then the deferral ends by itself on the next pointer release or on window
+    // blur, and resizes follow the host again until the next drag starts. After a while
+    // without a resize the renderer catches up with the host as well; a drag that only
+    // paused defers again at its next move.
+    let ignoresLayoutResizeInteraction = false
+    let deferralTimer: ReturnType<typeof setTimeout> | null = null
+    let listensForDeferralEnd = false
+    const pinCanvasSize = () => {
+      const canvas = appRef.current?.canvas as HTMLCanvasElement | undefined
+      const size = rendererSizeRef.current
+      if (!canvas || !size || pinnedCanvas === canvas) {
+        return
+      }
+      pinnedCanvas = canvas
+      canvas.style.width = `${size.width}px`
+      canvas.style.height = `${size.height}px`
+    }
+    const unpinCanvasSize = () => {
+      if (!pinnedCanvas) {
+        return
+      }
+      pinnedCanvas.style.width = '100%'
+      pinnedCanvas.style.height = '100%'
+      pinnedCanvas = null
+    }
+    const resizeToHost = () => {
       resizeRendererToStage()
       scheduleViewportReconcile()
+    }
+    const stopDeferralSafetyNet = () => {
+      if (deferralTimer !== null) {
+        clearTimeout(deferralTimer)
+        deferralTimer = null
+      }
+      if (listensForDeferralEnd) {
+        listensForDeferralEnd = false
+        window.removeEventListener('pointerup', abandonDeferral, true)
+        window.removeEventListener('blur', abandonDeferral)
+      }
+    }
+    const endDeferral = () => {
+      stopDeferralSafetyNet()
+      unpinCanvasSize()
+      if (hasSkippedResize) {
+        hasSkippedResize = false
+        resizeToHost()
+      }
+    }
+    function abandonDeferral() {
+      ignoresLayoutResizeInteraction = true
+      endDeferral()
+    }
+    const armDeferralSafetyNet = () => {
+      if (deferralTimer !== null) {
+        clearTimeout(deferralTimer)
+      }
+      deferralTimer = setTimeout(
+        endDeferral,
+        PROJECT_CANVAS_WEBGL_LAYOUT_RESIZE_DEFERRAL_MAX_IDLE_MS
+      )
+      if (!listensForDeferralEnd) {
+        listensForDeferralEnd = true
+        window.addEventListener('pointerup', abandonDeferral, true)
+        window.addEventListener('blur', abandonDeferral)
+      }
+    }
+    const observer = new ResizeObserver(() => {
+      if (getCanvasLayoutResizeInteractionState().active && !ignoresLayoutResizeInteraction) {
+        hasSkippedResize = true
+        pinCanvasSize()
+        armDeferralSafetyNet()
+        return
+      }
+      unpinCanvasSize()
+      resizeToHost()
     })
+    const handleLayoutResizeInteraction = (event: Event) => {
+      const detail = (event as CustomEvent<CanvasLayoutResizeInteractionDetail>).detail
+      // A new drag (or the end of one) brings the emitter's state back in charge.
+      ignoresLayoutResizeInteraction = false
+      if (detail?.active) {
+        return
+      }
+      endDeferral()
+    }
     observer.observe(host)
+    window.addEventListener(CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT, handleLayoutResizeInteraction)
     resizeRendererToStage(stageSizeRef.current)
 
     return () => {
       observer.disconnect()
+      stopDeferralSafetyNet()
+      window.removeEventListener(
+        CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
+        handleLayoutResizeInteraction
+      )
+      unpinCanvasSize()
     }
   }, [isInitialized, resizeRendererToStage, scheduleViewportReconcile])
+
+  // A change of the device pixel ratio (the window moved to a monitor with another scale)
+  // resizes no element, so nothing else would re-read it: follow it here. The query matches
+  // one ratio only, so it is made again for the new ratio after each change. The new monitor
+  // may also have another refresh rate: measure the display interval again.
+  useEffect(() => {
+    if (!isInitialized) {
+      return
+    }
+
+    scheduleDisplayIntervalProbe(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_PROBE_DELAY_MS)
+    if (typeof window.matchMedia !== 'function') {
+      return cancelDisplayIntervalProbe
+    }
+
+    let query: MediaQueryList | null = null
+    const handleResolutionChange = () => {
+      watchResolution()
+      resyncRendererResolution()
+      renderQualityGovernorRef.current.setDisplayIntervalMs(null)
+      scheduleDisplayIntervalProbe(PROJECT_CANVAS_WEBGL_DISPLAY_INTERVAL_RETRY_DELAY_MS)
+    }
+    function watchResolution() {
+      query?.removeEventListener?.('change', handleResolutionChange)
+      query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`)
+      query?.addEventListener?.('change', handleResolutionChange)
+    }
+    watchResolution()
+
+    return () => {
+      query?.removeEventListener?.('change', handleResolutionChange)
+      query = null
+      cancelDisplayIntervalProbe()
+    }
+  }, [
+    cancelDisplayIntervalProbe,
+    isInitialized,
+    resyncRendererResolution,
+    scheduleDisplayIntervalProbe
+  ])
 
   useLayoutEffect(() => {
     applyViewportTransform({ x: stagePosX, y: stagePosY }, stageScale)
@@ -2865,6 +4158,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const markUnavailableSource = (outcome: 'skipped' | 'failed', error?: unknown) => {
         const currentItem = currentItemByIdRef.current.get(item.id)
         if (currentItem && isRequestCurrent()) {
+          pendingTextureReacquireIdsRef.current.delete(item.id)
           if (mode === 'source-upgrade' && outcome === 'skipped') {
             skippedSourceUpgradeSrcByIdRef.current.set(item.id, item.src)
           } else if (mode === 'source-upgrade') {
@@ -2872,6 +4166,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             console.warn('[Canvas WebGL] Source texture decode failed:', item.id, item.src, error)
           } else {
             failedLoadSrcByIdRef.current.set(item.id, item.src)
+            imageLoadRetriesRef.current?.noteFailure(item.id, item.src)
           }
           emitItemLoadMetricsSnapshot()
         } else if (currentItem) {
@@ -2938,6 +4233,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return false
       }
       const loadDecodedAsset = async (signal: AbortSignal): Promise<CanvasImageAsset | null> => {
+        imageFileReadCountRef.current += 1
         const releaseProducerDecodeBudgetReservation = beginDecodeBudgetReservation(
           sharedDecodedKey,
           mode,
@@ -3032,6 +4328,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         }
 
         failedLoadSrcByIdRef.current.delete(item.id)
+        imageLoadRetriesRef.current?.forget(item.id)
         failedSourceUpgradeSrcByIdRef.current.delete(item.id)
         skippedSourceUpgradeSrcByIdRef.current.delete(item.id)
         setCachedImageRecord({
@@ -3263,6 +4560,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         const abortController = new AbortController()
         thumbnailLoadAbortByIdRef.current.get(queued.itemId)?.abort()
         thumbnailLoadAbortByIdRef.current.set(queued.itemId, abortController)
+        imageFileReadCountRef.current += 1
         void loadImageElement(queued.src, {
           crossOrigin: shouldUseAnonymousCrossOrigin(queued.src) ? 'anonymous' : null,
           signal: abortController.signal
@@ -3306,6 +4604,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               nextItem?.thumbnailSet?.levels.some((level) => level.src === queued.src) &&
               getCanvasImageSourceRevisionKey(nextItem) === requestRevisionKey
             ) {
+              pendingTextureReacquireIdsRef.current.delete(queued.itemId)
               failedThumbnailLoadSrcByIdRef.current.set(queued.itemId, queued.src)
               failedThumbnailLoadRevisionByIdRef.current.set(queued.itemId, requestRevisionKey)
               scheduleImageVersionUpdate()
@@ -3373,7 +4672,75 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       return true
     }
 
+    const dropDecodedRecordsForImage = (itemId: string, image: CanvasImageAsset) => {
+      if (imageCacheRef.current.get(itemId)?.image === image) {
+        deleteCachedImageRecord(imageCacheRef.current, itemId, 'manual')
+      }
+      if (thumbnailCacheRef.current.get(itemId)?.image === image) {
+        deleteCachedImageRecord(thumbnailCacheRef.current, itemId, 'manual')
+      }
+    }
+
+    // A decode whose pixels were released after their upload is only a handle for that
+    // texture. Once the texture is gone the handle is stale and must not be drawn.
+    const isStaleReleasedDecodedImage = (item: CanvasImageItem, image: CanvasImageAsset) => {
+      if (!isProjectCanvasDecodedImageReleased(image)) {
+        return false
+      }
+
+      const cachedSource = imageCacheRef.current.get(item.id)
+      const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+      const decodedVariantKey =
+        cachedSource?.image === image
+          ? getProjectCanvasDecodedVariantKey(cachedSource)
+          : cachedThumbnail?.image === image
+            ? getProjectCanvasDecodedVariantKey(cachedThumbnail)
+            : null
+      if (decodedVariantKey === null) {
+        return true
+      }
+
+      return (
+        sharedTexturePoolRef.current.getRefCount(
+          getCanvasImageSharedTextureKey(
+            item,
+            image,
+            decodedVariantKey,
+            getCanvasImageAssetIdentityKey(image)
+          )
+        ) === 0
+      )
+    }
+
     const ensureImage = (item: CanvasImageItem, sourceUpgradePriority: number) => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const image = resolveImageForItem(item, sourceUpgradePriority)
+        if (!image || !isStaleReleasedDecodedImage(item, image)) {
+          if (image) {
+            const cachedSource = imageCacheRef.current.get(item.id)
+            const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+            const wantedRecord =
+              cachedSource?.image === image
+                ? cachedSource
+                : cachedThumbnail?.image === image
+                  ? cachedThumbnail
+                  : undefined
+            if (wantedRecord) {
+              // This pass draws it (now, or in a later batch): not an unused decode.
+              wantedRecord.wantedGeneration = spriteReconcileGeneration
+              wantedRecord.lastTouchedAt = decodedRecordTouchCounterRef.current += 1
+            }
+          }
+          return image
+        }
+        // Decode it again: the next attempt falls back to what is still drawable.
+        dropDecodedRecordsForImage(item.id, image)
+      }
+
+      return item.image ?? null
+    }
+
+    const resolveImageForItem = (item: CanvasImageItem, sourceUpgradePriority: number) => {
       const failedSourceUpgradeSrc = failedSourceUpgradeSrcByIdRef.current.get(item.id)
       const skippedSourceUpgradeSrc = skippedSourceUpgradeSrcByIdRef.current.get(item.id)
       if (failedSourceUpgradeSrc && failedSourceUpgradeSrc !== item.src) {
@@ -3421,6 +4788,21 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       } else if (cachedThumbnail) {
         deleteCachedImageRecord(thumbnailCacheRef.current, item.id, 'replaced')
       }
+      // A texture that must be refreshed but cannot be uploaded again is replaced by a new
+      // decode of the same level. Until that decode is uploaded the old texture stays.
+      const reacquireGeneration = pendingTextureReacquireIdsRef.current.has(item.id)
+        ? (textureGenerationByIdRef.current.get(item.id) ?? 0)
+        : 0
+      const shownImage =
+        reacquireGeneration > 0 ? renderItemsRef.current.get(item.id)?.image : undefined
+      if (
+        currentThumbnail &&
+        shownImage === currentThumbnail.image &&
+        currentThumbnail.textureGeneration < reacquireGeneration &&
+        isProjectCanvasDecodedImageReleased(currentThumbnail.image)
+      ) {
+        queueThumbnailLoad(item, currentThumbnail.src, sourceUpgradePriority)
+      }
       const failedThumbnailSrc = failedThumbnailLoadSrcByIdRef.current.get(item.id)
       if (
         failedThumbnailSrc &&
@@ -3454,6 +4836,19 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
       if (cached) {
         failedLoadSrcByIdRef.current.delete(item.id)
+        if (
+          shownImage === cached.image &&
+          cached.textureGeneration < reacquireGeneration &&
+          isProjectCanvasDecodedImageReleased(cached.image) &&
+          !isViewportInteractingRef.current &&
+          !isPerformanceThrottledRef.current
+        ) {
+          if (fallbackImage) {
+            queueSourceUpgrade(item, sourceUpgradePriority)
+          } else {
+            startImageLoad(item, 'initial', sourceUpgradePriority)
+          }
+        }
         const cachedSourceDecision = resolveCanvasImageLodDecision({
           item,
           image: fallbackImage ?? null,
@@ -3464,9 +4859,33 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           residentTextureBytes: getResidentTextureBytes(),
           existingTextureBytes: existingRecord?.textureByteSize ?? 0,
           residentTextureBudgetBytes: PROJECT_CANVAS_WEBGL_TEXTURE_BUDGET_BYTES,
-          deviceScale: getProjectCanvasRenderDeviceScale()
+          deviceScale: getProjectCanvasRenderDeviceScale(),
+          sourceTextureResident: true
         })
         if (fallbackImage && !cachedSourceDecision.shouldUseSourceTexture) {
+          if (
+            thumbnailLevel?.src &&
+            currentThumbnail?.src !== thumbnailLevel.src &&
+            failedThumbnailLoadSrcByIdRef.current.get(item.id) !== thumbnailLevel.src &&
+            existingRecord &&
+            renderItemsRef.current.get(item.id)?.image === cached.image
+          ) {
+            // The level that should replace the source texture is not decoded yet. Keep the
+            // sharper texture on screen instead of dropping to the small preview in between.
+            return cached.image
+          }
+          if (
+            isProjectCanvasDecodedImageReleased(cached.image) &&
+            // A stale fallback is dropped by the caller, which then asks again: the source
+            // texture has to stay on screen until the fallback level is decoded.
+            !isStaleReleasedDecodedImage(item, fallbackImage)
+          ) {
+            // The source is not wanted at this zoom or selection any more. Its pixels live
+            // only in the texture, which goes away with the sprite: drop the handle now.
+            // (A source decode that was never uploaded stays as an unused decode and is
+            // bounded by the LRU.)
+            deleteCachedImageRecord(imageCacheRef.current, item.id, 'budget-pressure')
+          }
           return fallbackImage
         }
         if (!fallbackImage && !cachedSourceDecision.shouldUseSourceTexture) {
@@ -3557,6 +4976,7 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         failedLoadSrcByIdRef.current.delete(itemId)
       }
     })
+    imageLoadRetriesRef.current?.retain(nextIds)
     failedSourceUpgradeSrcByIdRef.current.forEach((_src, itemId) => {
       if (!nextIds.has(itemId)) {
         failedSourceUpgradeSrcByIdRef.current.delete(itemId)
@@ -3625,6 +5045,12 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     thumbnailLoadGenerationByIdRef.current.forEach((_generation, itemId) => {
       if (!nextIds.has(itemId)) {
         thumbnailLoadGenerationByIdRef.current.delete(itemId)
+      }
+    })
+    textureGenerationByIdRef.current.forEach((_generation, itemId) => {
+      if (!nextIds.has(itemId)) {
+        textureGenerationByIdRef.current.delete(itemId)
+        pendingTextureReacquireIdsRef.current.delete(itemId)
       }
     })
     initialLoadQueueRef.current = initialLoadQueueRef.current.filter((entry) => {
@@ -3892,9 +5318,29 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         : 0
       : Number.POSITIVE_INFINITY
     let deferredNewSpriteCount = 0
+    const largeTextureUploadGl = getProjectCanvasWebGLFenceContext(appRef.current)
+    const canUploadEagerly =
+      typeof (appRef.current?.renderer as PixiRendererWithEagerTextureUpload | null | undefined)
+        ?.texture?.initSource === 'function'
+    const canUploadInStrips = canProjectCanvasRendererUploadInStrips(appRef.current)
     let residentCandidateTextureBytes = 0
     let worldOrderDirty = false
     const nextRenderItems = new Map<string, ProjectCanvasRenderableImage>()
+    // Uploads a new texture now and counts its bytes and main-thread time against this
+    // display frame's upload budget (checked before the texture was created).
+    const uploadTextureNowWithinFrameBudget = (texture: Texture, textureByteSize: number) => {
+      const uploadStartedAt = window.performance.now()
+      if (!uploadProjectCanvasTextureNow(appRef.current, texture)) {
+        return false
+      }
+      noteProjectCanvasLargeTextureUpload(
+        largeTextureUploadPacerRef.current,
+        textureByteSize,
+        window.performance.now() - uploadStartedAt
+      )
+      armLargeTextureUploadFrame()
+      return true
+    }
 
     const reconcileSpatialTilePresentation = (input: SpatialTileReconcileInput) => {
       if (
@@ -4141,7 +5587,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
             getCanvasImageAssetIdentityKey(cachedSource?.image),
             cachedThumbnail?.src,
             getCanvasImageAssetIdentityKey(cachedThumbnail?.image),
-            activeSourceUpgradeSrcByIdRef.current.get(item.id)
+            activeSourceUpgradeSrcByIdRef.current.get(item.id),
+            pendingTextureReacquireIdsRef.current.has(item.id)
           ]
         },
         {
@@ -4314,16 +5761,17 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       } else {
         resourceBudgetTrackerRef.current.remove(encodedBlobReservationId)
       }
-      const decodedVariantKey = isProjectCanvasCachedSourceImage(
-        renderItem.image,
-        imageCacheRef.current.get(item.id)
-      )
-        ? 'source'
-        : thumbnailCacheRef.current.get(item.id)?.image === renderItem.image
-          ? `thumbnail:${thumbnailCacheRef.current.get(item.id)?.src ?? ''}`
-          : getCanvasImageStableSourceKey(item)
-            ? 'provided-source'
-            : `provided-object:${getCanvasImageAssetIdentityKey(renderItem.image)}`
+      const cachedSourceForVariant = imageCacheRef.current.get(item.id)
+      const cachedThumbnailForVariant = thumbnailCacheRef.current.get(item.id)
+      const decodedVariantKey =
+        cachedSourceForVariant &&
+        isProjectCanvasCachedSourceImage(renderItem.image, cachedSourceForVariant)
+          ? getProjectCanvasDecodedVariantKey(cachedSourceForVariant)
+          : cachedThumbnailForVariant?.image === renderItem.image
+            ? getProjectCanvasDecodedVariantKey(cachedThumbnailForVariant)
+            : getCanvasImageStableSourceKey(item)
+              ? 'provided-source'
+              : `provided-object:${getCanvasImageAssetIdentityKey(renderItem.image)}`
       const sharedTextureKey = getCanvasImageSharedTextureKey(
         item,
         renderItem.image,
@@ -4333,23 +5781,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       const textureKey = `${getProjectCanvasRenderTextureKey(renderItem)}|${sourceRevisionKey}`
       const transformState = preview ?? renderItem
       const transformKey = getProjectCanvasRenderTransformKey(transformState)
+      const targetRenderItem = renderItem
+      /**
+       * The item keeps the sprite it has while its new texture waits (a large upload in
+       * flight, the creation batch of this pass, a decode again, the texture budget). The
+       * sprite still has to follow a move, a layer change or a rotation of the item meanwhile;
+       * only its texture stays the old one.
+       */
       const preserveExistingRenderItem = () => {
         const previousRenderItem = renderItemsRef.current.get(item.id)
-        if (previousRenderItem) {
-          nextRenderItems.set(item.id, previousRenderItem)
+        if (!existingRecord || spriteRecordsRef.current.get(item.id) !== existingRecord) {
+          if (previousRenderItem) {
+            nextRenderItems.set(item.id, previousRenderItem)
+          }
+          return
         }
-      }
-      const needsNewSpriteRecord = !existingRecord || existingRecord.textureKey !== textureKey
-      if (needsNewSpriteRecord && newSpriteCreationBudget <= 0) {
-        if (existingRecord) {
-          preserveExistingRenderItem()
+        if (syncSpriteRecordEdgeAntialias(existingRecord, transformState.rotation)) {
+          worldOrderDirty = true
         }
-        deferredNewSpriteCount += 1
-        return
-      }
-
-      if (existingRecord && existingRecord.textureKey === textureKey) {
-        nextRenderItems.set(item.id, renderItem)
         if (existingRecord.sprite.zIndex !== item.zIndex) {
           existingRecord.sprite.zIndex = item.zIndex
           worldOrderDirty = true
@@ -4365,13 +5814,98 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           )
           existingRecord.transformKey = transformKey
         }
-        refreshProjectCanvasTextureAfterTinyPreview(
-          existingRecord,
-          transformState,
-          stageScaleRef.current
-        )
+        if (previousRenderItem) {
+          // Old texture, new place: what clearing a preview later restores.
+          nextRenderItems.set(item.id, {
+            ...previousRenderItem,
+            x: targetRenderItem.x,
+            y: targetRenderItem.y,
+            width: targetRenderItem.width,
+            height: targetRenderItem.height,
+            scaleX: targetRenderItem.scaleX,
+            scaleY: targetRenderItem.scaleY,
+            rotation: targetRenderItem.rotation,
+            zIndex: targetRenderItem.zIndex
+          })
+        }
+      }
+      const needsNewSpriteRecord = !existingRecord || existingRecord.textureKey !== textureKey
+      if (
+        needsNewSpriteRecord &&
+        isProjectCanvasDecodedImageReleased(renderItem.image) &&
+        sharedTexturePoolRef.current.getRefCount(sharedTextureKey) === 0
+      ) {
+        // Last line of defence: the pixels of this decode were released after their upload
+        // and that texture no longer exists. Never upload the closed bitmap; decode again.
+        dropDecodedRecordsForImage(item.id, renderItem.image)
+        scheduleImageVersionUpdate()
+        if (existingRecord) {
+          preserveExistingRenderItem()
+        }
+        return
+      }
+      if (needsNewSpriteRecord && newSpriteCreationBudget <= 0) {
+        if (existingRecord) {
+          preserveExistingRenderItem()
+        }
+        deferredNewSpriteCount += 1
+        return
+      }
+
+      if (existingRecord && existingRecord.textureKey === textureKey) {
+        nextRenderItems.set(item.id, renderItem)
+        if (syncSpriteRecordEdgeAntialias(existingRecord, transformState.rotation)) {
+          worldOrderDirty = true
+        }
+        if (existingRecord.sprite.zIndex !== item.zIndex) {
+          existingRecord.sprite.zIndex = item.zIndex
+          worldOrderDirty = true
+        }
+        if (existingRecord.transformKey !== transformKey) {
+          applySpriteTransform(
+            existingRecord.sprite,
+            {
+              textureWidth: existingRecord.textureWidth,
+              textureHeight: existingRecord.textureHeight
+            },
+            transformState
+          )
+          existingRecord.transformKey = transformKey
+        }
+        if (
+          refreshProjectCanvasTextureAfterTinyPreview(
+            existingRecord,
+            transformState,
+            stageScaleRef.current,
+            'reconcile'
+          )
+        ) {
+          requestTextureReacquire(item.id)
+        }
         markSpriteRecordUsed(existingRecord)
         reconciledSnapshotItems.set(item.id, item)
+        return
+      }
+
+      if (
+        canUploadEagerly &&
+        sharedTexturePoolRef.current.getRefCount(sharedTextureKey) === 0 &&
+        !isProjectCanvasDecodedImageReleased(image) &&
+        !isProjectCanvasLargeTextureUploadReady(
+          largeTextureUploadGl,
+          largeTextureUploadPacerRef.current,
+          window.performance.now(),
+          textureByteSize
+        )
+      ) {
+        // This frame's upload budget is spent, or the previous frame's uploads are still in
+        // flight: keep the decode (it is wanted by this pass, so the decoded budget keeps it)
+        // or the item's own preview, and what is on screen, and upload in a later frame.
+        largeTextureUploadPacerRef.current.waiting = true
+        armLargeTextureUploadFrame()
+        if (existingRecord) {
+          preserveExistingRenderItem()
+        }
         return
       }
 
@@ -4432,30 +5966,79 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         return
       }
 
+      if (
+        isProjectCanvasDecodedImageReleased(image) &&
+        sharedTexturePoolRef.current.getRefCount(sharedTextureKey) === 0
+      ) {
+        // The same check as before the eviction loop, again: making room can destroy the
+        // texture this released decode was a handle for (a duplicate's sprite holding it was
+        // the oldest). A closed bitmap must never become a new texture; decode again.
+        dropDecodedRecordsForImage(item.id, image)
+        scheduleImageVersionUpdate()
+        if (existingRecord) {
+          preserveExistingRenderItem()
+        }
+        return
+      }
+
       let baseTexture: Texture | null = null
       let texture: Texture | null = null
+      let unregisteredDisplayObject: ReturnType<
+        typeof createProjectCanvasImageDisplayObject
+      > | null = null
       try {
         let createdSharedTexture = false
         baseTexture = sharedTexturePoolRef.current.acquire(sharedTextureKey, () => {
           createdSharedTexture = true
-          const createdTexture = createProjectCanvasTexture(image)
-          const cachedSource = imageCacheRef.current.get(item.id)
-          const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
-          const decodedAsset = cachedSource?.image === image ? cachedSource : cachedThumbnail
-          if (decodedAsset?.image === image && decodedAsset.decodedAssetReleaseId) {
-            // Pixi may upload again after unload. Retain the actual shared texture
-            // input, not a sprite's potentially different decoded object.
-            decodedAsset.decodedAssetRefCount += 1
-            textureDecodedAssetRef.current.set(createdTexture, decodedAsset)
-          }
-          return createdTexture
+          return createProjectCanvasTexture(image, canUploadInStrips)
         })
         if (createdSharedTexture) {
-          webglErrorCheckRequestedRef.current = true
+          requestSampledWebGLErrorCheck()
         }
         sharedTextureByteTrackerRef.current.acquire(sharedTextureKey, textureByteSize)
         if (!baseTexture) {
           throw new Error('Pixi returned an empty texture.')
+        }
+        if (
+          decodedRecordsByImageRef.current.has(image) &&
+          !isProjectCanvasDecodedImageReleased(image)
+        ) {
+          // One copy per image: upload the decoded pixels now and close the bitmap, instead
+          // of keeping a decoded twin next to the texture for as long as the texture lives.
+          const alreadyUploaded = eagerlyUploadedTexturesRef.current.has(baseTexture)
+          const holdDecodedAssetForTexture = () => {
+            const cachedSource = imageCacheRef.current.get(item.id)
+            const cachedThumbnail = thumbnailCacheRef.current.get(item.id)
+            const decodedAsset = cachedSource?.image === image ? cachedSource : cachedThumbnail
+            if (decodedAsset?.image === image && decodedAsset.decodedAssetReleaseId) {
+              decodedAsset.decodedAssetRefCount += 1
+              textureDecodedAssetRef.current.set(baseTexture!, decodedAsset)
+            }
+          }
+          if (alreadyUploaded || uploadTextureNowWithinFrameBudget(baseTexture, textureByteSize)) {
+            eagerlyUploadedTexturesRef.current.add(baseTexture)
+            if (isCanvasImageBitmapLike(image)) {
+              releaseDecodedImagePixelsAfterUpload(image)
+            } else if (createdSharedTexture) {
+              // An image element (a remote or blob: source, a format createImageBitmap
+              // rejects) cannot be closed: its encoded and decoded data stay alive as the
+              // texture's resource. Keep its record, so the decoded budget still counts it
+              // and a refresh uploads the element again instead of fetching it again.
+              holdDecodedAssetForTexture()
+            }
+          } else if (createdSharedTexture) {
+            // No eager upload on this renderer: Pixi uploads on a later draw, so the
+            // texture keeps its actual input alive until it is destroyed.
+            holdDecodedAssetForTexture()
+          }
+        } else if (createdSharedTexture && canUploadEagerly) {
+          // The item's own preview (the page's bitmap or element, not a decode of this
+          // layer): upload it now, inside this frame's upload budget, instead of letting Pixi
+          // upload it on its first draw outside every budget. The page owns the image and
+          // keeps it; nothing is released here.
+          if (uploadTextureNowWithinFrameBudget(baseTexture, textureByteSize)) {
+            eagerlyUploadedTexturesRef.current.add(baseTexture)
+          }
         }
         ;(baseTexture.source as { scaleMode?: 'nearest' | 'linear' }).scaleMode =
           getProjectCanvasTextureScaleMode()
@@ -4472,17 +6055,24 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
               })
             : baseTexture
 
-        const sprite = new Sprite(texture)
-        const textureWidth = Math.max(1, texture.width)
-        const textureHeight = Math.max(1, texture.height)
+        const displayObject = createProjectCanvasImageDisplayObject(
+          texture,
+          needsProjectCanvasEdgeAntialias(transformState.rotation)
+            ? edgeAntialiasGeometryRef.current
+            : null
+        )
+        unregisteredDisplayObject = displayObject
+        const { sprite, textureWidth, textureHeight } = displayObject
         sprite.label = item.id
         applySpriteTransform(sprite, { textureWidth, textureHeight }, transformState)
         sprite.zIndex = renderItem.zIndex
         if (existingRecord) {
-          destroySpriteRecord(item.id, { retainPreview: true })
+          destroySpriteRecord(item.id, { retainPreview: true, replaced: true })
         }
+        unregisteredDisplayObject = null
         spriteRecordsRef.current.set(item.id, {
           sprite,
+          edgeAntialiasShader: displayObject.edgeAntialiasShader,
           texture,
           sourceTexture: baseTexture,
           textureKey,
@@ -4509,6 +6099,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
           newSpriteCreationBudget -= 1
         }
         markSpriteRecordUsed(spriteRecordsRef.current.get(item.id)!)
+        // Whatever texture had to be replaced is gone with the previous sprite.
+        pendingTextureReacquireIdsRef.current.delete(item.id)
         reconciledSnapshotItems.set(item.id, item)
         world.addChild(sprite)
         worldOrderDirty = true
@@ -4526,6 +6118,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         deleteCachedImageRecord(imageCacheRef.current, item.id, 'error-cleanup')
         if (existingRecord) {
           preserveExistingRenderItem()
+        }
+        if (unregisteredDisplayObject) {
+          unregisteredDisplayObject.sprite.destroy()
+          unregisteredDisplayObject.edgeAntialiasShader?.destroy()
         }
         if (texture && texture !== baseTexture) {
           texture.destroy(false)
@@ -4545,6 +6141,15 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
       }
     })
 
+    // Send this pass's uploads now behind one fence, so that it can pass before the next frame.
+    fenceProjectCanvasTextureUploads(
+      largeTextureUploadGl,
+      largeTextureUploadPacerRef.current,
+      window.performance.now()
+    )
+    // Uploads of this pass released their decodes; what no texture wanted is now bounded.
+    pruneDecodedPixelRecords()
+    pumpInitialImageLoadQueue()
     pumpSourceUpgradeQueue()
     let lastSpriteSortDurationMs: number | null = null
     let spriteSortCount = metricsRef.current.spriteSortCount ?? 0
@@ -4603,6 +6208,8 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
         lastSpriteReconcileRemovedCount: removedSpriteCount,
         lastSpriteReconcileDeferredCount: deferredNewSpriteCount,
         spriteSortCount,
+        textureReacquireCount: textureReacquireCountRef.current,
+        imageFileReadCount: imageFileReadCountRef.current,
         ...(lastSpriteSortDurationMs === null ? {} : { lastSpriteSortDurationMs }),
         ...imageHealthCounts
       },
@@ -4642,6 +6249,10 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     items,
     markSpriteRecordUsed,
     pruneDecodedImageCacheForResidentTargets,
+    pruneDecodedPixelRecords,
+    releaseDecodedImagePixelsAfterUpload,
+    armLargeTextureUploadFrame,
+    requestTextureReacquire,
     removeTextureBudgetReservation,
     cancelScheduledRender,
     scheduleRender,
@@ -4652,6 +6263,9 @@ const ProjectCanvasWebGLImageLayer = forwardRef<
     setCachedImageRecord,
     setTextureBudgetReservation,
     selectedIds,
+    requestSampledWebGLErrorCheck,
+    syncSpriteRecordEdgeAntialias,
+    queueImageVersionFrame,
     viewportVersion
   ])
 

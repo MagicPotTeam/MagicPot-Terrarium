@@ -132,6 +132,79 @@ describe('svcManagedMedia contract', () => {
     }
   })
 
+  it('accepts Windows drive-letter and long paths and refuses UNC and namespace paths at the IPC boundary', () => {
+    const longPath = `C:\\${'nested-folder\\'.repeat(24)}image.png`
+    for (const sourcePath of ['C:\\Users\\artist\\a.png', 'd:\\Art Work\\a b.png', longPath]) {
+      expect(
+        validateImportManagedMediaFileReq({
+          sourcePath,
+          mimeType: 'image/png',
+          originalFileName: 'a.png'
+        }).sourcePath
+      ).toBe(sourcePath)
+    }
+    for (const sourcePath of [
+      '\\\\server\\share\\a.png',
+      '//server/share/a.png',
+      '\\\\?\\C:\\Users\\a.png',
+      '\\\\.\\PhysicalDrive0',
+      'C:\\Users\\..\\a.png',
+      'C:a.png'
+    ]) {
+      expect(() =>
+        validateImportManagedMediaFileReq({
+          sourcePath,
+          mimeType: 'image/png',
+          originalFileName: 'a.png'
+        })
+      ).toThrow(ServiceValidationError)
+    }
+  })
+
+  it('refuses NT object-namespace paths and Windows device names at the IPC boundary', () => {
+    for (const sourcePath of [
+      '\\??\\UNC\\attacker-host\\share\\a.png',
+      '\\??\\C:\\Users\\a.png',
+      '/??/UNC/attacker-host/share/a.png',
+      'file:///??/UNC/attacker-host/share/a.png',
+      'file:///%3F%3F/UNC/attacker-host/share/a.png',
+      'C:\\Users\\artist\\CON',
+      'C:\\Users\\artist\\com1.png',
+      'C:\\Users\\artist\\NUL .txt',
+      'C:\\Users\\artist\\CONOUT$',
+      'C:\\Users\\artist\\CON.tar.gz',
+      'C:\\Users\\artist\\aux .png',
+      'file:///C:/Users/artist/lpt1.png'
+    ]) {
+      expect(
+        () =>
+          validateImportManagedMediaFileReq({
+            sourcePath,
+            mimeType: 'image/png',
+            originalFileName: 'a.png'
+          }),
+        sourcePath
+      ).toThrow(ServiceValidationError)
+    }
+    // Only the last segment of a Windows path names a device; POSIX names are just names.
+    for (const sourcePath of [
+      'C:\\Users\\console\\a.png',
+      'C:\\Users\\artist\\com10.png',
+      'C:\\Users\\artist\\Con Edison bill.png',
+      'C:\\Users\\artist\\AUX cable.jpg',
+      'C:\\Users\\artist\\com1 port.png',
+      '/home/artist/con.png'
+    ]) {
+      expect(
+        validateImportManagedMediaFileReq({
+          sourcePath,
+          mimeType: 'image/png',
+          originalFileName: 'a.png'
+        }).sourcePath
+      ).toBe(sourcePath)
+    }
+  })
+
   it('validates import data URL MIME, base64, decoded size, and file name', () => {
     expect(
       validateImportManagedMediaDataUrlReq({
@@ -262,6 +335,26 @@ describe('svcManagedMedia contract', () => {
         reference,
         transport: 'chunked-binary-v1',
         extra: true
+      })
+    ).toThrow(ServiceValidationError)
+  })
+
+  it('accepts a bounded materialization request without changing legacy validation', () => {
+    for (const transport of ['request-data-url', 'chunked-binary-v1']) {
+      const request = { reference, transport, maxBytes: 64 }
+      expect(validateMaterializeManagedMediaForRequestReq(request)).toEqual(request)
+      for (const maxBytes of [0, -1, 1.5, NaN, Infinity, '64', null, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() =>
+          validateMaterializeManagedMediaForRequestReq({ ...request, maxBytes })
+        ).toThrow(ServiceValidationError)
+      }
+    }
+    expect(() =>
+      validateMaterializeManagedMediaForRequestReq({
+        reference,
+        transport: 'chunked-binary-v1',
+        maxBytes: 64,
+        other: true
       })
     ).toThrow(ServiceValidationError)
   })

@@ -76,6 +76,46 @@ describe('durable tool audit sink', () => {
     }
   })
 
+  it('persists content-free same-file failure counts and known commit status', async () => {
+    const store = new MagicAgentEventStore(':memory:')
+    try {
+      await createMagicAgentToolAuditSink(
+        store,
+        'files:partial'
+      )({
+        tool: 'files.edit',
+        authorizationId: 'AUTH_SECRET',
+        path: 'PRIVATE_TARGET.txt',
+        outcome: 'rejected',
+        durationMs: 1,
+        editMode: 'partial',
+        editApplied: 1,
+        editFailed: 1,
+        editSkipped: 2,
+        editWriteStatus: 'committed',
+        beforeSha256: 'a'.repeat(64),
+        afterSha256: 'b'.repeat(64)
+      } as Parameters<ReturnType<typeof createMagicAgentToolAuditSink>>[0])
+      const events = store.readStream(TOOL_AUDIT_STREAM_ID)
+      expect(events).toHaveLength(2)
+      for (const event of events)
+        expect(event.payload).toMatchObject({
+          tool: 'files.edit',
+          outcome: 'rejected',
+          editMode: 'partial',
+          editApplied: 1,
+          editFailed: 1,
+          editSkipped: 2,
+          editWriteStatus: 'committed',
+          beforeSha256: 'a'.repeat(64),
+          afterSha256: 'b'.repeat(64)
+        })
+      expect(JSON.stringify(events)).not.toMatch(/AUTH_SECRET|PRIVATE_TARGET/)
+    } finally {
+      store.close()
+    }
+  })
+
   it('is idempotent for a stable call identity after reopen', async () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'magic-agent-tool-audit-replay-'))
     directories.push(directory)

@@ -32,6 +32,7 @@ import {
   type ResourceMutationInput,
   type StoredResource
 } from '../persistence/eventStore'
+import { matchesProductionManagedFirstRunContract } from './managedFirstRunRequestContract'
 import { redactPolicyRequestForAudit, type RedactedPolicyRequest } from './redaction'
 
 const AUDIT_KIND = 'policy-audit'
@@ -135,6 +136,7 @@ export class MagicAgentPolicyAuthorizationService {
   private readonly storeId: string
   private readonly trustedApprovers: ReadonlySet<string>
   private readonly permitBrands = new WeakSet<object>()
+  private readonly requestContract?: 'production-managed-first-run/v2'
 
   constructor(input: {
     store: MagicAgentEventStore
@@ -142,11 +144,15 @@ export class MagicAgentPolicyAuthorizationService {
     policyVersion: string
     storeId: string
     trustedApprovers: readonly MagicAgentActorRef[]
+    /** Fixed MAIN-only data contract, never an IPC callback or extra authority. */
+    requestContract?: 'production-managed-first-run/v2'
   }) {
     if (!input || typeof input !== 'object') throw new ApprovalValidationError('Options required.')
     const parsedRules = parsePolicyRules(input.rules)
     if (!parsedRules.ok) throw new ApprovalValidationError(parsedRules.error)
     this.policyVersion = text(input.policyVersion, 'policyVersion')
+    if (input.requestContract !== undefined && input.requestContract !== 'production-managed-first-run/v2') throw new ApprovalValidationError('Unsupported fixed request contract.')
+    this.requestContract = input.requestContract
     this.storeId = text(input.storeId, 'storeId')
     if (!Array.isArray(input.trustedApprovers) || input.trustedApprovers.length === 0)
       throw new ApprovalValidationError('trustedApprovers must be non-empty.')
@@ -1058,6 +1064,11 @@ export class MagicAgentPolicyAuthorizationService {
   }
 
   private evaluate(request: PolicyRequest, evaluatedAt: number): PolicyDecision {
+    // Deny-only refinement inside the ORIGINAL service. No new pending registry,
+    // grant issuer, authority callback or renderer-selected effect classification.
+    if (this.requestContract && !matchesProductionManagedFirstRunContract(request)) {
+      return evaluatePolicy(request, [{ ruleId: 'production-managed-first-run-contract-denied', priority: 10000, effect: 'deny', explanation: 'Managed first-run exact input/effect contract does not match the supported prepared transport.' }], { evaluatedAt, policyVersion: this.policyVersion })
+    }
     return evaluatePolicy(request, this.rules, { evaluatedAt, policyVersion: this.policyVersion })
   }
 

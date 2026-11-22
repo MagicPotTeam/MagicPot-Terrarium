@@ -24,6 +24,7 @@ import { StateSvc, stateSvcDef } from './svcState'
 import { AppUpdateSvc, appUpdateSvcDef } from './svcAppUpdate'
 import { MagicAgentPlatformSvc, magicAgentPlatformSvcDef } from './svcMagicAgentPlatform'
 import { ManagedMediaSvc, managedMediaSvcDef } from './svcManagedMedia'
+import { ReportBundlesSvc, reportBundlesSvcDef } from './svcReportBundles'
 import { apiExtensionDef, type ApiExtensionServices } from './extensionServices'
 
 export type BaseApi = {
@@ -52,6 +53,7 @@ export type BaseApi = {
   svcAppUpdate: AppUpdateSvc
   svcMagicAgentPlatform: MagicAgentPlatformSvc
   svcManagedMedia: ManagedMediaSvc
+  svcReportBundles: ReportBundlesSvc
 }
 
 export type Api = BaseApi & ApiExtensionServices
@@ -82,5 +84,6 @@ export const apiDef: ApiDefSheet<Api> = {
   svcAppUpdate: appUpdateSvcDef,
   svcMagicAgentPlatform: magicAgentPlatformSvcDef,
   svcManagedMedia: managedMediaSvcDef,
+  svcReportBundles: reportBundlesSvcDef,
   ...apiExtensionDef
 }

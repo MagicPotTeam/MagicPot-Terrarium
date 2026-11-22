@@ -155,6 +155,9 @@ export const appendAssistantPlaceholderToSession = (
       {
         role: 'assistant',
         content: '',
+        // Every ending writes a new message, so this lasts exactly as long as the reply is
+        // unfinished; still set after a reload, it shows the reply was cut off.
+        runState: 'streaming',
         ...(modelName ? { modelName } : {})
       }
     ]
@@ -314,6 +317,26 @@ export const removeTrailingEmptyAssistantMessage = (
       messages: session.messages.slice(0, -1)
     }
   })
+
+/**
+ * What a Stop leaves of the reply it ends: an empty placeholder goes, a reply with some text or
+ * tool rows stays without runState, so a reply the user stopped never shows as cut off. Only for
+ * a session whose run was live: otherwise the last assistant message may be an older reply that
+ * really was cut off.
+ */
+export const settleStoppedAssistantMessage = (
+  sessions: ChatSession[],
+  sessionId: string
+): ChatSession[] => {
+  const removed = removeTrailingEmptyAssistantMessage(sessions, sessionId)
+  return updateSessionById(removed, sessionId, (session) => {
+    const lastMessage = session.messages[session.messages.length - 1]
+    if (lastMessage?.role !== 'assistant' || lastMessage.runState === undefined) return session
+    const { runState: _settled, ...settled } = lastMessage
+    void _settled
+    return { ...session, messages: [...session.messages.slice(0, -1), settled] }
+  })
+}
 
 export const collectAssistantImageUrls = (session?: ChatSession): string[] => {
   if (!session) {

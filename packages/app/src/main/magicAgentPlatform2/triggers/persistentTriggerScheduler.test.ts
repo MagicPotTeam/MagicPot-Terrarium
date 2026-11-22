@@ -120,7 +120,7 @@ describe('PersistentTriggerScheduler', () => {
     await expect(scheduler.runOnce()).resolves.toBe(true)
 
     expect(claimDue).toHaveBeenCalledWith(100, 'claim-1', 100)
-    expect(execute).toHaveBeenCalledWith(trigger)
+    expect(execute).toHaveBeenCalledWith(trigger, { signal: expect.any(AbortSignal) })
     expect(completeClaim).toHaveBeenCalledWith('heartbeat', 'claim-1', 120)
     expect(failClaim).not.toHaveBeenCalled()
   })

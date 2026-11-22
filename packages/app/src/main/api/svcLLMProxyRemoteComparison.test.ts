@@ -10,7 +10,7 @@ const { providerChat, getAssistantRuntimeMock } = vi.hoisted(() => ({
   getAssistantRuntimeMock: vi.fn(() => ({ listTools: vi.fn(() => []), callTool: vi.fn() }))
 }))
 
-vi.mock('electron', () => ({ net: {} }))
+vi.mock('electron', () => ({ app: { isPackaged: false }, net: {} }))
 vi.mock('../config/config', () => ({ getConfig: () => currentConfig }))
 vi.mock('../assistantRuntime/runtime', () => ({ getAssistantRuntime: getAssistantRuntimeMock }))
 vi.mock('../mcp/runtime', () => ({ syncMcpClientManager: vi.fn() }))

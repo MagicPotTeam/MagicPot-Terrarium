@@ -30,6 +30,10 @@ import {
   type BackupManifest
 } from './backupRestore'
 
+// A process id no process can hold: above the Linux pid_max ceiling and not a multiple of 4, as
+// every Windows process id is. A small fixed id such as 123 can belong to a live process.
+const EXITED_PID = 2_147_483_646
+
 const realFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
 const realOs = await vi.importActual<typeof import('node:os')>('node:os')
 const require = createRequire(import.meta.url)
@@ -318,7 +322,7 @@ describe('secure backup and restore', () => {
     const target = join(directory, 'stale-target')
     const leaseDirectory = instanceLeaseDirectory(target)
     mkdirSync(leaseDirectory, { recursive: true })
-    const anchor = join(leaseDirectory, `123-${randomUUID()}.lease`)
+    const anchor = join(leaseDirectory, `${EXITED_PID}-${randomUUID()}.lease`)
     const lockDirectory = `${anchor}.lock`
     writeFileSync(anchor, '')
     mkdirSync(lockDirectory)
@@ -340,7 +344,7 @@ describe('secure backup and restore', () => {
     const target = join(directory, 'unsafe-stale-target')
     const leaseDirectory = instanceLeaseDirectory(target)
     mkdirSync(leaseDirectory, { recursive: true })
-    const anchor = join(leaseDirectory, `123-${randomUUID()}.lease`)
+    const anchor = join(leaseDirectory, `${EXITED_PID}-${randomUUID()}.lease`)
     const lockDirectory = `${anchor}.lock`
     writeFileSync(anchor, '')
     mkdirSync(lockDirectory)

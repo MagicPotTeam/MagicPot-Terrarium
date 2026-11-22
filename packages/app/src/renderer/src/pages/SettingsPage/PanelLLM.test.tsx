@@ -130,6 +130,18 @@ describe('PanelLLM custom skill validation', () => {
 })
 
 describe('PanelLLM Agent API settings', () => {
+  it('marks retired browser profiles unavailable without rewriting or deleting them', () => {
+    const kind = ['chat', 'gpt', '-web-playwright'].join('')
+    const settings = buildSettingsWithProfile({ call_type: kind, model_name: kind })
+    const before = JSON.stringify(settings)
+    const saveSettings = vi.fn()
+    render(<PanelLLM settingsValue={settings} saveSettings={saveSettings} onSelectTab={vi.fn()} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('llm.retired_provider_notice')
+    expect(saveSettings).not.toHaveBeenCalled()
+    expect(JSON.stringify(settings)).toBe(before)
+    fireEvent.mouseDown(screen.getByLabelText('Call Type'))
+    for (const option of screen.getAllByRole('option')) expect(option.getAttribute('data-value')).not.toBe(kind)
+  })
   it('hides custom skills and removes the Quick App API prompt', () => {
     render(<PanelLLM settingsValue={DEFAULT_CONFIG} saveSettings={vi.fn()} />)
 

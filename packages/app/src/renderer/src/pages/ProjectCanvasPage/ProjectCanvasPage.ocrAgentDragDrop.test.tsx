@@ -201,6 +201,24 @@ vi.mock('../../utils/windowUtils', () => ({
   })
 }))
 
+// The board's proven-crop registry, captured as the page creates it.
+const provenCropRegistries = vi.hoisted(
+  () => [] as Array<import('./canvasProvenCropRegistry').CanvasProvenCropRegistry>
+)
+vi.mock('./canvasProvenCropRegistry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./canvasProvenCropRegistry')>()
+  return {
+    ...actual,
+    createCanvasProvenCropRegistry: (
+      ...args: Parameters<typeof actual.createCanvasProvenCropRegistry>
+    ) => {
+      const registry = actual.createCanvasProvenCropRegistry(...args)
+      provenCropRegistries.push(registry)
+      return registry
+    }
+  }
+})
+
 vi.mock('./canvasStorage', () => ({
   saveCanvasItems: mockSaveCanvasItems,
   loadCanvasItems: mockLoadCanvasItems,
@@ -702,6 +720,58 @@ describe('ProjectCanvasPage OCR agent drag/drop integration', () => {
     await waitFor(() => {
       expect(screen.getByText('canvas-target-主控规划.md')).toBeTruthy()
     })
+  })
+
+  it('revokes the object URL of every proven crop when the board unmounts (F2 part 6)', async () => {
+    provenCropRegistries.length = 0
+    const view = render(
+      <ThemeProvider theme={theme}>
+        <ProjectCanvasPage />
+      </ThemeProvider>
+    )
+    await waitFor(() => expect(mockLoadCanvasItems).toHaveBeenCalled())
+    const registry = provenCropRegistries.at(-1)
+    expect(registry).toBeDefined()
+    const record = {
+      version: 1 as const,
+      origin: 'confirm' as const,
+      width: 640,
+      height: 480,
+      sizeBytes: 1000,
+      sha256: 'ab'.repeat(32)
+    }
+    const entry = registry!.register(
+      {
+        id: 'unmount-crop',
+        type: 'image',
+        src: 'local-media:///C:/MagicPot/unmount.png',
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 80,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        zIndex: 1,
+        locked: false,
+        sourceWidth: 640,
+        sourceHeight: 480,
+        crop: { x: 10, y: 20, width: 100, height: 80 },
+        cropSource: record
+      },
+      new Blob(['crop'], { type: 'image/png' }),
+      { width: 100, height: 80 }
+    )
+    expect(entry?.url).toMatch(/^blob:/)
+    expect(registry!.entryCount).toBe(1)
+    const revoke = URL.revokeObjectURL as unknown as ReturnType<typeof vi.fn>
+    revoke.mockClear()
+
+    view.unmount()
+
+    expect(revoke).toHaveBeenCalledWith(entry!.url)
+    expect(registry!.entryCount).toBe(0)
+    expect(registry!.totalBytes).toBe(0)
   })
 
   it('preserves Hunyuan3D quick app provenance when dragging a canvas 3d model back out', async () => {

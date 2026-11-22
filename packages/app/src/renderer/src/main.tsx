@@ -2,6 +2,7 @@
 import './utils/loggingOverride' // override console.log before anything else
 import { installPerformanceMeasureGuard } from './utils/performanceMeasureGuard'
 import { startManagedMediaReferenceScanner } from './services/managedMediaReferenceBootstrap'
+import { shouldForceStartupHomeRoute } from './utils/agentManagementRouting'
 import './assets/main.css'
 import './i18n'
 import { Fragment, StrictMode } from 'react'
@@ -18,6 +19,7 @@ import { CssBaseline, ThemeProvider } from '@mui/material'
 import { theme } from './theme'
 import type { ErrorInfo, ReactNode } from 'react'
 import React from 'react'
+import { RootErrorFallback } from './RootErrorFallback'
 
 const root = createRoot(document.getElementById('root') as HTMLElement)
 let devReloadScheduled = false
@@ -54,12 +56,9 @@ installPerformanceMeasureGuard()
 startManagedMediaReferenceScanner()
 
 function forceStartupHomeRoute(): void {
-  if (!store.getState().layout.startupRestorePending) {
-    return
-  }
-
-  const hash = window.location.hash.trim()
-  if (!hash || hash === '#/' || hash === '#') {
+  if (
+    !shouldForceStartupHomeRoute(store.getState().layout.startupRestorePending, window.location.hash)
+  ) {
     return
   }
 
@@ -100,23 +99,7 @@ class RootErrorBoundary extends React.Component<{ children: ReactNode }, RootErr
       return this.props.children
     }
 
-    return (
-      <div
-        style={{
-          minHeight: '100vh',
-          background: '#111',
-          color: '#f5f5f5',
-          padding: '24px',
-          fontFamily: 'Consolas, monospace'
-        }}
-      >
-        <h2 style={{ marginTop: 0 }}>Renderer crashed</h2>
-        <p style={{ color: '#bbb' }}>The packaged app hit a frontend error during startup.</p>
-        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-          {this.state.error.stack || this.state.error.message}
-        </pre>
-      </div>
-    )
+    return <RootErrorFallback error={this.state.error} />
   }
 }
 

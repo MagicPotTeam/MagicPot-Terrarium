@@ -16,9 +16,26 @@ export type TriggerOccurrenceSchedulerOptions = Readonly<{
   claimId?: () => string
 }>
 
+const POLL_FAILURE_LOG_INTERVAL_MS = 10 * 60_000
+// Only a class-like error name is logged; anything else (paths, record text) becomes 'Error'.
+const loggableErrorName = (error: unknown): string =>
+  error instanceof Error && /^[A-Za-z_$][\w$.-]{0,63}$/.test(error.name) ? error.name : 'Error'
+type StoredTrigger = ReturnType<PersistentTriggerStore['get']>
+// As the cron source reads it: a positive integer in the trigger's config, else 1.
+const catchUpRunsOf = (trigger: StoredTrigger): number => {
+  const runs = trigger?.state.config?.['maxCatchUpRuns']
+  return typeof runs === 'number' && Number.isInteger(runs) && runs > 0 ? runs : 1
+}
+
 export class TriggerOccurrenceScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined
+  private pollFailure: Readonly<{ name: string; loggedAt: number }> | undefined
+  private archiveFailureLoggedAt: number | undefined
+  // Stale occurrences dead-lettered by the polls of a drain not yet logged.
+  private deadLettered = 0
   private running = false
+  // The last poll archived or dead-lettered records and more are left: the next one comes soon.
+  private backlog = false
   private inFlight: Promise<boolean> | undefined
   private readonly pollIntervalMs: number
   private readonly leaseMs: number
@@ -47,11 +64,13 @@ export class TriggerOccurrenceScheduler {
     this.schedule(0)
   }
 
+  // Waits for the poll in flight, which is bounded; a later direct runOnce() still polls.
   async stop(): Promise<void> {
     this.running = false
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
     await this.inFlight
+    this.logDeadLettered()
   }
 
   async runOnce(): Promise<boolean> {
@@ -68,23 +87,80 @@ export class TriggerOccurrenceScheduler {
   private schedule(delay: number): void {
     if (!this.running) return
     this.timer = setTimeout(() => {
-      void this.runOnce().finally(() => this.schedule(this.pollIntervalMs))
+      // A rejected poll leaves the occurrence durable: unmarked ones stay claimable (nothing was
+      // consumed), marked ones are settled as unknown by a later claimNext. Direct runOnce
+      // callers still see the error; the timer path logs its name and keeps polling.
+      void this.runOnce()
+        .then(
+          () => this.notePollSucceeded(),
+          (error: unknown) => this.notePollFailed(error)
+        )
+        .then(() => this.schedule(this.backlog ? 0 : this.pollIntervalMs))
     }, delay)
   }
 
+  // Content-free and rate-limited: the error name when a failure starts or changes, at most once
+  // per ten minutes while it repeats, and one line when polls succeed again.
+  private notePollFailed(error: unknown): void {
+    const name = loggableErrorName(error)
+    const at = this.now()
+    const current = this.pollFailure
+    if (current?.name === name && at - current.loggedAt < POLL_FAILURE_LOG_INTERVAL_MS) return
+    console.warn(
+      `[triggers] Occurrence poll ${current?.name === name ? 'still failing' : 'failed'}: ${name}`
+    )
+    this.pollFailure = { name, loggedAt: at }
+  }
+
+  private notePollSucceeded(): void {
+    if (this.pollFailure === undefined) return
+    this.pollFailure = undefined
+    console.warn('[triggers] Occurrence polls recovered.')
+  }
+
+  // A count only, once a drain ends (or the scheduler stops), so an upgrade backlog is one line.
+  private logDeadLettered(): void {
+    if (this.deadLettered === 0) return
+    console.warn(
+      `[triggers] Dead-lettered ${this.deadLettered} stale occurrence(s) without running them: missed cron or calendar instants beyond maxCatchUpRuns, or ones an older version left unclaimed.`
+    )
+    this.deadLettered = 0
+  }
+
+  // Content-free, at most once per ten minutes: a failing archive only costs claim-scan time.
+  private noteArchiveFailed(error: unknown): void {
+    const at = this.now()
+    const last = this.archiveFailureLoggedAt
+    if (last !== undefined && at - last < POLL_FAILURE_LOG_INTERVAL_MS) return
+    this.archiveFailureLoggedAt = at
+    console.warn(`[triggers] Occurrence archive failed: ${loggableErrorName(error)}`)
+  }
+
+  // Each poll does a bounded share of the archiving and dead-lettering, then claims, so a backlog
+  // drains over several polls (with a yield between them) and never delays a fresh occurrence.
+  // Claiming never depends on that maintenance: a failure is logged and the claim still runs.
   private async executeOne(): Promise<boolean> {
+    this.backlog = false
     const now = this.now()
     const claimId = this.claimId()
-    const claimed = this.options.occurrences.claimNext(
+    const triggers = new Map<string, StoredTrigger>()
+    const triggerOf = (id: string) => {
+      if (!triggers.has(id)) triggers.set(id, this.options.triggers.get(id))
+      return triggers.get(id)
+    }
+    const poll = this.options.occurrences.poll({
       now,
-      claimId,
-      this.leaseMs,
-      3,
-      (occurrence) => {
-        const trigger = this.options.triggers.get(occurrence.triggerId)
-        return trigger !== undefined && trigger.state.enabled === true
-      }
-    )
+      owner: claimId,
+      leaseMs: this.leaseMs,
+      maxAttempts: 3,
+      eligible: (occurrence) => triggerOf(occurrence.triggerId)?.state.enabled === true,
+      catchUpRuns: (triggerId) => catchUpRunsOf(triggerOf(triggerId))
+    })
+    this.backlog = poll.backlog
+    this.deadLettered += poll.deadLettered
+    if (!poll.backlog) this.logDeadLettered()
+    if (poll.maintenanceError !== undefined) this.noteArchiveFailed(poll.maintenanceError)
+    const claimed = poll.claimed
     if (!claimed) return false
     const trigger = this.options.triggers.get(claimed.state.triggerId)
     if (!trigger) {

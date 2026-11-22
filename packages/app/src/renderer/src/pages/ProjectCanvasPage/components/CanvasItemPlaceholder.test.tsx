@@ -124,6 +124,35 @@ describe('CanvasItemPlaceholder', () => {
     expect(document.body.style.cursor).toBe('')
   })
 
+  it('does not re-render a transparent proxy for a committed pan or zoom when stage refs are given', () => {
+    const stagePosRef = { current: { x: 0, y: 0 } }
+    const stageScaleRef = { current: 1 }
+    const item = createImageItem()
+    const canvasContainerRef = React.createRef<HTMLDivElement>()
+    const renderProxy = (stagePos: { x: number; y: number }, stageScale: number) => (
+      <CanvasItemPlaceholder
+        canvasContainerRef={canvasContainerRef}
+        item={item}
+        isSelected
+        stagePos={stagePos}
+        stageScale={stageScale}
+        stagePosRef={stagePosRef}
+        stageScaleRef={stageScaleRef}
+        onSelect={vi.fn()}
+        onDragEnd={vi.fn()}
+        onTransformEnd={vi.fn()}
+      />
+    )
+
+    const { rerender } = render(renderProxy({ x: 0, y: 0 }, 1))
+    const rendersAfterMount = rectOverlayProps.length
+
+    rerender(renderProxy({ x: -40, y: 25 }, 1))
+    rerender(renderProxy({ x: -90, y: 10 }, 2.5))
+
+    expect(rectOverlayProps.length).toBe(rendersAfterMount)
+  })
+
   it('forwards hand-tool pointer passthrough to the rect interaction overlay', () => {
     render(
       <CanvasItemPlaceholder

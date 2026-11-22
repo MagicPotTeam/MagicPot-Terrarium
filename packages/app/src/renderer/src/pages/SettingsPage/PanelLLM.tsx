@@ -22,6 +22,7 @@ import {
   isTripo3DCompatibleProfile
 } from '@shared/config/apiProfileSelectors'
 import {
+  retiredProfileKind,
   isOllamaUrl,
   isLocalBaseUrl,
   resolveProfileCallType,
@@ -979,6 +980,7 @@ const ApiProfileCard: React.FC<ApiProfileCardProps> = ({
           </Box>
         </Box>
 
+        {retiredProfileKind(profile) ? <Alert severity="warning">{t('llm.retired_provider_notice')}</Alert> : null}
         <InputSelect
           label={copy('调用类型', 'Call Type')}
           value={profileCallType}

@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { LLMChatReq } from '@shared/api/svcLLMProxy'
-import { prepareCanvasAgentTools, isCanvasApprovalToolInvocation } from './canvasAgentTools'
+import { prepareCanvasAgentTools, isCanvasApprovalToolInvocation, CANVAS_WORKSPACE_READ_TOOL_NAMES, CANVAS_WRITE_TOOL_NAMES } from './canvasAgentTools'
+import { CANVAS_CREATIVE_TOOL_NAMES } from './canvasCreativeTools'
 import {
   registerMagicAgentTrustedRouteBinding,
   clearMagicAgentTrustedRouteBindingsForTest
 } from '../magicAgentRuntime/trustedRouteBinding'
 import { authorizeMagicPotMcpToolInvocation } from '../mcp/platform/runtime'
+vi.mock('electron', () => ({ webContents: { fromId: () => undefined }, BrowserWindow: { fromWebContents: () => undefined } }))
 vi.mock('../config/config', () => ({ getConfig: () => ({}) }))
 vi.mock('../mcp/platform/managedHttpBridge', () => ({
   handleManagedMagicPotMcpHttpBridgeRequest: vi.fn()
@@ -71,7 +73,10 @@ describe('main-owned canvas approval admission', () => {
     'foreign-project',
     'iframe',
     'explicit-skill',
+    'ordinary-chat',
+    'external-agent',
     'image',
+    'video',
     'comparison'
   ])('does not issue admission for %s', (kind) => {
     trust()
@@ -83,11 +88,14 @@ describe('main-owned canvas approval admission', () => {
     if (kind === 'iframe') ctx.isMainFrame = false
     if (kind === 'explicit-skill')
       req.skillRuntime = { bindings: [{ appId: 'restricted', toolNames: [] }] }
+    if (kind === 'ordinary-chat') req.route = { ...route, channel: 'generic' }
+    if (kind === 'external-agent') req.skillRuntime = { skillId: 'external-agent' }
     if (kind === 'image') req.imageGenerationOptions = { enabled: true }
+    if (kind === 'video') req.videoGenerationOptions = {}
     if (kind === 'comparison') req.comparisonRouting = 'configured'
-    expect(
-      prepareCanvasAgentTools(req, kind === 'missing-sender' ? undefined : ctx, opts).admission
-    ).toBeUndefined()
+    const prepared = prepareCanvasAgentTools(req, kind === 'missing-sender' ? undefined : ctx, opts)
+    expect(prepared.admission).toBeUndefined()
+    expect(prepared.toolProvider).toBeUndefined()
   })
   it('keeps terminal disabled when the main-owned feature setting is off', async () => {
     trust()
@@ -170,6 +178,39 @@ describe('main-owned canvas approval admission', () => {
       await task
     })
     expect(decision().allowed).toBe(false)
+  })
+  it.each([...CANVAS_WORKSPACE_READ_TOOL_NAMES, ...CANVAS_WRITE_TOOL_NAMES])(
+    'admits %s only in this trusted request and keeps the default policy closed', async (tool) => {
+      trust()
+      const p = prepareCanvasAgentTools(request(), invocation(), settings)
+      expect(p.request.skillRuntime?.bindings?.[0]?.toolNames).toContain(tool)
+      expect(decision(tool).allowed).toBe(false)
+      await p.admission!.run(tool, undefined, async () => {
+        expect(decision(tool).allowed).toBe(true)
+        expect(isCanvasApprovalToolInvocation({ ...route, threadId: 'foreign' }, tool)).toBe(false)
+      })
+      expect(decision(tool).allowed).toBe(false)
+    }
+  )
+  it('exposes a per-request business provider but no arbitrary terminal or MCP tool', async () => {
+    trust()
+    const p = prepareCanvasAgentTools(request(), invocation(), settings)
+    const names = p.toolProvider!.listTools().map((tool) => tool.name)
+    expect(names).toEqual([...CANVAS_CREATIVE_TOOL_NAMES])
+    expect(names).not.toContain('terminal.run')
+    expect(names).not.toContain('mcp.tool.call')
+    const call = () => p.toolProvider!.callTool('comfyui.status', {}, { route, runId: 'run' })
+    await expect(call()).rejects.toThrow('live Agent thread invocation')
+    p.dispose!()
+    await expect(p.admission!.run('comfyui.status', undefined, call)).rejects.toThrow('request has ended')
+  })
+  it('does not borrow admission from another request in the same thread', async () => {
+    trust()
+    const first = prepareCanvasAgentTools(request(), invocation(), settings)
+    const second = prepareCanvasAgentTools(request(), invocation(), settings)
+    await second.admission!.run('comfyui.status', undefined, async () => {
+      await expect(first.toolProvider!.callTool('comfyui.status', {}, { route, runId: 'wrong-owner' })).rejects.toThrow('live Agent thread invocation')
+    })
   })
   it('checks renderer liveness again at execution time', async () => {
     trust()

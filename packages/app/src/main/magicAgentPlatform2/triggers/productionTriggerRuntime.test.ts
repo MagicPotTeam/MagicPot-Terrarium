@@ -12,6 +12,10 @@ import type { PersistentTriggerState } from './persistentTriggerStore'
 import { DriveCommandService } from '../drives/driveCommandService'
 import { ProductionDriveRuntime } from '../drives/productionDriveRuntime'
 import { subscribeDriveStates } from '../drives/driveStateEvents'
+import {
+  CooperativeExecutionController,
+  type CooperativeOperationGate
+} from '../agents/cooperativeExecutionController'
 import { ProductionTriggerRuntime } from './productionTriggerRuntime'
 
 const stores: MagicAgentEventStore[] = []
@@ -104,6 +108,223 @@ describe('production trigger runtime', () => {
     await runtime.stop()
     await runtime.stop()
     expect(() => eventStore.listResources({ kind: 'trigger', limit: 10 })).not.toThrow()
+  })
+
+  it('rejects restart before any startup or calendar side effect while runtime stop is draining', async () => {
+    vi.useFakeTimers()
+    const { eventStore, authorization } = setup('deny')
+    const runtime = new ProductionTriggerRuntime({
+      eventStore,
+      authorization,
+      service: { runAgent: vi.fn(), runGraph: vi.fn() },
+      grantProvider: vi.fn(),
+      routeResolver: () => ({ trusted: true }),
+      now: () => 1000
+    })
+    let finish!: () => void
+    const held = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const stopScheduler = runtime.scheduler.stop.bind(runtime.scheduler)
+    vi.spyOn(runtime.scheduler, 'stop').mockImplementation(async () => {
+      await stopScheduler()
+      await held
+    })
+    const enqueue = vi.spyOn(runtime.startupSource, 'enqueue'),
+      tick = vi.spyOn(runtime.calendarCronSource, 'tick')
+    runtime.start()
+    const stopping = runtime.stop()
+    try {
+      expect(() => runtime.start()).toThrow('stopping')
+      expect(enqueue).toHaveBeenCalledTimes(1)
+      expect(tick).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+      finish()
+      await stopping
+      runtime.start()
+      expect(enqueue).toHaveBeenCalledTimes(2)
+      expect(tick).toHaveBeenCalledTimes(2)
+    } finally {
+      finish()
+      await stopping
+      await runtime.stop()
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('publishes runtime stop before a synchronous admission-abort listener can restart it', async () => {
+    vi.useFakeTimers()
+    const { eventStore, authorization } = setup('deny')
+    const execution = new CooperativeExecutionController()
+    await execution.requestPause()
+    let entered!: () => void, reentryError: unknown
+    const reached = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const gate: CooperativeOperationGate = {
+      run: (kind, signal, operation) => {
+        signal!.addEventListener(
+          'abort',
+          () => {
+            try {
+              runtime.start()
+            } catch (error) {
+              reentryError = error
+            }
+          },
+          { once: true }
+        )
+        entered()
+        return execution.run(kind, signal, operation)
+      }
+    }
+    const runtime = new ProductionTriggerRuntime({
+      eventStore,
+      authorization,
+      cooperativeExecution: gate,
+      service: { runAgent: vi.fn(), runGraph: vi.fn() },
+      grantProvider: vi.fn(),
+      routeResolver: () => ({ trusted: true }),
+      now: () => 1000
+    })
+    const enqueue = vi.spyOn(runtime.startupSource, 'enqueue'),
+      tick = vi.spyOn(runtime.calendarCronSource, 'tick')
+    runtime.start()
+    const running = runtime.scheduler.runOnce()
+    await reached
+    const stopping = runtime.stop()
+    try {
+      expect(reentryError).toBeInstanceOf(Error)
+      expect((reentryError as Error).message).toContain('runtime is stopping')
+      expect(enqueue).toHaveBeenCalledTimes(1)
+      expect(tick).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+      expect(await running).toBe(false)
+      await stopping
+      expect(execution.isPaused()).toBe(true)
+    } finally {
+      execution.resume()
+      await running
+      await stopping
+      await runtime.stop()
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('waits for every scheduler drain even after one child stop rejects', async () => {
+    vi.useFakeTimers()
+    const { eventStore, authorization } = setup('deny')
+    const runtime = new ProductionTriggerRuntime({
+      eventStore,
+      authorization,
+      service: { runAgent: vi.fn(), runGraph: vi.fn() },
+      grantProvider: vi.fn(),
+      routeResolver: () => ({ trusted: true }),
+      now: () => 1000
+    })
+    const failure = new Error('interval stop failed')
+    let finish!: () => void
+    const held = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const stopInterval = runtime.scheduler.stop.bind(runtime.scheduler),
+      stopOccurrence = runtime.occurrenceScheduler.stop.bind(runtime.occurrenceScheduler)
+    vi.spyOn(runtime.scheduler, 'stop').mockImplementation(async () => {
+      await stopInterval()
+      throw failure
+    })
+    vi.spyOn(runtime.occurrenceScheduler, 'stop').mockImplementation(async () => {
+      await stopOccurrence()
+      await held
+    })
+    runtime.start()
+    let settled = false
+    const stopping = runtime.stop(),
+      observed = stopping.then(
+        () => {
+          settled = true
+        },
+        (error) => {
+          settled = true
+          return error
+        }
+      )
+    try {
+      for (let i = 0; i < 48; i++) await Promise.resolve()
+      expect(settled).toBe(false)
+      expect(() => runtime.start()).toThrow('stopping')
+      finish()
+      expect(await observed).toBe(failure)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      finish()
+      await observed
+      await runtime.stop()
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('does not mutate durable schedule state or consume policy permission before trusted admission', async () => {
+    vi.useFakeTimers()
+    const { eventStore, authorization } = setup('allow')
+    const execution = new CooperativeExecutionController()
+    await execution.requestPause()
+    const runAgent = vi.fn(async () => 'local fixture result')
+    const grantProvider = vi.fn(createGrantProvider(authorization, 1000))
+    const runtime = new ProductionTriggerRuntime({
+      eventStore,
+      authorization,
+      cooperativeExecution: execution,
+      service: { runAgent, runGraph: vi.fn() },
+      grantProvider,
+      routeResolver: () => ({ trusted: true }),
+      now: () => 1000
+    })
+    const created = runtime.store.create(
+      {
+        ...trigger({ kind: 'agent-run', agentId: 'scoped-agent', prompt: 'local' }, 0),
+        id: 'no-claim-before-admission',
+        config: {
+          target: { kind: 'agent-run', agentId: 'scoped-agent', prompt: 'local' },
+          cooperativeExecution: { run: 'not a MAIN capability' }
+        }
+      },
+      0
+    )
+    const before = runtime.store.get(created.id)
+    const claim = vi.spyOn(runtime.store, 'claimDue')
+    const running = runtime.scheduler.runOnce()
+    try {
+      for (let i = 0; i < 48; i++) await Promise.resolve()
+      expect(claim).not.toHaveBeenCalled()
+      expect(runtime.store.get(created.id)).toEqual(before)
+      expect(grantProvider).not.toHaveBeenCalled()
+      expect(runAgent).not.toHaveBeenCalled()
+      await runtime.scheduler.stop()
+      expect(await running).toBe(false)
+      expect(runtime.store.get(created.id)).toEqual(before)
+      expect(execution.isPaused()).toBe(true)
+      runtime.scheduler.start()
+      const restarted = runtime.scheduler.runOnce()
+      execution.resume()
+      expect(await restarted).toBe(true)
+      expect(grantProvider).toHaveBeenCalledOnce()
+      expect(runAgent).toHaveBeenCalledOnce()
+      expect(runtime.outcomes.list()).toHaveLength(1)
+      expect(runtime.outcomes.list()[0].state.status).toBe('succeeded')
+      expect(runtime.store.get(created.id)?.state).toMatchObject({ nextFireAt: 2000 })
+      expect(runtime.store.get(created.id)?.state.claim).toBeUndefined()
+    } finally {
+      execution.resume()
+      await running
+      await runtime.scheduler.stop()
+      await runtime.stop()
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
   })
 
   it('dispatches due agent trigger through policy and trusted route', async () => {

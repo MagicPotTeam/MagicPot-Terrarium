@@ -123,6 +123,7 @@ const ActivityBar: React.FC = () => {
   return (
     <Box
       component="nav"
+      data-workbench-module="activity"
       aria-label={t('menu.navigation', { defaultValue: 'Main navigation' })}
       sx={(theme) => ({
         width: ACTIVITY_BAR_WIDTH,
@@ -192,11 +193,11 @@ const ActivityBar: React.FC = () => {
               </Box>
             </Tooltip>
 
-            <Tooltip title="Agent" placement="right" arrow>
+            <Tooltip title={t('menu.agent', { defaultValue: 'Agent' })} placement="right" arrow>
               <Box
                 component="button"
                 type="button"
-                aria-label="Agent"
+                aria-label={t('menu.agent', { defaultValue: 'Agent' })}
                 aria-pressed={effectRightPanelVisible}
                 data-testid="activity-bar-agent"
                 onClick={() => {

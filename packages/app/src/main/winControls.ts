@@ -54,3 +54,8 @@ class WinController {
 }
 
 export const winController = new WinController()
+
+/** One lazy callable identity for MAIN window installation and IPC delegates; preserve `this`. */
+export function getAuthoritativeMainWindow(): BrowserWindow | null {
+  return winController.getMainWindow()
+}

@@ -1,15 +1,16 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useEffect, useMemo } from 'react'
+import { getServiceErrorMessage } from '@shared/api/apiUtils/serviceValidation'
 import { api } from '../../utils/windowUtils'
 import { cloneHy3dMediaState } from '../ChatPage/hy3d/types'
 import {
   buildCanvasAgentAttachmentManifest,
   buildCanvasAgentAttachments,
-  buildCanvasImageCropSourceMetadata,
-  CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY,
   expandCanvasItemsForAgentSend,
+  isCanvasCroppedImageSourceUrl,
   materializeCanvasAgentAttachmentItemsSync
 } from './canvasAgentAttachmentUtils'
+import type { CanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import { isCanvasAdditiveSelectionModifier } from './canvasSelectionModifiers'
 import { FILLED_ANNOTATION_OPACITY, type CanvasDragPayload } from './projectCanvasPageShared'
 import { formatProjectCanvasScalePercent } from './projectCanvasViewportScale'
@@ -91,6 +92,7 @@ export function useCanvasSelectionUiActions(options: UseCanvasSelectionUiActions
     nextZIndex,
     notifyError,
     notifySuccess,
+    provenCropRegistry,
     selectedIds,
     setAnnotationFillOpacity,
     setContextMenuTarget,
@@ -498,7 +500,7 @@ Return shape:
       console.error('[Smart Cleanup]', error)
       notifyError(
         `${isChineseUi ? 'AI \u667a\u80fd\u6574\u7406\u5931\u8d25' : 'AI cleanup failed'}: ${
-          error instanceof Error ? error.message : String(error)
+          getServiceErrorMessage(error)
         }`
       )
       setItems(backupItems)
@@ -552,50 +554,35 @@ Return shape:
   const buildCanvasDragPayload = useCallback(
     (targetItems: CanvasItem[], options?: CanvasDragPayloadBuildOptions): CanvasDragPayload => {
       const expandedTargetItems = expandCanvasItemsForAgentSend(targetItems, items)
-      const attachmentSourceItems = materializeCanvasAgentAttachmentItemsSync(expandedTargetItems)
-      const dragManifestItems = attachmentSourceItems.map((item) => {
-        if (item.type !== 'image') return item
-
-        const cropSource = buildCanvasImageCropSourceMetadata(item)
-        if (!cropSource) return item
-
-        const outputWidth = Math.max(1, Math.round(cropSource.crop.width))
-        const outputHeight = Math.max(1, Math.round(cropSource.crop.height))
-        const { crop: _crop, ...itemWithoutCrop } = item
-        return {
-          ...itemWithoutCrop,
-          fileName: cropSource.fileName,
-          sourceWidth: outputWidth,
-          sourceHeight: outputHeight,
-          width: outputWidth,
-          height: outputHeight
-        } as CanvasImageItem
-      })
-      const originalImageItems = attachmentSourceItems.filter(
-        (item): item is CanvasImageItem => item.type === 'image'
+      // A drag start cannot read and hash a source. A cropped image travels only
+      // as the PNG drawn when its crop was proven (registry entry for the same
+      // id, source, record and crop); a crop without one stays in place here.
+      const registry = provenCropRegistry as CanvasProvenCropRegistry | undefined
+      const attachmentSourceItems = materializeCanvasAgentAttachmentItemsSync(
+        expandedTargetItems,
+        registry ? (item) => registry.lookup(item) : undefined
       )
-      let imageAttachmentIndex = 0
-      const attachments = buildCanvasAgentAttachments(dragManifestItems).map((attachment) => {
-        if (attachment.type !== 'image') return attachment
-
-        const sourceItem = originalImageItems[imageAttachmentIndex++]
-        const cropSource = sourceItem ? buildCanvasImageCropSourceMetadata(sourceItem) : null
-        if (!cropSource) return attachment
-
-        return {
-          ...attachment,
-          url: cropSource.url,
-          fileName: cropSource.fileName,
-          mimeType: 'image/png',
-          sizeBytes: undefined,
-          sourceWidth: Math.max(1, Math.round(cropSource.crop.width)),
-          sourceHeight: Math.max(1, Math.round(cropSource.crop.height)),
-          metadata: {
-            ...(attachment.metadata || {}),
-            [CANVAS_IMAGE_CROP_SOURCE_METADATA_KEY]: cropSource
-          }
-        }
-      })
+      // If a crop remains, synchronous materialization did not produce visible
+      // pixels. The original URL (including option fallbacks) must not enter a
+      // drag payload; abort the whole selection instead of silently dropping it.
+      // The refusal never suggests removing the crop: that would expose the
+      // whole original. A send or a new confirm proves the crop and keeps its
+      // pixels for the next drag, unless the crop is too large to keep.
+      const unresolvedCrops = attachmentSourceItems.filter(
+        (item): item is CanvasImageItem => item.type === 'image' && Boolean(item.crop)
+      )
+      if (unresolvedCrops.length > 0) {
+        notifyError(
+          t(
+            unresolvedCrops.some((item) => registry?.isTooLarge(item))
+              ? 'canvas.drag_cropped_image_too_large'
+              : 'canvas.drag_cropped_image_unavailable'
+          )
+        )
+        throw new Error('CANVAS_CROP_EXPORT_UNAVAILABLE')
+      }
+      const dragManifestItems = attachmentSourceItems
+      const attachments = buildCanvasAgentAttachments(dragManifestItems)
       const singleDragImageItem =
         attachmentSourceItems.length === 1 && attachmentSourceItems[0]?.type === 'image'
           ? (attachmentSourceItems[0] as CanvasImageItem)
@@ -626,13 +613,13 @@ Return shape:
           ? attachments[0]
           : null
       const singleDragImageUrl = singleDragAttachment?.url || singleDragImageItem?.src
+      // A caller's fallback URL is never the original source of a cropped item.
+      const getSafeOptionUrl = (url: string | undefined): string | undefined =>
+        url?.trim() && !isCanvasCroppedImageSourceUrl(expandedTargetItems, url) ? url : undefined
 
       return {
-        objectUrl:
-          singleDragImageUrl || (options?.objectUrl?.trim() ? options.objectUrl : undefined),
-        previewImageUrl:
-          singleDragImageUrl ||
-          (options?.previewImageUrl?.trim() ? options.previewImageUrl : undefined),
+        objectUrl: singleDragImageUrl || getSafeOptionUrl(options?.objectUrl),
+        previewImageUrl: singleDragImageUrl || getSafeOptionUrl(options?.previewImageUrl),
         promptId: options?.promptId?.trim() ? options.promptId : undefined,
         sourceCanvasId: canvasId,
         attachments: attachments.length > 0 ? attachments : undefined,
@@ -649,7 +636,7 @@ Return shape:
           : {})
       }
     },
-    [canvasId, extractPromptTextFromCanvasItems, items]
+    [canvasId, extractPromptTextFromCanvasItems, items, notifyError, provenCropRegistry, t]
   )
 
   const setCanvasDragPayload = useCallback(

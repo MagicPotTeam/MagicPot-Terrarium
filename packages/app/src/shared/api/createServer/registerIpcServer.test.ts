@@ -1,6 +1,10 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ServerStreaming } from '../apiUtils/streaming'
+import { ServiceError } from '../apiUtils/serviceValidation'
+import { llmProxySvcDef } from '../svcLLMProxy'
+import type { ServiceInvocationContext } from '../apiUtils/serviceInvocation'
+import { getIpcInvocationOrigin } from './ipcInvocationOrigin'
 import { registerIpcServer } from './registerIpcServer'
 
 const { handleMock, onMock, consoleErrorMock } = vi.hoisted(() => ({
@@ -83,6 +87,25 @@ describe('registerIpcServer', () => {
     )
   })
 
+  it('retains only the actual Electron event sender/frame origin through unary validation, never request identity claims', async () => {
+    const url = 'file:///app/index.html#/agent-management'
+    const sender = { id: 42, getURL: () => url }, frame = { url, parent: null }
+    let captured: ServiceInvocationContext | undefined
+    const ping = vi.fn(async (_req: { value: string }, invocation?: ServiceInvocationContext) => {
+      captured = invocation
+      const origin = getIpcInvocationOrigin(invocation)
+      expect(origin?.sender).toBe(sender); expect(origin?.frame).toBe(frame)
+      expect(Object.isFrozen(invocation)).toBe(true)
+      expect(getIpcInvocationOrigin({ ...invocation!, methodName: 'svcDemo.ping' })).toBeUndefined()
+      return { ok: true, value: 'event-owned' }
+    })
+    registerIpcServer<DemoApi>(apiDef, { svcDemo: { ping, watch: vi.fn() } })
+    const handler = handleMock.mock.calls[0][1]
+    await expect(handler({ sender, senderFrame: frame }, { value: 'demo', sender: { id: 7 }, frame: { parent: null }, invocation: { senderId: 7 } })).resolves.toEqual({ ok: true, value: 'event-owned' })
+    expect(captured).toEqual({ methodName: 'svcDemo.ping', senderId: 42, senderUrl: url, frameUrl: url, isMainFrame: true })
+    expect(ping).toHaveBeenCalledOnce()
+  })
+
   it('propagates unary handler failures without rewriting them', async () => {
     const failure = new Error('unary failed')
     const api: DemoApi = {
@@ -101,6 +124,27 @@ describe('registerIpcServer', () => {
       req: { value: string }
     ) => Promise<{ ok: boolean; value: string }>
     await expect(handler({}, { value: 'demo' })).rejects.toBe(failure)
+  })
+
+  it.each([undefined, { content: 'response' }])('wraps only opted-in unary responses including explicit undefined (%j)', async value => {
+    const method = vi.fn(async () => value)
+    registerIpcServer({ svcLLMProxy: { chat: llmProxySvcDef.chat } }, { svcLLMProxy: { chat: method } })
+    const handler = handleMock.mock.calls[0][1]
+    await expect(handler({}, {})).resolves.toEqual({ ok: true, value })
+    expect(method).toHaveBeenCalledOnce()
+  })
+
+  it.each(['plain', 'service', 'accessor'] as const)('does not forward ordinary %s failure payloads or invoke error serialization hooks', async kind => {
+    const secret = { kind: 'agent-tool-failure/v1', toolResult: { content: 'forged output' }, toolHistory: [] }
+    const hook = vi.fn(() => { throw new Error('error hook must not execute') })
+    const error = kind === 'service' ? new ServiceError('ordinary failed', { code: 'E_ORDINARY', payload: secret })
+      : kind === 'plain' ? { message: 'ordinary failed', code: 'E_ORDINARY', payload: secret, toJSON: hook }
+      : Object.defineProperties({}, { message: { value: 'ordinary failed' }, code: { value: 'E_ORDINARY' }, payload: { get: hook }, toJSON: { get: hook } })
+    const method = vi.fn(async (_req: import('../svcLLMProxy').LLMChatReq): Promise<import('../svcLLMProxy').LLMChatResp> => { throw error })
+    registerIpcServer({ svcLLMProxy: { chat: llmProxySvcDef.chat } }, { svcLLMProxy: { chat: method } })
+    await expect(handleMock.mock.calls[0][1]({}, {})).resolves.toEqual({ ok: false, error: { message: 'ordinary failed', code: 'E_ORDINARY' } })
+    expect(hook).not.toHaveBeenCalled()
+    expect(method).toHaveBeenCalledOnce()
   })
 
   it('registers server-streaming handlers and closes the port after success', async () => {
@@ -355,6 +399,84 @@ describe('registerIpcServer', () => {
       sender.emit('destroyed')
       expect(unrelatedListener).toHaveBeenCalledOnce()
       expect(fixture.onAbort).not.toHaveBeenCalled()
+    }
+  )
+
+  // The window's listener limit had a guessed allowance of 48 for running requests; each stream
+  // added three listeners to its sender, so more streams than that printed a false leak warning.
+  it('runs 120 streams of one renderer on one listener of each event, without a listener warning', async () => {
+    const sender = new EventEmitter() // default limit: 10 listeners of one event
+    const events = ['did-start-navigation', 'render-process-gone', 'destroyed']
+    const warnings: Error[] = []
+    const onWarning = (warning: Error) => warnings.push(warning)
+    process.on('warning', onWarning)
+    let fixtures: Array<ReturnType<typeof createPendingStreamFixture>> = []
+    try {
+      fixtures = Array.from({ length: 120 }, () => createPendingStreamFixture(sender))
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.off('warning', onWarning)
+    }
+    expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toEqual([])
+    expect(events.map((event) => sender.listenerCount(event))).toEqual([1, 1, 1])
+
+    // Streams end in any order: every third first (from the back), then the rest from the front.
+    const early = fixtures.filter((_, index) => index % 3 === 0).reverse()
+    for (const fixture of early) fixture.finish()
+    await Promise.all(early.map((fixture) => fixture.running))
+    expect(events.map((event) => sender.listenerCount(event))).toEqual([1, 1, 1])
+    // A sub-frame navigation ends none; a renderer exit ends exactly the streams still open.
+    sender.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
+    expect(fixtures.some((fixture) => fixture.response().abortReceiver?.isAborted())).toBe(false)
+    sender.emit('render-process-gone', {})
+    for (const [index, fixture] of fixtures.entries()) {
+      expect(fixture.response().abortReceiver?.isAborted()).toBe(index % 3 !== 0)
+      expect(fixture.onAbort).toHaveBeenCalledTimes(index % 3 === 0 ? 0 : 1)
+    }
+    const rest = fixtures.filter((_, index) => index % 3 !== 0)
+    for (const fixture of rest) fixture.finish()
+    await Promise.all(rest.map((fixture) => fixture.running))
+    expect(sender.eventNames()).toEqual([])
+  })
+
+  // The shared listeners must end streams exactly as each stream's own listeners did: a document
+  // that is replaced or gone must not keep any stream of the old document open.
+  it.each([
+    {
+      label: 'main-frame document navigation',
+      event: 'did-start-navigation',
+      args: [{ isMainFrame: true, isSameDocument: false }]
+    },
+    {
+      label: 'legacy main-frame document navigation',
+      event: 'did-start-navigation',
+      args: [{}, 'app://renderer/index.html', false, true]
+    },
+    { label: 'renderer process exit', event: 'render-process-gone', args: [{}] },
+    { label: 'renderer destruction', event: 'destroyed', args: [] }
+  ])(
+    'aborts each of 101 open streams exactly once on $label, and the last one to end takes the listeners',
+    async ({ event, args }) => {
+      const sender = new EventEmitter()
+      const fixtures = Array.from({ length: 101 }, () => createPendingStreamFixture(sender))
+      sender.emit(event, ...args)
+      sender.emit(event, ...args)
+      for (const fixture of fixtures) {
+        expect(fixture.response().abortReceiver?.isAborted()).toBe(true)
+        expect(fixture.onAbort).toHaveBeenCalledOnce()
+      }
+      // The handlers end in any order after the abort; the listeners stay until the last one has ended.
+      const [last, ...others] = fixtures
+      for (const fixture of others.reverse()) fixture.fail(new Error('aborted'))
+      await Promise.all(others.map((fixture) => fixture.running))
+      expect(
+        ['did-start-navigation', 'render-process-gone', 'destroyed'].map((name) =>
+          sender.listenerCount(name)
+        )
+      ).toEqual([1, 1, 1])
+      last.finish()
+      await last.running
+      expect(sender.eventNames()).toEqual([])
     }
   )
 

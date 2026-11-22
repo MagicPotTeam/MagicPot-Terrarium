@@ -11,6 +11,7 @@ import {
   removeTrailingEmptyAssistantMessage,
   replaceLastMessageInSession,
   replaceLastMessageWithMessagesInSession,
+  settleStoppedAssistantMessage,
   sortSessionsByRecencyDesc,
   updateSessionUrl
 } from './chatSessionUtils'
@@ -319,7 +320,8 @@ describe('chatSessionUtils session updaters', () => {
 
     expect(withPlaceholder[1].messages[withPlaceholder[1].messages.length - 1]).toEqual({
       role: 'assistant',
-      content: ''
+      content: '',
+      runState: 'streaming'
     })
 
     const cleaned = removeTrailingEmptyAssistantMessage(withPlaceholder, '2')
@@ -335,8 +337,70 @@ describe('chatSessionUtils session updaters', () => {
 
     expect(withDelta[1].messages).toEqual([
       { role: 'user', content: 'hello' },
-      { role: 'assistant', content: 'partial reply' }
+      { role: 'assistant', content: 'partial reply', runState: 'streaming' }
     ])
+  })
+
+  it('drops runState with every ending, which writes a new message', () => {
+    const streaming = appendAssistantDeltaToSession(
+      appendAssistantPlaceholderToSession(baseSessions, '2'),
+      { sessionId: '2', delta: 'partial' }
+    )
+    const replaced = replaceLastMessageInSession(streaming, {
+      sessionId: '2',
+      message: { role: 'assistant', content: 'done' }
+    })
+    expect(replaced[1].messages.at(-1)).toEqual({ role: 'assistant', content: 'done' })
+    const batched = replaceLastMessageWithMessagesInSession(streaming, {
+      sessionId: '2',
+      messages: [
+        { role: 'assistant', content: 'a' },
+        { role: 'assistant', content: 'b' }
+      ]
+    })
+    expect(batched[1].messages.slice(-2).every((message) => !('runState' in message))).toBe(true)
+  })
+
+  it('settles the reply a Stop ends: an empty placeholder goes, a partial one stays unmarked', () => {
+    const placeholder = appendAssistantPlaceholderToSession(baseSessions, '2')
+    expect(settleStoppedAssistantMessage(placeholder, '2')[1].messages).toEqual(
+      baseSessions[1].messages
+    )
+    const partial = appendAssistantDeltaToSession(placeholder, { sessionId: '2', delta: 'part' })
+    const settled = settleStoppedAssistantMessage(partial, '2')
+    expect(settled[1].messages.at(-1)).toEqual({ role: 'assistant', content: 'part' })
+    // Tool rows and no text: kept, unmarked.
+    const toolOnly = placeholder.map((session) =>
+      session.id === '2'
+        ? {
+            ...session,
+            messages: [
+              ...session.messages.slice(0, -1),
+              {
+                ...session.messages[session.messages.length - 1],
+                toolHistory: [
+                  {
+                    runId: 'r',
+                    toolCallId: 'c',
+                    toolName: 'web_fetch',
+                    args: {},
+                    status: 'completed' as const,
+                    content: 'x'
+                  }
+                ]
+              }
+            ]
+          }
+        : session
+    )
+    const settledTool = settleStoppedAssistantMessage(toolOnly, '2')[1].messages.at(-1)
+    expect(settledTool?.toolHistory).toHaveLength(1)
+    expect(settledTool && 'runState' in settledTool).toBe(false)
+    // A trailing user message and a session without messages are unchanged; others by identity.
+    expect(settleStoppedAssistantMessage(baseSessions, '2')[1].messages).toEqual(
+      baseSessions[1].messages
+    )
+    expect(settled[0]).toBe(partial[0])
   })
 
   it('preserves the responding model on streamed assistant placeholders', () => {
@@ -348,7 +412,7 @@ describe('chatSessionUtils session updaters', () => {
 
     expect(withDelta[1].messages).toEqual([
       { role: 'user', content: 'hello' },
-      { role: 'assistant', content: 'partial reply', modelName: 'GPT-4o' }
+      { role: 'assistant', content: 'partial reply', runState: 'streaming', modelName: 'GPT-4o' }
     ])
   })
 

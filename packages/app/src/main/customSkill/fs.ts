@@ -6,6 +6,9 @@
  * This mirrors the QApp file-based storage pattern.
  */
 
+import { createHash } from 'node:crypto'
+import { constants } from 'node:fs'
+import { THREAD_SKILL_LIMITS as LIMITS, isThreadSkillPattern, type ThreadProceduralSkill } from '@shared/api/agentThreadSkill'
 import path from 'path'
 import { getBuildEnv } from '../config/buildEnv'
 import { getConfig } from '../config/config'
@@ -101,6 +104,87 @@ export class CustomSkillFSCli {
       return path.join(dir, sanitizedCategory, fileName)
     }
     return path.join(dir, fileName)
+  }
+
+  /** Passive discovery only. Unlike listSkills, this NEVER creates dirs, copies
+   * bundled files, migrates names or writes categories. Only the existing user
+   * skill directory can opt in; bundled defaults are not implicitly exposed.
+   */
+  async listProceduralSkills(signal?: AbortSignal): Promise<{ skills: ThreadProceduralSkill[]; truncated: boolean }> {
+    signal?.throwIfAborted()
+    const requestedRoot = this.configUtils.getCustomSkillDir()
+    let root: string
+    try {
+      const stat = await fs.lstat(requestedRoot)
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Procedural skill root must be an unlinked directory.')
+      root = await fs.realpath(requestedRoot)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { skills: [], truncated: false }
+      throw error
+    }
+    const queue = [{ dir: root, depth: 0 }]
+    const skills: ThreadProceduralSkill[] = []
+    let entries = 0, files = 0, bytes = 0, truncated = false
+    scan: while (queue.length) {
+      signal?.throwIfAborted()
+      const { dir, depth } = queue.shift()!
+      if (normalizePathKey(await fs.realpath(requestedRoot)) !== normalizePathKey(root) || normalizePathKey(await fs.realpath(dir)) !== normalizePathKey(dir) || (await fs.lstat(dir)).isSymbolicLink()) throw new Error('Procedural skill directory changed during discovery.')
+      const directory = await fs.opendir(dir)
+      try {
+        for await (const entry of directory) {
+          signal?.throwIfAborted()
+          if (++entries > LIMITS.entries) { truncated = true; break scan }
+          const file = path.join(dir, entry.name)
+          if (entry.isDirectory() && depth === 0) {
+            const stat = await fs.lstat(file)
+            if (!stat.isSymbolicLink() && normalizePathKey(await fs.realpath(file)) === normalizePathKey(file)) queue.push({ dir: file, depth: 1 })
+            continue
+          }
+          if (!entry.isFile() || !entry.name.endsWith(SKILL_SUFFIX)) continue
+          if (++files > LIMITS.files) { truncated = true; break scan }
+          let handle: Awaited<ReturnType<typeof fs.open>> | undefined
+          try {
+            const stat = await fs.lstat(file)
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > LIMITS.fileBytes || normalizePathKey(await fs.realpath(file)) !== normalizePathKey(file)) { truncated = true; continue }
+            if (bytes + stat.size > LIMITS.totalBytes) { truncated = true; break scan }
+            handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+            const opened = await handle.stat()
+            if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== stat.dev || opened.ino !== stat.ino) { truncated = true; continue }
+            const buffer = Buffer.alloc(Math.min(LIMITS.fileBytes, LIMITS.totalBytes - bytes) + 1)
+            let bytesRead = 0
+            while (bytesRead < buffer.length) {
+              signal?.throwIfAborted()
+              const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead)
+              if (!read.bytesRead) break
+              bytesRead += read.bytesRead
+            }
+            bytes += bytesRead
+            if (bytes > LIMITS.totalBytes) { truncated = true; break scan }
+            if (bytesRead > LIMITS.fileBytes) { truncated = true; continue }
+            const after = await handle.stat(), current = await fs.lstat(file)
+            if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs || current.isSymbolicLink() || after.nlink !== 1 || current.dev !== after.dev || current.ino !== after.ino || normalizePathKey(await fs.realpath(file)) !== normalizePathKey(file) || normalizePathKey(await fs.realpath(requestedRoot)) !== normalizePathKey(root)) { truncated = true; continue }
+            signal?.throwIfAborted()
+            const raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytesRead)).replace(/^\uFEFF/, '')) as CustomSkill
+            if (!raw || raw.type !== 'normal' || raw.procedural?.enabled !== true) continue
+            if (typeof raw.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(raw.id) || typeof raw.skillName !== 'string' || !raw.skillName.trim() || raw.skillName.length > 128) { truncated = true; continue }
+            const system = raw.instructions?.systemPrompt ?? raw.prompt
+            const user = raw.instructions?.userPrompt ?? ''
+            const patterns = raw.procedural.paths ?? []
+            if (typeof system !== 'string' || typeof user !== 'string' || !Array.isArray(patterns) || patterns.length > LIMITS.patterns || !patterns.every(isThreadSkillPattern)) { truncated = true; continue }
+            const instructions = [system, user].filter(Boolean).join('\n\n')
+            if (!instructions.trim() || instructions.length > LIMITS.bodyCharacters) { truncated = true; continue }
+            const result = { id: raw.id, name: raw.skillName.trim(), description: typeof raw.description === 'string' ? raw.description.slice(0, 1000) : '', instructions, baseDirectory: path.dirname(file), paths: [...patterns] }
+            skills.push({ ...result, digest: createHash('sha256').update(JSON.stringify(result)).digest('hex') })
+          } catch { signal?.throwIfAborted(); truncated = true }
+          finally { await handle?.close() }
+        }
+      } finally { await directory.close().catch(() => undefined) }
+    }
+    signal?.throwIfAborted()
+    // Ambiguous IDs or names cannot silently select an alternate definition.
+    const unique = skills.filter((skill) => skills.filter((item) => item.id === skill.id).length === 1 && skills.filter((item) => item.name === skill.name).length === 1)
+    truncated ||= unique.length !== skills.length
+    return { skills: unique.sort((a, b) => a.id.localeCompare(b.id)), truncated }
   }
 
   async listSkills(): Promise<{ skills: CustomSkill[]; categories: string[] }> {

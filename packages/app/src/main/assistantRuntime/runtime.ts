@@ -1,10 +1,24 @@
-﻿import { ChatAttachment, ChatMessage, LLMProxySvc } from '@shared/api/svcLLMProxy'
+import { createAbortError } from '@shared/agent'
+import { assertKnownAssistantToolOutcomes, resolveAssistantToolReplayRunId } from './toolRecovery'
+import { invokePrivateSideRead } from '../agentKernel/toolBridge'
+import { ChatAttachment, ChatMessage, LLMProxySvc } from '@shared/api/svcLLMProxy'
 import { MAGICPOT_SESSION_STATUS_TOOL_NAME, normalizeMagicPotToolName } from '@shared/app/types'
 import { Config } from '@shared/config/config'
-import { LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
+import { isManagedRealChatService, LLMProxySvcImpl } from '../api/svcLLMProxyImpl'
 import { getConfig } from '../config/config'
 import { syncMcpClientManager } from '../mcp/runtime'
-import { AssistantExecutionAdapter } from './executionAdapter'
+import { withCooperativeOperation } from './cooperativeOperation'
+import { captureManagedData, managedDigest } from '../magicAgentPlatform2/agents/managedRuntimeSnapshot'
+import { prepareManagedTextFirstRun as prepareModelTextFirstRun } from '../llmProxy/managedTextFirstRun'
+import {
+  assertManagedTextFirstRunGuard, captureManagedTextFirstRunRuntimeContext, managedTextFirstRunCaller,
+  type PreparedManagedTextFirstRunRuntime, type ManagedTextFirstRunRuntimePlan,
+  type ManagedTextFirstRunRuntimePreparedRecord, type ManagedTextFirstRunRuntimeContext,
+  type ManagedTextFirstRunRuntimeExecution, type ManagedTextFirstRunRuntimeClosure,
+  type ManagedTextFirstRunRuntimeClosureData, type ManagedTextFirstRunRuntimeOutcome, type ManagedTextFirstRunRuntimeResult
+} from './managedTextFirstRunRuntime'
+import { ManagedRuntimeRecording, type ManagedRuntimeOptions, type ManagedRuntimeExecution } from '../magicAgentPlatform2/agents/managedRuntimeRecording'
+import { AssistantExecutionAdapter, type AssistantExecutionRequest } from './executionAdapter'
 import { buildAssistantHelpText } from './assistantOutputPresenter'
 import {
   AssistantAuditTimelineEntry,
@@ -54,6 +68,7 @@ import {
   detachAssistantWorkspaceBinding,
   ensureAssistantWorkspaceBinding,
   ensureAssistantWorkspaceState,
+  createManagedFirstRunWorkspace,
   getAssistantWorkspaceState,
   manageAssistantWorkspaceGovernance,
   persistAssistantContextSnapshot,
@@ -70,6 +85,10 @@ type AssistantRuntimeDeps = {
   sessionStore?: AssistantSessionStore
   configProvider?: () => Config
   toolRegistry?: AssistantToolRegistry
+  /** MAIN-only explicit direct recording fixture; not production service transport. */
+  managedRecording?: ManagedRuntimeRecording
+  /** MAIN-only bounded constructor policy. Not an inbound request/permission. */
+  managedTextFirstRun?: true
 }
 
 type AssistantToolCallRequest = Parameters<AssistantExecutionAdapter['callTool']>[2]
@@ -640,6 +659,10 @@ export class AssistantRuntime {
   private readonly configProvider: () => Config
   private readonly toolRegistry: AssistantToolRegistry
   private readonly executionAdapter: AssistantExecutionAdapter
+  readonly #managedRecording?: ManagedRuntimeRecording
+  readonly #managedTextFirstRun: boolean
+  #managedTextPrepared?: ManagedTextFirstRunRuntimePreparedRecord
+  readonly #managedTextClosures = new WeakMap<object, { context: ManagedTextFirstRunRuntimeContext; data: ManagedTextFirstRunRuntimeClosureData; used: boolean }>()
   private readonly routeQueues = new Map<string, Promise<unknown>>()
   private readonly taskStates = new Map<string, AssistantTaskState>()
   private readonly activeRuns = new Map<string, string>()
@@ -656,14 +679,161 @@ export class AssistantRuntime {
   private readonly routeEventSubscribers = new Map<string, Set<AssistantEventListener>>()
 
   constructor(deps: AssistantRuntimeDeps = {}) {
+    this.#managedTextFirstRun = deps.managedTextFirstRun === true
+    if (this.#managedTextFirstRun && (!isManagedRealChatService(deps.chatService) || deps.managedRecording || deps.toolRegistry || !deps.sessionStore)) throw Error('Managed text first-run runtime requires its exact bounded service and explicit isolated session store, no recording or tools.')
+    if (isManagedRealChatService(deps.chatService) && !deps.managedRecording && !this.#managedTextFirstRun) throw Error('Managed real-chat service requires concrete managed recording.')
+    if (deps.managedRecording) {
+      // Only the exact private real-service facade or explicit bounded test scripts.
+      // A facade is routing identity, never ticket/owner/approval authority.
+      const service = deps.chatService
+      if (!(deps.managedRecording instanceof ManagedRuntimeRecording) || !service ||
+          ![Object.prototype, null].includes(Object.getPrototypeOf(service)) ||
+          typeof Object.getOwnPropertyDescriptor(service, 'chat')?.value !== 'function')
+        throw new Error('Managed runtime recording requires an explicit plain scripted chat service.')
+      deps.managedRecording.attachRuntime(this)
+      this.#managedRecording = deps.managedRecording
+    }
     this.chatService = deps.chatService || new LLMProxySvcImpl()
     this.sessionStore = deps.sessionStore || new AssistantSessionStore()
     this.configProvider = deps.configProvider || getConfig
-    this.toolRegistry = deps.toolRegistry || new AssistantToolRegistry()
+    this.toolRegistry = this.#managedTextFirstRun ? AssistantToolRegistry.createManagedTextFirstRunRegistry() : deps.toolRegistry || new AssistantToolRegistry()
     this.executionAdapter = new AssistantExecutionAdapter({
       chatService: this.chatService,
-      toolRegistry: this.toolRegistry
+      ...(this.#managedTextFirstRun ? { managedTextFirstRun: true } : { toolRegistry: this.toolRegistry }),
+      ...(this.#managedRecording ? { managedRecording: this.#managedRecording, managedRuntime: this } : {})
     })
+  }
+
+  #assertOrdinary(): void {
+    if (this.#managedTextFirstRun) throw Error('Managed text first-run runtime requires its prepared path; ordinary operations/subscribers are unsupported.')
+  }
+
+  /** Effect-free preparation using the actual runtime's user/system normalization
+   * and actual client's body builder. No inherited context or dynamic catalog. */
+  prepareManagedTextFirstRun(input: AssistantInboundMessage, inputConfig: Config): PreparedManagedTextFirstRunRuntime {
+    if (!this.#managedTextFirstRun || this.#managedTextPrepared) throw Error('One unused managed first-run runtime preparation is required.')
+    const req = captureManagedData(input)
+    if (Object.keys(req).some(key => !['route', 'text', 'systemPrompt', 'profileId', 'maxOutputTokens', 'temperature'].includes(key)) ||
+        typeof req.text !== 'string' || req.systemPrompt !== undefined && typeof req.systemPrompt !== 'string') throw Error('Managed first run accepts only explicit plain text/profile/options and no callbacks, helpers or history.')
+    const user = buildUserMessage(req), systemPrompt = cleanString(req.systemPrompt)
+    const model = prepareModelTextFirstRun(this.chatService, {
+      route: req.route, messages: [user], profileId: req.profileId,
+      maxOutputTokens: req.maxOutputTokens, temperature: req.temperature,
+      ...(systemPrompt ? { systemPrompt } : {})
+    }, inputConfig)
+    const token = crypto.randomUUID()
+    const storageRoute = captureManagedData({ channel: 'generic', scopeType: 'dm', scopeId: `managed-first-run-${token}` }) as AssistantRoute
+    const workspace = captureManagedData(getAssistantWorkspaceState(storageRoute, `managed-first-run-${token}`))
+    const body = captureManagedData({
+      protocol: 'assistant-final-input/v1' as const, route: model.material.route as AssistantRoute, model: model.material,
+      storage: { route: storageRoute, workspace, history: 'new-private-session' as const, reusableContext: 'none' as const, eventDelivery: 'awaited-store-only' as const }
+    })
+    const material = captureManagedData({ ...body, digest: managedDigest('assistant-final-input/v1', body) })
+    const plan = Object.freeze({}) as ManagedTextFirstRunRuntimePlan
+    this.#managedTextPrepared = { plan, model, request: captureManagedData({ ...req, text: user.content, ...(systemPrompt ? { systemPrompt } : {}) }), material, used: false }
+    return Object.freeze({ plan, material })
+  }
+
+  /** Whole actual runtime invocation remains owned through final writes. Caller
+   * cancellation can settle earlier; closed joins the declared producer + native
+   * raw descendants after sealing. It is bounded closure, NEVER clean/restart. */
+  startPreparedManagedTextFirstRun(plan: ManagedTextFirstRunRuntimePlan, inputContext: ManagedTextFirstRunRuntimeContext): ManagedTextFirstRunRuntimeExecution {
+    const record = this.#managedTextPrepared
+    if (!this.#managedTextFirstRun || !record || record.plan !== plan || record.used) throw Error('Exact unused prepared managed runtime plan required.')
+    const context = captureManagedTextFirstRunRuntimeContext(inputContext)
+    record.used = true // A thrown guard/setup/final write can never restore this slot.
+    assertManagedTextFirstRunGuard(context.assertDispatchCurrent)
+    context.controller.signal.throwIfAborted()
+    const signalController = new AbortController(), forwardAbort = () => signalController.abort(context.controller.signal.reason)
+    context.controller.signal.addEventListener('abort', forwardAbort, { once: true })
+    if (context.controller.signal.aborted) forwardAbort()
+    // Runtime duration bounds caller/work dispatch, NOT drain or owner retirement.
+    const deadline = setTimeout(() => signalController.abort(new DOMException('Managed first-run runtime deadline exceeded.', 'TimeoutError')), record.model.material.requestTimeoutMs)
+    let sealed = false, outcome: ManagedTextFirstRunRuntimeOutcome | undefined
+    const work = withCooperativeOperation(context.cooperativeExecution, 'assistant-turn', signalController.signal, async children => {
+      try {
+        const completed = await this.#executePreparedManagedTextFirstRun(record, context, children, signalController.signal)
+        outcome = completed.outcome
+        return completed.result
+      } finally {
+        sealed = true
+        clearTimeout(deadline)
+        context.controller.signal.removeEventListener('abort', forwardAbort)
+      }
+    })
+    const closed = (async (): Promise<ManagedTextFirstRunRuntimeClosure> => {
+      let failed = false, failure: unknown
+      try { await work } catch (error) { failed = true; failure = error }
+      finally { clearTimeout(deadline); context.controller.signal.removeEventListener('abort', forwardAbort) }
+      // This is a join, not a timeout and not itself a producer witness. The
+      // producer above must have sealed successfully with its final store writes.
+      await context.cooperativeExecution.whenQuiescent()
+      if (failed) throw failure
+      if (!sealed || !outcome) throw Error('Managed first-run producer did not issue positive bounded completion.')
+      assertManagedTextFirstRunGuard(context.assertCompletionCurrent)
+      const closure = Object.freeze({}) as ManagedTextFirstRunRuntimeClosure
+      this.#managedTextClosures.set(closure, { context, used: false, data: Object.freeze({ protocol: 'assistant-bounded-closure/v1', runId: context.runId, finalInputDigest: record.material.digest, outcome }) })
+      return closure
+    })()
+    // Install rejection observation even if the caller only awaits responsive
+    // result. The original closed promise still reports failure to its owner.
+    void closed.catch(() => undefined)
+    return Object.freeze({ result: managedTextFirstRunCaller(work, signalController.signal), closed })
+  }
+
+  consumeManagedTextFirstRunClosure(closure: ManagedTextFirstRunRuntimeClosure, inputContext: ManagedTextFirstRunRuntimeContext): ManagedTextFirstRunRuntimeClosureData {
+    const proof = this.#managedTextClosures.get(closure), context = captureManagedTextFirstRunRuntimeContext(inputContext)
+    if (!proof || proof.used || proof.context.controller !== context.controller || proof.context.cooperativeExecution !== context.cooperativeExecution ||
+        proof.context.runId !== context.runId || proof.context.assertCompletionCurrent !== context.assertCompletionCurrent || proof.context.assertDispatchCurrent !== context.assertDispatchCurrent)
+      throw Error('Exact unconsumed managed runtime closure and original owner required.')
+    proof.used = true
+    assertManagedTextFirstRunGuard(context.assertCompletionCurrent)
+    return proof.data
+  }
+
+  async #executePreparedManagedTextFirstRun(
+    record: ManagedTextFirstRunRuntimePreparedRecord,
+    context: ManagedTextFirstRunRuntimeContext,
+    children: AssistantExecutionRequest['cooperativeExecution'],
+    signal: AbortSignal
+  ): Promise<{ result: ManagedTextFirstRunRuntimeResult; outcome: ManagedTextFirstRunRuntimeOutcome }> {
+    const dispatch = () => { assertManagedTextFirstRunGuard(context.assertDispatchCurrent); signal.throwIfAborted() }
+    const completion = () => assertManagedTextFirstRunGuard(context.assertCompletionCurrent)
+    const { route, workspace } = record.material.storage
+    const runId = context.runId, sessionKey = getAssistantSessionKey(route)
+    dispatch()
+    await createManagedFirstRunWorkspace(workspace, route)
+    completion()
+    // No session content is ever injected into the model. Reject collision anyway;
+    // the namespace cannot adopt a previous session or ordinary workspace binding.
+    const previous = await this.sessionStore.getSession(route)
+    if (previous) throw Error('Managed first-run storage namespace is already in use.')
+    let run: AssistantRunRecord = { ...createRunRecord(runId, route, record.request.text, 0, record.model.material.profileId, { workspaceId: workspace.workspaceId, executionMode: 'isolated', executionHistorySize: 1 }), status: 'running', startedAt: Date.now() }
+    const events = [createEvent(runId, route, 'started', 'Bounded one-request no-history text run started.')]
+    completion()
+    await this.sessionStore.appendTurn(route, [buildUserMessage(record.request)], 2, { workspace, run, events })
+    let reply: AssistantRuntimeResult['reply'] = { content: '' }, outcome: ManagedTextFirstRunRuntimeOutcome = 'completed'
+    try {
+      dispatch()
+      reply = await this.executionAdapter.runPreparedManagedTextFirstRun(record.model, context, children, signal)
+      dispatch()
+    } catch {
+      // Do not persist raw provider/error messages: they can contain credentials
+      // or unbounded upstream content. A model failure creates no tool intents.
+      outcome = signal.aborted ? 'cancelled' : 'failed'
+    }
+    completion() // Cancellation revokes dispatch, NOT this completion-only write.
+    const finishedAt = Date.now()
+    run = { ...run, status: outcome, updatedAt: finishedAt, finishedAt, cancelRequested: outcome === 'cancelled',
+      ...(outcome === 'completed' ? { responseText: reply.content } : outcome === 'failed' ? { errorMessage: 'Managed one-request text execution failed; no retry was attempted.' } : {}) }
+    events.push(createEvent(runId, route, outcome, outcome === 'completed' ? 'Bounded text run completed.' : outcome === 'cancelled' ? 'Bounded text run cancelled; owned work may still be draining.' : 'Bounded text run failed; no retry was attempted.'))
+    // One final publication attempt. A failed store write poisons bounded closure;
+    // there is no catch-and-retry path that can fabricate successful persistence.
+    if (outcome === 'completed') await this.sessionStore.appendTurn(route, [buildAssistantMessage(reply.content)], 2, { workspace, run, events: [events[1]] })
+    else await this.sessionStore.upsertRun(route, run, { workspace, events: [events[1]] })
+    completion()
+    return { outcome, result: { runId, sessionKey, profileId: record.model.material.profileId, historySize: outcome === 'completed' ? 2 : 1, executionMode: 'isolated', executionHistorySize: 1, status: outcome, events,
+      artifacts: [], reply: outcome === 'completed' ? reply : { content: outcome === 'cancelled' ? 'Cancelled; owned work may still be draining.' : 'Managed text execution failed; no retry was attempted.' } } }
   }
 
   private resolveProfileId(req: AssistantInboundMessage, config: Config): string | undefined {
@@ -738,6 +908,7 @@ export class AssistantRuntime {
       sourceRunId?: string
     }
   ): Promise<AssistantTaskGroupState | null> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const sessionKey = getAssistantSessionKey(normalizedRoute)
     const previous = this.taskGroupQueues.get(sessionKey) || Promise.resolve()
@@ -772,6 +943,7 @@ export class AssistantRuntime {
       sourceRunId?: string
     }
   ): Promise<AssistantTaskGroupState | null> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const taskGroupId =
       cleanString(options?.taskGroupId, 120) ||
@@ -1273,9 +1445,12 @@ export class AssistantRuntime {
     route: AssistantRoute,
     runId: string,
     queuedRun: AssistantRunRecord,
-    preparedSession: Awaited<ReturnType<AssistantRuntime['prepareSession']>>
+    preparedSession: Awaited<ReturnType<AssistantRuntime['prepareSession']>>,
+    managed?: ManagedRuntimeExecution
   ): Promise<AssistantRuntimeResult> {
-    const config = this.configProvider()
+    const config = managed
+      ? managed.coordinator.config(this, managed.lease)
+      : this.configProvider()
     await syncMcpClientManager(config)
     if (!cleanString(req.text) && !(req.attachments && req.attachments.length > 0)) {
       throw new Error('Missing inbound chat message text or attachments.')
@@ -1388,15 +1563,17 @@ export class AssistantRuntime {
     }
     this.runAbortControllers.set(runId, abortController)
 
-    await req.cooperativeExecution?.checkpoint('assistant-turn')
-    const leaveAssistantTurn = req.cooperativeExecution?.enter('assistant-turn')
     let executionResult
     try {
-      executionResult = await this.executionAdapter
-        .run({
+      executionResult = await withCooperativeOperation(
+        req.cooperativeExecution,
+        'assistant-turn',
+        abortController.signal,
+        async children => {
+          const input: AssistantExecutionRequest = {
           runId,
           route,
-          req,
+          req: Object.freeze({ ...req, cooperativeExecution: children }),
           config,
           messages: executionMessages,
           profileId,
@@ -1420,7 +1597,8 @@ export class AssistantRuntime {
           resumeRun: this.resumeRun.bind(this),
           resumeWorkflow: this.resumeWorkflow.bind(this),
           signal: abortController.signal,
-          cooperativeExecution: req.cooperativeExecution,
+          cooperativeExecution: children,
+          toolProvider: req.toolProvider,
           emitEvent: async (event) =>
             this.appendAndEmitEvent(
               req,
@@ -1430,15 +1608,24 @@ export class AssistantRuntime {
                 metadata: event.metadata
               })
             )
-        })
-        .catch((error) => {
-          req.signal?.removeEventListener('abort', forwardExternalAbort)
-          throw error
-        })
+        }
+          const admitted = managed
+            ? managed.coordinator.admitExecutor(this, managed.lease, input)
+            : input
+          return this.executionAdapter.run(admitted, managed)
+        }
+      )
+    } catch (error) {
+      // Route-queue cleanup removes cancellation bookkeeping before the outer
+      // error handler runs; preserve signal cancellation independently of text.
+      if (abortController.signal.aborted) throw createAbortError(abortController.signal.reason)
+      throw error
     } finally {
-      leaveAssistantTurn?.()
+      req.signal?.removeEventListener('abort', forwardExternalAbort)
     }
 
+    // As before, turn ownership ends at adapter settlement. Final run/message
+    // persistence below is not a claimed configuration/replacement safe point.
     const reply = executionResult.reply
     if (req.signal?.aborted) {
       this.cancelledRuns.add(runId)
@@ -1593,9 +1780,11 @@ export class AssistantRuntime {
     }
   }
 
-  private async queueInboundMessage(req: AssistantInboundMessage): Promise<QueuedAssistantMessage> {
-    const route = normalizeAssistantRoute(req.route)
-    const config = this.configProvider()
+  private async queueInboundMessage(req: AssistantInboundMessage, managed?: ManagedRuntimeExecution): Promise<QueuedAssistantMessage> {
+    const route = managed ? req.route : normalizeAssistantRoute(req.route)
+    const config = managed
+      ? managed.coordinator.captureConfig(this, managed.lease, this.configProvider())
+      : this.configProvider()
     const continueFromRunId = cleanString(req.continueFromRunId, 120)
     const resumeFromRunId = cleanString(req.resumeFromRunId, 120)
     if (continueFromRunId && resumeFromRunId) {
@@ -1603,12 +1792,12 @@ export class AssistantRuntime {
     }
 
     const continuationSourceRun = continueFromRunId
-      ? await this.sessionStore.getRun(continueFromRunId)
+      ? await this.getRun(continueFromRunId, route)
       : null
     if (continueFromRunId && !continuationSourceRun) {
       throw new Error(`Cannot continue from missing run: ${continueFromRunId}`)
     }
-    const resumeSourceRun = resumeFromRunId ? await this.sessionStore.getRun(resumeFromRunId) : null
+    const resumeSourceRun = resumeFromRunId ? await this.getRun(resumeFromRunId, route) : null
     if (resumeFromRunId && !resumeSourceRun) {
       throw new Error(`Cannot resume from missing run: ${resumeFromRunId}`)
     }
@@ -1617,6 +1806,15 @@ export class AssistantRuntime {
       if (!eligibility.resumable) {
         throw new Error(`Cannot resume run ${resumeSourceRun.runId}: ${eligibility.reason}`)
       }
+      const replayRunId = await resolveAssistantToolReplayRunId(
+        resumeSourceRun.runId,
+        route,
+        (id) => this.getRun(id, route)
+      )
+      const sourceSession = await this.sessionStore.getSession(route)
+      assertKnownAssistantToolOutcomes(sourceSession?.eventLog || [], replayRunId, {
+        requireRunStart: true
+      })
     }
 
     const sourceRun = resumeSourceRun || continuationSourceRun
@@ -1643,7 +1841,7 @@ export class AssistantRuntime {
       config,
       cleanString(req.workspaceId, 120) || sourceRun?.workspaceId
     )
-    const runId = crypto.randomUUID()
+    const runId = managed ? managed.coordinator.runId(this, managed.lease) : crypto.randomUUID()
     const sessionKey = getAssistantSessionKey(route)
     const taskState = this.enqueueRun(sessionKey, runId)
     const normalizedTaskGroup = req.taskGroup
@@ -1734,7 +1932,8 @@ export class AssistantRuntime {
 
   private async executeQueuedMessage(
     req: AssistantInboundMessage,
-    queuedMessage: QueuedAssistantMessage
+    queuedMessage: QueuedAssistantMessage,
+    managed?: ManagedRuntimeExecution
   ): Promise<AssistantRuntimeResult> {
     const { route, runId, sessionKey, queuedRun, workspace, contextSnapshot } = queuedMessage
 
@@ -1743,7 +1942,7 @@ export class AssistantRuntime {
         this.handleMessageUnlocked(req, route, runId, queuedRun, {
           workspace,
           contextSnapshot
-        })
+        }, managed)
       )
     } catch (error) {
       if (this.cancelledRuns.has(runId) || isAbortError(error)) {
@@ -1889,11 +2088,29 @@ export class AssistantRuntime {
     }
   }
 
-  async handleMessage(req: AssistantInboundMessage): Promise<AssistantRuntimeResult> {
-    return this.executeQueuedMessage(req, await this.queueInboundMessage(req))
+  async handleMessage(req: AssistantInboundMessage, options?: ManagedRuntimeOptions): Promise<AssistantRuntimeResult> {
+    this.#assertOrdinary()
+    if (options === undefined && !this.#managedRecording)
+      return this.executeQueuedMessage(req, await this.queueInboundMessage(req))
+    if (!this.#managedRecording || options === undefined)
+      throw new Error('Managed runtime recording requires its exact private ticket options; no ordinary fallback.')
+    const coordinator = this.#managedRecording
+    const claimed = coordinator.claim(this, options, req)
+    const managed: ManagedRuntimeExecution = Object.freeze({ coordinator, runtime: this, lease: claimed.lease })
+    let failed = true
+    try {
+      const result = await this.executeQueuedMessage(claimed.request, await this.queueInboundMessage(claimed.request, managed), managed)
+      failed = false
+      return result
+    } finally { coordinator.finish(this, claimed.lease, failed) }
   }
 
-  async submitMessage(req: AssistantInboundMessage): Promise<AssistantRuntimeResult> {
+  async submitMessage(req: AssistantInboundMessage, options?: ManagedRuntimeOptions): Promise<AssistantRuntimeResult> {
+    this.#assertOrdinary()
+    if (options !== undefined || this.#managedRecording) {
+      this.#managedRecording?.rejectTicket(options)
+      throw new Error('Managed runtime recording does not admit submitMessage.')
+    }
     const queuedMessage = await this.queueInboundMessage(req)
 
     void this.executeQueuedMessage(req, queuedMessage).catch((error) => {
@@ -1924,6 +2141,7 @@ export class AssistantRuntime {
       async?: boolean
     }
   ): Promise<AssistantRuntimeResult> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const sourceRun = await this.getRun(runId, normalizedRoute)
     if (!sourceRun) {
@@ -1935,38 +2153,8 @@ export class AssistantRuntime {
       throw new Error(`Cannot resume run ${runId}: ${eligibility.reason}`)
     }
 
-    const sourceSession = await this.sessionStore.getSession(normalizedRoute)
-    const sourceToolActions = (sourceSession?.eventLog || [])
-      .filter((event) => event.runId === sourceRun.runId)
-      .map((event) => event.metadata?.agentAction)
-      .filter(
-        (value): value is { type: string; payload: Record<string, unknown> } =>
-          value !== null &&
-          typeof value === 'object' &&
-          'type' in value &&
-          'payload' in value &&
-          typeof value.type === 'string' &&
-          Boolean(value.payload) &&
-          typeof value.payload === 'object'
-      )
-    const settledToolIds = new Set(
-      sourceToolActions
-        .filter((action) => action.type === 'tool.result')
-        .map((action) => action.payload.invocationId)
-    )
-    if (
-      sourceToolActions.some(
-        (action) =>
-          action.type === 'tool.invoke' && !settledToolIds.has(action.payload.invocationId)
-      )
-    ) {
-      throw Object.assign(
-        new Error(
-          'This run has a tool with an unknown outcome; review its effects before resuming.'
-        ),
-        { code: 'TOOL_REPLAY_REQUIRES_REVIEW' }
-      )
-    }
+    // The shared inbound queue validates source ownership and unresolved effects
+    // for both this convenience method and direct synchronous/asynchronous resumes.
 
     const requestText = cleanString(sourceRun.requestText)
     if (!requestText) {
@@ -1992,6 +2180,7 @@ export class AssistantRuntime {
       async?: boolean
     }
   ): Promise<AssistantRuntimeResult> {
+    this.#assertOrdinary()
     const normalizedWorkflowId = cleanString(workflowId, 120)
     if (!normalizedWorkflowId) {
       throw new Error('Cannot resume a workflow without a workflowId.')
@@ -2027,6 +2216,7 @@ export class AssistantRuntime {
   }
 
   async resetSession(route: AssistantRoute): Promise<void> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     await this.runSerialForRoute(normalizedRoute, crypto.randomUUID(), () =>
       this.clearPersistentSessionState(normalizedRoute)
@@ -2040,6 +2230,7 @@ export class AssistantRuntime {
       olderThanDays?: number
     }
   ): Promise<AssistantCleanupResult> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const mode = options?.mode || 'clear'
 
@@ -2111,6 +2302,7 @@ export class AssistantRuntime {
   }
 
   async cancelRoute(route: AssistantRoute): Promise<AssistantTaskState> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     return this.runCancellationSerial(normalizedRoute, () =>
       this.cancelRouteUnlocked(normalizedRoute)
@@ -2208,6 +2400,7 @@ export class AssistantRuntime {
     commandName: string,
     commandArgs?: string
   ): Promise<AssistantRuntimeResult> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const normalizedCommand = cleanString(commandName)?.toLowerCase() || ''
     const normalizedCommandArgs = cleanString(commandArgs)
@@ -2892,10 +3085,12 @@ export class AssistantRuntime {
   }
 
   getTaskState(route: AssistantRoute): AssistantTaskState {
+    this.#assertOrdinary()
     return this.getOrCreateTaskState(getAssistantSessionKey(normalizeAssistantRoute(route)))
   }
 
   subscribeEvents(route: AssistantRoute, listener: AssistantEventListener): () => void {
+    this.#assertOrdinary()
     const sessionKey = getAssistantSessionKey(normalizeAssistantRoute(route))
     const subscribers =
       this.routeEventSubscribers.get(sessionKey) || new Set<AssistantEventListener>()
@@ -2913,7 +3108,36 @@ export class AssistantRuntime {
   }
 
   listTools(allowedToolNames?: string[] | null) {
+    this.#assertOrdinary()
     return this.executionAdapter.listTools(allowedToolNames)
+  }
+
+  /** Main-only read-only path for opt-in metadata hints. No IPC/model directory. */
+  async resolveSkillHintWorkspace(route: AssistantRoute, signal: AbortSignal): Promise<string> {
+    this.#assertOrdinary()
+    signal.throwIfAborted()
+    const normalized = normalizeAssistantRoute(route), sessionKey = getAssistantSessionKey(normalized), fallback = getAssistantWorkspaceState(normalized)
+    const { readSkillWorkspaceRecord } = await import('../customSkill/workspaceRecord')
+    const snapshot = await readSkillWorkspaceRecord(fallback.contextFile, 32768, signal)
+    if (snapshot && (!Number.isFinite(snapshot.generatedAt) || Number(snapshot.generatedAt) >= 946684800000 && Number(snapshot.generatedAt) < Date.now() - 7 * 86400000)) throw new Error('Procedural skill workspace binding is stale.')
+    if (snapshot && (snapshot.sessionKey !== sessionKey || !snapshot.route || getAssistantSessionKey(snapshot.route as AssistantRoute) !== sessionKey || typeof snapshot.workspaceId !== 'string' || !snapshot.workspaceId || snapshot.workspaceId.length > 120)) throw new Error('Procedural skill workspace binding is invalid.')
+    const workspace = getAssistantWorkspaceState(normalized, snapshot?.workspaceId as string | undefined)
+    const metadata = await readSkillWorkspaceRecord(workspace.workspaceMetaFile, 65536, signal)
+    if (metadata) {
+      if (metadata.workspaceId !== workspace.workspaceId || metadata.status !== 'active' || !Array.isArray(metadata.attachedSessionKeys) || !metadata.attachedSessionKeys.includes(sessionKey) || metadata.accessMode !== 'shared' && (metadata.accessMode !== 'private' || metadata.ownerSessionKey !== sessionKey)) throw new Error('Procedural skill workspace is not attached to this route.')
+    } else if (workspace.workspaceId !== fallback.workspaceId) throw new Error('Procedural skill shared workspace binding is missing.')
+    signal.throwIfAborted(); return workspace.workspaceRootDir
+  }
+
+  /** Private user-side file reads retain tool policy but never persist body/args in the parent journal. */
+  async callPrivateSideRead(route: AssistantRoute, name: string, args: Record<string, unknown>, options: { signal: AbortSignal; readExternalFile: NonNullable<AssistantToolCallRequest['readExternalFile']> }) {
+    this.#assertOrdinary()
+    options.signal.throwIfAborted()
+    if (!['files.read', 'files.tree', 'files.glob', 'files.grep', 'files.json.read'].includes(name)) throw new Error('Private side reader cannot invoke this tool.')
+    const normalized = normalizeAssistantRoute(route), workspace = await this.resolveWorkspaceState(normalized)
+    await ensureAssistantWorkspaceState(normalized, workspace.workspaceId)
+    options.signal.throwIfAborted()
+    return invokePrivateSideRead({ toolRegistry: this.toolRegistry, toolName: name, args, signal: options.signal, context: this.buildToolContext(normalized, workspace, this.getTaskState(normalized), { signal: options.signal, readExternalFile: options.readExternalFile }) })
   }
 
   async callTool(
@@ -2926,25 +3150,32 @@ export class AssistantRuntime {
       runId?: string
       toolCallId?: string
       readExternalFile?: AssistantToolCallRequest['readExternalFile']
+      toolProvider?: AssistantInboundMessage['toolProvider']
     }
   ) {
+    this.#assertOrdinary()
+    if (this.#managedRecording) throw new Error('Managed runtime recording does not admit standalone callTool.')
     if (options?.signal?.aborted)
       throw options.signal.reason || new Error('Tool invocation cancelled.')
     const normalizedRoute = normalizeAssistantRoute(route)
     const normalizedToolName = normalizeMagicPotToolName(name)
     const workspace = await this.resolveWorkspaceState(normalizedRoute)
-    if (normalizedToolName.startsWith('files.') || normalizedToolName === 'agent.terminal.run') {
+    if (normalizedToolName.startsWith('files.') || normalizedToolName.startsWith('notebook.') || ['python.execute', 'python.background', 'shell.execute', 'shell.background'].includes(normalizedToolName) || normalizedToolName === 'agent.terminal.run') {
       await ensureAssistantWorkspaceState(normalizedRoute, workspace.workspaceId)
       if (options?.signal?.aborted)
         throw options.signal.reason || new Error('Tool invocation cancelled.')
     }
-    await syncMcpClientManager(this.configProvider())
+    // No implicit global sync before a request-owned meta-tool. Connection
+    // management performs its own exact-service approved operation instead.
+    const passiveThreadTool = ['mcp_list', 'mcp_call', 'mcp_connect', 'mcp_disconnect', 'info', 'skill', 'search_memory', 'scratchpad', 'memory_read', 'memory_write', 'memory.files.write', 'shell.execute', 'python.background', 'shell.background', 'process.list', 'process.status', 'process.read', 'process.wait', 'process.stop'].includes(normalizedToolName) && options?.toolProvider?.listTools().some((tool) => tool.name === normalizedToolName)
+    if (!passiveThreadTool) await syncMcpClientManager(this.configProvider())
     return this.executionAdapter.callTool(
       name,
       args,
       this.buildToolContext(normalizedRoute, workspace, this.getTaskState(normalizedRoute), {
         signal: options?.signal,
         readExternalFile: options?.readExternalFile,
+        toolProvider: options?.toolProvider,
         startTaskGroup: this.startTaskGroup.bind(this),
         progressTaskGroup: this.progressTaskGroup.bind(this),
         approveTaskGroup: this.approveTaskGroup.bind(this),
@@ -3099,6 +3330,7 @@ export class AssistantRuntime {
     commandArgs: string | undefined,
     taskState: AssistantTaskState
   ): Promise<AssistantRuntimeResult> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const normalizedArgs = cleanString(commandArgs)
     const explicitMatch = normalizedArgs?.match(/^([a-z0-9_-]+)(?:\s+([\s\S]+))?$/i)
@@ -3495,6 +3727,7 @@ export class AssistantRuntime {
       setSharedNotes?: string[]
     }
   ): Promise<AssistantWorkspaceInspection> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const config = this.configProvider()
     const { workspaceId: resolvedWorkspaceId } = await this.resolveWorkspaceState(
@@ -3539,6 +3772,7 @@ export class AssistantRuntime {
     workspace: AssistantWorkspaceInspection
     previousWorkspace?: AssistantWorkspaceInspection | null
   }> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const config = this.configProvider()
     const currentWorkspace = await this.resolveWorkspaceState(normalizedRoute)
@@ -3578,6 +3812,7 @@ export class AssistantRuntime {
     action: AssistantWorkspaceGovernanceAction,
     workspaceId?: string
   ): Promise<AssistantWorkspaceInspection> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const targetWorkspaceId =
       cleanString(workspaceId, 120) ||
@@ -3599,6 +3834,7 @@ export class AssistantRuntime {
       workspaceRunId?: string
     }
   ): Promise<AssistantTaskGroupState | null> {
+    this.#assertOrdinary()
     return this.recordTaskGroupAction(route, 'start', options)
   }
 
@@ -3615,6 +3851,7 @@ export class AssistantRuntime {
       workspaceRunId?: string
     }
   ): Promise<AssistantTaskGroupState | null> {
+    this.#assertOrdinary()
     return this.recordTaskGroupAction(route, 'progress', options)
   }
 
@@ -3626,6 +3863,7 @@ export class AssistantRuntime {
       workspaceRunId?: string
     }
   ): Promise<AssistantTaskGroupState | null> {
+    this.#assertOrdinary()
     return this.recordTaskGroupAction(route, 'approve', options)
   }
 
@@ -3638,6 +3876,7 @@ export class AssistantRuntime {
       workspaceRunId?: string
     }
   ): Promise<AssistantTaskGroupState | null> {
+    this.#assertOrdinary()
     return this.recordTaskGroupAction(route, 'export', options)
   }
 
@@ -3648,6 +3887,7 @@ export class AssistantRuntime {
       workspaceRunId?: string
     }
   ): Promise<AssistantTaskGroupState | null> {
+    this.#assertOrdinary()
     await this.cancelRoute(route)
     return this.recordTaskGroupAction(route, 'cancel', options)
   }
@@ -3659,6 +3899,7 @@ export class AssistantRuntime {
       async?: boolean
     }
   ): Promise<AssistantRuntimeResult> {
+    this.#assertOrdinary()
     const normalizedRoute = normalizeAssistantRoute(route)
     const workflow = await this.findResumableTaskGroupWorkflow(taskGroupId, normalizedRoute)
     return this.resumeWorkflow(workflow?.workflowId || taskGroupId, normalizedRoute, options)
@@ -3670,6 +3911,7 @@ export class AssistantRuntime {
     sourceEventId: string,
     targetRoute: AssistantRoute
   ): Promise<AssistantSessionForkResult> {
+    this.#assertOrdinary()
     return this.sessionStore.forkSessionAtEvent(sourceRoute, sourceEventId, targetRoute)
   }
 

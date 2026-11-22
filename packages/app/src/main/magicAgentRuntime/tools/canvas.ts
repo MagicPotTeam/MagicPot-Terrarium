@@ -1,26 +1,32 @@
-import { createAdapter, objectSchema, statusSchema } from './helpers'
+import { bundledCreativeDeclarations } from '@shared/magicAgentRuntime/bundledCreativeDeclarations'
+import { createAdapter, objectSchema } from './helpers'
 
 export const canvasToolAdapter = createAdapter([
   {
-    name: 'canvas.status',
-    category: 'canvas',
-    description: 'Return current creative canvas status through a registered canvas adapter.',
-    inputSchema: statusSchema,
+    ...bundledCreativeDeclarations['canvas.status'],
+    inputSchema: objectSchema(
+      { path: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 200 } },
+      undefined,
+      false
+    ),
     dependency: 'canvasStatus'
   },
   {
-    name: 'canvas.export',
-    category: 'canvas',
-    description: 'Thin wrapper for exporting canvas content through a registered canvas adapter.',
-    inputSchema: objectSchema({
-      canvasId: {
-        type: 'string'
+    ...bundledCreativeDeclarations['canvas.export'],
+    inputSchema: objectSchema(
+      {
+        path: {
+          type: 'string'
+        },
+        outputPath: { type: 'string' },
+        format: {
+          type: 'string',
+          enum: ['json']
+        }
       },
-      format: {
-        type: 'string',
-        enum: ['png', 'webp', 'json']
-      }
-    }),
+      ['path', 'outputPath'],
+      false
+    ),
     dependency: 'canvasExport',
     permissionLevel: 'write',
     requiresConfirmation: true,

@@ -364,6 +364,37 @@ describe('managed media cleanup scheduler', () => {
     expect(timers.size()).toBe(0)
   })
 
+  it('an incomplete snapshot after a run stops the daily rerun until a fresh complete one', async () => {
+    // The renderer withdraws its snapshot this way while it holds back scans (a chat request runs).
+    vi.useFakeTimers()
+    try {
+      const plan = vi.fn(async () => cleanupPlan)
+      const persistSnapshot = vi.fn(async () => undefined)
+      const scheduler = createManagedMediaCleanupScheduler({
+        plan,
+        execute: vi.fn(async () => result),
+        persistSnapshot,
+        dailyMs: 10 * 60_000
+      })
+      scheduler.submitSnapshot(snapshot)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(plan).toHaveBeenCalledTimes(1)
+
+      scheduler.submitSnapshot({ ...snapshot, complete: false })
+      await vi.advanceTimersByTimeAsync(60 * 60_000)
+      expect(plan).toHaveBeenCalledTimes(1)
+      // Only complete snapshots are persisted; a restored one never authorises a run by itself.
+      expect(persistSnapshot).toHaveBeenCalledTimes(1)
+
+      scheduler.submitSnapshot(snapshot)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(plan).toHaveBeenCalledTimes(2)
+      await scheduler.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('incomplete snapshots invalidate a pending complete timer', async () => {
     vi.useFakeTimers()
     try {

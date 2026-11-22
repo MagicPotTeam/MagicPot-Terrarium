@@ -1,3 +1,4 @@
+import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
 import React from 'react'
 import {
   Box,
@@ -57,6 +58,11 @@ import ProjectCanvasPageTopToolbar from './ProjectCanvasPageTopToolbar'
 import ProjectCanvasPageOverlayDialogAssembly from './ProjectCanvasPageOverlayDialogAssembly'
 import ProjectCanvasPageStageScene from './ProjectCanvasPageStageScene'
 import { resolveProjectCanvasRenderBoundary } from './projectCanvasRenderBoundary'
+import {
+  isDefaultStableCallbackKey,
+  useStableCallbackProps,
+  useStableEventHandler
+} from './useStableEventHandler'
 import type {
   AnnotationShape,
   CanvasAnnotationItem,
@@ -74,6 +80,67 @@ import type {
 } from './ProjectCanvasPageShellContract'
 
 const MemoizedProjectCanvasPageStageScene = React.memo(ProjectCanvasPageStageScene)
+type OverlayDialogAssemblyProps = React.ComponentProps<
+  typeof ProjectCanvasPageOverlayDialogAssembly
+>
+type DialogsProps = OverlayDialogAssemblyProps['dialogsProps']
+const EMPTY_VIDEO_BUDGET_MODE_BY_ID: ReadonlyMap<
+  string,
+  'active-playing' | 'visible-paused' | 'poster-frame' | 'unmounted'
+> = new Map()
+// Page props the top toolbar does not render. They change on every pan, zoom, gesture start or page
+// render, so passing them would re-render the whole toolbar (about 250 components) each time.
+// stagePos / stageScale / stageSize are read through getStageViewport, scalePercent is drawn by the
+// zoom chip label from the viewport driver.
+const TOOLBAR_OMITTED_PROP_KEYS = new Set([
+  'selectionOverlayGroups',
+  'selectionRect',
+  'imageBatchImportProgress',
+  'stagePos',
+  'stagePosRef',
+  'stageScale',
+  'stageScaleRef',
+  'stageSize',
+  'scalePercent',
+  'isViewportInteracting',
+  'isCanvasPerformanceThrottled',
+  'suppressSelectionChromeAfterMarquee',
+  'visibleItems',
+  'videoItems',
+  'htmlItems',
+  'renderedModel3DItems',
+  'getQuickCanvasItemsImageUrl',
+  'prepareQuickCanvasItemsImageUrl',
+  'registerViewportLayer'
+])
+// Selection toolbar helpers that are only called from drag / click handlers. The page rebuilds them
+// whenever the committed viewport changes. prepareQuickCanvasItemsImageUrl is deliberately not
+// forwarded: its identity changes with the drag-preview cache key (canvas, viewport, export
+// snapshot), and the selection overlays re-prepare the preview when it does. A stable forwarder
+// would leave the cache empty after a pan or zoom and cancel every drag of the selection out of the
+// canvas.
+const SELECTION_OVERLAY_STABLE_CALLBACK_KEYS = new Set([
+  'buildCanvasDragPayload',
+  'setCanvasDragPayload',
+  'getQuickCanvasItemsImageUrl'
+])
+// Toolbar callbacks without an on* / handle* name that the page rebuilds when the viewport or the
+// stage size changes. The toolbar (and its group tree popover) only calls them from click handlers.
+const TOOLBAR_STABLE_CALLBACK_KEYS = new Set([
+  'setStageScaleAroundViewportCenter',
+  'startGroupPlayback',
+  'stopGroupPlayback',
+  'pauseGroupPlayback',
+  'resumeGroupPlayback'
+])
+const isToolbarCallbackKey = (key: string) =>
+  isDefaultStableCallbackKey(key) || TOOLBAR_STABLE_CALLBACK_KEYS.has(key)
+const isSelectionOverlayCallbackKey = (key: string) =>
+  isDefaultStableCallbackKey(key) || SELECTION_OVERLAY_STABLE_CALLBACK_KEYS.has(key)
+
+function areSameArrayItems<T>(previous: readonly T[], next: readonly T[]) {
+  return previous.length === next.length && previous.every((item, index) => item === next[index])
+}
 const IMAGE_BATCH_IMPORT_PREPARING_DISPLAY_WEIGHT = 0.35
 
 function clampImageBatchImportRatio(value: number) {
@@ -113,18 +180,28 @@ function resolveImageBatchImportDisplay(progress: {
 
 export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRuntimeProps) {
   const { imageBatchImportProgress: _imageBatchImportProgress, ...stageSceneProps } = props
-  const toolbarProps = React.useMemo<ProjectCanvasPageTopToolbarProps>(
-    () =>
-      Object.fromEntries(
-        Object.entries(props).filter(
-          ([key]) =>
-            key !== 'selectionOverlayGroups' &&
-            key !== 'selectionRect' &&
-            key !== 'imageBatchImportProgress'
-        )
-      ) as ProjectCanvasPageTopToolbarProps,
-    [props]
-  )
+  // The page rebuilds several stage handlers on every render (including the deferred-value pass
+  // after a viewport or stage size commit). The stage calls them from event handlers and effects
+  // only, so they reach it as stable forwarders and do not re-render it on their own.
+  const stableStageSceneProps = useStableCallbackProps(stageSceneProps)
+  // The toolbar reads the committed viewport only when a handler runs, through this getter, and its
+  // zoom chip follows the viewport driver itself. So a pan or a zoom does not re-render it.
+  const getStageViewport = useStableEventHandler(() => ({
+    stagePos: props.stagePos,
+    stageScale: props.stageScale,
+    stageSize: props.stageSize
+  }))
+  const toolbarSourceProps = React.useMemo(() => {
+    const source = Object.fromEntries(
+      Object.entries(props).filter(([key]) => !TOOLBAR_OMITTED_PROP_KEYS.has(key))
+    )
+    source.getStageViewport = getStageViewport
+    return source
+  }, [getStageViewport, props])
+  const toolbarProps = useStableCallbackProps(
+    toolbarSourceProps,
+    isToolbarCallbackKey
+  ) as ProjectCanvasPageTopToolbarProps
   const {
     CANVAS_IMPORT_ACCEPT,
     DccExportIcon,
@@ -456,7 +533,7 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
     ReadonlyMap<string, 'active-playing' | 'visible-paused' | 'poster-frame' | 'unmounted'>
   >(() => {
     if (isViewportInteracting) {
-      return new Map()
+      return EMPTY_VIDEO_BUDGET_MODE_BY_ID
     }
 
     const renderableVideoItems = resolveProjectCanvasRenderBoundary({
@@ -469,11 +546,17 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
       stageSize: deferredStageSize,
       forceRenderAllItemsForExport
     })
-    return new Map<string, 'active-playing' | 'visible-paused' | 'poster-frame' | 'unmounted'>(
+    const videoBudgetModeById = new Map<
+      string,
+      'active-playing' | 'visible-paused' | 'poster-frame' | 'unmounted'
+    >(
       renderableVideoItems
         .filter((item) => item.kind === 'video')
         .map((item) => [item.id, item.videoBudgetMode ?? 'visible-paused'])
     )
+    // One empty map for every board without visible videos, so a gesture start or a pan does not
+    // hand the selection overlays a new one.
+    return videoBudgetModeById.size > 0 ? videoBudgetModeById : EMPTY_VIDEO_BUDGET_MODE_BY_ID
   }, [
     deferredStagePos,
     deferredStageScale,
@@ -534,6 +617,410 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
         ? `失败 ${imageBatchImportProgress.failed}`
         : `${imageBatchImportProgress.failed} failed`
       : null
+
+  // Rebuilt on every render; keep the previous array while it holds the same items so the visual
+  // overlays' memo holds.
+  const nextTeamLabelImageItems = (visibleItems as CanvasItem[]).filter(
+    (item): item is CanvasImageItem =>
+      item.type === 'image' && !!item.teamImageLabel && !isCanvasItemTransientlyHidden(item.id)
+  )
+  const teamLabelImageItemsRef = React.useRef(nextTeamLabelImageItems)
+  if (!areSameArrayItems(teamLabelImageItemsRef.current, nextTeamLabelImageItems)) {
+    teamLabelImageItemsRef.current = nextTeamLabelImageItems
+  }
+  const teamLabelImageItems = teamLabelImageItemsRef.current
+  const groupPlaybackCurrentIndex = groupPlayback?.currentIndex
+  const groupPlaybackTotalCount = groupPlayback?.itemIds.length
+  const groupPlaybackPaused = groupPlayback?.paused
+  const hasGroupPlayback = Boolean(groupPlayback)
+  const groupPlaybackInfo = React.useMemo(
+    () =>
+      hasGroupPlayback
+        ? {
+            currentIndex: groupPlaybackCurrentIndex,
+            totalCount: groupPlaybackTotalCount,
+            paused: groupPlaybackPaused
+          }
+        : null,
+    [groupPlaybackCurrentIndex, groupPlaybackPaused, groupPlaybackTotalCount, hasGroupPlayback]
+  )
+  // Every overlay and dialog below is memoised (ProjectCanvasPageOverlayDialogAssembly). Their props
+  // go through useStableCallbackProps so inline handlers and handlers that close over fresh page
+  // state neither break the memo nor leave a child calling an old one: a page render caused by a
+  // gesture or a viewport commit re-renders only the parts whose rendered values changed.
+  const selectionOverlaysProps = useStableCallbackProps<
+    OverlayDialogAssemblyProps['selectionOverlaysProps']
+  >(
+    {
+      tool,
+      selectionOverlayGroups,
+      exactSelectedGroup,
+      liveMultiSelectionBounds,
+      stagePos,
+      stagePosRef,
+      stageScale,
+      stageScaleRef,
+      stageSize,
+      selectedIds,
+      items,
+      stageRef,
+      canvasContainerRef,
+      canvasContainerElement,
+      registerViewportCallback,
+      registerViewportInteractionCallback,
+      lastClickedId: lastClickedIdRef.current,
+      mediaCaptionActionLabel,
+      legacySelectionToolbarEnabled: isLegacySelectionToolbarEnabled(),
+      suppressSelectionChrome: Boolean(suppressSelectionChromeAfterMarquee),
+      groupCreateLabel: t('canvas.group_create_button'),
+      t,
+      handleFocusGroup,
+      buildCanvasDragPayload,
+      setCanvasDragPayload,
+      handleFlipImage,
+      handleCropImage,
+      handleExtractImage,
+      handleCopyCanvasImage,
+      handleDownloadCanvasImage,
+      handleOpenAgentSendMenu,
+      handleOpenMediaCaptionEditor,
+      handleSendCanvasItemsToAgent,
+      handleToggleVideoPlayback,
+      resolvedVideoBudgetModeById,
+      handleOpenModel3DViewer,
+      handleOpenDccExportMenu,
+      handleDownloadBlobItem,
+      handleExportCanvasFile,
+      handleCopyCanvasItemsAsImage,
+      handleDownloadCanvasItemsAsImage,
+      getQuickCanvasItemsImageUrl,
+      prepareQuickCanvasItemsImageUrl,
+      handleGenerateCanvasItems,
+      handleCreateGroup,
+      fileExportActionLabel: isChineseUi ? '导出文件' : 'Export file',
+      Model3DIcon,
+      ExportIcon: DccExportIcon
+    },
+    isSelectionOverlayCallbackKey
+  )
+  const visualOverlaysProps = useStableCallbackProps<
+    OverlayDialogAssemblyProps['visualOverlaysProps']
+  >({
+    canvasContainerRef,
+    canvasContainerElement,
+    sessionKey: canvasAgentSessionKey,
+    renderedModel3DItems: overlayRenderedModel3DItems,
+    videoItems: overlayVideoItems,
+    htmlItems: overlayHtmlItems,
+    annotationItems: visibleOverlayItems.annotationItems,
+    textItems: visibleOverlayItems.textItems,
+    fileItems: visibleOverlayItems.fileItems,
+    teamLabelImageItems,
+    items,
+    editingTextItemId: inlineTextEdit?.id ?? null,
+    activeOcrHover,
+    selectedIds,
+    dragContextRef,
+    tool,
+    stagePos,
+    stageScale,
+    stageSize,
+    itemsLength: items.length,
+    isViewportInteracting,
+    isCanvasPerformanceThrottled,
+    forceRenderAllItemsForExport,
+    onSelectItem: (itemId) => setSelectedIds(new Set([itemId])),
+    onDragOver: handleDragOver,
+    onDrop: handleDrop,
+    onDragVideoEnd: handleDragEnd,
+    onUpdateVideoItem: handleUpdateVideoItem,
+    onVideoContextMenu: handleImageContextMenu,
+    onUpdateHtmlItem: handleUpdateHtmlItem,
+    onDeleteHtmlItem: handleDeleteHtmlItem,
+    groupPlaybackInfo,
+    activeGroupPlaybackItem,
+    activeGroupPlaybackCanvasBounds,
+    activeGroupPlaybackScreenBounds,
+    activeGroupPlaybackGroupName: activeGroupPlaybackGroup?.name ?? null,
+    onToggleGroupPlaybackPause: () => {
+      if (!groupPlayback) return
+      groupPlayback.paused ? resumeGroupPlayback() : pauseGroupPlayback()
+    },
+    onStopGroupPlayback: stopGroupPlayback,
+    onGroupPlaybackVideoEnded: handleGroupPlaybackVideoEnded,
+    onExportGroupPlaybackAsGif: handleExportGroupPlaybackAsGif,
+    registerViewportLayer,
+    registerViewportCallback
+  })
+  const inlineTextEditorProps = useStableCallbackProps<
+    OverlayDialogAssemblyProps['inlineTextEditorProps']
+  >({
+    canvasContainerRef,
+    canvasContainerElement,
+    inlineTextEdit,
+    setInlineTextEdit,
+    inlineTextAreaRef,
+    mediaCaptionPlaceholder,
+    stageScale,
+    stagePos,
+    annotationColor,
+    items,
+    nextZIndexRef: nextZIndex,
+    setItemsWithHistory,
+    setSelectedIds,
+    setTool
+  })
+  const hiddenInputsProps = useStableCallbackProps<OverlayDialogAssemblyProps['hiddenInputsProps']>(
+    {
+      fileInputRef,
+      modelInputRef,
+      videoInputRef,
+      allAccept: CANVAS_IMPORT_ACCEPT,
+      modelImportExtensions: MODEL_IMPORT_EXTENSIONS,
+      onFileSelect: handleFileSelect,
+      onModelSelect: handleModelSelect,
+      onVideoSelect: handleVideoSelect
+    }
+  )
+  const shortcutDialogProps = useStableCallbackProps<
+    OverlayDialogAssemblyProps['shortcutDialogProps']
+  >({
+    open: shortcutDialogOpen,
+    currentShortcut,
+    recordedShortcut,
+    onRecordedShortcutChange: setRecordedShortcut,
+    onClose: () => setShortcutDialogOpen(false),
+    onSave: async () => {
+      if (!recordedShortcut) return
+
+      if (conflictsWithCanvasShortcut(recordedShortcut, toolShortcuts)) {
+        notifyError(`截图快捷键 ${recordedShortcut} 与画布快捷键冲突，请换一个组合键。`)
+        return
+      }
+
+      const screenshotBridge = window.canvasScreenshot
+      if (!screenshotBridge) {
+        notifyError('当前环境不支持修改截图快捷键。')
+        return
+      }
+
+      try {
+        const result = (await screenshotBridge.setShortcut(
+          toElectronAccelerator(recordedShortcut),
+          buildReservedCanvasShortcuts(toolShortcuts)
+        )) as { success?: boolean; error?: string }
+
+        if (result?.success === false) {
+          notifyError(result.error || '截图快捷键设置失败。')
+          return
+        }
+
+        setCurrentShortcut(recordedShortcut)
+        setRecordedShortcut('')
+        setShortcutDialogOpen(false)
+      } catch (err) {
+        console.error('[Canvas] Failed to update screenshot shortcut.', err)
+        notifyError('截图快捷键设置失败。')
+      }
+    }
+  })
+  const canvasTargetDialogProps = useStableCallbackProps<
+    OverlayDialogAssemblyProps['canvasTargetDialogProps']
+  >({
+    open: canvasTargetDialogOpen,
+    isChineseUi,
+    loading: canvasTargetLoading,
+    error: canvasTargetError,
+    schemes: targetSchemes,
+    historyTargets: canvasTargetHistoryTargets,
+    selectedHistoryTargetId: canvasTargetSelectedHistoryTargetId,
+    traceDocuments: canvasTargetReferenceTraces,
+    selectedTraceIds: canvasTargetSelectedTraceIds,
+    evidenceMode: canvasTargetEvidenceMode,
+    selectedSchemeId: canvasTargetSelectedSchemeId,
+    targetItemCount: canvasTargetTargetItemCount,
+    targetName: canvasTargetTargetName,
+    userIntent: canvasTargetUserIntent,
+    controlProfileId: canvasTargetControlProfileId,
+    controlReasoningEffort: canvasTargetControlReasoningEffort,
+    availableControlReasoningEfforts: canvasTargetAvailableControlReasoningEfforts,
+    stageProfiles: canvasTargetStageProfiles,
+    quickApps: canvasTargetQuickApps,
+    profileOptions: canvasTargetStageProfileSelectOptions,
+    controlProfileOptions: canvasTargetControlProfileSelectOptions,
+    quickAppOptions: canvasTargetQuickAppOptions,
+    report: canvasTargetReport,
+    onTargetNameChange: setCanvasTargetTargetName,
+    onSelectedSchemeIdChange: setCanvasTargetSelectedSchemeId,
+    onUserIntentChange: setCanvasTargetUserIntent,
+    onControlProfileIdChange: setCanvasTargetControlProfileId,
+    onControlReasoningEffortChange: setCanvasTargetControlReasoningEffort,
+    onStageProfilesChange: setCanvasTargetStageProfiles,
+    onQuickAppsChange: setCanvasTargetQuickApps,
+    onApplyHistoryTarget: handleApplyCanvasTargetHistoryTarget,
+    onDeleteHistoryTarget: (targetId) => {
+      void handleDeleteCanvasTargetHistoryTarget(targetId)
+    },
+    onRenameHistoryTarget: (targetId, name) => {
+      void handleRenameCanvasTargetHistoryTarget(targetId, name)
+    },
+    onSelectedTraceIdsChange: setCanvasTargetSelectedTraceIds,
+    onEvidenceModeChange: setCanvasTargetEvidenceMode,
+    onOpenSchemeManager: openTargetManager,
+    onRun: () => void handleRunCanvasTarget(),
+    onCancelRun: handleCancelCanvasTarget,
+    onClose: handleCloseCanvasTargetDialog
+  })
+  const figmaBindingDialogProps = useStableCallbackProps<
+    OverlayDialogAssemblyProps['figmaBindingDialogProps']
+  >({
+    open: figmaBindingDialogOpen,
+    accessTokenConfigured: Boolean(figmaAccessToken),
+    busyAction: figmaBusyAction,
+    error: figmaBindingError,
+    fileKeyOrUrl: figmaFileKeyOrUrlInput,
+    binding: figmaDialogBinding,
+    globalAutoCheckEnabled: figmaGlobalAutoCheckEnabled,
+    globalAutoCheckIntervalMinutes: figmaAutoCheckIntervalMinutes,
+    onFileKeyOrUrlChange: setFigmaFileKeyOrUrlInput,
+    onPageNodeIdChange: handleFigmaDraftPageChange,
+    onAutoCheckUpdatesChange: handleFigmaDraftAutoCheckUpdatesChange,
+    onResolve: () => void handleResolveFigmaBinding(),
+    onBind: handleSaveFigmaBinding,
+    onSync: () => void handleSyncFigmaBinding(),
+    onCheck: () => void handleCheckFigmaUpdate(),
+    onUnbind: handleUnbindFigmaBinding,
+    onClose: handleCloseFigmaBindingDialog
+  })
+  const generationTaskPackDialogProps = useStableCallbackProps<
+    DialogsProps['generationTaskPackDialogProps']
+  >({
+    open: generationTaskDialogOpen,
+    taskPack: generationTaskPack,
+    onClose: handleCloseGenerationTaskDialog,
+    onConfirm: handleConfirmGenerationTaskPackWithTraceRefresh
+  })
+  const generationTraceHistoryDialogProps = useStableCallbackProps<
+    DialogsProps['generationTraceHistoryDialogProps']
+  >({
+    open: generationTraceHistoryDialogOpen,
+    records: generationTraceRecentRecords,
+    onContinueRecord: (record) => {
+      void handleContinueGenerationTraceRecord(record)
+    },
+    onApproveRecord: (record) => handleUpdateGenerationTraceDecision(record, 'approved'),
+    onDiscardRecord: (record) => handleUpdateGenerationTraceDecision(record, 'discarded'),
+    onDeleteRecord: handleDeleteGenerationTraceHistoryRecord,
+    onClose: handleCloseGenerationTraceHistory
+  })
+  const filePreviewDialogProps = useStableCallbackProps<DialogsProps['filePreviewDialogProps']>({
+    open: Boolean(activeFileDialogItem),
+    item: activeFileDialogItem,
+    draftContent: fileDialogDraftContent,
+    draftSheets: fileDialogDraftSheets,
+    activeOcrHover,
+    onDraftChange: setFileDialogDraftContent,
+    onDraftSheetsChange: setFileDialogDraftSheets,
+    onClose: handleCloseFileDialog,
+    onSave: handleSaveFileDialog,
+    onExport: (item, format) => {
+      void handleExportCanvasFile(item, format)
+    }
+  })
+  const clearConfirmDialogProps = useStableCallbackProps<DialogsProps['clearConfirmDialogProps']>({
+    open: clearConfirmOpen,
+    onClose: closeClearConfirmDialog,
+    onConfirm: handleConfirmClearDialog
+  })
+  const model3DViewerDialogProps = useStableCallbackProps<DialogsProps['model3DViewerDialogProps']>(
+    {
+      open: Boolean(activeModel3DItem),
+      item: activeModel3DItem,
+      sessionKey: canvasAgentSessionKey,
+      bgColor,
+      transparentPattern,
+      onClose: handleCloseModel3DViewer,
+      onDownload: (item) => handleDownloadBlobItem(item),
+      onImportTextures: handleRequestModel3DTextureImport
+    }
+  )
+  const textureImportDialogProps = useStableCallbackProps<DialogsProps['textureImportDialogProps']>(
+    {
+      open: textureImportDialogOpen,
+      onClose: handleCloseTextureImportDialog,
+      onSkip: handleSkipTextureImportDialog,
+      onImport: handleOpenTextureImportInput
+    }
+  )
+  const labelEditorDialogProps = useStableCallbackProps<DialogsProps['labelEditorDialogProps']>({
+    open: labelDialogOpen,
+    text: labelDialogText,
+    onTextChange: (text) => setLabelDialogText(text),
+    onClose: () => setLabelDialogOpen(false),
+    onConfirm: handleConfirmLabelDialog
+  })
+  const dialogsProps = useStableCallbackProps<OverlayDialogAssemblyProps['dialogsProps']>({
+    dccExportMenuAnchor,
+    dccExportMenuItemId,
+    onCloseDccExportMenu: handleCloseDccExportMenu,
+    onSelectDccExportTarget: handleSelectDccExportTarget,
+    agentSendMenuAnchor,
+    agentSendMenuItemIds,
+    onCloseAgentSendMenu: handleCloseAgentSendMenu,
+    onSelectAgentTargetApp: handleSelectAgentTargetApp,
+    generationTaskPackDialogProps,
+    generationTraceHistoryDialogProps,
+    filePreviewDialogProps,
+    clearConfirmDialogProps,
+    model3DViewerDialogProps,
+    textureImportDialogProps,
+    textureInputRef,
+    onTextureFilesSelected: handleTextureFilesSelected,
+    labelEditorDialogProps,
+    imageContextMenu,
+    contextMenuTarget,
+    onCloseImageContextMenu: handleCloseImageContextMenu,
+    onBringToFront: handleBringToFront,
+    onSendToBack: handleSendToBack,
+    onBringForward: handleBringForward,
+    onSendBackward: handleSendBackward,
+    onOpenTextureImportFromContextMenu: handleOpenTextureImportFromContextMenu
+  })
+  const colorPopoversProps = useStableCallbackProps<
+    OverlayDialogAssemblyProps['colorPopoversProps']
+  >({
+    annotationWheelOpen: Boolean(colorPickerAnchor),
+    backgroundWheelOpen: Boolean(bgColorPickerAnchor),
+    colorPickerAnchor,
+    bgColorPickerAnchor,
+    brushWidthAnchor,
+    annotationColor,
+    annotationStrokeWidth,
+    bgColor,
+    onCloseColorPicker: () => setColorPickerAnchor(null),
+    onCloseBackgroundColorPicker: () => setBgColorPickerAnchor(null),
+    onCloseBrushWidthPicker: () => setBrushWidthAnchor(null),
+    onSelectAnnotationColor: (color) => {
+      setAnnotationColor(color)
+      setInlineTextEdit((prev) => (prev ? { ...prev, fill: color } : null))
+      if (selectedIds.size > 0) {
+        setItemsWithHistory(
+          (prev) =>
+            prev.map((item) => {
+              if (!selectedIds.has(item.id)) return item
+              if (item.type === 'annotation') return { ...item, stroke: color }
+              if (item.type === 'text') return { ...item, fill: color }
+              return item
+            }) as CanvasItem[]
+        )
+      }
+    },
+    onSelectAnnotationStrokeWidth: (size) => setAnnotationStrokeWidth(size),
+    onSelectBackgroundColor: (color) => {
+      setBgCustomColor(color)
+      handleBgColorChange(color)
+    }
+  })
 
   return (
     <Box
@@ -600,7 +1087,7 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
         </Box>
       ) : null}
       <MemoizedProjectCanvasPageStageScene
-        {...stageSceneProps}
+        {...stableStageSceneProps}
         isViewportInteracting={isViewportInteracting}
         onLiveMultiSelectionBoundsChange={setLiveMultiSelectionBounds}
         setCanvasContainerElement={setCanvasContainerElement}
@@ -608,350 +1095,15 @@ export default function ProjectCanvasPageShell(props: ProjectCanvasPageShellRunt
 
       <ProjectCanvasPageOverlayDialogAssembly
         suspendViewportChrome={false}
-        selectionOverlaysProps={{
-          tool,
-          selectionOverlayGroups,
-          exactSelectedGroup,
-          liveMultiSelectionBounds,
-          stagePos,
-          stagePosRef,
-          stageScale,
-          stageScaleRef,
-          stageSize,
-          selectedIds,
-          items,
-          stageRef,
-          canvasContainerRef,
-          canvasContainerElement,
-          registerViewportCallback,
-          registerViewportInteractionCallback,
-          lastClickedId: lastClickedIdRef.current,
-          mediaCaptionActionLabel,
-          legacySelectionToolbarEnabled: isLegacySelectionToolbarEnabled(),
-          suppressSelectionChrome: Boolean(suppressSelectionChromeAfterMarquee),
-          groupCreateLabel: t('canvas.group_create_button'),
-          t,
-          handleFocusGroup,
-          buildCanvasDragPayload,
-          setCanvasDragPayload,
-          handleFlipImage,
-          handleCropImage,
-          handleExtractImage,
-          handleCopyCanvasImage,
-          handleDownloadCanvasImage,
-          handleOpenAgentSendMenu,
-          handleOpenMediaCaptionEditor,
-          handleSendCanvasItemsToAgent,
-          handleToggleVideoPlayback,
-          resolvedVideoBudgetModeById,
-          handleOpenModel3DViewer,
-          handleOpenDccExportMenu,
-          handleDownloadBlobItem,
-          handleExportCanvasFile,
-          handleCopyCanvasItemsAsImage,
-          handleDownloadCanvasItemsAsImage,
-          getQuickCanvasItemsImageUrl,
-          prepareQuickCanvasItemsImageUrl,
-          handleGenerateCanvasItems,
-          handleCreateGroup,
-          fileExportActionLabel: isChineseUi ? '导出文件' : 'Export file',
-          Model3DIcon,
-          ExportIcon: DccExportIcon
-        }}
-        visualOverlaysProps={{
-          canvasContainerRef,
-          canvasContainerElement,
-          sessionKey: canvasAgentSessionKey,
-          renderedModel3DItems: overlayRenderedModel3DItems,
-          videoItems: overlayVideoItems,
-          htmlItems: overlayHtmlItems,
-          annotationItems: visibleOverlayItems.annotationItems,
-          textItems: visibleOverlayItems.textItems,
-          fileItems: visibleOverlayItems.fileItems,
-          items,
-          editingTextItemId: inlineTextEdit?.id ?? null,
-          activeOcrHover,
-          selectedIds,
-          dragContextRef,
-          tool,
-          stagePos,
-          stageScale,
-          stageSize,
-          itemsLength: items.length,
-          isViewportInteracting,
-          isCanvasPerformanceThrottled,
-          forceRenderAllItemsForExport,
-          onSelectItem: (itemId) => setSelectedIds(new Set([itemId])),
-          onDragOver: handleDragOver,
-          onDrop: handleDrop,
-          onDragVideoEnd: handleDragEnd,
-          onUpdateVideoItem: handleUpdateVideoItem,
-          onVideoContextMenu: handleImageContextMenu,
-          onUpdateHtmlItem: handleUpdateHtmlItem,
-          onDeleteHtmlItem: handleDeleteHtmlItem,
-          groupPlaybackInfo: groupPlayback
-            ? {
-                currentIndex: groupPlayback.currentIndex,
-                totalCount: groupPlayback.itemIds.length,
-                paused: groupPlayback.paused
-              }
-            : null,
-          activeGroupPlaybackItem,
-          activeGroupPlaybackCanvasBounds,
-          activeGroupPlaybackScreenBounds,
-          activeGroupPlaybackGroupName: activeGroupPlaybackGroup?.name ?? null,
-          onToggleGroupPlaybackPause: () => {
-            if (!groupPlayback) return
-            groupPlayback.paused ? resumeGroupPlayback() : pauseGroupPlayback()
-          },
-          onStopGroupPlayback: stopGroupPlayback,
-          onGroupPlaybackVideoEnded: handleGroupPlaybackVideoEnded,
-          onExportGroupPlaybackAsGif: handleExportGroupPlaybackAsGif,
-          registerViewportLayer,
-          registerViewportCallback
-        }}
-        inlineTextEditorProps={{
-          canvasContainerRef,
-          canvasContainerElement,
-          inlineTextEdit,
-          setInlineTextEdit,
-          inlineTextAreaRef,
-          mediaCaptionPlaceholder,
-          stageScale,
-          stagePos,
-          annotationColor,
-          items,
-          nextZIndexRef: nextZIndex,
-          setItemsWithHistory,
-          setSelectedIds,
-          setTool
-        }}
-        hiddenInputsProps={{
-          fileInputRef,
-          modelInputRef,
-          videoInputRef,
-          allAccept: CANVAS_IMPORT_ACCEPT,
-          modelImportExtensions: MODEL_IMPORT_EXTENSIONS,
-          onFileSelect: handleFileSelect,
-          onModelSelect: handleModelSelect,
-          onVideoSelect: handleVideoSelect
-        }}
-        shortcutDialogProps={{
-          open: shortcutDialogOpen,
-          currentShortcut,
-          recordedShortcut,
-          onRecordedShortcutChange: setRecordedShortcut,
-          onClose: () => setShortcutDialogOpen(false),
-          onSave: async () => {
-            if (!recordedShortcut) return
-
-            if (conflictsWithCanvasShortcut(recordedShortcut, toolShortcuts)) {
-              notifyError(`截图快捷键 ${recordedShortcut} 与画布快捷键冲突，请换一个组合键。`)
-              return
-            }
-
-            const screenshotBridge = window.canvasScreenshot
-            if (!screenshotBridge) {
-              notifyError('当前环境不支持修改截图快捷键。')
-              return
-            }
-
-            try {
-              const result = (await screenshotBridge.setShortcut(
-                toElectronAccelerator(recordedShortcut),
-                buildReservedCanvasShortcuts(toolShortcuts)
-              )) as { success?: boolean; error?: string }
-
-              if (result?.success === false) {
-                notifyError(result.error || '截图快捷键设置失败。')
-                return
-              }
-
-              setCurrentShortcut(recordedShortcut)
-              setRecordedShortcut('')
-              setShortcutDialogOpen(false)
-            } catch (err) {
-              console.error('[Canvas] Failed to update screenshot shortcut.', err)
-              notifyError('截图快捷键设置失败。')
-            }
-          }
-        }}
-        canvasTargetDialogProps={{
-          open: canvasTargetDialogOpen,
-          isChineseUi,
-          loading: canvasTargetLoading,
-          error: canvasTargetError,
-          schemes: targetSchemes,
-          historyTargets: canvasTargetHistoryTargets,
-          selectedHistoryTargetId: canvasTargetSelectedHistoryTargetId,
-          traceDocuments: canvasTargetReferenceTraces,
-          selectedTraceIds: canvasTargetSelectedTraceIds,
-          evidenceMode: canvasTargetEvidenceMode,
-          selectedSchemeId: canvasTargetSelectedSchemeId,
-          targetItemCount: canvasTargetTargetItemCount,
-          targetName: canvasTargetTargetName,
-          userIntent: canvasTargetUserIntent,
-          controlProfileId: canvasTargetControlProfileId,
-          controlReasoningEffort: canvasTargetControlReasoningEffort,
-          availableControlReasoningEfforts: canvasTargetAvailableControlReasoningEfforts,
-          stageProfiles: canvasTargetStageProfiles,
-          quickApps: canvasTargetQuickApps,
-          profileOptions: canvasTargetStageProfileSelectOptions,
-          controlProfileOptions: canvasTargetControlProfileSelectOptions,
-          quickAppOptions: canvasTargetQuickAppOptions,
-          report: canvasTargetReport,
-          onTargetNameChange: setCanvasTargetTargetName,
-          onSelectedSchemeIdChange: setCanvasTargetSelectedSchemeId,
-          onUserIntentChange: setCanvasTargetUserIntent,
-          onControlProfileIdChange: setCanvasTargetControlProfileId,
-          onControlReasoningEffortChange: setCanvasTargetControlReasoningEffort,
-          onStageProfilesChange: setCanvasTargetStageProfiles,
-          onQuickAppsChange: setCanvasTargetQuickApps,
-          onApplyHistoryTarget: handleApplyCanvasTargetHistoryTarget,
-          onDeleteHistoryTarget: (targetId) => {
-            void handleDeleteCanvasTargetHistoryTarget(targetId)
-          },
-          onRenameHistoryTarget: (targetId, name) => {
-            void handleRenameCanvasTargetHistoryTarget(targetId, name)
-          },
-          onSelectedTraceIdsChange: setCanvasTargetSelectedTraceIds,
-          onEvidenceModeChange: setCanvasTargetEvidenceMode,
-          onOpenSchemeManager: openTargetManager,
-          onRun: () => void handleRunCanvasTarget(),
-          onCancelRun: handleCancelCanvasTarget,
-          onClose: handleCloseCanvasTargetDialog
-        }}
-        figmaBindingDialogProps={{
-          open: figmaBindingDialogOpen,
-          accessTokenConfigured: Boolean(figmaAccessToken),
-          busyAction: figmaBusyAction,
-          error: figmaBindingError,
-          fileKeyOrUrl: figmaFileKeyOrUrlInput,
-          binding: figmaDialogBinding,
-          globalAutoCheckEnabled: figmaGlobalAutoCheckEnabled,
-          globalAutoCheckIntervalMinutes: figmaAutoCheckIntervalMinutes,
-          onFileKeyOrUrlChange: setFigmaFileKeyOrUrlInput,
-          onPageNodeIdChange: handleFigmaDraftPageChange,
-          onAutoCheckUpdatesChange: handleFigmaDraftAutoCheckUpdatesChange,
-          onResolve: () => void handleResolveFigmaBinding(),
-          onBind: handleSaveFigmaBinding,
-          onSync: () => void handleSyncFigmaBinding(),
-          onCheck: () => void handleCheckFigmaUpdate(),
-          onUnbind: handleUnbindFigmaBinding,
-          onClose: handleCloseFigmaBindingDialog
-        }}
-        dialogsProps={{
-          dccExportMenuAnchor,
-          dccExportMenuItemId,
-          onCloseDccExportMenu: handleCloseDccExportMenu,
-          onSelectDccExportTarget: handleSelectDccExportTarget,
-          agentSendMenuAnchor,
-          agentSendMenuItemIds,
-          onCloseAgentSendMenu: handleCloseAgentSendMenu,
-          onSelectAgentTargetApp: handleSelectAgentTargetApp,
-          generationTaskPackDialogProps: {
-            open: generationTaskDialogOpen,
-            taskPack: generationTaskPack,
-            onClose: handleCloseGenerationTaskDialog,
-            onConfirm: handleConfirmGenerationTaskPackWithTraceRefresh
-          },
-          generationTraceHistoryDialogProps: {
-            open: generationTraceHistoryDialogOpen,
-            records: generationTraceRecentRecords,
-            onContinueRecord: (record) => {
-              void handleContinueGenerationTraceRecord(record)
-            },
-            onApproveRecord: (record) => handleUpdateGenerationTraceDecision(record, 'approved'),
-            onDiscardRecord: (record) => handleUpdateGenerationTraceDecision(record, 'discarded'),
-            onDeleteRecord: handleDeleteGenerationTraceHistoryRecord,
-            onClose: handleCloseGenerationTraceHistory
-          },
-          filePreviewDialogProps: {
-            open: Boolean(activeFileDialogItem),
-            item: activeFileDialogItem,
-            draftContent: fileDialogDraftContent,
-            draftSheets: fileDialogDraftSheets,
-            activeOcrHover,
-            onDraftChange: setFileDialogDraftContent,
-            onDraftSheetsChange: setFileDialogDraftSheets,
-            onClose: handleCloseFileDialog,
-            onSave: handleSaveFileDialog,
-            onExport: (item, format) => {
-              void handleExportCanvasFile(item, format)
-            }
-          },
-          clearConfirmDialogProps: {
-            open: clearConfirmOpen,
-            onClose: closeClearConfirmDialog,
-            onConfirm: handleConfirmClearDialog
-          },
-          model3DViewerDialogProps: {
-            open: Boolean(activeModel3DItem),
-            item: activeModel3DItem,
-            sessionKey: canvasAgentSessionKey,
-            bgColor,
-            transparentPattern,
-            onClose: handleCloseModel3DViewer,
-            onDownload: (item) => handleDownloadBlobItem(item),
-            onImportTextures: handleRequestModel3DTextureImport
-          },
-          textureImportDialogProps: {
-            open: textureImportDialogOpen,
-            onClose: handleCloseTextureImportDialog,
-            onSkip: handleSkipTextureImportDialog,
-            onImport: handleOpenTextureImportInput
-          },
-          textureInputRef,
-          onTextureFilesSelected: handleTextureFilesSelected,
-          labelEditorDialogProps: {
-            open: labelDialogOpen,
-            text: labelDialogText,
-            onTextChange: (text) => setLabelDialogText(text),
-            onClose: () => setLabelDialogOpen(false),
-            onConfirm: handleConfirmLabelDialog
-          },
-          imageContextMenu,
-          contextMenuTarget,
-          onCloseImageContextMenu: handleCloseImageContextMenu,
-          onBringToFront: handleBringToFront,
-          onSendToBack: handleSendToBack,
-          onBringForward: handleBringForward,
-          onSendBackward: handleSendBackward,
-          onOpenTextureImportFromContextMenu: handleOpenTextureImportFromContextMenu
-        }}
-        colorPopoversProps={{
-          annotationWheelOpen: Boolean(colorPickerAnchor),
-          backgroundWheelOpen: Boolean(bgColorPickerAnchor),
-          colorPickerAnchor,
-          bgColorPickerAnchor,
-          brushWidthAnchor,
-          annotationColor,
-          annotationStrokeWidth,
-          bgColor,
-          onCloseColorPicker: () => setColorPickerAnchor(null),
-          onCloseBackgroundColorPicker: () => setBgColorPickerAnchor(null),
-          onCloseBrushWidthPicker: () => setBrushWidthAnchor(null),
-          onSelectAnnotationColor: (color) => {
-            setAnnotationColor(color)
-            setInlineTextEdit((prev) => (prev ? { ...prev, fill: color } : null))
-            if (selectedIds.size > 0) {
-              setItemsWithHistory(
-                (prev) =>
-                  prev.map((item) => {
-                    if (!selectedIds.has(item.id)) return item
-                    if (item.type === 'annotation') return { ...item, stroke: color }
-                    if (item.type === 'text') return { ...item, fill: color }
-                    return item
-                  }) as CanvasItem[]
-              )
-            }
-          },
-          onSelectAnnotationStrokeWidth: (size) => setAnnotationStrokeWidth(size),
-          onSelectBackgroundColor: (color) => {
-            setBgCustomColor(color)
-            handleBgColorChange(color)
-          }
-        }}
+        selectionOverlaysProps={selectionOverlaysProps}
+        visualOverlaysProps={visualOverlaysProps}
+        inlineTextEditorProps={inlineTextEditorProps}
+        hiddenInputsProps={hiddenInputsProps}
+        shortcutDialogProps={shortcutDialogProps}
+        canvasTargetDialogProps={canvasTargetDialogProps}
+        figmaBindingDialogProps={figmaBindingDialogProps}
+        dialogsProps={dialogsProps}
+        colorPopoversProps={colorPopoversProps}
       />
     </Box>
   )

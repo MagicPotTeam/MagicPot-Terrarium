@@ -187,6 +187,20 @@ describe('VideoGenerationWorkspace', () => {
     expect(await screen.findByText('Latest result')).toBeTruthy()
   })
 
+  it('keeps plain coded chat failures readable without results or success', async () => {
+    mocks.currentConfig.value = buildConfig({ qappProfiles: [buildKlingProfile('qapp-video')] })
+    mocks.chatMock.mockRejectedValueOnce({ message: 'ordinary provider failure', code: 'E_ORDINARY' })
+    renderWorkspace()
+    await screen.findByRole('combobox', { name: /Video model/ })
+    fireEvent.change(screen.getByLabelText('Video prompt'), { target: { value: 'local rejection fixture, no provider call' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Generate video' }))
+    await waitFor(() => expect(mocks.notifyErrorMock).toHaveBeenCalledWith('Generation failed: ordinary provider failure'))
+    expect(screen.getByText('Generation failed: ordinary provider failure')).toBeTruthy()
+    expect(mocks.chatMock).toHaveBeenCalledOnce()
+    expect(mocks.appendResultsMock).not.toHaveBeenCalled()
+    expect(mocks.notifySuccessMock).not.toHaveBeenCalled()
+  })
+
   it('can use Agent Thread video profiles directly from the Quick App page', async () => {
     mocks.currentConfig.value = buildConfig({
       agentProfiles: [buildSeedanceProfile('agent-video')]

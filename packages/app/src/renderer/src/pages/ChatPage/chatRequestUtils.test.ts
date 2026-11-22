@@ -10,6 +10,8 @@ import {
   supportsStreamingChatCompletion
 } from './chatRequestUtils'
 import { HUNYUAN_3D_PROFILE_ID } from './chatPageShared'
+import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
+import { createImageResponse } from '../../testUtils/imageResponse'
 import type {
   ChatAttachment,
   ChatMessage
@@ -253,10 +255,7 @@ describe('normalizeChatAttachmentsForRequest', () => {
 
   it('converts local image attachments into data URLs', async () => {
     const imageBlob = new Blob(['image-bytes'], { type: 'image/png' })
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      blob: async () => imageBlob
-    })
+    const fetchMock = vi.fn().mockImplementation(async () => createImageResponse('image-bytes'))
     vi.stubGlobal('fetch', fetchMock)
 
     const attachments: ChatAttachment[] = [
@@ -321,10 +320,7 @@ describe('normalizeChatAttachmentsForRequest', () => {
     'materializes an un-managed local image URL through the guarded local-media fetch: %s',
     async (url) => {
       const imageBlob = new Blob(['image-bytes'], { type: 'image/png' })
-      const fetchMock = vi.fn().mockResolvedValue({
-        ok: true,
-        blob: async () => imageBlob
-      })
+      const fetchMock = vi.fn().mockImplementation(async () => createImageResponse('image-bytes'))
       vi.stubGlobal('fetch', fetchMock)
 
       const attachment: ChatAttachment = {
@@ -521,11 +517,7 @@ describe('normalizeChatAttachmentsForRequest', () => {
   })
 
   it('falls back to request-scoped data URL materialization without accessible-url', async () => {
-    const imageBlob = new Blob(['remote-image'], { type: 'image/png' })
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      blob: async () => imageBlob
-    })
+    const fetchMock = vi.fn().mockImplementation(async () => createImageResponse('remote-image'))
     vi.stubGlobal('fetch', fetchMock)
 
     const attachment: ChatAttachment = {
@@ -545,11 +537,7 @@ describe('normalizeChatAttachmentsForRequest', () => {
   })
 
   it('materializes public HTTPS images when request-data-url is the only available transport', async () => {
-    const imageBlob = new Blob(['remote-image'], { type: 'image/png' })
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      blob: async () => imageBlob
-    })
+    const fetchMock = vi.fn().mockImplementation(async () => createImageResponse('remote-image'))
     vi.stubGlobal('fetch', fetchMock)
 
     const attachment: ChatAttachment = {
@@ -772,6 +760,18 @@ describe('requestChatCompletion', () => {
     })
   })
 
+  it('passes team member identity to the local chat IPC and omits it for lead requests', async () => {
+    const config = createConfig()
+    config.use_remote_llm = false
+    const chat = vi.fn().mockResolvedValue({ content: 'fixture' })
+    ;(window as typeof window & { api: unknown }).api = { svcLLMProxy: { chat } } as unknown as Window['api']
+    const teamMember = { scope: 'scope', thread: 'thread', lead: 'lead', member: 'writer' }
+    await requestChatCompletion({ config, messages, profileId: 'foo', teamMember })
+    await requestChatCompletion({ config, messages, profileId: 'foo' })
+    expect(chat.mock.calls[0][0].teamMember).toEqual(teamMember)
+    expect(chat.mock.calls[1][0]).not.toHaveProperty('teamMember')
+  })
+
   it('normalizes final-step context usage without replacing aggregate billing usage', async () => {
     const config = createConfig()
     const chat = vi.fn().mockResolvedValue({
@@ -913,10 +913,7 @@ describe('requestChatCompletion', () => {
     ]
 
     const imageBlob = new Blob(['image-bytes'], { type: 'image/png' })
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      blob: async () => imageBlob
-    })
+    const fetchMock = vi.fn().mockImplementation(async () => createImageResponse('image-bytes'))
     vi.stubGlobal('fetch', fetchMock)
 
     const chat = vi.fn().mockResolvedValue({ content: 'local reply' })
@@ -1349,10 +1346,7 @@ describe('requestChatCompletion', () => {
         url ===
         'local-media:///C:/client-user-data/renderer-state/project-canvas/.Canvas-Project__canvas-1/assets/images/sprite.png'
       ) {
-        return {
-          ok: true,
-          blob: async () => imageBlob
-        }
+        return createImageResponse('image-bytes')
       }
 
       if (url === 'http://example.com:3721/api/chat') {
@@ -2165,8 +2159,11 @@ describe('requestChatCompletion', () => {
       .fn()
       .mockResolvedValueOnce({ content: '15000' })
       .mockResolvedValueOnce({ content: 'bundle reply' })
+    // The report is a bundle registered for this conversation.
+    const reports = createReportBundleRegistryFixture()
     ;(window as typeof window & { api: unknown }).api = {
-      svcLLMProxy: { chat }
+      svcLLMProxy: { chat },
+      svcReportBundles: reports.svcReportBundles
     } as unknown as Window['api']
 
     const fetchMock = vi.fn(async (url: string) => {
@@ -2213,10 +2210,7 @@ describe('requestChatCompletion', () => {
       }
 
       if (url === 'local-media:///cache/report-bundles/bundle-1/images/fig-01-overview.png') {
-        return {
-          ok: true,
-          blob: async () => new Blob(['image-bytes'], { type: 'image/png' })
-        }
+        return createImageResponse('image-bytes')
       }
 
       throw new Error(`Unexpected fetch: ${url}`)
@@ -2227,22 +2221,26 @@ describe('requestChatCompletion', () => {
       requestChatCompletion({
         config,
         profileId: 'profile-report',
+        conversationId: 'report-conversation',
         messages: [
           {
             role: 'user',
             content: 'Please review this report bundle.',
             attachments: [
-              {
-                type: 'file',
-                url: 'local-media:///cache/report-bundles/bundle-1/canvas-target-report.md',
-                fileName: 'canvas-target-report.md',
-                mimeType: 'text/markdown',
-                reportBundleId: 'bundle-1',
-                reportBundleRole: 'primary-report',
-                reportBundleRefName: 'canvas-target-report.md',
-                reportBundleManifestUrl:
-                  'local-media:///cache/report-bundles/bundle-1/manifest.json'
-              }
+              reports.register(
+                {
+                  type: 'file',
+                  url: 'local-media:///cache/report-bundles/bundle-1/canvas-target-report.md',
+                  fileName: 'canvas-target-report.md',
+                  mimeType: 'text/markdown',
+                  reportBundleId: 'bundle-1',
+                  reportBundleRole: 'primary-report',
+                  reportBundleRefName: 'canvas-target-report.md',
+                  reportBundleManifestUrl:
+                    'local-media:///cache/report-bundles/bundle-1/manifest.json'
+                },
+                'report-conversation'
+              )
             ]
           }
         ]

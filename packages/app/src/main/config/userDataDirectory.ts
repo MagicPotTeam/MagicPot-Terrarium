@@ -2,6 +2,7 @@ import fs from 'fs'
 import fsp from 'fs/promises'
 import path from 'path'
 import { app } from 'electron'
+import { startupStorageSnapshot } from './startupStorageSnapshot'
 import { resolveStorageLayout, STORAGE_DATA_DIRNAME } from '@shared/storageLayout'
 import {
   readTestUiEnv,
@@ -1201,6 +1202,8 @@ export async function beginUserDataDirectoryChange(
   currentPath: string,
   migrationSources: StorageDirectoryMigrationSources = {}
 ): Promise<PreparedUserDataDirectoryChange> {
+  // Fence direct/prepare-helper callers before bootstrap discovery or other existing effects.
+  startupStorageSnapshot.invalidate()
   const currentState = getCurrentUserDataDirectoryState(currentPath)
   if (currentState.source === 'env') {
     throw new Error(

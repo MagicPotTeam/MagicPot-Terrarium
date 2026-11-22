@@ -26,7 +26,10 @@ export default defineConfig({
     exclude: [
       'packages/app/src/shared/llm/openaiFileSearch.control.test.ts',
       'packages/app/src/shared/llm/openaiFileSearch.lifecycle.test.ts',
-      'packages/app/src/shared/llm/openaiFileSearch.http.test.ts'
+      'packages/app/src/shared/llm/openaiFileSearch.http.test.ts',
+      // Channel real-page test bed: runs only under vitest.web.channel.config.mjs, whose first
+      // setup file refuses the network, real IndexedDB, workers and unlisted bridge calls.
+      'packages/app/src/renderer/**/*.channel.realPage.test.{ts,tsx}'
     ],
     setupFiles: ['packages/app/src/renderer/src/tests/setup.ts']
   }

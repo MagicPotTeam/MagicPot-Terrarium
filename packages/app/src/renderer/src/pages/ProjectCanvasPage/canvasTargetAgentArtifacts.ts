@@ -10,8 +10,15 @@ import type {
   CanvasTargetReport,
   CanvasTargetReportStage
 } from '@shared/canvasTarget'
+import type {
+  BeginReportBundleReq,
+  BeginReportBundleResp,
+  RegisterReportBundleReq,
+  RegisterReportBundleResp,
+  ReportBundleConversation
+} from '@shared/api/svcReportBundles'
 import type { ReportBundleManifest, ReportBundleManifestEntry } from '@shared/reportBundle'
-import { REPORT_BUNDLE_MANIFEST_VERSION } from '@shared/reportBundle'
+import { REPORT_BUNDLE_MANIFEST_VERSION, isReportBundleBinding } from '@shared/reportBundle'
 
 import { sanitizeFilePart } from './canvasExportNamingUtils'
 import { guardCanvasTargetTextForUi } from './canvasTargetTextGuard'
@@ -25,6 +32,17 @@ export type CanvasTargetAgentBundleOptions = {
   bundleRootDir?: string
   saveImageToPath?: (req: SaveImageToPathReq) => Promise<SaveImageToPathResp>
   writeTextFile?: (req: WriteTextFileReq) => Promise<WriteTextFileResp>
+  /**
+   * MAIN registration of the bundle (svcReportBundles): beginReportBundle opens a one-shot
+   * write session before the first write into the bundle directory, registerReportBundle
+   * seals it after the manifest write and returns the binding the primary report carries.
+   * Both are optional: without them, or when either refuses, the bundle is still written and
+   * posted, but its primary carries no binding and is refused when it is used in a request.
+   */
+  beginReportBundle?: (req: BeginReportBundleReq) => Promise<BeginReportBundleResp>
+  registerReportBundle?: (req: RegisterReportBundleReq) => Promise<RegisterReportBundleResp>
+  /** The conversation the report is delivered to; the binding is valid for it only. */
+  conversation?: ReportBundleConversation
 }
 
 type CanvasTargetBundleMaterialization = {
@@ -1074,6 +1092,27 @@ export async function materializeCanvasTargetAgentMessagePayload(
     }
   }
 
+  // The write session must exist before the first write into the bundle directory: MAIN only
+  // seals files written after the ticket was issued. Any failure leaves the report unbound.
+  // A ticket left unused because a later write throws needs no release: MAIN drops tickets
+  // after REPORT_BUNDLE_TICKET_TTL_MS (10 minutes) and keeps at most 64 outstanding.
+  let bundleTicket: string | null = null
+  let registrationSkippedReason: string | null = null
+  if (!options.beginReportBundle || !options.registerReportBundle || !options.conversation) {
+    registrationSkippedReason = 'registration is unavailable'
+  } else {
+    try {
+      const begun = await options.beginReportBundle({
+        bundleDir,
+        conversation: options.conversation
+      })
+      bundleTicket = typeof begun?.ticket === 'string' && begun.ticket ? begun.ticket : null
+      if (!bundleTicket) registrationSkippedReason = 'no write ticket was issued'
+    } catch {
+      registrationSkippedReason = 'the write session was refused'
+    }
+  }
+
   const primaryWriteResult = await options.writeTextFile({
     outputPath: bundleDir,
     filename: stageReportFileName,
@@ -1166,6 +1205,28 @@ export async function materializeCanvasTargetAgentMessagePayload(
     filename: 'manifest.json',
     content: JSON.stringify(materialization.manifest, null, 2)
   })
+
+  if (bundleTicket && options.registerReportBundle) {
+    try {
+      const registered = await options.registerReportBundle({ ticket: bundleTicket })
+      if (isReportBundleBinding(registered?.binding)) {
+        persistedBundleAttachments[0] = {
+          ...primaryAttachment,
+          reportBundleBinding: registered.binding
+        }
+      } else {
+        registrationSkippedReason = 'no binding was returned'
+      }
+    } catch {
+      registrationSkippedReason = 'registration was refused'
+    }
+  }
+  if (registrationSkippedReason) {
+    // Never log the ticket, the binding or the bundle path.
+    console.warn(
+      `[CanvasTarget] Report bundle posted without a binding (${registrationSkippedReason}); it will be refused when used in a request.`
+    )
+  }
 
   return {
     ...payload,

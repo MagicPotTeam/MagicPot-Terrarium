@@ -8,11 +8,11 @@ import {
   FlashOn as FlashIcon,
   Architecture as ArchitectureIcon,
   Chat as ChatIcon,
-  Dvr as ComfyIcon,
-  SmartToy as AgentStudioIcon
+  Dvr as ComfyIcon
 } from '@mui/icons-material'
 import MainPage from './pages/MainPage/MainPage'
 import LegacyProjectWebglRedirectPage from './pages/ProjectCanvasPage/LegacyProjectWebglRedirectPage'
+import { AGENT_MANAGEMENT_ROUTE_PATH } from './utils/agentManagementRouting'
 import { lazyWithRetry } from './utils/lazyWithRetry'
 import {
   LEGACY_PROJECT_WEBGL_ROUTE_PATH,
@@ -21,6 +21,9 @@ import {
 
 const ProjectCanvasPage = lazyWithRetry(() => import('./pages/ProjectCanvasPage/ProjectCanvasPage'))
 const ModelPage = lazyWithRetry(() => import('./pages/FileBrowserPage/ModelPage'))
+const AgentManagementPage = lazyWithRetry(
+  () => import('./pages/AgentManagementPage/AgentManagementPage')
+)
 const SettingsPage = lazyWithRetry(() => import('./pages/SettingsPage/SettingsPage'))
 const TerminalPage = lazyWithRetry(() => import('./pages/TerminalPage'))
 const ContactPage = lazyWithRetry(() => import('./pages/ContactPage'))
@@ -34,12 +37,12 @@ const CustomSkillManagerPage = lazyWithRetry(
 )
 const ChatPage = lazyWithRetry(() => import('./pages/ChatPage/ChatPage'))
 const AppLogPage = lazyWithRetry(() => import('./pages/AppLogPage'))
-const AgentStudioPage = lazyWithRetry(() => import('./pages/AgentStudioPage/AgentStudioPage'))
 
 export type PageType =
   | 'main'
   | 'model'
   | 'settings'
+  | 'agent_management'
   | 'terminal'
   | 'comfyui'
   | 'contact'
@@ -52,7 +55,6 @@ export type PageType =
   | 'project_canvas'
   | 'project_webgl_legacy'
   | 'chat'
-  | 'agent_studio'
   | 'language'
 
 export interface RouteConfig {
@@ -170,12 +172,12 @@ export const routes: RouteConfig[] = [
     showInSidebar: true
   },
   {
-    id: 'agent_studio',
-    path: '/agent-studio',
-    label: 'Agent Studio',
-    Icon: AgentStudioIcon,
-    Page: AgentStudioPage,
-    showInSidebar: true
+    id: 'agent_management',
+    path: AGENT_MANAGEMENT_ROUTE_PATH,
+    label: 'Agent management',
+    Icon: SettingsIcon,
+    Page: AgentManagementPage,
+    showInSidebar: false
   },
   {
     id: 'settings',

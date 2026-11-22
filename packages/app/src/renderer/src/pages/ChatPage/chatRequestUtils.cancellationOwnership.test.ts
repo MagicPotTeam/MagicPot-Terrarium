@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG, type CustomSkill } from '@shared/config/config'
 import type { LLMChatStreamResp } from '@shared/api/svcLLMProxy'
+import { normalizeMediaReference } from '@shared/mediaReference'
 import { requestChatCompletion, requestChatCompletionStream } from './chatRequestUtils'
 
 const input = () => ({
@@ -32,6 +33,113 @@ describe.each([false, true])('request-scoped cancellation (stream: %s)', (stream
     expect(chatStream).not.toHaveBeenCalled()
     expect(cancelConversation).not.toHaveBeenCalled()
   })
+
+  it.each(['request-data-url', 'chunked-binary-v1'] as const)(
+    'stops aborted managed-image preparation for %s without reading later attachments or cancelling another chat',
+    async (transport) => {
+      const media = {
+        version: 1 as const,
+        kind: 'managed' as const,
+        relativePath: 'originals/aa/fixture.png',
+        mimeType: 'image/png',
+        sizeBytes: 5,
+        sha256: 'a'.repeat(64),
+        originalFileName: 'fixture.png'
+      }
+      expect(normalizeMediaReference(media)).toEqual(media)
+      const messages = [
+        {
+          role: 'user' as const,
+          content: 'analyze',
+          attachments: [0, 1].map((index) => ({
+            type: 'image' as const,
+            url: `local-media:///fixture-${index}.png`,
+            media
+          }))
+        }
+      ]
+      let release!: (value: unknown) => void
+      const materializeForRequest = vi.fn(
+        (_request: { transport: string }) =>
+          new Promise((resolve) => {
+            release = resolve
+          })
+      )
+      const chat = vi.fn()
+      const chatStream = vi.fn()
+      const cancelConversation = vi.fn()
+      vi.stubGlobal('api', {
+        svcManagedMedia: { materializeForRequest },
+        svcLLMProxy: { chat, chatStream, cancelConversation }
+      })
+      const config = {
+        ...DEFAULT_CONFIG,
+        use_remote_llm: false,
+        llm_config: {
+          ...DEFAULT_CONFIG.llm_config,
+          api_profiles: [
+            {
+              id: 'preparation-fixture',
+              provider: 'openai' as const,
+              deployment: 'cloud' as const,
+              model_use: 'chat' as const,
+              model_name: 'fixture',
+              base_url: 'https://fixture.invalid/v1',
+              api_key: 'fixture',
+              api_mode: 'responses' as const,
+              attachment_transports: [transport]
+            }
+          ]
+        }
+      }
+      const controller = new AbortController()
+      const request = {
+        config,
+        messages,
+        profileId: 'preparation-fixture',
+        signal: controller.signal,
+        conversationId: 'same-chat'
+      }
+      const pending = (
+        streaming
+          ? requestChatCompletionStream({ ...request, onEvent: vi.fn() })
+          : requestChatCompletion(request)
+      ).catch((error: unknown) => error)
+      let earlyFailure: unknown
+      void pending.then((value) => {
+        earlyFailure = value
+      })
+      await vi.waitFor(() =>
+        expect(materializeForRequest, String(earlyFailure)).toHaveBeenCalledOnce()
+      )
+      expect(materializeForRequest.mock.calls[0][0]).toMatchObject({ transport })
+      if (transport === 'chunked-binary-v1') {
+        expect(materializeForRequest.mock.calls[0][0]).toMatchObject({ maxBytes: 64 * 1024 * 1024 })
+      } else {
+        expect(materializeForRequest.mock.calls[0][0]).not.toHaveProperty('maxBytes')
+      }
+      controller.abort(new DOMException('stop preparing', 'AbortError'))
+      const settled = vi.fn()
+      void pending.then(settled)
+      await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce(), { timeout: 500 })
+      expect(await pending).toMatchObject({ name: 'AbortError' })
+      release(
+        transport === 'request-data-url'
+          ? {
+              transport,
+              dataUrl: 'data:image/png;base64,aGVsbG8=',
+              mimeType: 'image/png',
+              sizeBytes: 5
+            }
+          : { transport, reference: media, chunks: [] }
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(materializeForRequest).toHaveBeenCalledOnce()
+      expect(chat).not.toHaveBeenCalled()
+      expect(chatStream).not.toHaveBeenCalled()
+      expect(cancelConversation).not.toHaveBeenCalled()
+    }
+  )
 
   it('binds cancellation to one attempt, not a later request in the same conversation', async () => {
     const pending: Array<{
@@ -88,6 +196,93 @@ describe.each([false, true])('request-scoped cancellation (stream: %s)', (stream
     )
   })
 })
+
+it.each(['remote', 'external-agent'] as const)(
+  'keeps the legacy uncapped materialization request for %s transport',
+  async (route) => {
+    const media = {
+      version: 1 as const,
+      kind: 'managed' as const,
+      relativePath: 'originals/aa/fixture.png',
+      mimeType: 'image/png',
+      sizeBytes: 5,
+      sha256: 'a'.repeat(64),
+      originalFileName: 'fixture.png'
+    }
+    let release!: (value: unknown) => void
+    const materializeForRequest = vi.fn(
+      (_request: { transport: string }) =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    const remoteFetch = vi.fn()
+    const cancelConversation = vi.fn()
+    vi.stubGlobal('api', {
+      svcManagedMedia: { materializeForRequest },
+      svcLLMProxy: { remoteFetch, cancelConversation }
+    })
+    const profile = {
+      id: 'other-route-fixture',
+      provider: 'openai' as const,
+      deployment: 'cloud' as const,
+      model_use: 'chat' as const,
+      model_name: 'fixture',
+      base_url: 'https://fixture.invalid/v1',
+      api_key: 'fixture',
+      api_mode: 'responses' as const,
+      attachment_transports: ['chunked-binary-v1' as const]
+    }
+    const controller = new AbortController()
+    const config = {
+      ...DEFAULT_CONFIG,
+      use_remote_llm: route === 'remote',
+      llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [profile] }
+    }
+    const externalAgentSkill: CustomSkill | undefined =
+      route === 'external-agent'
+        ? {
+            id: 'owned-agent',
+            type: 'agent',
+            category: 'fixture',
+            skillName: 'Fixture',
+            prompt: 'Fixture',
+            apiAddress: 'https://fixture.invalid/agent',
+            apiKey: ''
+          }
+        : undefined
+    const pending = requestChatCompletion({
+      config,
+      profileId: profile.id,
+      remoteProfile: route === 'remote' ? profile : undefined,
+      externalAgentSkill,
+      messages: [
+        {
+          role: 'user',
+          content: 'fixture',
+          attachments: [{ type: 'image', url: 'local-media:///fixture.png', media }]
+        }
+      ],
+      signal: controller.signal,
+      conversationId: 'other-route'
+    }).catch((error: unknown) => error)
+    let earlyFailure: unknown
+    void pending.then((value) => {
+      earlyFailure = value
+    })
+    await vi.waitFor(() =>
+      expect(materializeForRequest, String(earlyFailure)).toHaveBeenCalledOnce()
+    )
+    expect(materializeForRequest.mock.calls[0][0]).toMatchObject({ transport: 'chunked-binary-v1' })
+    expect(materializeForRequest.mock.calls[0][0]).not.toHaveProperty('maxBytes')
+    controller.abort(new DOMException('stop fixture', 'AbortError'))
+    expect(await pending).toMatchObject({ name: 'AbortError' })
+    release({ transport: 'chunked-binary-v1', reference: media, chunks: [] })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(remoteFetch).not.toHaveBeenCalled()
+    expect(cancelConversation).not.toHaveBeenCalled()
+  }
+)
 
 it.each(['external-unary', 'external-stream', 'external-stream-fallback'] as const)(
   'targets only the old attempt when cancelling %s and ignores its late completion',

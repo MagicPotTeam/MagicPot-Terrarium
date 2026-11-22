@@ -736,14 +736,73 @@ describe('executeCanvasTargetSemanticCanvasAction', () => {
       }
     )
 
+    // Updated (K8c): only the moved items get new values, above the highest
+    // other item; the other item keeps its zIndex instead of being renumbered.
     const byId = new Map(result.items.map((item) => [item.id, item]))
-    expect(byId.get(front.id)?.zIndex).toBe(1)
-    expect(byId.get(back.id)?.zIndex).toBe(2)
-    expect(byId.get(middle.id)?.zIndex).toBe(3)
-    expect(result.nextZIndex).toBe(4)
+    expect(byId.get(front.id)?.zIndex).toBe(3)
+    expect(byId.get(front.id)).toBe(front)
+    expect(byId.get(back.id)?.zIndex).toBe(4)
+    expect(byId.get(middle.id)?.zIndex).toBe(5)
+    expect(result.nextZIndex).toBe(6)
   })
 
-  it('deletes resolved items and prunes group membership', () => {
+  describe('set_z_order changes only its source items', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e']
+    const stack = () => ids.map((id, index) => createTextItem(id, 0, 0, (index + 1) * 10))
+    const zOrder = (zOrder: string, itemIds: string[], items = stack()) => {
+      const result = executeCanvasTargetSemanticCanvasAction(
+        createCanvasAction('set_z_order', { itemIds, zOrder: zOrder as never }),
+        { items, selectedIds: new Set(), nextZIndex: 60 }
+      )
+      const order = [...result.items].sort((left, right) => left.zIndex - right.zIndex).map((item) => item.id)
+      return { result, order, items }
+    }
+    const othersUnchanged = (items: CanvasTextItem[], result: { items: Array<{ id: string }> }, moved: string[]) =>
+      items.filter((item) => !moved.includes(item.id)).forEach((item) => {
+        expect(result.items.find((next) => next.id === item.id)).toBe(item)
+      })
+
+    it.each([
+      ['front', ['b', 'd'], ['a', 'c', 'e', 'b', 'd']],
+      ['back', ['b', 'd'], ['b', 'd', 'a', 'c', 'e']],
+      ['forward', ['b'], ['a', 'c', 'b', 'd', 'e']],
+      ['backward', ['d'], ['a', 'b', 'd', 'c', 'e']],
+      ['forward', ['b', 'c'], ['a', 'd', 'b', 'c', 'e']]
+    ])('%s of %j reorders as asked and keeps every other zIndex', (mode, moved, expected) => {
+      const { result, order, items } = zOrder(mode, moved)
+      expect(order).toEqual(expected)
+      othersUnchanged(items as CanvasTextItem[], result, moved)
+    })
+
+    it('keeps the order the user gave the other items, even one between whole numbers', () => {
+      // The user brought 'c' to the front by hand; then the run moves 'a' forward.
+      const items = stack().map((item) => (item.id === 'c' ? { ...item, zIndex: 51 } : item))
+      const { result, order } = zOrder('forward', ['a'], items)
+      expect(order).toEqual(['b', 'a', 'd', 'e', 'c'])
+      othersUnchanged(items, result, ['a'])
+      // A whole number is free above b (20) and below d (40): a takes 21.
+      expect(result.items.find((item) => item.id === 'a')?.zIndex).toBe(21)
+    })
+
+    it('places a source between two neighbours with no whole number free between them', () => {
+      const items = [createTextItem('a', 0, 0, 1), createTextItem('b', 0, 0, 2), createTextItem('c', 0, 0, 3)]
+      const { result, order } = zOrder('forward', ['a'], items)
+      expect(order).toEqual(['b', 'a', 'c'])
+      expect(result.items.find((item) => item.id === 'a')?.zIndex).toBe(2.5)
+      othersUnchanged(items, result, ['a'])
+    })
+
+    it('leaves the items untouched when the source already is where the action puts it', () => {
+      const items = stack()
+      const { result } = zOrder('front', ['e'], items)
+      expect(result.items).toBe(items)
+    })
+  })
+
+  // Updated (K8b): a run's delete no longer prunes groups. Groups are not in
+  // the undo history, so a pruned group could not be restored; like a manual
+  // delete, the group keeps naming the item and undo brings it back in.
+  it('deletes resolved items and leaves group membership for undo', () => {
     const first = createTextItem('item-1', 0, 0, 1)
     const second = createTextItem('item-2', 100, 0, 2)
 
@@ -760,8 +819,17 @@ describe('executeCanvasTargetSemanticCanvasAction', () => {
     )
 
     expect(result.items.map((item) => item.id)).toEqual([second.id])
-    expect(result.groups).toEqual([expect.objectContaining({ itemIds: [second.id] })])
+    expect(result.groups).toBeUndefined()
     expect(Array.from(result.selectedIds)).toEqual([second.id])
+  })
+
+  it('clears the canvas only with explicit intent and leaves groups for undo', () => {
+    const first = createTextItem('item-1', 0, 0, 1)
+    const state = { items: [first], groups: [createGroup('group-1', [first.id])], selectedIds: new Set<string>(), nextZIndex: 2 }
+    expect(executeCanvasTargetSemanticCanvasAction(createCanvasAction('clear_canvas', {}), state).items).toEqual([first])
+    const cleared = executeCanvasTargetSemanticCanvasAction(createCanvasAction('clear_canvas', { explicitUserIntent: true }), state)
+    expect(cleared.items).toEqual([])
+    expect(cleared.groups).toBeUndefined()
   })
 
   it('flips selected items while preserving their world center', () => {

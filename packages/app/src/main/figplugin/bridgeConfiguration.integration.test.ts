@@ -15,6 +15,7 @@ const { fixtureRoot } = await vi.hoisted(async () => ({
 }))
 vi.mock('../config/buildEnv', () => ({ getBuildEnv: () => ({ pathMap: { data: fixtureRoot } }) }))
 vi.mock('../config/portablePaths', () => ({
+  USER_DATA_BOOTSTRAP_FILENAME: 'user-data-bootstrap.json',
   resolvePortableStorageRootForUserDataSync: () => undefined
 }))
 vi.mock('../assistantRuntime/runtime', () => ({ getAssistantRuntime: vi.fn() }))

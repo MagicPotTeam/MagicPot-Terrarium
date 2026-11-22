@@ -25,14 +25,26 @@ type RuntimeItemsState = {
   history: CanvasItem[][]
   future: CanvasItem[][]
   historyRevision: number
+  selectedHistoryRevision: number | null
 }
+
+/**
+ * Maps one item to itself or to an attested copy. Used for facts about an
+ * item's bytes (a crop source record, a legacy-crop marker): they are not
+ * edits, so they apply to the present items and to every undo/redo snapshot
+ * alike, and leave the history and its selected revision alone. The mapper
+ * must return the same object for every item it does not change.
+ */
+export type CanvasItemAttestation = (item: CanvasItem) => CanvasItem
 
 type RuntimeItemsAction =
   | { type: 'set'; updater: CanvasItemsUpdate }
+  | { type: 'attest'; mapItem: CanvasItemAttestation }
   | { type: 'edit'; updater: CanvasItemsUpdate }
   | { type: 'undo' }
   | { type: 'redo' }
   | { type: 'restore'; index: number }
+  | { type: 'select-history'; updater: SetStateAction<number | null> }
 
 function resolveCanvasItemsUpdate(
   updater: CanvasItemsUpdate,
@@ -41,30 +53,126 @@ function resolveCanvasItemsUpdate(
   return typeof updater === 'function' ? updater(previous) : updater
 }
 
+/**
+ * A crop source record is a fact about the bytes of one source. An edit or set
+ * that gives an item another src while carrying its record over drops the
+ * record (and with it the crop's registry identity): the new source is proven
+ * again by a confirm, never by the old source's record. Returns next itself
+ * when nothing changes. Cheap: unchanged items are skipped by identity.
+ */
+export function dropCarriedCropSources(previous: CanvasItem[], next: CanvasItem[]): CanvasItem[] {
+  if (next === previous) return next
+  let previousById: Map<string, CanvasItem> | null = null
+  let result: CanvasItem[] | null = null
+  for (let index = 0; index < next.length; index += 1) {
+    const item = next[index]
+    if (item === previous[index] || item.type !== 'image' || item.cropSource === undefined) continue
+    let before: CanvasItem | undefined = previous[index]
+    if (before?.id !== item.id) {
+      previousById ??= new Map(previous.map((candidate) => [candidate.id, candidate]))
+      before = previousById.get(item.id)
+    }
+    if (
+      before?.type !== 'image' ||
+      before.src === item.src ||
+      before.cropSource !== item.cropSource
+    ) {
+      continue
+    }
+    const { cropSource: _carried, ...withoutRecord } = item
+    result ??= next.slice()
+    result[index] = withoutRecord
+  }
+  return result ?? next
+}
+
+function attestCanvasItemList(
+  list: CanvasItem[],
+  mapItem: CanvasItemAttestation
+): CanvasItem[] {
+  let changed = false
+  const next = list.map((item) => {
+    const mapped = mapItem(item)
+    if (mapped !== item) changed = true
+    return mapped
+  })
+  return changed ? next : list
+}
+
+function attestCanvasItemLists(
+  lists: CanvasItem[][],
+  mapItem: CanvasItemAttestation
+): CanvasItem[][] {
+  let changed = false
+  const next = lists.map((list) => {
+    const mapped = attestCanvasItemList(list, mapItem)
+    if (mapped !== list) changed = true
+    return mapped
+  })
+  return changed ? next : lists
+}
+
 function reduceRuntimeItemsState(
   state: RuntimeItemsState,
   action: RuntimeItemsAction
 ): RuntimeItemsState {
+  if (action.type === 'attest') {
+    // Present, undo and redo alike: an undo never brings back a state that
+    // lacks a fact already proven about the same bytes and crop.
+    const items = attestCanvasItemList(state.items, action.mapItem)
+    const history = attestCanvasItemLists(state.history, action.mapItem)
+    const future = attestCanvasItemLists(state.future, action.mapItem)
+    if (items === state.items && history === state.history && future === state.future) {
+      return state
+    }
+    return { ...state, items, history, future }
+  }
+
+  if (action.type === 'select-history') {
+    const selectedHistoryRevision =
+      typeof action.updater === 'function'
+        ? action.updater(state.selectedHistoryRevision)
+        : action.updater
+    return Object.is(selectedHistoryRevision, state.selectedHistoryRevision)
+      ? state
+      : { ...state, selectedHistoryRevision }
+  }
+
   if (action.type === 'set') {
-    const items = resolveCanvasItemsUpdate(action.updater, state.items)
-    return items === state.items ? state : { ...state, items }
+    const items = dropCarriedCropSources(
+      state.items,
+      resolveCanvasItemsUpdate(action.updater, state.items)
+    )
+    // Non-history sets retain their existing selection-clear policy, even on item identity.
+    return items === state.items && state.selectedHistoryRevision === null
+      ? state
+      : { ...state, items, selectedHistoryRevision: null }
   }
 
   if (action.type === 'edit') {
+    const items = dropCarriedCropSources(
+      state.items,
+      resolveCanvasItemsUpdate(action.updater, state.items)
+    )
+    // Pure identity updaters reject the whole edit: no snapshot, redo loss or selection change.
+    if (items === state.items) return state
     return {
-      items: resolveCanvasItemsUpdate(action.updater, state.items),
+      items,
       history: [
         ...state.history.slice(-CANVAS_HISTORY_LIMIT + 1),
         createCanvasHistorySnapshot(state.items)
       ],
       future: [],
-      historyRevision: state.historyRevision + 1
+      historyRevision: state.historyRevision + 1,
+      selectedHistoryRevision: null
     }
   }
 
   if (action.type === 'undo') {
     const previous = state.history.at(-1)
-    if (!previous) return state
+    if (!previous) {
+      return state.selectedHistoryRevision === null ? state : { ...state, selectedHistoryRevision: null }
+    }
     return {
       items: restoreCanvasHistorySnapshot(previous, state.items),
       history: state.history.slice(0, -1),
@@ -72,13 +180,16 @@ function reduceRuntimeItemsState(
         createCanvasHistorySnapshot(state.items),
         ...state.future.slice(0, CANVAS_HISTORY_LIMIT - 1)
       ],
-      historyRevision: state.historyRevision + 1
+      historyRevision: state.historyRevision + 1,
+      selectedHistoryRevision: null
     }
   }
 
   if (action.type === 'redo') {
     const next = state.future[0]
-    if (!next) return state
+    if (!next) {
+      return state.selectedHistoryRevision === null ? state : { ...state, selectedHistoryRevision: null }
+    }
     return {
       items: restoreCanvasHistorySnapshot(next, state.items),
       history: [
@@ -86,7 +197,8 @@ function reduceRuntimeItemsState(
         createCanvasHistorySnapshot(state.items)
       ],
       future: state.future.slice(1),
-      historyRevision: state.historyRevision + 1
+      historyRevision: state.historyRevision + 1,
+      selectedHistoryRevision: null
     }
   }
 
@@ -99,7 +211,8 @@ function reduceRuntimeItemsState(
       createCanvasHistorySnapshot(state.items),
       ...state.future.slice(0, CANVAS_HISTORY_LIMIT - 1)
     ],
-    historyRevision: state.historyRevision + 1
+    historyRevision: state.historyRevision + 1,
+    selectedHistoryRevision: state.selectedHistoryRevision
   }
 }
 
@@ -139,16 +252,23 @@ export function useProjectCanvasPageRuntimeState() {
     items: [],
     history: [],
     future: [],
-    historyRevision: 0
+    historyRevision: 0,
+    selectedHistoryRevision: null
   })
-  const { items, history, future, historyRevision } = itemsState
-  const historySnapshots = history.map((snapshot, index) => ({ index, items: snapshot })).reverse()
+  const { items, history, future, historyRevision, selectedHistoryRevision } = itemsState
+  // One array per history change, not per render: the top toolbar is memoised on it.
+  const historySnapshots = useMemo(
+    () => history.map((snapshot, index) => ({ index, items: snapshot })).reverse(),
+    [history]
+  )
   const historyCount = history.length
   const [groups, setGroups] = useState<CanvasGroup[]>([])
   const [groupBranches, setGroupBranches] = useState<CanvasGroupBranch[]>([])
   const [selectedIds, setSelectedIdsState] = useState<Set<string>>(new Set())
   const selectedIdsRef = useRef(selectedIds)
-  const [selectedHistoryRevision, setSelectedHistoryRevision] = useState<number | null>(null)
+  const setSelectedHistoryRevision = useCallback((updater: SetStateAction<number | null>) => {
+    dispatchItems({ type: 'select-history', updater })
+  }, [])
   const setSelectedIds = useCallback(
     (updater: Set<string> | ((prev: Set<string>) => Set<string>)) => {
       const next =
@@ -168,9 +288,10 @@ export function useProjectCanvasPageRuntimeState() {
       if (!history[index]) return
       dispatchItems({ type: 'restore', index })
       setSelectedIds(new Set())
+      // Selection belongs to wrapper admission even if a prior queued undo removes the snapshot.
       setSelectedHistoryRevision(index)
     },
-    [history, setSelectedIds]
+    [history, setSelectedIds, setSelectedHistoryRevision]
   )
 
   const lastClickedIdRef = useRef<string | null>(null)
@@ -223,32 +344,46 @@ export function useProjectCanvasPageRuntimeState() {
   }, [stageScale])
 
   const setItems = useCallback((updater: CanvasItemsUpdate) => {
-    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'set', updater })
   }, [])
 
   const setItemsWithHistory = useCallback((updater: CanvasItemsUpdate) => {
-    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'edit', updater })
   }, [])
 
+  const attestItems = useCallback((mapItem: CanvasItemAttestation) => {
+    dispatchItems({ type: 'attest', mapItem })
+  }, [])
+
   const handleUndo = useCallback(() => {
-    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'undo' })
     setSelectedIds(new Set())
   }, [setSelectedIds])
 
   const handleRedo = useCallback(() => {
-    setSelectedHistoryRevision(null)
     dispatchItems({ type: 'redo' })
     setSelectedIds(new Set())
   }, [setSelectedIds])
+
+  // Read-only view of the undo history and the redo stack for the save path:
+  // assets those snapshots can still bring back must not be pruned.
+  const undoRedoItemListsRef = useRef({ history, future })
+  undoRedoItemListsRef.current = { history, future }
+  const getUndoRedoItemLists = useCallback(
+    (): CanvasItem[][] => [
+      ...undoRedoItemListsRef.current.history,
+      ...undoRedoItemListsRef.current.future
+    ],
+    []
+  )
 
   return useMemo(
     () => ({
       activeOcrHover,
       annoTool,
+      attestItems,
       drawingState,
+      getUndoRedoItemLists,
       groups,
       groupBranches,
       handleRedo,
@@ -290,7 +425,9 @@ export function useProjectCanvasPageRuntimeState() {
     [
       activeOcrHover,
       annoTool,
+      attestItems,
       drawingState,
+      getUndoRedoItemLists,
       groups,
       groupBranches,
       handleRedo,

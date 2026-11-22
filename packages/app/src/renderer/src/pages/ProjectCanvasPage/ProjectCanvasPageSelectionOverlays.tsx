@@ -339,7 +339,7 @@ type ProjectCanvasPageSelectionOverlaysProps = {
   handleOpenMediaCaptionEditor: (
     item: CanvasImageItem | CanvasModel3DItem | CanvasVideoItem
   ) => void
-  handleSendCanvasItemsToAgent: (items: CanvasItem[]) => void | Promise<void>
+  handleSendCanvasItemsToAgent: (items: CanvasItem[]) => void | Promise<boolean>
   handleToggleVideoPlayback: (item: CanvasVideoItem, nextPlaying?: boolean) => void
   resolvedVideoBudgetModeById?: ReadonlyMap<string, ProjectCanvasVideoBudgetMode>
   handleOpenModel3DViewer: (itemId: string) => void
@@ -939,6 +939,8 @@ export default function ProjectCanvasPageSelectionOverlays({
     return [selectedSingleTextLikeItem]
   }, [selectedIds.size, selectedItems, selectedSingleTextLikeItem, tool])
 
+  // prepareQuickCanvasItemsImageUrl changes identity with its cache key (the committed viewport is
+  // part of it), so it must reach this component as the page built it, not as a stable forwarder.
   React.useEffect(() => {
     if (quickDragPreviewItems.length === 0) return
     void prepareQuickCanvasItemsImageUrl(quickDragPreviewItems)
@@ -1402,13 +1404,18 @@ export default function ProjectCanvasPageSelectionOverlays({
             size="small"
             draggable
             onDragStart={(event) => {
-              setCanvasDragPayload(
-                event.dataTransfer,
-                buildCanvasDragPayload([selectedImg], {
-                  objectUrl: selectedImg.src || '',
-                  promptId: (selectedImg as CanvasImageItem & { promptId?: string }).promptId
-                })
-              )
+              try {
+                setCanvasDragPayload(
+                  event.dataTransfer,
+                  buildCanvasDragPayload([selectedImg], {
+                    objectUrl: selectedImg.src || '',
+                    promptId: (selectedImg as CanvasImageItem & { promptId?: string }).promptId
+                  })
+                )
+              } catch (error) {
+                if (!(error instanceof Error) || error.message !== 'CANVAS_CROP_EXPORT_UNAVAILABLE') throw error
+                event.preventDefault()
+              }
             }}
             sx={{ cursor: 'grab', '&:active': { cursor: 'grabbing' } }}
           >
@@ -1828,15 +1835,33 @@ export default function ProjectCanvasPageSelectionOverlays({
         t={t}
         onDragSelectedItems={(itemsToDrag, dataTransfer) => {
           const objectUrl = getQuickCanvasItemsImageUrl(itemsToDrag)
-          if (!objectUrl) return
+          if (!objectUrl) {
+            // No snapshot yet. A cropped image without kept pixels is the usual
+            // reason: building the payload says so (it refuses with a message);
+            // otherwise the drag waits for the snapshot.
+            try {
+              buildCanvasDragPayload(itemsToDrag)
+            } catch (error) {
+              const refused =
+                error instanceof Error && error.message === 'CANVAS_CROP_EXPORT_UNAVAILABLE'
+              if (!refused) throw error
+            }
+            return false
+          }
 
-          setCanvasDragPayload(
-            dataTransfer,
-            buildCanvasDragPayload(itemsToDrag, {
-              objectUrl,
-              previewImageUrl: objectUrl
-            })
-          )
+          try {
+            setCanvasDragPayload(
+              dataTransfer,
+              buildCanvasDragPayload(itemsToDrag, {
+                objectUrl,
+                previewImageUrl: objectUrl
+              })
+            )
+            return true
+          } catch (error) {
+            if (!(error instanceof Error) || error.message !== 'CANVAS_CROP_EXPORT_UNAVAILABLE') throw error
+            return false
+          }
         }}
         onCopySelectedItems={(itemsToCopy) => {
           void handleCopyCanvasItemsAsImage(itemsToCopy)

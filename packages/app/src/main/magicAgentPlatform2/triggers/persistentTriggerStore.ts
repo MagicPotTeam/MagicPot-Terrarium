@@ -162,11 +162,11 @@ export class PersistentTriggerStore {
     }) as readonly StoredResource<PersistentTriggerState>[]
   }
 
-  create(
+  prepareCreate(
     trigger: PersistentTriggerState,
-    now = Date.now(),
+    now: number,
     callerIdempotencyKey?: string
-  ): StoredResource<PersistentTriggerState> {
+  ) {
     finite(now, 'Trigger creation time')
     const normalized: PersistentTriggerState =
       trigger.type === 'schedule'
@@ -184,6 +184,25 @@ export class PersistentTriggerStore {
     const stateDigest = sha256PolicyText(
       canonicalPolicyJson(normalized as unknown as PolicyJsonValue)
     )
+    const mutation = {
+      operation: 'create' as const,
+      kind: MAGIC_AGENT_TRIGGER_RESOURCE_KIND,
+      id: normalized.id,
+      idempotencyKey: storedKey,
+      state: normalized,
+      createdAt: now,
+      event: event(normalized.id, 'trigger.created', now, {
+        triggerId: normalized.id,
+        triggerType: normalized.type,
+        ...(normalized.type === 'schedule' ? { schedule: normalized.schedule } : {}),
+        stateDigest
+      }, 0)
+    }
+    return { normalized, storedKey, stateDigest, mutation }
+  }
+
+  create(trigger: PersistentTriggerState, now = Date.now(), callerIdempotencyKey?: string): StoredResource<PersistentTriggerState> {
+    const { normalized, storedKey, stateDigest, mutation } = this.prepareCreate(trigger, now, callerIdempotencyKey)
     const replay = this.eventStore
       .listResourceMutations(MAGIC_AGENT_TRIGGER_RESOURCE_KIND, normalized.id, 1000)
       .find((mutation) => mutation.idempotencyKey === storedKey)
@@ -206,26 +225,7 @@ export class PersistentTriggerStore {
       return replay.resource as StoredResource<PersistentTriggerState>
     }
     if (this.get(normalized.id)) throw new Error('Trigger already exists.')
-    return this.eventStore.mutateResource<PersistentTriggerState>({
-      operation: 'create',
-      kind: MAGIC_AGENT_TRIGGER_RESOURCE_KIND,
-      id: normalized.id,
-      idempotencyKey: storedKey,
-      state: normalized,
-      createdAt: now,
-      event: event(
-        normalized.id,
-        'trigger.created',
-        now,
-        {
-          triggerId: normalized.id,
-          triggerType: normalized.type,
-          ...(normalized.type === 'schedule' ? { schedule: normalized.schedule } : {}),
-          stateDigest
-        },
-        0
-      )
-    }).resource
+    return this.eventStore.mutateResource<PersistentTriggerState>(mutation).resource
   }
 
   claimDue(

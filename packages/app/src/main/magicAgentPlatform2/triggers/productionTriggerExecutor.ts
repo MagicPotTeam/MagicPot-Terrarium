@@ -7,9 +7,10 @@ import type { AuthorizationResult, MagicAgentPolicyAuthorizationService } from '
 import {
   TriggerPolicyExecutionBoundary,
   TriggerPolicyExecutionError,
+  triggerAuthorizationId,
   type TriggerPolicyExecutionResult
 } from './policyExecution'
-import type { TriggerPermitConsumedHook } from './policyExecution'
+import type { TriggerPermitAuthorizedHook, TriggerPermitConsumedHook } from './policyExecution'
 import type { TriggerExecutionOutcomeStore } from './executionOutcomeStore'
 import {
   adaptTrustedTriggerTarget,
@@ -41,6 +42,16 @@ export type ProductionTriggerDispatchers<TResult> = Readonly<{
 
 export type TrustedTriggerRouteResolver = (trigger: PersistentTriggerState) => PolicyJsonRecord
 
+/** Records, durably, that the permit step of this claimed occurrence attempt has begun. */
+export type TriggerOccurrencePermitMarker = (
+  input: Readonly<{
+    occurrenceId: string
+    owner: string
+    authorizationId: string
+    requestDigest: string
+  }>
+) => void | Promise<void>
+
 export type ProductionTriggerExecutorOptions<TResult> = Readonly<{
   authorizationService: MagicAgentPolicyAuthorizationService
   grantProvider: (
@@ -52,6 +63,8 @@ export type ProductionTriggerExecutorOptions<TResult> = Readonly<{
   resolveTrustedRoute: TrustedTriggerRouteResolver
   dispatch: ProductionTriggerDispatchers<TResult>
   outcomes?: TriggerExecutionOutcomeStore
+  /** When set, executeOccurrence calls it before the permit of a claimed occurrence is consumed. */
+  onOccurrencePermit?: TriggerOccurrencePermitMarker
   now?: () => number
 }>
 
@@ -151,15 +164,56 @@ export class TriggerOutcomePersistenceError extends Error {
 
 export class ProductionTriggerExecutor<TResult = unknown> {
   private readonly now: () => number
+  // One claimed attempt runs at most once at a time in this process: a parallel second run would
+  // pass the idempotent marker and the replayed permit consumption and dispatch again.
+  private readonly runningOccurrences = new Set<string>()
 
   constructor(private readonly options: ProductionTriggerExecutorOptions<TResult>) {
     this.now = options.now ?? Date.now
   }
 
+  /**
+   * Only TriggerOccurrenceScheduler may reach this (through ProductionTriggerRuntime's execute
+   * callback), once, for the claim it took in that poll: `occurrence` is the state its poll
+   * claimed, and the scheduler settles the claim afterwards. Nothing else fences a second run of
+   * one claimed attempt: the permit marker is idempotent for the same attempt and the permit
+   * consumption replays success for the same request, so a second call before the claim is
+   * settled dispatches again. `runningOccurrences` only refuses an overlapping call on this
+   * instance, not a later call, another executor instance or another runtime on the same store.
+   * A new caller must take its own claim first.
+   */
   async executeOccurrence(
     trigger: PersistentTriggerState,
     occurrence: TriggerOccurrenceState
   ): Promise<TResult> {
+    const running = JSON.stringify([occurrence.occurrenceId, occurrence.attempt])
+    if (this.runningOccurrences.has(running))
+      throw new TriggerOccurrenceNotExecutedError('in-flight')
+    this.runningOccurrences.add(running)
+    try {
+      return await this.executeOccurrenceOnce(trigger, occurrence)
+    } finally {
+      this.runningOccurrences.delete(running)
+    }
+  }
+
+  private async executeOccurrenceOnce(
+    trigger: PersistentTriggerState,
+    occurrence: TriggerOccurrenceState
+  ): Promise<TResult> {
+    let markPermit: TriggerPermitAuthorizedHook | undefined
+    const onOccurrencePermit = this.options.onOccurrencePermit
+    if (onOccurrencePermit) {
+      const owner = occurrence.claim?.owner
+      if (owner === undefined) throw new TriggerOccurrenceNotExecutedError('unclaimed')
+      markPermit = ({ authorizationId, requestDigest }) =>
+        onOccurrencePermit({
+          occurrenceId: occurrence.occurrenceId,
+          owner,
+          authorizationId,
+          requestDigest
+        })
+    }
     const route = this.options.resolveTrustedRoute(trigger)
     const adapted = adaptTrustedTriggerTarget({
       requestId: `trigger-run:${trigger.id}:${occurrence.occurrenceId}:${occurrence.claim?.owner ?? 'unclaimed'}`,
@@ -180,7 +234,16 @@ export class ProductionTriggerExecutor<TResult = unknown> {
       route,
       trustedTarget: targetFromState(trigger)
     })
-    const result = await this.executeAdaptedWithOutcome(adapted, route)
+    const result = await this.executeAdaptedWithOutcome(adapted, route, markPermit)
+    if (result.status === 'already-consumed' && markPermit) {
+      // A permit for exactly this attempt was consumed before: settle it like any consumed one.
+      const requestDigest = digestPolicyRequest(result.request)
+      await markPermit({
+        request: result.request,
+        authorizationId: triggerAuthorizationId(requestDigest),
+        requestDigest
+      })
+    }
     if (result.status !== 'executed') throw new TriggerOccurrenceNotExecutedError(result.status)
     return result.result
   }
@@ -198,7 +261,8 @@ export class ProductionTriggerExecutor<TResult = unknown> {
 
   private async executeAdaptedWithOutcome(
     adapted: ReturnType<typeof adaptTrustedTriggerTarget>,
-    route: PolicyJsonRecord
+    route: PolicyJsonRecord,
+    beforePermitConsumption?: TriggerPermitAuthorizedHook
   ): Promise<TriggerPolicyExecutionResult<TResult>> {
     let outcome: ReturnType<TriggerExecutionOutcomeStore['recordPermitConsumed']> | undefined
     const boundary = new TriggerPolicyExecutionBoundary(
@@ -223,7 +287,8 @@ export class ProductionTriggerExecutor<TResult = unknown> {
               requestDigest,
               consumedAt: this.now()
             })
-          }
+          },
+      beforePermitConsumption
     )
     try {
       const result = await boundary.execute(adapted.policyRequestInput)

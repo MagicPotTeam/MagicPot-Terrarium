@@ -2,11 +2,17 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChildProcess } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import type { CommandJobsSpawnProcess } from './commandJobs'
 import {
   buildWindowsJobObjectArguments,
   createWindowsJobObjectConfinementAdapter,
-  resolveWindowsCommandJobHelper
+  probeWindowsCommandJobHelperCapability,
+  resolveCapableWindowsCommandJobHelper,
+  isPackagedElectronApp,
+  resolveWindowsCommandJobHelper,
+  WINDOWS_COMMAND_JOB_CAPABILITY
 } from './windowsJobObjectConfinement'
 
 const realFs = await vi.importActual<typeof import('node:fs')>('node:fs')
@@ -124,5 +130,236 @@ describe('Windows Job Object confinement adapter', () => {
     expect(calls).toEqual([
       [realFs.realpathSync.native(helper), ['4096', '-', '-', '--', target, '-v'], options]
     ])
+  })
+})
+
+class FakeProbe extends EventEmitter {
+  readonly stdout = new PassThrough()
+  killed = 0
+  kill(): boolean {
+    this.killed += 1
+    return true
+  }
+}
+
+const probeSpawner = (answer: (probe: FakeProbe) => void) => {
+  const calls: unknown[][] = []
+  const probes: FakeProbe[] = []
+  const spawnProcess = ((...args: unknown[]) => {
+    calls.push(args)
+    const probe = new FakeProbe()
+    probes.push(probe)
+    queueMicrotask(() => answer(probe))
+    return probe as unknown as ChildProcess
+  }) as CommandJobsSpawnProcess
+  return { calls, probes, spawnProcess }
+}
+
+describe('Windows Job Object helper capability', () => {
+  it('matches the capability string printed by the Rust helper', () => {
+    const source = realFs.readFileSync(
+      path.join(__dirname, '../../../../../magicpot-command-job/src/main.rs'),
+      'utf8'
+    )
+    expect(source).toContain(`println!("${WINDOWS_COMMAND_JOB_CAPABILITY}");`)
+  })
+
+  it('asks the helper for --capabilities without a shell and trims the answer', async () => {
+    const fake = probeSpawner((probe) => {
+      probe.stdout.write(`${WINDOWS_COMMAND_JOB_CAPABILITY}\r\n`)
+      probe.emit('close', 0)
+    })
+    await expect(
+      probeWindowsCommandJobHelperCapability('C:\\h.exe', fake.spawnProcess)
+    ).resolves.toBe(WINDOWS_COMMAND_JOB_CAPABILITY)
+    expect(fake.calls).toEqual([
+      [
+        'C:\\h.exe',
+        ['--capabilities'],
+        { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }
+      ]
+    ])
+  })
+
+  it('treats a failing, erroring, oversized or silent probe as no capability', async () => {
+    const failing = probeSpawner((probe) => {
+      probe.stdout.write(WINDOWS_COMMAND_JOB_CAPABILITY)
+      probe.emit('close', 1)
+    })
+    await expect(
+      probeWindowsCommandJobHelperCapability('h', failing.spawnProcess)
+    ).resolves.toBeUndefined()
+    const erroring = probeSpawner((probe) => probe.emit('error', new Error('ENOENT')))
+    await expect(
+      probeWindowsCommandJobHelperCapability('h', erroring.spawnProcess)
+    ).resolves.toBeUndefined()
+    const oversized = probeSpawner((probe) => probe.stdout.write('x'.repeat(2000)))
+    await expect(
+      probeWindowsCommandJobHelperCapability('h', oversized.spawnProcess)
+    ).resolves.toBeUndefined()
+    expect(oversized.probes[0].killed).toBe(1)
+    const silent = probeSpawner(() => undefined)
+    await expect(
+      probeWindowsCommandJobHelperCapability('h', silent.spawnProcess, 20)
+    ).resolves.toBeUndefined()
+    expect(silent.probes[0].killed).toBe(1)
+    const throwing = (() => {
+      throw new Error('spawn EACCES')
+    }) as unknown as CommandJobsSpawnProcess
+    await expect(probeWindowsCommandJobHelperCapability('h', throwing)).resolves.toBeUndefined()
+  })
+
+  it('resolves only a verified helper that answers the current capability', async () => {
+    const helper = helperFixture()
+    const canonical = realFs.realpathSync.native(helper)
+    await expect(
+      resolveCapableWindowsCommandJobHelper({
+        candidates: [helper],
+        fileOps,
+        probe: async () => WINDOWS_COMMAND_JOB_CAPABILITY
+      })
+    ).resolves.toBe(canonical)
+    await expect(
+      resolveCapableWindowsCommandJobHelper({
+        candidates: [helper],
+        fileOps,
+        probe: async () => 'magicpot-command-job:atomic-job-list-empty-v1'
+      })
+    ).resolves.toBeUndefined()
+    await expect(
+      resolveCapableWindowsCommandJobHelper({
+        candidates: [helper],
+        fileOps,
+        probe: async () => {
+          throw new Error('probe failed')
+        }
+      })
+    ).resolves.toBeUndefined()
+    // Replaced between the probe and the launch decision.
+    await expect(
+      resolveCapableWindowsCommandJobHelper({
+        candidates: [helper],
+        fileOps,
+        probe: async () => {
+          realFs.writeFileSync(helper, Buffer.from('swapped-after-probe'))
+          return WINDOWS_COMMAND_JOB_CAPABILITY
+        }
+      })
+    ).resolves.toBeUndefined()
+    const probe = vi.fn(async () => WINDOWS_COMMAND_JOB_CAPABILITY)
+    await expect(
+      resolveCapableWindowsCommandJobHelper({
+        candidates: [path.join(helper, 'missing')],
+        fileOps,
+        probe
+      })
+    ).resolves.toBeUndefined()
+    expect(probe).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The command line hop through the helper: libuv quotes the helper's argv (quote_cmd_arg), the
+ * helper's C runtime splits it, and the helper re-quotes each argument for CreateProcessW
+ * (`quote` in packages/magicpot-command-job/src/main.rs). The command must see the same argv as
+ * a direct spawn.
+ */
+describe('Windows Job Object helper argument round trip', () => {
+  const libuvQuote = (arg: string): string => {
+    if (arg === '') return '""'
+    if (!/[ \t"]/.test(arg)) return arg
+    if (!/["\\]/.test(arg)) return `"${arg}"`
+    let out = ''
+    let slashes = 0
+    for (const ch of arg) {
+      if (ch === '\\') {
+        slashes += 1
+        continue
+      }
+      out += ch === '"' ? '\\'.repeat(slashes * 2 + 1) + '"' : '\\'.repeat(slashes) + ch
+      slashes = 0
+    }
+    return `"${out}${'\\'.repeat(slashes * 2)}"`
+  }
+  // Port of `quote` in main.rs.
+  const helperQuote = (text: string): string => {
+    if (text !== '' && !/[ \t"]/.test(text)) return text
+    let result = '"'
+    let slashes = 0
+    for (const ch of text) {
+      if (ch === '\\') {
+        slashes += 1
+      } else {
+        result += ch === '"' ? '\\'.repeat(slashes * 2 + 1) : '\\'.repeat(slashes)
+        slashes = 0
+        result += ch
+      }
+    }
+    return `${result}${'\\'.repeat(slashes * 2)}"`
+  }
+  // Microsoft C runtime argument splitting (the rules both quoters target).
+  const parse = (line: string): string[] => {
+    const args: string[] = []
+    let index = 0
+    while (index < line.length) {
+      while (line[index] === ' ' || line[index] === '\t') index += 1
+      if (index >= line.length) break
+      let current = ''
+      let quoted = false
+      while (index < line.length && (quoted || (line[index] !== ' ' && line[index] !== '\t'))) {
+        let slashes = 0
+        while (line[index] === '\\') {
+          slashes += 1
+          index += 1
+        }
+        if (line[index] === '"') {
+          current += '\\'.repeat(Math.floor(slashes / 2))
+          if (slashes % 2) current += '"'
+          else quoted = !quoted
+          index += 1
+        } else {
+          current += '\\'.repeat(slashes)
+          if (index < line.length && (quoted || (line[index] !== ' ' && line[index] !== '\t'))) {
+            current += line[index]
+            index += 1
+          }
+        }
+      }
+      args.push(current)
+    }
+    return args
+  }
+
+  it('keeps arguments with spaces, quotes and trailing backslashes intact', () => {
+    const command = 'C:\\Program Files\\Tool\\tool.exe'
+    const args = [
+      'plain',
+      'with space',
+      'tab\there',
+      'quote"inside',
+      '"fully quoted"',
+      'trailing\\',
+      'trailing space\\',
+      'C:\\dir with space\\',
+      'back\\\\"quote',
+      '',
+      '\\\\server\\share'
+    ]
+    const helperArgv = ['-', '-', '-', '--', command, ...args]
+    const helperLine = ['helper.exe', ...helperArgv].map(libuvQuote).join(' ')
+    const received = parse(helperLine).slice(1)
+    expect(received).toEqual(helperArgv)
+    const childLine = received.slice(4).map(helperQuote).join(' ')
+    expect(parse(childLine)).toEqual([command, ...args])
+  })
+})
+
+describe('isPackagedElectronApp (no helper from the start directory in a packaged app)', () => {
+  it('is true only for Electron started without defaultApp', () => {
+    const electron = { ...process.versions, electron: '42.0.0' } as NodeJS.ProcessVersions
+    const node = { ...process.versions, electron: undefined } as unknown as NodeJS.ProcessVersions
+    expect(isPackagedElectronApp(electron, undefined)).toBe(true)
+    expect(isPackagedElectronApp(electron, true)).toBe(false)
+    expect(isPackagedElectronApp(node, undefined)).toBe(false)
   })
 })

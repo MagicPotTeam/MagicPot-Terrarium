@@ -1,3 +1,4 @@
+import { renameSync } from 'node:fs'
 import fs from 'fs/promises'
 import path from 'path'
 import { randomUUID } from 'crypto'
@@ -19,10 +20,16 @@ function sanitizeConfigText(text: string): string {
   return text.replace(/\uFEFF/g, '').replaceAll('\0', '')
 }
 
-async function writeConfigAtomically(configPath: string, contents: string) {
+async function writeConfigAtomically(configPath: string, contents: string, assertCommit?: () => void) {
   const tempPath = `${configPath}.${randomUUID()}.tmp`
-  await fs.writeFile(tempPath, contents, 'utf-8')
-  await fs.rename(tempPath, configPath)
+  try {
+    await fs.writeFile(tempPath, contents, 'utf-8')
+    if (assertCommit) {
+      // Only guarded main-owned operations use this small synchronous commit.
+      // No renderer lifecycle callback can run between the guard and rename.
+      assertCommit(); renameSync(tempPath, configPath)
+    } else await fs.rename(tempPath, configPath)
+  } catch (error) { await fs.rm(tempPath, { force: true }).catch(() => undefined); throw error }
 }
 
 function getConfigPath() {
@@ -113,12 +120,13 @@ export function getConfig(): Config {
   return configCache
 }
 
-export function saveConfig(config: DeepPartial<Config>): Promise<void> {
+export function saveConfig(config: DeepPartial<Config>, assertCommit?: () => void): Promise<void> {
   const save = saveQueue.then(async () => {
+    assertCommit?.()
     const configPath = getConfigPath()
     const newConfig = deepMerge(getConfig() as never, config as never) as Config
 
-    await writeConfigAtomically(configPath, serializeConfig(newConfig))
+    await writeConfigAtomically(configPath, serializeConfig(newConfig), assertCommit)
     configCache = newConfig
     notifyConfigCommitted()
     await eventCenter.emit(newConfig)

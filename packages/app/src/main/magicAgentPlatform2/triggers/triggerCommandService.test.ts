@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { PersistentTriggerStore } from './persistentTriggerStore'
 import { TriggerCommandError, TriggerCommandService } from './triggerCommandService'
+import { THREAD_TRIGGER_CANDIDATE_PREFIX } from './threadTriggerNamespace'
 
 const makeRuntime = (enabled = true) => {
   const trigger = { id: 'trigger-1', revision: 3, state: { id: 'trigger-1', enabled } }
@@ -45,6 +46,154 @@ const command = (patch: Record<string, unknown> = {}) => ({
 })
 
 describe('TriggerCommandService', () => {
+  it('treats prefix IDs like ordinary IDs across create and every mutation', () => {
+    const { runtime, store, occurrences } = makeRuntime()
+    const service = new TriggerCommandService(runtime)
+    const id = `${THREAD_TRIGGER_CANDIDATE_PREFIX}historical`
+    const control = {
+      triggerId: id,
+      expectedTriggerRevision: 3,
+      idempotencyKey: 'key',
+      requestedAt: 10
+    }
+    service.createTrigger({
+      trigger: { id, type: 'startup', title: 'History', enabled: true },
+      createdAt: 10,
+      idempotencyKey: 'key'
+    })
+    service.update({ ...control, patch: { title: 'changed' } })
+    service.enable(control)
+    service.disable(control)
+    service.pause(control)
+    service.resume(control)
+    service.retry(control)
+    service.manualFire({ ...control, occurrenceId: 'occ' })
+    expect(store.create).toHaveBeenCalledOnce()
+    expect(store.update).toHaveBeenCalledOnce()
+    expect(store.setEnabled).toHaveBeenCalledTimes(2)
+    expect(store.setPaused).toHaveBeenCalledTimes(2)
+    expect(store.retry).toHaveBeenCalledOnce()
+    expect(store.get).toHaveBeenCalledWith(id)
+    expect(occurrences.enqueueManual).toHaveBeenCalledWith(expect.objectContaining({ triggerId: id }))
+  })
+
+  it('allows disabling a historical prefix trigger in the real store', () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    try {
+      const store = new PersistentTriggerStore(eventStore)
+      const id = `${THREAD_TRIGGER_CANDIDATE_PREFIX}legacy`
+      const original = store.create(
+        { id, type: 'startup', title: 'Legacy', enabled: true, paused: false },
+        10,
+        'legacy'
+      )
+      const service = new TriggerCommandService({
+        store,
+        occurrences: { enqueueManual: vi.fn() }
+      } as never)
+      const updated = service.disable({
+        triggerId: id,
+        expectedTriggerRevision: original.revision,
+        idempotencyKey: 'disable',
+        requestedAt: 20
+      })
+      expect(updated.state.enabled).toBe(false)
+      expect(store.get(id)).toEqual(updated)
+    } finally {
+      eventStore.close()
+    }
+  })
+
+  it('preserves create ID normalization for prefix IDs', () => {
+    const { runtime, store } = makeRuntime()
+    const service = new TriggerCommandService(runtime)
+    for (const id of [
+      '  thread-delivery-v1-id  ',
+      'thread delivery v1 id',
+      'thread--delivery--v1--id',
+      'thread-💥delivery-v1-id'
+    ]) {
+      service.createTrigger({
+        trigger: { id, type: 'startup', title: 'Test', enabled: true },
+        createdAt: 10,
+        idempotencyKey: 'key'
+      })
+    }
+    expect(store.create).toHaveBeenCalledTimes(4)
+    for (const [state] of store.create.mock.calls)
+      expect(state.id).toBe('thread-delivery-v1-id')
+    service.createTrigger({
+      trigger: { id: 'Thread-delivery-v1-id', type: 'startup', title: 'Test', enabled: true },
+      createdAt: 10,
+      idempotencyKey: 'ordinary'
+    })
+    expect(store.create).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'Thread-delivery-v1-id' }),
+      10,
+      'ordinary'
+    )
+  })
+
+  it('does not resolve whitespace control IDs to a reserved store key', () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    try {
+      const store = new PersistentTriggerStore(eventStore)
+      const id = `${THREAD_TRIGGER_CANDIDATE_PREFIX}legacy`
+      const original = store.create(
+        { id, type: 'startup', title: 'Legacy', enabled: true, paused: false },
+        10,
+        'legacy'
+      )
+      const service = new TriggerCommandService({
+        store,
+        occurrences: { enqueueManual: vi.fn() }
+      } as never)
+      for (const triggerId of [` ${id}`, `  ${id}  `]) {
+        expect(() =>
+          service.disable({
+            triggerId,
+            expectedTriggerRevision: original.revision,
+            idempotencyKey: `disable-${triggerId}`,
+            requestedAt: 20
+          })
+        ).toThrowError(expect.objectContaining({ code: 'not-found' }))
+        expect(store.get(id)).toEqual(original)
+      }
+      const variant = 'Thread-delivery-v1-id'
+      const ordinary = store.create(
+        { id: variant, type: 'startup', title: 'Ordinary', enabled: true, paused: false },
+        10,
+        'ordinary'
+      )
+      service.disable({
+        triggerId: variant,
+        expectedTriggerRevision: ordinary.revision,
+        idempotencyKey: 'disable-ordinary',
+        requestedAt: 20
+      })
+      expect(store.get(variant)?.state.enabled).toBe(false)
+      expect(store.get(id)).toEqual(original)
+    } finally {
+      eventStore.close()
+    }
+  })
+
+  it('does not reserve case variants or IDs with the prefix in the middle', () => {
+    const { runtime, store } = makeRuntime()
+    const service = new TriggerCommandService(runtime)
+    for (const id of [
+      `x-${THREAD_TRIGGER_CANDIDATE_PREFIX}id`,
+      THREAD_TRIGGER_CANDIDATE_PREFIX.toUpperCase() + 'id'
+    ])
+      service.enable({
+        triggerId: id,
+        expectedTriggerRevision: 3,
+        idempotencyKey: 'key',
+        requestedAt: 10
+      })
+    expect(store.setEnabled).toHaveBeenCalledTimes(2)
+  })
+
   it('lists and gets triggers', () => {
     const { runtime, store, trigger } = makeRuntime()
     const service = new TriggerCommandService(runtime)

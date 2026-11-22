@@ -37,7 +37,7 @@ import ProjectCanvasCanvas2DFallbackLayer, {
 } from './components/ProjectCanvasCanvas2DFallbackLayer'
 import {
   CANVAS_LAYOUT_RESIZE_INTERACTION_EVENT,
-  useCanvasLayoutResizeInteractionActive,
+  getCanvasLayoutResizeInteractionState,
   type CanvasLayoutResizeInteractionDetail
 } from './canvasLayoutResizeInteraction'
 import {
@@ -45,7 +45,6 @@ import {
   resolveProjectCanvasImageInteractionMode,
   type ProjectCanvasImagePreview
 } from './projectCanvasRenderBoundary'
-import { materializeCanvasImageAttachmentSource } from './canvasAgentAttachmentUtils'
 import { getCanvasItemBounds, isFillableAnnotationShape } from './projectCanvasPageShared'
 import { getCanvasThumbnailRuntimeMetrics } from './canvasThumbnailWorkerClient'
 import {
@@ -60,6 +59,21 @@ import {
 import { resolveCanvasImageLodDecision } from './canvasImageLodPolicy'
 import { isAnimatedGifCanvasImage } from './canvasAnimatedImageUtils'
 import { isCanvasItemTransientlyHidden } from './canvasTransientVisibility'
+import {
+  CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES,
+  createCropSourceRecord,
+  getCanvasCropOverlaySpace,
+  hasVerifiableCrop,
+  isConfirmedIdentityCrop,
+  readCanvasImageSourceEvidence,
+  resolveCanvasCropInSourceSpace
+} from './canvasCropProvenance'
+import { drawVerifiedCanvasImageCropPng } from './canvasAgentAttachmentUtils'
+import {
+  isCanvasProvenCropDrawable,
+  type CanvasProvenCropRegistry
+} from './canvasProvenCropRegistry'
+import { useStableEventHandler } from './useStableEventHandler'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -86,6 +100,72 @@ const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_DENSE_VIEW_MAX_SCALE = 1
 const PROJECT_CANVAS_HIGH_RES_DOM_IMAGE_DENSE_VIEW_CANDIDATE_LIMIT = 16
 const PROJECT_CANVAS_NEW_RESULT_HINT_DURATION_MS = 8000
 const PROJECT_CANVAS_NEW_RESULT_HINT_OUTLINE_SCREEN_PX = 4
+/**
+ * Set on the stage layer root while the viewport pans or zooms. Proxies and selection chrome stay
+ * mounted through a gesture (no remount at its start or end); this class only makes them inert.
+ */
+export const PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS = 'is-viewport-interacting'
+const PROJECT_CANVAS_STAGE_LAYER_ROOT_SX = {
+  position: 'relative',
+  width: '100%',
+  height: '100%',
+  [`&.${PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS} [data-project-canvas-proxy-layer="dom"] *`]: {
+    pointerEvents: 'none !important'
+  },
+  // The multi-selection outline stays visible while the viewport moves; its handles are hidden
+  // and its drag surfaces are inert until the gesture ends (as when the overlay was unmounted).
+  [`&.${PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS} [data-canvas-multi-select-drag-surface]`]: {
+    pointerEvents: 'none !important'
+  },
+  [`&.${PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS} [data-canvas-multi-select-handle]`]: {
+    visibility: 'hidden',
+    pointerEvents: 'none !important'
+  }
+} as const
+// After a layout panel drag ends, the WebGL runtime reports are committed together once no report
+// came for this long, and at the latest after the max window. The layer throttles its metrics
+// reports to one per 250 ms while it uploads the newly visible images, so the quiet period must be
+// clearly longer than that.
+export const PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS = 500
+export const PROJECT_CANVAS_LAYOUT_RESIZE_MAX_SETTLE_MS = 1500
+// The scene overlay is clipped to the stage by this fixed box. The follower inside it gets the
+// live-viewport transform during a gesture, so only the content moves: on a zoom-out the clip box
+// stays the size of the stage and outlines near its edges are not cut off.
+const PROJECT_CANVAS_SCENE_OVERLAY_CLIP_STYLE: React.CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  overflow: 'hidden',
+  pointerEvents: 'none'
+}
+const PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE: React.CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  overflow: 'visible',
+  pointerEvents: 'none',
+  transformOrigin: '0 0'
+}
+
+function isSameCanvasCrop(
+  left: CanvasImageItem['crop'] | undefined,
+  right: NonNullable<CanvasImageItem['crop']>
+): boolean {
+  return Boolean(
+    left &&
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  )
+}
+
+function areCanvasItemListsShallowEqual(left: readonly CanvasItem[], right: readonly CanvasItem[]) {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false
+  }
+  return true
+}
 
 function getProjectCanvasDomImageDeviceScale() {
   return Math.min(4, Math.max(1, window.devicePixelRatio || 1))
@@ -838,6 +918,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
     setExtractingImageId,
     setInlineTextEdit,
     setItemsWithHistory,
+    setItemsWithoutHistory,
+    attestCanvasItems,
+    provenCropRegistry,
     setLabelDialogItemId,
     setLabelDialogOpen,
     setLabelDialogText,
@@ -946,6 +1029,9 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const domPreviewSyncParentIdSet = React.useMemo(() => {
     const parentIds = new Set<string>()
     for (const item of allCanvasItems) {
+      if (item.type === 'image' && typeof item.teamImageLabel === 'string' && item.teamImageLabel.trim()) {
+        parentIds.add(item.id)
+      }
       if (item.type !== 'annotation') {
         continue
       }
@@ -992,7 +1078,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
   const canvas2DFallbackLayerRef = React.useRef<ProjectCanvasCanvas2DFallbackLayerHandle | null>(
     null
   )
-  const isCanvasLayoutResizeInteracting = useCanvasLayoutResizeInteractionActive()
+  // A layout panel drag (Agent column, side or bottom panel) is followed through refs and the
+  // layers' imperative setViewportInteracting, not React state: its start and end must not
+  // re-render the stage.
+  const isCanvasLayoutResizeInteracting = getCanvasLayoutResizeInteractionState().active
   const isCanvasPerformanceThrottledRef = React.useRef(isCanvasPerformanceThrottled)
   const isCanvasLayoutResizeInteractionActiveRef = React.useRef(isCanvasLayoutResizeInteracting)
   const isViewportInteractionActiveRef = React.useRef(isViewportInteracting)
@@ -1052,6 +1141,39 @@ export default function ProjectCanvasPageStageScene(props: any) {
         : nextFailedIds
     })
   }, [])
+  // After a layout panel drag (Agent column, side or bottom panel) the stage commits its new size,
+  // then the WebGL layer resizes and reports its resident ids and metrics several times while the
+  // newly visible images settle. Those reports stay queued, as during the drag, until none came for
+  // a short while (or the max window ran out), and are then committed together: the stage
+  // re-renders once for its new size and once for the new runtime state, not once per report.
+  const isCanvasLayoutResizeSettlingRef = React.useRef(false)
+  const layoutResizeSettleTimerRef = React.useRef<number | null>(null)
+  const layoutResizeSettleDeadlineRef = React.useRef(0)
+  const finishLayoutResizeSettleRef = React.useRef<() => void>(() => {})
+  const clearLayoutResizeSettleTimer = React.useCallback(() => {
+    if (layoutResizeSettleTimerRef.current !== null) {
+      window.clearTimeout(layoutResizeSettleTimerRef.current)
+      layoutResizeSettleTimerRef.current = null
+    }
+  }, [])
+  const armLayoutResizeSettleTimer = React.useCallback(() => {
+    clearLayoutResizeSettleTimer()
+    const remainingMs = Math.max(0, layoutResizeSettleDeadlineRef.current - Date.now())
+    layoutResizeSettleTimerRef.current = window.setTimeout(
+      () => {
+        layoutResizeSettleTimerRef.current = null
+        finishLayoutResizeSettleRef.current()
+      },
+      Math.min(PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS, remainingMs)
+    )
+  }, [clearLayoutResizeSettleTimer])
+  // A deferred WebGL report pushes the end of the settle window back.
+  const noteDeferredWebglRuntimeReport = React.useCallback(() => {
+    if (isCanvasLayoutResizeSettlingRef.current) {
+      armLayoutResizeSettleTimer()
+    }
+  }, [armLayoutResizeSettleTimer])
+  React.useEffect(() => clearLayoutResizeSettleTimer, [clearLayoutResizeSettleTimer])
   const flushPendingWebglRuntimeState = React.useCallback(() => {
     const { pending, next } = takeProjectCanvasWebGLPendingRuntimeState(
       pendingWebglRuntimeStateRef.current
@@ -1079,12 +1201,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
           'residentIds',
           residentIds
         )
+        noteDeferredWebglRuntimeReport()
         return
       }
 
       commitWebglResidentIds(residentIds)
     },
-    [commitWebglResidentIds]
+    [commitWebglResidentIds, noteDeferredWebglRuntimeReport]
   )
   const handleWebglResolvedIdsChange = React.useCallback(
     (resolvedIds: Set<string>) => {
@@ -1094,12 +1217,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
           'resolvedIds',
           resolvedIds
         )
+        noteDeferredWebglRuntimeReport()
         return
       }
 
       commitWebglResolvedIds(resolvedIds)
     },
-    [commitWebglResolvedIds]
+    [commitWebglResolvedIds, noteDeferredWebglRuntimeReport]
   )
   const handleWebglFailedIdsChange = React.useCallback(
     (failedIds: Set<string>) => {
@@ -1109,12 +1233,13 @@ export default function ProjectCanvasPageStageScene(props: any) {
           'failedIds',
           failedIds
         )
+        noteDeferredWebglRuntimeReport()
         return
       }
 
       commitWebglFailedIds(failedIds)
     },
-    [commitWebglFailedIds]
+    [commitWebglFailedIds, noteDeferredWebglRuntimeReport]
   )
   const handleWebglMetricsChange = React.useCallback(
     (metrics: ProjectCanvasWebGLImageLayerMetrics) => {
@@ -1123,36 +1248,60 @@ export default function ProjectCanvasPageStageScene(props: any) {
           pendingWebglRuntimeStateRef.current,
           metrics
         )
+        noteDeferredWebglRuntimeReport()
         return
       }
 
       commitWebglMetrics(metrics)
     },
-    [commitWebglMetrics]
+    [commitWebglMetrics, noteDeferredWebglRuntimeReport]
   )
   React.useEffect(() => {
     isCanvasPerformanceThrottledRef.current = isCanvasPerformanceThrottled
-    isCanvasLayoutResizeInteractionActiveRef.current = isCanvasLayoutResizeInteracting
     isViewportInteractionActiveRef.current = isViewportInteracting
     const shouldDeferRuntimeState =
-      isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting
+      isViewportInteracting ||
+      isCanvasPerformanceThrottled ||
+      isCanvasLayoutResizeInteractionActiveRef.current ||
+      isCanvasLayoutResizeSettlingRef.current
     isWebglRuntimeStateDeferredRef.current = shouldDeferRuntimeState
     if (!shouldDeferRuntimeState) {
       flushPendingWebglRuntimeState()
     }
-  }, [
-    flushPendingWebglRuntimeState,
-    isCanvasLayoutResizeInteracting,
-    isCanvasPerformanceThrottled,
-    isViewportInteracting
-  ])
+  }, [flushPendingWebglRuntimeState, isCanvasPerformanceThrottled, isViewportInteracting])
+  React.useEffect(() => {
+    finishLayoutResizeSettleRef.current = () => {
+      isCanvasLayoutResizeSettlingRef.current = false
+      const shouldDeferRuntimeState =
+        isViewportInteractionActiveRef.current ||
+        isCanvasPerformanceThrottledRef.current ||
+        isCanvasLayoutResizeInteractionActiveRef.current
+      isWebglRuntimeStateDeferredRef.current = shouldDeferRuntimeState
+      if (!shouldDeferRuntimeState) {
+        flushPendingWebglRuntimeState()
+      }
+    }
+  }, [flushPendingWebglRuntimeState])
   React.useEffect(() => {
     const handleCanvasLayoutResizeInteraction = (event: Event) => {
       const detail = (event as CustomEvent<CanvasLayoutResizeInteractionDetail>).detail
       const active = Boolean(detail?.active)
       isCanvasLayoutResizeInteractionActiveRef.current = active
+      if (active) {
+        isCanvasLayoutResizeSettlingRef.current = false
+        clearLayoutResizeSettleTimer()
+      } else {
+        // Keep the runtime reports queued until the stage has resized and the layer settled.
+        isCanvasLayoutResizeSettlingRef.current = true
+        layoutResizeSettleDeadlineRef.current =
+          Date.now() + PROJECT_CANVAS_LAYOUT_RESIZE_MAX_SETTLE_MS
+        armLayoutResizeSettleTimer()
+      }
       isWebglRuntimeStateDeferredRef.current =
-        active || isViewportInteractionActiveRef.current || isCanvasPerformanceThrottledRef.current
+        active ||
+        isCanvasLayoutResizeSettlingRef.current ||
+        isViewportInteractionActiveRef.current ||
+        isCanvasPerformanceThrottledRef.current
       if (
         webglImageLayerReady &&
         typeof webglImageLayerRef.current?.setViewportInteracting === 'function'
@@ -1164,13 +1313,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
       canvas2DFallbackLayerRef.current?.setViewportInteracting(
         active || isViewportInteractionActiveRef.current
       )
-      if (
-        !active &&
-        !isViewportInteractionActiveRef.current &&
-        !isCanvasPerformanceThrottledRef.current
-      ) {
-        flushPendingWebglRuntimeState()
-      }
     }
 
     window.addEventListener(
@@ -1183,7 +1325,61 @@ export default function ProjectCanvasPageStageScene(props: any) {
         handleCanvasLayoutResizeInteraction
       )
     }
-  }, [flushPendingWebglRuntimeState, webglImageLayerReady])
+  }, [armLayoutResizeSettleTimer, clearLayoutResizeSettleTimer, webglImageLayerReady])
+  // ProjectCanvasPage does not hand its live stage refs down, so the proxies' memo comparators
+  // could not use them and every proxy re-rendered for each committed pan or zoom. These refs hold
+  // the committed viewport, and the live one while the driver moves it.
+  const fallbackStagePosRef = React.useRef(stagePos)
+  const fallbackStageScaleRef = React.useRef(stageScale)
+  const fallbackCommittedViewportRef = React.useRef({ pos: stagePos, scale: stageScale })
+  if (
+    fallbackCommittedViewportRef.current.pos !== stagePos ||
+    fallbackCommittedViewportRef.current.scale !== stageScale
+  ) {
+    fallbackCommittedViewportRef.current = { pos: stagePos, scale: stageScale }
+    fallbackStagePosRef.current = stagePos
+    fallbackStageScaleRef.current = stageScale
+  }
+  const proxyStagePosRef = stagePosRef ?? fallbackStagePosRef
+  const proxyStageScaleRef = stageScaleRef ?? fallbackStageScaleRef
+  // The scene overlay (group outlines, drawing preview, marquee) stays mounted through a gesture.
+  // It is laid out for the committed viewport, so while the viewport moves its wrapper gets the
+  // transform from the committed to the live viewport. Only done when it shows something.
+  const sceneOverlayFollowerRef = React.useRef<HTMLDivElement | null>(null)
+  const sceneOverlayCommittedViewportRef = React.useRef({
+    x: stagePos.x,
+    y: stagePos.y,
+    scale: stageScale
+  })
+  const sceneOverlayLiveViewportRef = React.useRef<{ x: number; y: number; scale: number } | null>(
+    null
+  )
+  const sceneOverlayHasContentRef = React.useRef(false)
+  const syncSceneOverlayFollowerTransform = React.useCallback(() => {
+    const follower = sceneOverlayFollowerRef.current
+    if (!follower) {
+      return
+    }
+
+    const committed = sceneOverlayCommittedViewportRef.current
+    const live = sceneOverlayLiveViewportRef.current
+    if (
+      !sceneOverlayHasContentRef.current ||
+      !live ||
+      !(committed.scale > 0) ||
+      (live.x === committed.x && live.y === committed.y && live.scale === committed.scale)
+    ) {
+      if (follower.style.transform) {
+        follower.style.removeProperty('transform')
+      }
+      return
+    }
+
+    const relativeScale = live.scale / committed.scale
+    follower.style.transform = `translate3d(${live.x - relativeScale * committed.x}px, ${
+      live.y - relativeScale * committed.y
+    }px, 0) scale(${relativeScale})`
+  }, [])
   React.useEffect(() => {
     if (!registerViewportCallback) {
       return
@@ -1195,19 +1391,39 @@ export default function ProjectCanvasPageStageScene(props: any) {
         syncViewport(pos, scale)
       }
       canvas2DFallbackLayerRef.current?.syncViewport(pos, scale)
+      sceneOverlayLiveViewportRef.current = { x: pos.x, y: pos.y, scale }
+      fallbackStagePosRef.current = pos
+      fallbackStageScaleRef.current = scale
+      syncSceneOverlayFollowerTransform()
     })
-  }, [registerViewportCallback])
+  }, [registerViewportCallback, syncSceneOverlayFollowerTransform])
+  const stageLayerRootRef = React.useRef<HTMLDivElement | null>(null)
+  const isViewportInteractingClassActiveRef = React.useRef(isViewportInteracting)
+  const syncViewportInteractingClass = React.useCallback((active: boolean) => {
+    isViewportInteractingClassActiveRef.current = active
+    stageLayerRootRef.current?.classList.toggle(PROJECT_CANVAS_VIEWPORT_INTERACTING_CLASS, active)
+  }, [])
+  React.useLayoutEffect(() => {
+    syncViewportInteractingClass(isViewportInteracting)
+  }, [isViewportInteracting, syncViewportInteractingClass])
+  React.useLayoutEffect(() => {
+    // The class is written outside React; keep it if a render ever rewrites the root's className.
+    syncViewportInteractingClass(isViewportInteractingClassActiveRef.current)
+  })
   React.useEffect(() => {
     if (!registerViewportInteractionCallback) {
       return
     }
 
     return registerViewportInteractionCallback((active) => {
+      // The driver reports the gesture before React commits it: make proxies inert at once.
+      syncViewportInteractingClass(active)
       isViewportInteractionActiveRef.current = active
       isWebglRuntimeStateDeferredRef.current =
         active ||
         isCanvasPerformanceThrottledRef.current ||
-        isCanvasLayoutResizeInteractionActiveRef.current
+        isCanvasLayoutResizeInteractionActiveRef.current ||
+        isCanvasLayoutResizeSettlingRef.current
       const webglImageLayer = webglImageLayerRef.current
       if (typeof webglImageLayer?.setViewportInteracting === 'function') {
         webglImageLayer.setViewportInteracting(
@@ -1220,12 +1436,17 @@ export default function ProjectCanvasPageStageScene(props: any) {
       if (
         !active &&
         !isCanvasPerformanceThrottledRef.current &&
-        !isCanvasLayoutResizeInteractionActiveRef.current
+        !isCanvasLayoutResizeInteractionActiveRef.current &&
+        !isCanvasLayoutResizeSettlingRef.current
       ) {
         flushPendingWebglRuntimeState()
       }
     })
-  }, [flushPendingWebglRuntimeState, registerViewportInteractionCallback])
+  }, [
+    flushPendingWebglRuntimeState,
+    registerViewportInteractionCallback,
+    syncViewportInteractingClass
+  ])
   const regionSelectionTargetId =
     tool === 'crop-select' ? croppingImageId : tool === 'extract-select' ? extractingImageId : null
   const cropTargetId = regionSelectionTargetId
@@ -1367,7 +1588,10 @@ export default function ProjectCanvasPageStageScene(props: any) {
     [canvas2DFallbackImageIdSet, canvas2DResolvedImageIds]
   )
   const highResolutionDomImagePreviewItems = React.useMemo(() => {
-    if (isViewportInteracting || isCanvasPerformanceThrottled || isCanvasLayoutResizeInteracting) {
+    // Kept through pan, zoom and panel resizes: the layer moves with the viewport transform, and
+    // emptying it at a gesture start meant unmounting and decoding the source images again at the
+    // end. It is only recomputed from the committed viewport.
+    if (isCanvasPerformanceThrottled) {
       return []
     }
 
@@ -1468,9 +1692,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     return budgetedItems
   }, [
     imageRuntimeRouteById,
-    isCanvasLayoutResizeInteracting,
     isCanvasPerformanceThrottled,
-    isViewportInteracting,
     selectedIds,
     stagePos,
     stagePosRef,
@@ -1510,9 +1732,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
         }
 
         const isActivePlaceholderDrag = activePlaceholderDragItemId === renderableItem.id
-        if (isViewportInteracting && runtimeRoute === 'webgl-primary' && !isActivePlaceholderDrag) {
-          continue
-        }
         const isSingleSelectedImage =
           tool === 'select' && selectedIds.size === 1 && selectedIds.has(renderableItem.id)
         const imageFallbackReason = imageFallbackReasonById.get(renderableItem.id)
@@ -1557,7 +1776,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
       activePlaceholderDragItemId,
       imageFallbackReasonById,
       imageRuntimeRouteById,
-      isViewportInteracting,
       renderableMediaItems,
       selectedIds,
       shouldUseDenseWebglImageProxyBudget,
@@ -1677,10 +1895,44 @@ export default function ProjectCanvasPageStageScene(props: any) {
       onLiveMultiSelectionBoundsChange?.(null)
     }
   }, [multiSelectionTransformItems.length, onLiveMultiSelectionBoundsChange, tool])
+  // visibleItems is a new array after every committed viewport change; keep the same selection
+  // array when it holds the same items so the selection chrome does not re-render at gesture end.
+  const stableMultiSelectionTransformItemsRef = React.useRef<CanvasItem[]>(
+    multiSelectionTransformItems
+  )
+  if (
+    !areCanvasItemListsShallowEqual(
+      stableMultiSelectionTransformItemsRef.current,
+      multiSelectionTransformItems
+    )
+  ) {
+    stableMultiSelectionTransformItemsRef.current = multiSelectionTransformItems
+  }
+  const stableMultiSelectionTransformItems = stableMultiSelectionTransformItemsRef.current
+  const handleMultiSelectionTransformEnd = React.useCallback(
+    (updates: Array<{ id: string; attrs: Partial<CanvasItem> }>) => {
+      const updateById = new Map(updates.map((update) => [update.id, update]))
+      setItemsWithHistory((prev: CanvasItem[]) =>
+        prev.map((item) => {
+          const update = updateById.get(item.id)
+          return update ? ({ ...item, ...update.attrs } as CanvasItem) : item
+        })
+      )
+    },
+    [setItemsWithHistory]
+  )
+  // The multi-selection overlay keeps its callbacks through skipped renders too (see the hit
+  // proxies below): give it stable handlers that call the latest committed ones.
+  const handleStableMultiSelectionTransformEnd = useStableEventHandler(
+    handleMultiSelectionTransformEnd
+  )
+  const handleStableLiveMultiSelectionBoundsChange = useStableEventHandler(
+    onLiveMultiSelectionBoundsChange
+  )
   const multiSelectionLivePreviewSyncItemIds = React.useMemo(() => {
     const itemIds = new Set<string>()
 
-    for (const item of multiSelectionTransformItems) {
+    for (const item of stableMultiSelectionTransformItems) {
       if (item.type === 'image') {
         if (domPreviewSyncParentIdSet.has(item.id)) {
           itemIds.add(item.id)
@@ -1694,7 +1946,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
     }
 
     return itemIds
-  }, [domPreviewSyncParentIdSet, multiSelectionTransformItems])
+  }, [domPreviewSyncParentIdSet, stableMultiSelectionTransformItems])
   const selectedSinglePlaceholderItem = React.useMemo<CanvasPlaceholderItem | null>(() => {
     if (
       tool !== 'select' ||
@@ -2090,29 +2342,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
       selectedSingleAnnotationOverlayItem
     ]
   )
-  const isImageIdentityCrop = React.useCallback((item: CanvasImageItem) => {
-    if (!item.crop) return false
-
-    const sourceWidth =
-      typeof item.sourceWidth === 'number' &&
-      Number.isFinite(item.sourceWidth) &&
-      item.sourceWidth > 0
-        ? item.sourceWidth
-        : item.width
-    const sourceHeight =
-      typeof item.sourceHeight === 'number' &&
-      Number.isFinite(item.sourceHeight) &&
-      item.sourceHeight > 0
-        ? item.sourceHeight
-        : item.height
-
-    return (
-      item.crop.x === 0 &&
-      item.crop.y === 0 &&
-      item.crop.width === sourceWidth &&
-      item.crop.height === sourceHeight
-    )
-  }, [])
   const handleCanvasContainerRef = React.useCallback(
     (node: HTMLDivElement | null) => {
       if ('current' in canvasContainerRef) {
@@ -2146,59 +2375,188 @@ export default function ProjectCanvasPageStageScene(props: any) {
     },
     [setInlineTextEdit, setSelectedIds]
   )
+  // Crop source records are attached in the background after a confirm; the
+  // fence below drops a read once the scene unmounts, the same item is cropped
+  // again, or its source changes.
+  const cropSourceMountedRef = React.useRef(true)
+  const cropSourceReadTokenByIdRef = React.useRef(new Map<string, number>())
+  const latestCanvasItemsForCropSourceRef = React.useRef<CanvasItem[]>(allCanvasItems)
+  React.useEffect(() => {
+    latestCanvasItemsForCropSourceRef.current = allCanvasItems
+  }, [allCanvasItems])
+  React.useEffect(() => {
+    cropSourceMountedRef.current = true
+    return () => {
+      cropSourceMountedRef.current = false
+    }
+  }, [])
+  const attachConfirmedCropSource = React.useCallback(
+    async (item: CanvasImageItem, crop: NonNullable<CanvasImageItem['crop']>) => {
+      if (typeof setItemsWithoutHistory !== 'function') return
+      // The space the overlay measured the crop in; unknown means no record.
+      const cropSpace = getCanvasCropOverlaySpace(item)
+      if (!cropSpace) return
+      const expected = {
+        id: item.id,
+        src: item.src,
+        sourceWidth: item.sourceWidth,
+        sourceHeight: item.sourceHeight,
+        crop: { x: crop.x, y: crop.y, width: crop.width, height: crop.height }
+      }
+      const tokens = cropSourceReadTokenByIdRef.current
+      const token = (tokens.get(item.id) ?? 0) + 1
+      tokens.set(item.id, token)
+      const registry = provenCropRegistry as CanvasProvenCropRegistry | undefined
+      // The registry fill leaves this item to the read below.
+      const endPending = registry?.beginPending(item.id)
+      try {
+        // The source size the record update writes when none was stored, and
+        // the crop in that space (scaled when the overlay measured a thumbnail).
+        let attestedSourceSize: { width: number; height: number } | null = null
+        let attestedCrop: NonNullable<CanvasImageItem['crop']> | null = null
+        const findLatest = () =>
+          latestCanvasItemsForCropSourceRef.current.find(
+            (candidate) => candidate.id === expected.id
+          )
+        const isCurrent = () => {
+          if (!cropSourceMountedRef.current || tokens.get(expected.id) !== token) return false
+          const latest = findLatest()
+          if (!latest || latest.type !== 'image' || latest.src !== expected.src) return false
+          if (
+            latest.sourceWidth === expected.sourceWidth &&
+            latest.sourceHeight === expected.sourceHeight
+          ) {
+            return true
+          }
+          return Boolean(
+            attestedSourceSize &&
+            expected.sourceWidth === undefined &&
+            expected.sourceHeight === undefined &&
+            latest.sourceWidth === attestedSourceSize.width &&
+            latest.sourceHeight === attestedSourceSize.height
+          )
+        }
+        // The confirmed crop is the one on the canvas: only its pixels may be
+        // registered, and only then is the draw worth doing.
+        const isShownCrop = () => {
+          if (!isCurrent()) return false
+          const latest = findLatest()
+          if (latest?.type !== 'image') return false
+          return (
+            isSameCanvasCrop(latest.crop, expected.crop) ||
+            Boolean(attestedCrop && isSameCanvasCrop(latest.crop, attestedCrop))
+          )
+        }
+        const evidence = await readCanvasImageSourceEvidence(expected.src, isCurrent, {
+          maxBytes: CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES
+        })
+        if (!evidence || !isCurrent()) return
+        // The same read measures the source: a crop drawn on a thumbnail (no
+        // stored source size) is scaled into the source space; any other
+        // mismatch between the overlay space and the bytes gets no record.
+        const inSource = resolveCanvasCropInSourceSpace(item, expected.crop, cropSpace, evidence)
+        if (!inSource) return
+        const sourceCrop = inSource.crop
+        const cropSource = createCropSourceRecord(evidence, 'confirm')
+        if (!cropSource) return
+        attestedSourceSize = { width: cropSource.width, height: cropSource.height }
+        attestedCrop = sourceCrop
+        // The record is a fact about these bytes and this crop, not an edit: it
+        // goes to the present items and to every undo/redo snapshot that shows
+        // the same crop on the same source, so neither an undo to a snapshot
+        // taken before it landed nor an undo/redo during the read loses it.
+        const attest = (candidate: CanvasItem): CanvasItem => {
+          if (candidate.id !== expected.id || candidate.type !== 'image') return candidate
+          if (
+            candidate.src !== expected.src ||
+            candidate.sourceWidth !== expected.sourceWidth ||
+            candidate.sourceHeight !== expected.sourceHeight ||
+            candidate.cropSource !== undefined ||
+            !isSameCanvasCrop(candidate.crop, expected.crop)
+          ) {
+            return candidate
+          }
+          // Every display path must read the crop in the record's space.
+          const attested: CanvasImageItem = {
+            ...candidate,
+            sourceWidth: candidate.sourceWidth ?? cropSource.width,
+            sourceHeight: candidate.sourceHeight ?? cropSource.height,
+            crop: { ...sourceCrop },
+            cropSource
+          }
+          return hasVerifiableCrop(attested) ? attested : candidate
+        }
+        if (typeof attestCanvasItems === 'function') {
+          attestCanvasItems(attest)
+        } else {
+          setItemsWithoutHistory((prev: CanvasItem[]) => {
+            let changed = false
+            const next = prev.map((candidate) => {
+              const attested = attest(candidate)
+              if (attested !== candidate) changed = true
+              return attested
+            })
+            return changed ? next : prev
+          })
+        }
+        // Keep the crop's pixels, drawn from the decode of the verified bytes, so
+        // a drag start (synchronous, cannot hash) can carry only what is visible.
+        if (!registry) return
+        const provenItem: CanvasImageItem = {
+          ...item,
+          src: expected.src,
+          sourceWidth: expected.sourceWidth ?? cropSource.width,
+          sourceHeight: expected.sourceHeight ?? cropSource.height,
+          crop: sourceCrop,
+          cropSource
+        }
+        if (!hasVerifiableCrop(provenItem) || !isCanvasProvenCropDrawable(provenItem)) return
+        // A newer confirm, an undo of this crop or an unmount throws the draw away.
+        if (!isShownCrop()) return
+        const png = await drawVerifiedCanvasImageCropPng(provenItem, evidence)
+        if (!png || !isShownCrop()) return
+        registry.register(provenItem, png.blob, png)
+      } finally {
+        endPending?.()
+      }
+    },
+    [attestCanvasItems, provenCropRegistry, setItemsWithoutHistory]
+  )
   const handleCropConfirm = React.useCallback(
-    async (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {
+    (item: CanvasImageItem, updates: Partial<CanvasImageItem>) => {
       lastClickedIdRef.current = item.id
       setSelectedIds(new Set([item.id]))
-      const croppedItem = { ...item, ...updates } as CanvasImageItem
-      const flattenedCropSource = updates.crop
-        ? await materializeCanvasImageAttachmentSource(croppedItem).catch((error) => {
-            console.warn('[Canvas] Failed to flatten cropped image item:', error)
-            return null
-          })
-        : null
-
+      // Dimensions alone cannot authenticate the coordinate system of a crop.
+      // Keep the source and crop together rather than destructively flattening
+      // against possibly backfilled source-size hints. A changed crop drops its
+      // old record; the background read below attests the source again.
+      const cropChanged = Object.prototype.hasOwnProperty.call(updates, 'crop')
       setItemsWithHistory((prev: CanvasItem[]) =>
         prev.map((i) => {
           if (i.id === item.id) {
-            if (flattenedCropSource) {
-              const {
-                crop: _crop,
-                image: _image,
-                sourceFile: _sourceFile,
-                sourceIdentity: _sourceIdentity,
-                thumbnailSet: _thumbnailSet,
-                ...itemWithoutSourcePreview
-              } = { ...i, ...updates } as CanvasImageItem
-
-              return {
-                ...itemWithoutSourcePreview,
-                src: flattenedCropSource.src,
-                fileName: flattenedCropSource.fileName,
-                sizeBytes: flattenedCropSource.sizeBytes,
-                sourceWidth: flattenedCropSource.sourceWidth,
-                sourceHeight: flattenedCropSource.sourceHeight,
-                width: flattenedCropSource.sourceWidth,
-                height: flattenedCropSource.sourceHeight
-              }
-            }
-
-            return { ...i, ...updates }
+            const merged = { ...i, ...updates } as CanvasImageItem
+            if (!cropChanged || merged.cropSource === undefined) return merged
+            const { cropSource: _replacedCropSource, ...withoutRecord } = merged
+            return withoutRecord
           }
-
-          if (i.type === 'image' && isImageIdentityCrop(i as CanvasImageItem)) {
-            const { crop, ...rest } = i as CanvasImageItem
-            return rest as CanvasItem
+          // A sibling's full-image crop is removed only when its record proves it;
+          // size hints never do.
+          if (i.type === 'image' && isConfirmedIdentityCrop(i)) {
+            const { crop: _identityCrop, cropSource: _identityCropSource, ...uncropped } = i
+            return uncropped
           }
-
           return i
         })
       )
       setTool('select')
       setCroppingImageId(null)
+      const confirmedCrop = updates.crop ?? item.crop
+      if (confirmedCrop) {
+        void attachConfirmedCropSource(item, confirmedCrop).catch(() => undefined)
+      }
     },
     [
-      isImageIdentityCrop,
+      attachConfirmedCropSource,
       lastClickedIdRef,
       setCroppingImageId,
       setItemsWithHistory,
@@ -2313,6 +2671,18 @@ export default function ProjectCanvasPageStageScene(props: any) {
     stageRef,
     stageScale
   })
+  const sceneOverlayHasContent = liveSelectionOverlayGroups.length > 0 || drawingState != null
+  React.useLayoutEffect(() => {
+    sceneOverlayCommittedViewportRef.current = { x: stagePos.x, y: stagePos.y, scale: stageScale }
+    sceneOverlayHasContentRef.current = sceneOverlayHasContent
+    syncSceneOverlayFollowerTransform()
+  }, [
+    sceneOverlayHasContent,
+    stagePos.x,
+    stagePos.y,
+    stageScale,
+    syncSceneOverlayFollowerTransform
+  ])
   const isHandToolCaptureRef = React.useRef(false)
   React.useEffect(() => {
     const container = canvasContainerRef.current
@@ -2509,32 +2879,6 @@ export default function ProjectCanvasPageStageScene(props: any) {
     },
     [handleStageMouseUp, isMiddleMouseRef, isStageEventLayerTarget, shouldIgnoreMouseCompatEvent]
   )
-  React.useEffect(() => {
-    if (!isHandToolCaptureRef.current) {
-      return
-    }
-
-    const releaseHandToolCapture = (nativeEvent: MouseEvent | PointerEvent) => {
-      if (!isHandToolCaptureRef.current) {
-        return
-      }
-      isHandToolCaptureRef.current = false
-      handleStageMouseUp({
-        evt: nativeEvent,
-        type: nativeEvent.type
-      })
-    }
-
-    window.addEventListener('mouseup', releaseHandToolCapture, true)
-    window.addEventListener('pointerup', releaseHandToolCapture, true)
-    window.addEventListener('pointercancel', releaseHandToolCapture, true)
-
-    return () => {
-      window.removeEventListener('mouseup', releaseHandToolCapture, true)
-      window.removeEventListener('pointerup', releaseHandToolCapture, true)
-      window.removeEventListener('pointercancel', releaseHandToolCapture, true)
-    }
-  }, [handleStageMouseUp])
   React.useEffect(() => {
     const describeTarget = (target: EventTarget | null) => {
       if (!(target instanceof Element)) {
@@ -2866,6 +3210,80 @@ export default function ProjectCanvasPageStageScene(props: any) {
     renderableMediaItemMap,
     visibleItems
   ])
+  // Hit proxies skip renders through their memo comparator (a gesture end, a selection or tool
+  // change that does not touch their own props), so a callback passed to them can outlive the
+  // render that created it. Every proxy callback goes through a stable handler that calls the
+  // latest committed one: a proxy can never act on an old selection, tool or item list.
+  const handleProxySelectItem = useStableEventHandler(selectItem)
+  const handleProxyContextMenu = useStableEventHandler(
+    (event: MouseEvent | PointerEvent, item: CanvasItem) => handleImageContextMenu?.(event, item)
+  )
+  const handleProxyDragStart = useStableEventHandler(handlePlaceholderDragStart)
+  const handleProxyDragEnd = useStableEventHandler(handlePlaceholderDragEnd)
+  const handleProxyTransformEnd = useStableEventHandler(
+    (itemId: string, attrs: Partial<CanvasItem>) => handleTransformEnd?.(itemId, attrs)
+  )
+  const handleProxyImagePreviewChange = useStableEventHandler(
+    (itemId: string, preview: ProjectCanvasImagePreview | null) => {
+      // Only the select tool drags images. A proxy rendered under the select tool can keep this
+      // handler after a tool change, so check the latest tool here; a clear (null) always goes
+      // through.
+      if (preview && tool !== 'select') {
+        return
+      }
+      syncWebGLImagePreview(itemId, preview)
+    }
+  )
+  const handleProxyOpenTextEditor = useStableEventHandler(openCanvasTextInlineEditor)
+  const handleProxyOpenFileDialog = useStableEventHandler((itemId: string) =>
+    handleOpenFileDialog?.(itemId)
+  )
+  const handleProxyOpenModel3DViewer = useStableEventHandler((itemId: string) =>
+    handleOpenModel3DViewer?.(itemId)
+  )
+  const handleProxyAnnotationPreviewChange = useStableEventHandler(
+    handleAnnotationPlaceholderPreviewChange
+  )
+  const handleProxyAnnotationDragEnd = useStableEventHandler(handleAnnotationPlaceholderDragEnd)
+  const handleProxyAnnotationHoverChange = useStableEventHandler(
+    (annoItem: CanvasAnnotationItem, isHovering: boolean) => {
+      setActiveOcrHover(
+        isHovering && annoItem.ocrBundleId && annoItem.ocrBoxId
+          ? {
+              bundleId: annoItem.ocrBundleId,
+              bboxIds: [annoItem.ocrBoxId],
+              cellIds: annoItem.ocrCellIds || []
+            }
+          : null
+      )
+    }
+  )
+  const handleProxyAnnotationDoubleClick = useStableEventHandler(
+    (annoItem: CanvasAnnotationItem) => {
+      setSelectedIds(new Set())
+      if (annoItem.shape === 'text-anno') {
+        const absW = Math.max(10, (annoItem.width || 150) * Math.abs(annoItem.scaleX))
+        const absH = Math.max(10, (annoItem.height || 40) * Math.abs(annoItem.scaleY))
+        const sy = annoItem.scaleY
+        setInlineTextEdit({
+          id: annoItem.id,
+          x: annoItem.x,
+          y: annoItem.y,
+          w: absW,
+          h: absH,
+          text: annoItem.text || '',
+          isNew: false,
+          fontSize: (annoItem.fontSize || 36) * Math.abs(sy),
+          attachedToId: (annoItem as AttachedCaptionAnnotation).attachedToId,
+          attachmentPlacement: (annoItem as AttachedCaptionAnnotation).attachmentPlacement
+        })
+      } else {
+        setLabelDialogItemId(annoItem.id)
+        setLabelDialogText(annoItem.label)
+        setLabelDialogOpen(true)
+      }
+    }
+  )
   const proxyLayerElements = React.useMemo(() => {
     return proxyLayerCandidateItems.map((item: CanvasItem) => {
       const isSelected = selectedIds.has(item.id) && tool === 'select'
@@ -2901,16 +3319,16 @@ export default function ProjectCanvasPageStageScene(props: any) {
               visualVariant={imageProxyVisualVariant}
               stagePos={stagePos}
               stageScale={stageScale}
-              stagePosRef={stagePosRef}
-              stageScaleRef={stageScaleRef}
-              onPreviewChange={tool === 'select' ? syncWebGLImagePreview : undefined}
-              onDragStart={handlePlaceholderDragStart}
+              stagePosRef={proxyStagePosRef}
+              stageScaleRef={proxyStageScaleRef}
+              onPreviewChange={tool === 'select' ? handleProxyImagePreviewChange : undefined}
+              onDragStart={handleProxyDragStart}
               onSelect={(additiveSelection) => {
-                selectItem(item.id, false, Boolean(additiveSelection))
+                handleProxySelectItem(item.id, false, Boolean(additiveSelection))
               }}
-              onDragEnd={handlePlaceholderDragEnd}
-              onTransformEnd={handleTransformEnd as any}
-              onContextMenu={(event) => handleImageContextMenu(event as any, item)}
+              onDragEnd={handleProxyDragEnd}
+              onTransformEnd={handleProxyTransformEnd as any}
+              onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
             />
           )
         }
@@ -2929,16 +3347,16 @@ export default function ProjectCanvasPageStageScene(props: any) {
             renderMode="dom-text-proxy"
             stagePos={stagePos}
             stageScale={stageScale}
-            stagePosRef={stagePosRef}
-            stageScaleRef={stageScaleRef}
-            onDragStart={handlePlaceholderDragStart}
+            stagePosRef={proxyStagePosRef}
+            stageScaleRef={proxyStageScaleRef}
+            onDragStart={handleProxyDragStart}
             onSelect={(additiveSelection?: boolean) => {
-              selectItem(item.id, false, Boolean(additiveSelection))
+              handleProxySelectItem(item.id, false, Boolean(additiveSelection))
             }}
-            onDragEnd={handlePlaceholderDragEnd}
-            onTransformEnd={handleTransformEnd}
-            onContextMenu={(event) => handleImageContextMenu(event as any, item)}
-            onDoubleClick={() => openCanvasTextInlineEditor(textItem)}
+            onDragEnd={handleProxyDragEnd}
+            onTransformEnd={handleProxyTransformEnd}
+            onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
+            onDoubleClick={() => handleProxyOpenTextEditor(textItem)}
           />
         )
       }
@@ -2956,14 +3374,14 @@ export default function ProjectCanvasPageStageScene(props: any) {
             renderMode="dom-file-proxy"
             stagePos={stagePos}
             stageScale={stageScale}
-            onDragStart={handlePlaceholderDragStart}
+            onDragStart={handleProxyDragStart}
             onSelect={(additiveSelection) => {
-              selectItem(item.id, false, Boolean(additiveSelection))
+              handleProxySelectItem(item.id, false, Boolean(additiveSelection))
             }}
-            onDragEnd={handlePlaceholderDragEnd}
-            onTransformEnd={handleTransformEnd as any}
-            onDoubleClick={() => handleOpenFileDialog(fileItem.id)}
-            onContextMenu={(event) => handleImageContextMenu(event as any, item)}
+            onDragEnd={handleProxyDragEnd}
+            onTransformEnd={handleProxyTransformEnd as any}
+            onDoubleClick={() => handleProxyOpenFileDialog(fileItem.id)}
+            onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
           />
         )
       }
@@ -2989,59 +3407,26 @@ export default function ProjectCanvasPageStageScene(props: any) {
             proxyRect={proxyRect}
             stagePos={stagePos}
             stageScale={stageScale}
-            stagePosRef={stagePosRef}
-            stageScaleRef={stageScaleRef}
-            onDragStart={handlePlaceholderDragStart}
+            stagePosRef={proxyStagePosRef}
+            stageScaleRef={proxyStageScaleRef}
+            onDragStart={handleProxyDragStart}
             onRectPreviewChange={(_itemId, preview) => {
-              handleAnnotationPlaceholderPreviewChange(annoItem, proxyRect, preview)
+              handleProxyAnnotationPreviewChange(annoItem, proxyRect, preview)
             }}
             onSelect={(additiveSelection) => {
-              selectItem(item.id, true, Boolean(additiveSelection))
+              handleProxySelectItem(item.id, true, Boolean(additiveSelection))
             }}
             onDragEnd={(itemId, x, y, evt) => {
-              handleAnnotationPlaceholderDragEnd(annoItem, proxyRect, itemId, x, y, evt)
+              handleProxyAnnotationDragEnd(annoItem, proxyRect, itemId, x, y, evt)
             }}
-            onTransformEnd={handleTransformEnd}
-            onContextMenu={(event) => handleImageContextMenu(event as any, item)}
+            onTransformEnd={handleProxyTransformEnd}
+            onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
             onHoverChange={
               annoItem.ocrBundleId && annoItem.ocrBoxId
-                ? (isHovering) => {
-                    setActiveOcrHover(
-                      isHovering
-                        ? {
-                            bundleId: annoItem.ocrBundleId!,
-                            bboxIds: [annoItem.ocrBoxId!],
-                            cellIds: annoItem.ocrCellIds || []
-                          }
-                        : null
-                    )
-                  }
+                ? (isHovering) => handleProxyAnnotationHoverChange(annoItem, isHovering)
                 : undefined
             }
-            onDoubleClick={() => {
-              setSelectedIds(new Set())
-              if (annoItem.shape === 'text-anno') {
-                const absW = Math.max(10, (annoItem.width || 150) * Math.abs(annoItem.scaleX))
-                const absH = Math.max(10, (annoItem.height || 40) * Math.abs(annoItem.scaleY))
-                const sy = annoItem.scaleY
-                setInlineTextEdit({
-                  id: annoItem.id,
-                  x: annoItem.x,
-                  y: annoItem.y,
-                  w: absW,
-                  h: absH,
-                  text: annoItem.text || '',
-                  isNew: false,
-                  fontSize: (annoItem.fontSize || 36) * Math.abs(sy),
-                  attachedToId: (annoItem as AttachedCaptionAnnotation).attachedToId,
-                  attachmentPlacement: (annoItem as AttachedCaptionAnnotation).attachmentPlacement
-                })
-              } else {
-                setLabelDialogItemId(item.id)
-                setLabelDialogText(annoItem.label)
-                setLabelDialogOpen(true)
-              }
-            }}
+            onDoubleClick={() => handleProxyAnnotationDoubleClick(annoItem)}
           />
         )
       }
@@ -3064,20 +3449,20 @@ export default function ProjectCanvasPageStageScene(props: any) {
             renderMode="dom-model3d-proxy"
             stagePos={stagePos}
             stageScale={stageScale}
-            stagePosRef={stagePosRef}
-            stageScaleRef={stageScaleRef}
-            onDragStart={handlePlaceholderDragStart}
+            stagePosRef={proxyStagePosRef}
+            stageScaleRef={proxyStageScaleRef}
+            onDragStart={handleProxyDragStart}
             onSelect={(additiveSelection) => {
-              selectItem(item.id, false, Boolean(additiveSelection))
+              handleProxySelectItem(item.id, false, Boolean(additiveSelection))
             }}
-            onDragEnd={handlePlaceholderDragEnd}
+            onDragEnd={handleProxyDragEnd}
             onDoubleClick={
               renderableMediaItem.kind === 'model3d'
-                ? () => handleOpenModel3DViewer(item.id)
+                ? () => handleProxyOpenModel3DViewer(item.id)
                 : undefined
             }
-            onTransformEnd={handleTransformEnd}
-            onContextMenu={(event) => handleImageContextMenu(event as any, item)}
+            onTransformEnd={handleProxyTransformEnd}
+            onContextMenu={(event) => handleProxyContextMenu(event as any, item)}
           />
         )
       }
@@ -3088,38 +3473,34 @@ export default function ProjectCanvasPageStageScene(props: any) {
     animatedGifImageIdSet,
     canvasContainerRef,
     getImageRuntimeRoute,
-    handleAnnotationPlaceholderDragEnd,
-    handleAnnotationPlaceholderPreviewChange,
-    handleImageContextMenu,
-    handleOpenFileDialog,
-    handleOpenModel3DViewer,
-    handlePlaceholderDragEnd,
-    handlePlaceholderDragStart,
-    handleTransformEnd,
+    handleProxyAnnotationDoubleClick,
+    handleProxyAnnotationDragEnd,
+    handleProxyAnnotationHoverChange,
+    handleProxyAnnotationPreviewChange,
+    handleProxyContextMenu,
+    handleProxyDragEnd,
+    handleProxyDragStart,
+    handleProxyImagePreviewChange,
+    handleProxyOpenFileDialog,
+    handleProxyOpenModel3DViewer,
+    handleProxyOpenTextEditor,
+    handleProxySelectItem,
+    handleProxyTransformEnd,
     imageFallbackReasonById,
     canvas2DVisualOwnerImageIdSet,
     itemIdSet,
-    openCanvasTextInlineEditor,
     renderableMediaItemMap,
     selectedIds,
     placeholderProxyImageIdSet,
     proxyLayerCandidateItems,
-    syncWebGLImagePreview,
     selectedSingleAnnotationItem?.id,
     selectedSingleFileItem?.id,
     selectedSinglePlaceholderItem?.id,
     selectedSingleTextItem?.id,
-    selectItem,
-    setActiveOcrHover,
-    setInlineTextEdit,
-    setLabelDialogItemId,
-    setLabelDialogOpen,
-    setLabelDialogText,
-    setSelectedIds,
     stagePos,
-    stagePosRef,
+    proxyStagePosRef,
     stageScale,
-    stageScaleRef,
+    proxyStageScaleRef,
     tool
   ])
   const hasProxyLayerElements = proxyLayerElements.some(Boolean)
@@ -3313,7 +3694,11 @@ export default function ProjectCanvasPageStageScene(props: any) {
       onDragOverCapture={handleDragOver}
     >
       <MaxSizeLayout onResize={handleResize}>
-        <Box sx={{ position: 'relative', width: '100%', height: '100%' }}>
+        <Box
+          ref={stageLayerRootRef}
+          data-project-canvas-stage-layer-root="true"
+          sx={PROJECT_CANVAS_STAGE_LAYER_ROOT_SX}
+        >
           <ProjectCanvasWebGLImageLayer
             ref={webglImageLayerRef}
             items={webglImageItems}
@@ -3321,7 +3706,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
             stagePos={stagePos}
             stageScale={stageScale}
             stageSize={stageSize}
-            isViewportInteracting={isViewportInteracting || isCanvasLayoutResizeInteracting}
+            isViewportInteracting={isViewportInteracting}
             isPerformanceThrottled={isCanvasPerformanceThrottled}
             onReadyChange={setWebglImageLayerReady}
             onResidentIdsChange={handleWebglResidentIdsChange}
@@ -3337,7 +3722,7 @@ export default function ProjectCanvasPageStageScene(props: any) {
               stagePos={stagePos}
               stageScale={stageScale}
               stageSize={stageSize}
-              isViewportInteracting={isViewportInteracting || isCanvasLayoutResizeInteracting}
+              isViewportInteracting={isViewportInteracting}
               isPerformanceThrottled={isCanvasPerformanceThrottled}
               onResolvedIdsChange={handleCanvas2DResolvedIdsChange}
               onFailedIdsChange={handleCanvas2DFailedIdsChange}
@@ -3790,45 +4175,51 @@ export default function ProjectCanvasPageStageScene(props: any) {
             />
           </div>
           {tool === 'select' &&
-            !isViewportInteracting &&
             !suppressSelectionChromeAfterMarquee &&
-            multiSelectionTransformItems.length > 1 && (
+            stableMultiSelectionTransformItems.length > 1 && (
               <ProjectCanvasMultiSelectionTransformOverlay
                 canvasContainerRef={canvasContainerRef}
-                items={multiSelectionTransformItems}
+                items={stableMultiSelectionTransformItems}
                 livePreviewSyncItemIds={multiSelectionLivePreviewSyncItemIds}
-                onPreviewBoundsChange={onLiveMultiSelectionBoundsChange}
+                onPreviewBoundsChange={
+                  onLiveMultiSelectionBoundsChange
+                    ? handleStableLiveMultiSelectionBoundsChange
+                    : undefined
+                }
                 registerViewportCallback={registerViewportCallback}
                 stagePos={stagePos}
-                stagePosRef={stagePosRef}
+                stagePosRef={proxyStagePosRef}
                 stageScale={stageScale}
-                stageScaleRef={stageScaleRef}
-                onTransformEnd={(updates) => {
-                  setItemsWithHistory((prev: CanvasItem[]) =>
-                    prev.map((item) => {
-                      const update = updates.find((candidate) => candidate.id === item.id)
-                      return update ? ({ ...item, ...update.attrs } as CanvasItem) : item
-                    })
-                  )
-                }}
+                stageScaleRef={proxyStageScaleRef}
+                onTransformEnd={handleStableMultiSelectionTransformEnd}
               />
             )}
-          {!isViewportInteracting && (
-            <ProjectCanvasPageSceneOverlay
-              annotationColor={annotationColor}
-              annotationFillOpacity={annotationFillOpacity}
-              drawingState={drawingState}
-              exactSelectedGroup={exactSelectedGroup}
-              isFillableShape={isFillableShape}
-              onSelectionRectElementsChange={onSelectionRectElementsChange}
-              selectionOverlayGroups={liveSelectionOverlayGroups}
-              selectionRect={selectionRect}
-              selectionRectRenderMode={selectionRectRenderMode}
-              stagePos={stagePos}
-              stageScale={stageScale}
-              tool={tool}
-            />
-          )}
+          <div
+            data-project-canvas-scene-overlay-clip="true"
+            style={PROJECT_CANVAS_SCENE_OVERLAY_CLIP_STYLE}
+          >
+            <div
+              ref={sceneOverlayFollowerRef}
+              data-project-canvas-scene-overlay-follower="true"
+              style={PROJECT_CANVAS_SCENE_OVERLAY_FOLLOWER_STYLE}
+            >
+              <ProjectCanvasPageSceneOverlay
+                annotationColor={annotationColor}
+                annotationFillOpacity={annotationFillOpacity}
+                clipToBounds={false}
+                drawingState={drawingState}
+                exactSelectedGroup={exactSelectedGroup}
+                isFillableShape={isFillableShape}
+                onSelectionRectElementsChange={onSelectionRectElementsChange}
+                selectionOverlayGroups={liveSelectionOverlayGroups}
+                selectionRect={selectionRect}
+                selectionRectRenderMode={selectionRectRenderMode}
+                stagePos={stagePos}
+                stageScale={stageScale}
+                tool={tool}
+              />
+            </div>
+          </div>
         </Box>
       </MaxSizeLayout>
     </Box>

@@ -27,7 +27,6 @@ import { waitPromptId, ComfyCliWrapper } from '../comfy/logic'
 import * as crypto from 'crypto'
 import * as zlib from 'zlib'
 import { readTestUiEnv, resolveTestArtifactPath, resolveTestUiPolicy } from '../testUiPolicy'
-import { normalizeLocalFilePath } from '../utils/localFileUrl'
 
 const inflateAsync = promisify(zlib.inflate)
 const execAsync = promisify(exec)
@@ -193,32 +192,27 @@ export class PhotoshopSvcImpl implements PhotoshopSvc {
     req: SendImageToPhotoshopReq
   ): Promise<SendImageToPhotoshopResp> => {
     try {
+      // Only the bytes the renderer sends: every caller renders or reads the image itself and
+      // sends a base64 data URL. A file URL or path is never read here (the page would name it).
+      if (typeof req.imageUrl !== 'string' || !req.imageUrl.startsWith('data:')) {
+        throw new Error('The image must be sent as a base64 data URL.')
+      }
+      const imageData = Buffer.from(req.imageUrl.split(',')[1] ?? '', 'base64')
+
       const platform = os.platform()
       await this.ensurePhotoshopIsRunning(platform)
       const tempDir = await getPhotoshopTempDir()
-      const fileName = req.fileName || `comfyui-image-${Date.now()}.png`
+      // A plain name in the temp folder: a page-named name never leaves it, and never breaks
+      // the JSX or AppleScript that names the file (a quote or a control character would).
+      const fileName =
+        typeof req.fileName === 'string' &&
+        /^[^\\/:*?"<>|]{1,200}$/.test(req.fileName) &&
+        !Array.from(req.fileName).some((character) => character.charCodeAt(0) < 0x20) &&
+        req.fileName !== '.' &&
+        req.fileName !== '..'
+          ? req.fileName
+          : `comfyui-image-${Date.now()}.png`
       const tempFilePath = path.join(tempDir, fileName)
-
-      // Read image data from the provided URL or path.
-      let imageData: Buffer
-      if (req.imageUrl.startsWith('data:')) {
-        // Handle data URLs.
-        const base64Data = req.imageUrl.split(',')[1]
-        imageData = Buffer.from(base64Data, 'base64')
-      } else if (req.imageUrl.startsWith('blob:')) {
-        // Blob URLs only exist in the renderer process.
-        // They must be converted before the request reaches the main process.
-        // Expect a base64 data URL or a real file path at this layer.
-        throw new Error(
-          'Blob URLs must be converted to base64 in the renderer before calling this API.'
-        )
-      } else if (req.imageUrl.startsWith('file://')) {
-        // Handle file URLs.
-        imageData = await fs.readFile(normalizeLocalFilePath(req.imageUrl))
-      } else {
-        // Fall back to treating the value as a file path.
-        imageData = await fs.readFile(req.imageUrl)
-      }
 
       // Persist the image to a temporary file.
       await fs.writeFile(tempFilePath, imageData)

@@ -183,9 +183,13 @@ export function buildCanvasTargetCanvasActionDisplayContent(
   }
 }
 
+// Actions whose confirmation line names how many canvas items they remove.
+const CANVAS_TARGET_DELETING_ACTIONS = new Set(['delete_items', 'clear_canvas'])
+
 export function describeCanvasTargetCapabilityAction(
   action: CanvasTargetCapabilityAction,
-  isChineseUi: boolean
+  isChineseUi: boolean,
+  targetItemCount?: number | null
 ): string {
   void isChineseUi
   const label = action.label?.trim() || action.id
@@ -194,13 +198,20 @@ export function describeCanvasTargetCapabilityAction(
     return `QuickApp ${action.qAppKey}: ${label} (${phase})`
   }
 
-  return `Canvas ${action.action}: ${label} (${phase})`
+  const count =
+    CANVAS_TARGET_DELETING_ACTIONS.has(action.action) && typeof targetItemCount === 'number'
+      ? `, ${targetItemCount} item(s)`
+      : ''
+  return `Canvas ${action.action}: ${label} (${phase}${count})`
 }
 
 export function buildCanvasTargetExecutionPlanPreview(options: {
   controlPlan: CanvasTargetControlPlan
   controlModelLabel: string
   isChineseUi: boolean
+  // How many existing canvas items a canvas action targets, when that is
+  // known before the run (null when it depends on a later stage).
+  resolveCanvasActionTargetCount?: (action: CanvasTargetCanvasAction) => number | null
 }): string {
   const { controlPlan, controlModelLabel, isChineseUi } = options
   void isChineseUi
@@ -212,7 +223,11 @@ export function buildCanvasTargetExecutionPlanPreview(options: {
 
   let stepIndex = 2
   for (const action of controlPlan.capabilityActions || []) {
-    lines.push(`${stepIndex}. ${describeCanvasTargetCapabilityAction(action, isChineseUi)}`)
+    const targetItemCount =
+      action.type === 'canvas' ? options.resolveCanvasActionTargetCount?.(action) : null
+    lines.push(
+      `${stepIndex}. ${describeCanvasTargetCapabilityAction(action, isChineseUi, targetItemCount)}`
+    )
     stepIndex += 1
   }
 

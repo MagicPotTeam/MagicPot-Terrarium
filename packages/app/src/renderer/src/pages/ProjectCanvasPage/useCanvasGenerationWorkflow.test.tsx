@@ -11,6 +11,13 @@ import { upsertProjectStyleModel } from './projectStyleModelRegistry'
 import type { CanvasFileItem, CanvasImageItem, CanvasItem, CanvasTextItem } from './types'
 import { useCanvasGenerationWorkflow } from './useCanvasGenerationWorkflow'
 
+// Translated with the locale files; the existing assertions read the zh-CN copy.
+const i18nState = vi.hoisted(() => ({ language: 'zh-CN' }))
+vi.mock('react-i18next', async () => {
+  const { localeTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return { useTranslation: () => ({ t: localeTranslator(i18nState.language), i18n: { language: i18nState.language } }) }
+})
+
 type WorkflowProbeProps = {
   items: CanvasItem[]
   notifySuccess: (message: string) => unknown
@@ -18,7 +25,7 @@ type WorkflowProbeProps = {
   sendCanvasItemsToAgent: (
     targetItems: CanvasItem[],
     options?: Record<string, unknown>
-  ) => Promise<void>
+  ) => Promise<boolean>
 }
 
 function WorkflowProbe({
@@ -132,6 +139,86 @@ function createTextItem(text = 'A neon fox courier in rainy cyberpunk Shanghai')
   }
 }
 
+describe('generation delivery result contract', () => {
+  it('keeps the dialog open and does not report success when send returns false', async () => {
+    const notifySuccess = vi.fn()
+    const notifyWarning = vi.fn()
+    const send = vi.fn().mockResolvedValue(false)
+    render(<WorkflowProbe items={[createImageItem()]} notifySuccess={notifySuccess} notifyWarning={notifyWarning} sendCanvasItemsToAgent={send} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
+    await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' })) })
+    expect(send).toHaveBeenCalledOnce()
+    expect(screen.getByTestId('dialog-state')).toHaveTextContent('open')
+    expect(notifySuccess).not.toHaveBeenCalled()
+    // A send that was not scheduled is not reported as scheduled either.
+    expect(notifyWarning).not.toHaveBeenCalled()
+  })
+
+  it('says nothing while the hand-off is still pending, then reports it as scheduled once', async () => {
+    const notifySuccess = vi.fn()
+    const notifyWarning = vi.fn()
+    let settle: (scheduled: boolean) => void = () => undefined
+    const send = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          settle = resolve
+        })
+    )
+    render(
+      <WorkflowProbe
+        items={[createImageItem()]}
+        notifySuccess={notifySuccess}
+        notifyWarning={notifyWarning}
+        sendCanvasItemsToAgent={send}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
+    await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' }))
+    })
+    expect(send).toHaveBeenCalledOnce()
+    expect(notifyWarning).not.toHaveBeenCalled()
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(screen.getByTestId('dialog-state')).toHaveTextContent('open')
+    await act(async () => {
+      settle(true)
+    })
+    expect(notifyWarning).toHaveBeenCalledExactlyOnceWith('已安排向默认 Agent 投递，尚未确认接收')
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(screen.getByTestId('dialog-state')).toHaveTextContent('closed')
+  })
+
+  it('describes true as scheduled, not confirmed delivery', async () => {
+    const notifySuccess = vi.fn()
+    const notifyWarning = vi.fn()
+    const send = vi.fn().mockResolvedValue(true)
+    render(<WorkflowProbe items={[createImageItem()]} notifySuccess={notifySuccess} notifyWarning={notifyWarning} sendCanvasItemsToAgent={send} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
+    await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' })) })
+    expect(send).toHaveBeenCalledOnce()
+    expect(screen.getByTestId('dialog-state')).toHaveTextContent('closed')
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(notifyWarning).toHaveBeenCalledWith('已安排向默认 Agent 投递，尚未确认接收')
+  })
+
+  it('reports the scheduled delivery in English when the app language is en-US', async () => {
+    i18nState.language = 'en-US'
+    try {
+      const notifyWarning = vi.fn()
+      render(<WorkflowProbe items={[createImageItem()]} notifySuccess={vi.fn()} notifyWarning={notifyWarning} sendCanvasItemsToAgent={vi.fn().mockResolvedValue(true)} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Start Generation' }))
+      await waitFor(() => expect(screen.getByTestId('dialog-state')).toHaveTextContent('open'))
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm Generation' })) })
+      expect(notifyWarning).toHaveBeenCalledExactlyOnceWith('Delivery to the default Agent is scheduled; receipt is not confirmed yet')
+    } finally {
+      i18nState.language = 'zh-CN'
+    }
+  })
+})
+
 describe('useCanvasGenerationWorkflow', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -141,7 +228,7 @@ describe('useCanvasGenerationWorkflow', () => {
   it('always sends the task pack to the default agent even if a project model exists', async () => {
     const notifySuccess = vi.fn()
     const notifyWarning = vi.fn()
-    const sendCanvasItemsToAgent = vi.fn().mockResolvedValue(undefined)
+    const sendCanvasItemsToAgent = vi.fn().mockResolvedValue(true)
     const items = [createFileItem(), createImageItem()]
 
     upsertProjectStyleModel('canvas-1', {
@@ -176,8 +263,8 @@ describe('useCanvasGenerationWorkflow', () => {
       expect(sendCanvasItemsToAgent).toHaveBeenCalledTimes(1)
     })
 
-    expect(notifyWarning).not.toHaveBeenCalled()
-    expect(notifySuccess).toHaveBeenCalledWith('已发送给默认 Agent 生成候选图')
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(notifyWarning).toHaveBeenCalledWith('已安排向默认 Agent 投递，尚未确认接收')
     expect(sendCanvasItemsToAgent).toHaveBeenCalledWith(
       items,
       expect.objectContaining({

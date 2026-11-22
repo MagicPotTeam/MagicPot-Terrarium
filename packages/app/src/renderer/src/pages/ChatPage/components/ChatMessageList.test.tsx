@@ -15,10 +15,12 @@ import type {
   ChatMessage
 } from '../../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import type { ChatSession } from '../chatStorage'
+import zh from '@shared/locales/zh-CN/renderer.json'
 
 const notifySuccessMock = vi.fn()
 
 const chatImageTranslations: Record<string, string> = {
+  'chat.agent_processing': zh.chat.agent_processing,
   'chat.loading_auto_retry_wait':
     'Retry {{attempt}} in {{seconds}} seconds. You can stop at any time.',
   'chat.loading_auto_retry_active': 'Retry {{attempt}} in progress. You can stop at any time.',
@@ -54,9 +56,11 @@ type OnSendEditedMessage = (
 type OnDownloadAttachment = (attachment: ChatAttachment) => void
 
 const buildChatMessageList = (
-  currentSession: ChatSession,
+  currentSession: ChatSession | undefined,
   options?: {
+    pendingConfirmation?: React.ComponentProps<typeof ChatMessageList>['pendingConfirmation']
     active?: boolean
+    columnStyle?: boolean
     loadingStatus?: import('../chatLoadingStatus').ChatLoadingStatus
     isLoading?: boolean
     editingMessageIndex?: number | null
@@ -80,6 +84,8 @@ const buildChatMessageList = (
       active={options?.active}
       currentSession={currentSession}
       isLoading={options?.isLoading ?? false}
+      columnStyle={options?.columnStyle}
+      pendingConfirmation={options?.pendingConfirmation}
       loadingStatus={options?.loadingStatus}
       editingMessageIndex={options?.editingMessageIndex ?? null}
       editingContent={options?.editingContent ?? ''}
@@ -102,6 +108,7 @@ const renderChatMessageList = (
   currentSession: ChatSession,
   options?: {
     active?: boolean
+    columnStyle?: boolean
     loadingStatus?: import('../chatLoadingStatus').ChatLoadingStatus
     isLoading?: boolean
     editingMessageIndex?: number | null
@@ -120,6 +127,202 @@ const renderChatMessageList = (
     messagesEndRef?: React.RefObject<HTMLDivElement | null>
   }
 ) => render(buildChatMessageList(currentSession, options))
+
+describe('ChatMessageList inline tool calls', () => {
+  it.each(['empty', 'text', 'image'] as const)(
+    'shows a running image tool only in its column tool row alongside %s content',
+    (kind) => {
+      const session: ChatSession = {
+        id: 'image-call',
+        title: 'Image',
+        messages: [
+          {
+            role: 'assistant',
+            content: kind === 'text' ? 'Editing the image.' : '',
+            attachments:
+              kind === 'image' ? [{ type: 'image', url: 'data:image/png;base64,AAAA' }] : [],
+            toolHistory: [
+              {
+                runId: 'run',
+                toolCallId: 'call',
+                toolName: 'image_gen',
+                args: {},
+                status: 'running'
+              }
+            ]
+          }
+        ]
+      }
+      renderChatMessageList(session, {
+        columnStyle: true,
+        isLoading: true,
+        loadingStatus: {
+          label: '出图中',
+          detail: 'image_gen',
+          presentation: 'tool-row-only'
+        }
+      })
+      expect(screen.queryByTestId('assistant-loading-status')).not.toBeInTheDocument()
+      expect(screen.queryByText('出图中')).not.toBeInTheDocument()
+      expect(screen.queryByText('chat.response_interrupted')).not.toBeInTheDocument()
+      if (kind === 'text') expect(screen.getByText('Editing the image.')).toBeInTheDocument()
+      if (kind === 'image') expect(screen.getByRole('img')).toBeInTheDocument()
+    }
+  )
+
+  it('reads routine request phases in the column as the Kohaku working line', () => {
+    renderChatMessageList(
+      { id: 'wait', title: '', messages: [{ role: 'assistant', content: 'Visible text' }] },
+      {
+        columnStyle: true,
+        isLoading: true,
+        loadingStatus: { presentation: 'routine', step: 3, totalSteps: 4, label: '等待模型响应' }
+      }
+    )
+    expect(screen.getByText('Visible text')).toBeVisible()
+    expect(screen.getByTestId('assistant-loading-line')).toHaveTextContent(
+      /^KohakUwUing...（生成中）$/
+    )
+    expect(screen.queryByText(/等待模型响应/)).not.toBeInTheDocument()
+  })
+
+  it('keeps a non-routine phase label in the column working line', () => {
+    renderChatMessageList(
+      { id: 'tool', title: '', messages: [{ role: 'assistant', content: '' }] },
+      { columnStyle: true, isLoading: true, loadingStatus: { label: 'Reading the canvas' } }
+    )
+    expect(screen.getByTestId('assistant-loading-line')).toHaveTextContent('Reading the canvas')
+  })
+
+  it('shows the column approval card instead of the working line', () => {
+    const session: ChatSession = {
+      id: 'approval',
+      title: '',
+      messages: [{ role: 'assistant', content: '' }]
+    }
+    const running = { columnStyle: true, isLoading: true, loadingStatus: { label: 'Waiting' } }
+    const pendingConfirmation = {
+      requestId: 'c',
+      prompt: 'Continue?',
+      confirmLabel: 'Allow',
+      cancelLabel: 'Cancel'
+    }
+    const { rerender } = render(buildChatMessageList(session, { ...running, pendingConfirmation }))
+    expect(screen.getByRole('button', { name: 'Allow' })).toBeEnabled()
+    expect(screen.queryByTestId('assistant-loading-status')).toBeNull()
+    expect(screen.queryByText('chat.response_interrupted')).toBeNull()
+    rerender(buildChatMessageList(session, running))
+    expect(screen.getByTestId('assistant-loading-status')).toBeVisible()
+  })
+
+  it.each(['Partial response', ''])(
+    'shows a single inline interruption with partial or empty text: %s',
+    (content) => {
+      renderChatMessageList({
+        id: 'interrupted',
+        title: '',
+        messages: [{ role: 'assistant', content, responseInterrupted: true }]
+      })
+      if (content) expect(screen.getByText(content)).toBeVisible()
+      expect(screen.getAllByText('chat.response_interrupted')).toHaveLength(1)
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    }
+  )
+
+  it('renders a tool-only assistant message as an expandable call, not an interrupted reply', () => {
+    renderChatMessageList({
+      id: 'tool-only',
+      title: 'Tool call',
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          toolHistory: [
+            {
+              runId: 'run',
+              toolCallId: 'call',
+              toolName: 'web_fetch',
+              args: { url: 'https://example.com/docs' },
+              status: 'completed',
+              content: 'PAGE_RESULT'
+            }
+          ]
+        }
+      ]
+    })
+    expect(screen.queryByText('chat.response_interrupted')).not.toBeInTheDocument()
+    const call = screen.getByRole('button', { name: /web_fetch/ })
+    expect(call).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('PAGE_RESULT')).not.toBeInTheDocument()
+    fireEvent.click(call)
+    expect(screen.getByText('PAGE_RESULT')).toBeInTheDocument()
+  })
+
+  it.each([false, true])(
+    'marks a reply cut off while it was being written, once, after its content (column %s)',
+    (columnStyle) => {
+      const toolRow = {
+        runId: 'run',
+        toolCallId: 'call',
+        toolName: 'web_fetch',
+        args: { url: 'https://example.com' },
+        status: 'completed' as const,
+        content: 'PAGE'
+      }
+      const cases: Array<{ message: ChatSession['messages'][number]; marked: number }> = [
+        { message: { role: 'assistant', content: 'partial', runState: 'streaming' }, marked: 1 },
+        {
+          message: {
+            role: 'assistant',
+            content: '',
+            runState: 'streaming',
+            toolHistory: [toolRow]
+          },
+          marked: 1
+        },
+        { message: { role: 'assistant', content: '', runState: 'streaming' }, marked: 1 },
+        // A legacy empty placeholder keeps its line; a finished reply has none.
+        { message: { role: 'assistant', content: '' }, marked: 1 },
+        { message: { role: 'assistant', content: 'done' }, marked: 0 },
+        // Only the exact value counts.
+        {
+          message: { role: 'assistant', content: 'done', runState: 'other' as never },
+          marked: 0
+        }
+      ]
+      for (const { message, marked } of cases) {
+        const view = renderChatMessageList(
+          {
+            id: 'cut',
+            title: 'Cut',
+            messages: [{ role: 'user', content: 'hi' }, message]
+          },
+          { columnStyle }
+        )
+        expect(screen.queryAllByText('chat.response_interrupted')).toHaveLength(marked)
+        view.unmount()
+      }
+    }
+  )
+
+  it('never marks the live reply, only an earlier one that was cut off', () => {
+    renderChatMessageList(
+      {
+        id: 'live',
+        title: 'Live',
+        messages: [
+          { role: 'user', content: 'one' },
+          { role: 'assistant', content: 'cut', runState: 'streaming' },
+          { role: 'user', content: 'two' },
+          { role: 'assistant', content: 'writing', runState: 'streaming' }
+        ]
+      },
+      { isLoading: true }
+    )
+    expect(screen.queryAllByText('chat.response_interrupted')).toHaveLength(1)
+    expect(screen.getByText('writing')).toBeInTheDocument()
+  })
+})
 
 describe('ChatMessageList context compression summary', () => {
   it('renders compressed context as a collapsed expandable row', () => {
@@ -1277,6 +1480,156 @@ describe('ChatMessageList text selection and reply actions', () => {
       text: 'Beta'
     })
   })
+
+  it('keeps download menu targets current through cloned and reordered duplicate sources', async () => {
+    const attachments: ChatAttachment[] = Array.from({ length: 8 }, (_, index) => ({
+      type: 'image',
+      url: 'data:image/png;base64,' + String.fromCharCode(65 + index).repeat(4096),
+      fileName: 'download-' + index + '.png'
+    }))
+    attachments[1].url = attachments[0].url
+    const before = structuredClone(attachments)
+    const onDownloadAttachment = vi.fn<OnDownloadAttachment>()
+    const makeSession = (items: ChatAttachment[]): ChatSession => {
+      const message = {
+        id: 'download-menu-message',
+        role: 'assistant' as const,
+        content: 'These image results are ready.',
+        attachments: items
+      }
+      return { id: 'download-menu-clones', title: 'Download menu clones', messages: [message] }
+    }
+    const view = renderChatMessageList(makeSession(attachments), { onDownloadAttachment })
+    fireEvent.click(screen.getByLabelText('下载回答'))
+    expect(screen.getAllByRole('menuitem', { name: /^Image: download-/ })).toHaveLength(8)
+    expect(screen.getByLabelText('Markdown (.md)')).toBeInTheDocument()
+    const distinctItem = screen.getByRole('menuitem', { name: 'Image: download-7.png' })
+    act(() => distinctItem.focus())
+
+    const cloned = attachments.map((item) => ({ ...item }))
+    view.rerender(buildChatMessageList(makeSession(cloned), { onDownloadAttachment }))
+    expect(screen.getByRole('menuitem', { name: 'Image: download-7.png' })).toBe(distinctItem)
+    expect(document.activeElement).toBe(distinctItem)
+
+    const reordered = [cloned[7], ...cloned.slice(0, 7)].map((item) => ({ ...item }))
+    view.rerender(buildChatMessageList(makeSession(reordered), { onDownloadAttachment }))
+    expect(screen.getAllByRole('menuitem', { name: /^Image: download-/ })).toHaveLength(8)
+    expect(screen.getByRole('menuitem', { name: 'Image: download-7.png' })).toBe(distinctItem)
+    expect(document.activeElement).toBe(distinctItem)
+    const firstDuplicate = screen.getByRole('menuitem', { name: 'Image: download-0.png' })
+    const secondDuplicate = screen.getByRole('menuitem', { name: 'Image: download-1.png' })
+    expect(firstDuplicate).not.toBe(secondDuplicate)
+
+    // Identical source identities match by occurrence; filenames are download metadata.
+    for (const [index, expected] of [reordered[1], reordered[2], reordered[0]].entries()) {
+      if (index) fireEvent.click(screen.getByLabelText('下载回答'))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Image: ' + expected.fileName }))
+      expect(onDownloadAttachment.mock.calls[index][0]).toBe(expected)
+      await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+    }
+    expect(onDownloadAttachment).toHaveBeenCalledTimes(3)
+    expect(attachments).toEqual(before)
+  })
+
+  it('replaces an attachment-only download target while its menu is open', async () => {
+    const original: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,' + 'A'.repeat(4096),
+      fileName: 'changing.png'
+    }
+    const replacement: ChatAttachment = {
+      ...original,
+      url: 'data:image/png;base64,' + 'B'.repeat(4096)
+    }
+    const onDownloadAttachment = vi.fn<OnDownloadAttachment>()
+    const makeSession = (item: ChatAttachment): ChatSession => {
+      const message = {
+        id: 'changing-download-message',
+        role: 'assistant' as const,
+        content: '',
+        attachments: [item]
+      }
+      return { id: 'changing-download-source', title: 'Changing source', messages: [message] }
+    }
+    const view = renderChatMessageList(makeSession(original), { onDownloadAttachment })
+    fireEvent.click(screen.getByLabelText('下载附件'))
+    const oldItem = screen.getByRole('menuitem', { name: 'Image: changing.png' })
+
+    view.rerender(buildChatMessageList(makeSession(replacement), { onDownloadAttachment }))
+    const currentItem = screen.getByRole('menuitem', { name: 'Image: changing.png' })
+    expect(currentItem).not.toBe(oldItem)
+    expect(oldItem).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Markdown (.md)')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Text (.txt)')).not.toBeInTheDocument()
+    fireEvent.click(currentItem)
+    expect(onDownloadAttachment).toHaveBeenCalledExactlyOnceWith(replacement)
+    expect(onDownloadAttachment.mock.calls[0][0]).toBe(replacement)
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+  })
+
+  it('clears download menu entries across session changes, deactivation and unmount', async () => {
+    const oldAttachment: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,QQ==',
+      fileName: 'old-thread.png'
+    }
+    const currentAttachment: ChatAttachment = {
+      type: 'image',
+      url: 'data:image/png;base64,Qg==',
+      fileName: 'current-thread.png'
+    }
+    const oldMessage = {
+      id: 'old-download-message',
+      role: 'assistant' as const,
+      content: 'Old thread response.',
+      attachments: [oldAttachment]
+    }
+    const currentMessage = {
+      id: 'current-download-message',
+      role: 'assistant' as const,
+      content: '',
+      attachments: [currentAttachment]
+    }
+    const oldSession: ChatSession = {
+      id: 'old-download-thread',
+      title: 'Old thread',
+      messages: [oldMessage]
+    }
+    const currentSession: ChatSession = {
+      id: 'current-download-thread',
+      title: 'Current thread',
+      messages: [currentMessage]
+    }
+    const onDownloadAttachment = vi.fn<OnDownloadAttachment>()
+    const view = renderChatMessageList(oldSession, { active: true, onDownloadAttachment })
+    fireEvent.click(screen.getByLabelText('下载回答'))
+    expect(screen.getByRole('menuitem', { name: 'Image: old-thread.png' })).toBeInTheDocument()
+
+    view.rerender(buildChatMessageList(currentSession, { active: true, onDownloadAttachment }))
+    expect(screen.queryByLabelText('Image: old-thread.png')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('下载附件'))
+    expect(screen.getByRole('menuitem', { name: 'Image: current-thread.png' })).toBeInTheDocument()
+    expect(onDownloadAttachment).not.toHaveBeenCalled()
+
+    view.rerender(buildChatMessageList(currentSession, { active: false, onDownloadAttachment }))
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Image: current-thread.png')).not.toBeInTheDocument()
+    )
+    view.rerender(buildChatMessageList(currentSession, { active: true, onDownloadAttachment }))
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('下载附件'))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Image: current-thread.png' }))
+    expect(onDownloadAttachment).toHaveBeenCalledExactlyOnceWith(currentAttachment)
+    expect(onDownloadAttachment.mock.calls[0][0]).toBe(currentAttachment)
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument())
+
+    fireEvent.click(screen.getByLabelText('下载附件'))
+    expect(screen.getByRole('menuitem', { name: 'Image: current-thread.png' })).toBeInTheDocument()
+    view.unmount()
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Image: current-thread.png')).not.toBeInTheDocument()
+    expect(onDownloadAttachment).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('ChatMessageList managed image derivatives', () => {
@@ -2147,7 +2500,7 @@ describe('ChatMessageList layout', () => {
 })
 
 describe('model capacity retry countdown', () => {
-  it.each(['server-overloaded', 'server-error', 'request-timeout'] as const)(
+  it.each(['server-overloaded', 'server-error', 'request-timeout', 'connection-error'] as const)(
     'ticks down on the real message component for %s and removes the timer after completion',
     async (reason) => {
       vi.useFakeTimers()

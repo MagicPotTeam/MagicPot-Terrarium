@@ -22,7 +22,7 @@ type CanvasMultiSelectionOverlayProps = {
   stageScale: number
   groupCreateLabel?: string
   t: CanvasTranslate
-  onDragSelectedItems: (items: CanvasItem[], dataTransfer: DataTransfer) => void
+  onDragSelectedItems: (items: CanvasItem[], dataTransfer: DataTransfer) => boolean | void
   onCopySelectedItems: (items: CanvasItem[]) => void
   onDownloadSelectedItems: (items: CanvasItem[], fileName: string) => void
   onOpenAgentSendMenu: (anchor: HTMLElement, items: CanvasItem[]) => void

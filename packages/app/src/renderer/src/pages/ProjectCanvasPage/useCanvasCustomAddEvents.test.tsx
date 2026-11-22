@@ -1,12 +1,24 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasCustomAddEvents } from './useCanvasCustomAddEvents'
+import { dispatchCanvasTargetMediaAttachmentToCanvas } from './canvasTargetMediaDispatch'
 import type { CanvasImageItem } from './types'
 import { CANVAS_NEW_RESULT_HINT_EVENT, type CanvasNewResultHintDetail } from './canvasNewResultHint'
 
 describe('useCanvasCustomAddEvents', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('forwards an explicit team label end-to-end without deriving it from fileName', async () => {
+    const addImageToCanvas = vi.fn(async (_src: string, options?: { teamImageLabel?: string }) => ({ id: 'image-1', type: 'image', ...options }) as CanvasImageItem)
+    renderHook(() => useCanvasCustomAddEvents({ canvasId: 'canvas-1', addImageToCanvas, addImagesToCanvas: vi.fn(), addVideoToCanvas: vi.fn(), addModel3DUrlToCanvas: vi.fn(), addTextToCanvas: vi.fn(), handleAppendGenerationTraceCandidate: vi.fn() }))
+    const attachment = { type: 'image' as const, url: 'data:image/png;base64,AA==', fileName: '普通.png' }
+    let result: Awaited<ReturnType<typeof dispatchCanvasTargetMediaAttachmentToCanvas>> | undefined
+    await act(async () => { result = await dispatchCanvasTargetMediaAttachmentToCanvas(attachment, 'canvas-1', 'member', { teamImageLabel: '设计师·图1' }) })
+    expect(result?.placedCanvasItems[0]).toMatchObject({ teamImageLabel: '设计师·图1' })
+    await act(async () => { await dispatchCanvasTargetMediaAttachmentToCanvas(attachment, 'canvas-1') })
+    expect(addImageToCanvas.mock.calls[1][1]).not.toHaveProperty('teamImageLabel')
   })
 
   it('forwards custom image source dimensions to canvas intake', async () => {

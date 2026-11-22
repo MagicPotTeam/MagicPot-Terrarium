@@ -1,3 +1,4 @@
+import { registerMagicPotPreparationTools } from '../api/magicPotMcpServer'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod/v4'
 import { Config } from '@shared/config/config'
@@ -232,6 +233,7 @@ export const createMagicPotMcpServer = ({
     name: 'magicpot-chat',
     version: '1.0.0'
   })
+  registerMagicPotPreparationTools(server)
   const resolveConfig = (): Config => {
     const resolved = configProvider?.() || config
     if (!resolved) {

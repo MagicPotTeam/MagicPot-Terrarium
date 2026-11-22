@@ -92,10 +92,26 @@ export interface CanvasHtmlItem extends CanvasItemBase {
 // ─── 图片节点 ───
 export type CanvasImageAsset = HTMLImageElement | ImageBitmap | HTMLCanvasElement
 
+/**
+ * Verified record of the source bytes a crop was measured on. width/height are
+ * the natural pixel size of those bytes, which is the space of the crop numbers.
+ * 'confirm' is attached after a crop confirm; 'reopen' marks a legacy crop that
+ * was re-measured when the board was opened (it never proves an identity crop).
+ */
+export interface CanvasImageCropSource {
+  version: 1
+  origin: 'confirm' | 'reopen'
+  width: number
+  height: number
+  sizeBytes: number
+  sha256: string
+}
+
 export interface CanvasImageItem extends CanvasItemBase {
   type: 'image'
   src: string // data URL or object URL
   fileName?: string
+  teamImageLabel?: string
   sourceFile?: Blob
   sourceUrlOwned?: boolean
   sizeBytes?: number
@@ -106,6 +122,7 @@ export interface CanvasImageItem extends CanvasItemBase {
   sourceWidth?: number
   sourceHeight?: number
   crop?: { x: number; y: number; width: number; height: number }
+  cropSource?: CanvasImageCropSource
   promptId?: string
   fileItem?: FileItem
   media?: MediaReference

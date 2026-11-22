@@ -1,6 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-refresh/only-export-components */
 import React from 'react'
+import { createPortal } from 'react-dom'
+import ChatToolCalls from './ChatToolCalls'
 import { isEqual } from 'es-toolkit'
 import {
   Box,
@@ -37,6 +39,7 @@ import {
   ContentCopy as ContentCopyIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
+import ChatTranscriptEmptyState from './ChatTranscriptEmptyState'
 import type { TFunction } from 'i18next'
 import ReactMarkdown, { type Components as MarkdownComponents } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -47,7 +50,15 @@ import {
   ChatAttachment
 } from '../../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import { type ChatSession } from '../chatStorage'
+import { DEFAULT_CHAT_IMAGE_COUNT_LIMIT } from '@shared/llm/chatImageCountLimit'
+import { assertExplicitUserImageCount } from '../chatExplicitImageCount'
+import {
+  assertNoUnverifiedPrimaryReports,
+  isPrimaryReportFileDescriptor,
+  isUnavailablePrimaryReportFile
+} from '@shared/llm/unverifiedReport'
 import { normalizeLocalMediaUrl, getDownloadFileNameFromUrl } from '../chatPageShared'
+import { useReportBundleBindingRefused } from '../reportBundleRefusals'
 import {
   buildAssistantReplyDownloadBaseName,
   extractAssistantReplyTextContent,
@@ -56,7 +67,8 @@ import {
   resolveAssistantReplyDownloadMode,
   resolveAssistantSidecarExportEntries
 } from '../chatReplyDownloadUtils'
-import { getChatAttachmentRenderKeys, getVisibleChatAttachments } from '../chatAttachmentVisibility'
+import { getVisibleChatAttachments } from '../chatAttachmentVisibility'
+import { useChatAttachmentRenderKeys } from '../useChatAttachmentRenderKeys'
 import {
   setAgentAttachmentDragPayload,
   setAgentImageDragPayload,
@@ -75,7 +87,11 @@ import { getDroppedLocalImageContent } from '@renderer/utils/droppedImageUtils'
 import { DccBridgeTarget, isSupportedDccBridgeModelSourceFormat } from '@shared/api/svcDccBridge'
 import type { ManagedMediaDerivativeMaxEdge, ManagedMediaSvc } from '@shared/api/svcManagedMedia'
 import { normalizeMediaReference, type MediaReference } from '@shared/mediaReference'
-import type { SxProps, Theme } from '@mui/material/styles'
+import { alpha, keyframes, type SxProps, type Theme } from '@mui/material/styles'
+import {
+  getAgentColumnTokens,
+  type AgentColumnTokens
+} from '@renderer/components/agentColumnTokens'
 import {
   ensureCachedChatImageDerivative,
   getChatImageDerivativeCacheKey,
@@ -88,8 +104,37 @@ export {
   resetChatImageDerivativeCacheForTests
 } from '../chatImageDerivativeScheduler'
 
+/**
+ * Command cards that keep their place in the transcript: they follow the message with the index
+ * `after - 1` (0: they come before the first message).
+ */
+export type ChatAnchoredTailGroup = { after: number; node: React.ReactNode }
+
 interface ChatMessageListProps {
+  workbench?: boolean
   active?: boolean
+  /**
+   * Agent column look (flat rows, neutral user bubble, one-line tool rows). The
+   * full-page chat leaves it off and keeps its own look.
+   */
+  columnStyle?: boolean
+  /**
+   * Agent column only: rows that follow the last message (command cards). They are the last
+   * rows of the scroll content, before the working line, and stay outside the virtual window.
+   */
+  tail?: React.ReactNode
+  /**
+   * Agent column only: an element drawn right after the tail, also while it is empty (the
+   * host of the member approval cards). Unlike the tail it does not replace the empty state.
+   */
+  tailEnd?: React.ReactNode
+  /**
+   * Agent column only: command cards that newer messages have followed. They stay where they
+   * were created, inside the measured row of the message they follow.
+   */
+  anchoredTail?: readonly ChatAnchoredTailGroup[]
+  /** Changes when a row was just added to the tail: the list then scrolls to its end. */
+  tailScrollToken?: number
   currentSession: ChatSession | undefined
   isLoading: boolean
   loadingStatus?: ChatLoadingStatus
@@ -108,6 +153,22 @@ interface ChatMessageListProps {
     hiddenContext: string | undefined,
     baseMessages: ChatMessage[]
   ) => void
+  /**
+   * Projects the history an edited message keeps onto the history its send
+   * will actually carry (isolated / last-N skills). The default keeps every
+   * message, which can only refuse more than the send path does.
+   */
+  projectEditHistory?: (prefix: ChatMessage[]) => ChatMessage[]
+  /**
+   * MAIN's verify of the bound report bundles an edit keeps (projected history plus the
+   * edited attachments), awaited before the form gives up the edited text. A rejection keeps
+   * the form open with its message. Only called when a primary report is present; without
+   * it the synchronous shape guard is the only check before submit.
+   */
+  preflightEditReports?: (
+    prefix: ChatMessage[],
+    attachments: ChatAttachment[] | undefined
+  ) => Promise<void>
   onPreviewImage: (url: string) => void
   onImageContextMenu: (event: React.MouseEvent, imageUrl: string) => void
   onDownloadAttachment: (attachment: ChatAttachment) => void
@@ -125,6 +186,34 @@ export type ChatPendingConfirmation = {
 }
 
 const COPIED_FEEDBACK_DURATION_MS = 1800
+/** The text "Copy" button of a code block in the Agent column reads "Copied" for this long. */
+const COLUMN_CODE_COPIED_FEEDBACK_MS = 1500
+/** Rows of the Agent column are this far apart. */
+const COLUMN_ROW_GAP_PX = 12
+const COLUMN_CODE_BLOCK_BG = { light: '#1a1a2e', dark: '#0d0d1a' } as const
+
+const columnPulse = keyframes({ '0%, 100%': { opacity: 0.4 }, '50%': { opacity: 1 } })
+const columnPulseSx = {
+  animation: `${columnPulse} 1.5s ease-in-out infinite`,
+  '@media (prefers-reduced-motion: reduce)': { animation: 'none' }
+} as const
+
+/** 22px bordered icon button of the per-message action row in the Agent column. */
+const columnActionButtonSx = (tokens: AgentColumnTokens): SxProps<Theme> => ({
+  width: 22,
+  height: 22,
+  p: 0,
+  borderRadius: `${tokens.radius.control}px`,
+  border: '1px solid',
+  borderColor: tokens.border,
+  color: tokens.muted,
+  transition: 'color 150ms, border-color 150ms',
+  '&:hover': { color: tokens.text, borderColor: tokens.muted, bgcolor: 'transparent' },
+  '&.Mui-focusVisible': tokens.focusRing,
+  '&.Mui-disabled': { color: tokens.muted, opacity: tokens.disabledOpacity },
+  '&.MuiButtonBase-root.MuiIconButton-colorSuccess': { color: 'success.main' }
+})
+const COLUMN_ACTION_ICON_SIZE = 12
 const CHAT_VIRTUALIZATION_THRESHOLD = 40
 const CHAT_VIRTUALIZATION_OVERSCAN_PX = 900
 const CHAT_ESTIMATED_MESSAGE_HEIGHT = 112
@@ -563,7 +652,19 @@ const CopiableIconButton: React.FC<{
   active?: boolean
   iconSize?: number | string
   buttonSx?: SxProps<Theme>
-}> = ({ copyLabel, copiedLabel, content, active = true, iconSize = 14, buttonSx }) => {
+  /** When set, the control is a text button with these two words instead of an icon. */
+  textLabels?: { copy: string; copied: string }
+  feedbackMs?: number
+}> = ({
+  copyLabel,
+  copiedLabel,
+  content,
+  active = true,
+  iconSize = 14,
+  buttonSx,
+  textLabels,
+  feedbackMs = COPIED_FEEDBACK_DURATION_MS
+}) => {
   const { t } = useTranslation()
   const { notifySuccess, notifyError } = useMessage()
   const [copied, setCopied] = React.useState(false)
@@ -607,14 +708,30 @@ const CopiableIconButton: React.FC<{
         setCopied(false)
         setTooltipOpen(false)
         timerRef.current = null
-      }, COPIED_FEEDBACK_DURATION_MS)
+      }, feedbackMs)
     } catch {
       if (!isCurrent()) return
       notifyError(t('chat.copy_failed', { defaultValue: 'Failed to copy text. Try again.' }))
     } finally {
       if (pendingRef.current === operation) pendingRef.current = null
     }
-  }, [active, content, copiedLabel, notifyError, notifySuccess, t])
+  }, [active, content, copiedLabel, feedbackMs, notifyError, notifySuccess, t])
+
+  if (textLabels) {
+    return (
+      <Box
+        component="button"
+        type="button"
+        aria-label={copied ? copiedLabel : copyLabel}
+        data-copied={copied ? 'true' : undefined}
+        disabled={!active || !content}
+        onClick={handleClick}
+        sx={buttonSx}
+      >
+        {copied ? textLabels.copied : textLabels.copy}
+      </Box>
+    )
+  }
 
   return (
     <Tooltip
@@ -687,8 +804,46 @@ const MeasuredChatRow: React.FC<{
   )
 }
 
+/**
+ * A row at the end of the column transcript that grows afterwards keeps a list that stood at
+ * its end there. Whether it stood at the end is read from the geometry before the growth: the
+ * scroll event of the frame in which the row grew has already seen the taller content.
+ */
+function useKeepEndOnGrowth(
+  elementRef: React.RefObject<HTMLDivElement | null>,
+  enabled: boolean,
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  wasNearBottomRef: React.MutableRefObject<boolean>
+): void {
+  const heightRef = React.useRef(0)
+  React.useEffect(() => {
+    const element = elementRef.current
+    if (!enabled || !element || typeof ResizeObserver === 'undefined') return
+    heightRef.current = 0
+    const observer = new ResizeObserver(() => {
+      const height = element.getBoundingClientRect().height
+      const growth = height - heightRef.current
+      heightRef.current = height
+      const container = containerRef.current
+      if (!container || growth <= 0) return
+      const end = Math.max(0, container.scrollHeight - container.clientHeight)
+      if (end - container.scrollTop - growth > CHAT_STICK_TO_BOTTOM_THRESHOLD_PX) return
+      container.scrollTop = end
+      wasNearBottomRef.current = true
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [elementRef, enabled, containerRef, wasNearBottomRef])
+}
+
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
+  workbench: workbenchProp = false,
   active = true,
+  columnStyle = false,
+  tail,
+  tailEnd,
+  anchoredTail,
+  tailScrollToken,
   currentSession,
   isLoading,
   loadingStatus,
@@ -700,6 +855,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   onDropImageAttachments,
   onRegisterEditingAttachmentReceiver,
   onSendEditedMessage,
+  projectEditHistory,
+  preflightEditReports,
   onPreviewImage,
   onImageContextMenu,
   onDownloadAttachment,
@@ -711,8 +868,35 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const { t } = useTranslation()
   const theme = useTheme()
   const isLight = theme.palette.mode === 'light'
+  // Undefined outside the Agent column: every row then keeps the full-page look.
+  const columnTokens = React.useMemo(
+    () => (columnStyle ? getAgentColumnTokens(theme) : undefined),
+    [columnStyle, theme]
+  )
   const { notifySuccess } = useMessage()
+  // The workbench (Agent column) rows: the column presentation.
+  const workbench = workbenchProp || columnStyle
   const messages = React.useMemo(() => currentSession?.messages ?? [], [currentSession?.messages])
+  const hasTail = columnStyle && tail !== undefined && tail !== null && tail !== false
+  const tailRef = React.useRef<HTMLDivElement | null>(null)
+  const hasTailEnd = columnStyle && tailEnd !== undefined && tailEnd !== null && tailEnd !== false
+  const tailEndRef = React.useRef<HTMLDivElement | null>(null)
+  // The cards of each row: by the index of the message they follow, -1 for those before the
+  // first message. A place past the last message falls back to the last message.
+  const anchoredTailByRow = React.useMemo(() => {
+    if (!columnStyle || !anchoredTail?.length || messages.length === 0) return null
+    const byRow = new Map<number, React.ReactNode[]>()
+    for (const group of anchoredTail) {
+      const row = Math.min(Math.max(0, Math.floor(group.after)), messages.length) - 1
+      byRow.set(row, [
+        ...(byRow.get(row) ?? []),
+        <React.Fragment key={group.after}>{group.node}</React.Fragment>
+      ])
+    }
+    return byRow
+  }, [anchoredTail, columnStyle, messages.length])
+  // With a tail the working line moves below it: the last message portals it into this host.
+  const [workingLineHost, setWorkingLineHost] = React.useState<HTMLDivElement | null>(null)
   const contextCompressionSummary = currentSession?.contextCompression
   const sidecarExportEntries = React.useMemo(
     () => resolveAssistantSidecarExportEntries(messages, currentSession?.skillId),
@@ -822,6 +1006,9 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         bottom: 0,
         loadingGap: 0,
         forcedLoadingIndex: null,
+        forcedEditingIndex: null,
+        editingGap: 0,
+        editingAfterWindow: false,
         anchorStart: 0
       }
     }
@@ -842,20 +1029,44 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     end = Math.max(start + 1, end)
     const forcedLoadingIndex =
       loadingIndex !== null && (loadingIndex < start || loadingIndex >= end) ? loadingIndex : null
+    const forcedEditingIndex =
+      editingMessageIndex !== null &&
+      Number.isInteger(editingMessageIndex) &&
+      editingMessageIndex >= 0 &&
+      editingMessageIndex < messages.length &&
+      messages[editingMessageIndex]?.role === 'user' &&
+      (editingMessageIndex < start || editingMessageIndex >= end) &&
+      editingMessageIndex !== forcedLoadingIndex
+        ? editingMessageIndex
+        : null
+    const editingAfterWindow = forcedEditingIndex !== null && forcedEditingIndex >= end
+    const renderedWindowEnd =
+      editingAfterWindow && forcedEditingIndex !== null ? forcedEditingIndex + 1 : end
+    const lastEnd = forcedLoadingIndex !== null ? forcedLoadingIndex + 1 : renderedWindowEnd
     return {
       start,
       end,
-      top: offsets[start],
-      bottom:
-        forcedLoadingIndex === null
-          ? offsets[messages.length] - offsets[end]
-          : offsets[messages.length] - offsets[forcedLoadingIndex + 1],
+      top:
+        forcedEditingIndex !== null && forcedEditingIndex < start
+          ? offsets[forcedEditingIndex]
+          : offsets[start],
+      bottom: offsets[messages.length] - offsets[lastEnd],
+      editingGap:
+        forcedEditingIndex === null
+          ? 0
+          : editingAfterWindow
+            ? offsets[forcedEditingIndex] - offsets[end]
+            : offsets[start] - offsets[forcedEditingIndex + 1],
+      editingAfterWindow,
       loadingGap:
-        forcedLoadingIndex === null ? 0 : Math.max(0, offsets[forcedLoadingIndex] - offsets[end]),
+        forcedLoadingIndex === null
+          ? 0
+          : Math.max(0, offsets[forcedLoadingIndex] - offsets[renderedWindowEnd]),
       forcedLoadingIndex,
+      forcedEditingIndex,
       anchorStart
     }
-  }, [heightRevision, itemHeight, loadingIndex, messages.length, scroll, virtualized])
+  }, [editingMessageIndex, heightRevision, itemHeight, loadingIndex, messages, scroll, virtualized])
   visibleStartRef.current = virtualWindow.anchorStart
 
   React.useLayoutEffect(() => {
@@ -908,6 +1119,22 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     setScroll({ top: container.scrollTop, viewport: container.clientHeight })
   }, [chatContainerRef, heightRevision])
 
+  // A row that was just added to the tail is scrolled into view, wherever the list stood.
+  const tailScrollTokenRef = React.useRef(tailScrollToken)
+  React.useLayoutEffect(() => {
+    if (tailScrollTokenRef.current === tailScrollToken) return
+    tailScrollTokenRef.current = tailScrollToken
+    const container = chatContainerRef.current
+    if (!container || !hasTail) return
+    container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight)
+    wasNearBottomRef.current = true
+    setScroll({ top: container.scrollTop, viewport: container.clientHeight })
+  }, [chatContainerRef, hasTail, tailScrollToken])
+  // A tail row that grows afterwards (its content arrives) keeps a list that stood at its end
+  // there; so does an approval card that arrives after the tail.
+  useKeepEndOnGrowth(tailRef, hasTail, chatContainerRef, wasNearBottomRef)
+  useKeepEndOnGrowth(tailEndRef, hasTailEnd, chatContainerRef, wasNearBottomRef)
+
   const handleStartEditing = React.useCallback(
     (index: number, content: string) => {
       const scrollContainer = chatContainerRef.current
@@ -954,7 +1181,17 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         flexDirection: 'column',
         maxWidth: '900px',
         mx: 'auto',
-        width: '100%'
+        width: '100%',
+        // Every row ends with the 12px row gap, so 4px more gives the 16px bottom inset.
+        ...(columnTokens
+          ? {
+              boxSizing: 'border-box',
+              px: '8px',
+              pt: '16px',
+              pb: '4px',
+              fontSize: columnTokens.fontSize.base
+            }
+          : {})
       }}
     >
       {contextCompressionSummary ? (
@@ -965,9 +1202,13 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           manual={contextCompressionSummary.manual}
           t={t}
           theme={theme}
+          columnTokens={columnTokens}
         />
       ) : null}
-      {messages.length === 0 && !contextCompressionSummary && (
+      {messages.length === 0 && !contextCompressionSummary && columnTokens && !hasTail ? (
+        <ChatTranscriptEmptyState tokens={columnTokens} />
+      ) : null}
+      {messages.length === 0 && !contextCompressionSummary && !columnTokens && (
         <Box
           sx={{
             flex: 1,
@@ -979,7 +1220,20 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
             gap: 2
           }}
         >
-          <Typography variant="h6">{t('chat.welcome_message')}</Typography>
+          {workbench ? (
+            <Box sx={{ px: 2, textAlign: 'center' }}>
+              <Typography variant="subtitle2" color="text.primary">
+                {t('chat.workbench_empty', { defaultValue: 'Start a conversation' })}
+              </Typography>
+              <Typography variant="caption">
+                {t('chat.workbench_hint', {
+                  defaultValue: 'Ask a question, attach a file, or describe an image.'
+                })}
+              </Typography>
+            </Box>
+          ) : (
+            <Typography variant="h6">{t('chat.welcome_message')}</Typography>
+          )}
         </Box>
       )}
       {virtualized && virtualWindow.top > 0 ? (
@@ -989,15 +1243,39 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         />
       ) : null}
       {[
+        ...(virtualWindow.forcedEditingIndex !== null && !virtualWindow.editingAfterWindow
+          ? [virtualWindow.forcedEditingIndex]
+          : []),
         ...Array.from(
           { length: virtualWindow.end - virtualWindow.start },
           (_, offsetIndex) => offsetIndex + virtualWindow.start
         ),
+        ...(virtualWindow.forcedEditingIndex !== null && virtualWindow.editingAfterWindow
+          ? [virtualWindow.forcedEditingIndex]
+          : []),
         ...(virtualWindow.forcedLoadingIndex === null ? [] : [virtualWindow.forcedLoadingIndex])
       ].map((index) => {
         const message = messages[index]
         return (
           <React.Fragment key={messageIdentities[index]}>
+            {virtualWindow.forcedEditingIndex !== null &&
+            virtualWindow.editingAfterWindow &&
+            index === virtualWindow.forcedEditingIndex &&
+            virtualWindow.editingGap > 0 ? (
+              <div
+                data-testid="chat-virtual-editing-gap"
+                style={{ height: virtualWindow.editingGap, flexShrink: 0 }}
+              />
+            ) : null}
+            {virtualWindow.forcedEditingIndex !== null &&
+            !virtualWindow.editingAfterWindow &&
+            index === virtualWindow.start &&
+            virtualWindow.editingGap > 0 ? (
+              <div
+                data-testid="chat-virtual-editing-gap"
+                style={{ height: virtualWindow.editingGap, flexShrink: 0 }}
+              />
+            ) : null}
             {index === virtualWindow.forcedLoadingIndex && virtualWindow.loadingGap > 0 ? (
               <div
                 data-testid="chat-virtual-loading-gap"
@@ -1009,19 +1287,29 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               identity={messageIdentities[index]}
               index={index}
               enabled={virtualized}
-              bottomSpacing={message.role === 'user' ? 0 : 16}
+              bottomSpacing={columnTokens ? COLUMN_ROW_GAP_PX : message.role === 'user' ? 0 : 16}
               onHeight={measureRow}
             >
+              {index === 0 && anchoredTailByRow?.has(-1) ? (
+                <AnchoredTailCards placement="before">
+                  {anchoredTailByRow.get(-1)}
+                </AnchoredTailCards>
+              ) : null}
               {message.role === 'user' ? (
                 editingMessageIndex === index ? (
                   <UserMessageEditForm
                     key={messageIdentities[index]}
                     message={message}
                     index={index}
+                    historyPrefix={(() => {
+                      const prefix = currentSession?.messages.slice(0, index) ?? []
+                      return projectEditHistory ? projectEditHistory(prefix) : prefix
+                    })()}
                     editingContent={editingContent}
                     onSetEditingContent={onSetEditingContent}
                     onDropImageAttachments={onDropImageAttachments}
                     onRegisterEditingAttachmentReceiver={onRegisterEditingAttachmentReceiver}
+                    preflightReports={preflightEditReports}
                     onCancel={() => {
                       onSetEditingIndex(null)
                       onSetEditingContent('')
@@ -1039,6 +1327,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     }}
                     savedChatScrollPositionRef={editScrollPositionRef}
                     isLight={isLight}
+                    columnTokens={columnTokens}
                   />
                 ) : (
                   <UserMessageBubble
@@ -1055,6 +1344,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     onSendModelToDcc={onSendModelToDcc}
                     t={t}
                     theme={theme}
+                    columnTokens={columnTokens}
                   />
                 )
               ) : (
@@ -1075,6 +1365,13 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   loadingStatus={
                     isLoading && index === messages.length - 1 ? loadingStatus : undefined
                   }
+                  workingLineHost={
+                    (hasTail || hasTailEnd) && isLoading && index === messages.length - 1
+                      ? workingLineHost
+                      : null
+                  }
+                  // The column shows the pending approval card instead of the working line.
+                  workingLineHidden={columnStyle && Boolean(pendingConfirmation)}
                   onPreviewImage={onPreviewImage}
                   onImageContextMenu={onImageContextMenu}
                   onDownloadAttachment={onDownloadAttachment}
@@ -1082,8 +1379,14 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   notifySuccess={notifySuccess}
                   t={t}
                   theme={theme}
+                  columnTokens={columnTokens}
                 />
               )}
+              {anchoredTailByRow?.has(index) ? (
+                <AnchoredTailCards placement="after">
+                  {anchoredTailByRow.get(index)}
+                </AnchoredTailCards>
+              ) : null}
             </MeasuredChatRow>
           </React.Fragment>
         )
@@ -1097,17 +1400,72 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           }}
         />
       ) : null}
+      {columnStyle ? (
+        // Always there in the column, also while it is empty: a card that arrives in a live
+        // region that already exists is announced.
+        <Box
+          ref={tailRef}
+          data-testid="chat-transcript-tail"
+          aria-live="polite"
+          sx={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: `${COLUMN_ROW_GAP_PX}px`,
+            minWidth: 0,
+            flexShrink: 0,
+            '&:not(:empty)': { mb: `${COLUMN_ROW_GAP_PX}px` }
+          }}
+        >
+          {hasTail ? tail : null}
+        </Box>
+      ) : null}
+      {hasTailEnd ? (
+        <Box ref={tailEndRef} sx={{ flexShrink: 0, minWidth: 0 }}>
+          {tailEnd}
+        </Box>
+      ) : null}
       {pendingConfirmation ? (
         <PendingConfirmationPanel
           confirmation={pendingConfirmation}
           active={active}
           onResolve={onResolvePendingConfirmation}
+          columnStyle={columnStyle}
+        />
+      ) : null}
+      {/* The working line is the last child, after the tail and the cards at its end. */}
+      {hasTail || hasTailEnd ? (
+        <Box
+          ref={setWorkingLineHost}
+          data-testid="chat-transcript-working-line"
+          sx={{ flexShrink: 0, minWidth: 0, '&:not(:empty)': { mb: `${COLUMN_ROW_GAP_PX}px` } }}
         />
       ) : null}
       <div ref={messagesEndRef} />
     </Box>
   )
 }
+
+/** The command cards of one row: a column with the row gap, set off from the message. */
+const AnchoredTailCards: React.FC<{
+  placement: 'before' | 'after'
+  children: React.ReactNode
+}> = ({ placement, children }) => (
+  <Box
+    data-testid="chat-transcript-anchored-cards"
+    data-placement={placement}
+    sx={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: `${COLUMN_ROW_GAP_PX}px`,
+      minWidth: 0,
+      ...(placement === 'before'
+        ? { mb: `${COLUMN_ROW_GAP_PX}px` }
+        : { mt: `${COLUMN_ROW_GAP_PX}px` })
+    }}
+  >
+    {children}
+  </Box>
+)
 
 const ContextCompressionSummaryCard: React.FC<{
   summary: string
@@ -1116,7 +1474,8 @@ const ContextCompressionSummaryCard: React.FC<{
   manual?: boolean
   t: TFunction<'translation'>
   theme: any
-}> = ({ summary, coveredMessageCount, updatedAt, manual, t, theme }) => {
+  columnTokens?: AgentColumnTokens
+}> = ({ summary, coveredMessageCount, updatedAt, manual, t, theme, columnTokens }) => {
   const [expanded, setExpanded] = React.useState(false)
   const timeLabel = updatedAt
     ? new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -1132,6 +1491,111 @@ const ContextCompressionSummaryCard: React.FC<{
   const summaryLabel = t('chat.context_summary_expand_label', {
     defaultValue: 'Compressed context'
   })
+
+  if (columnTokens) {
+    // One-line accent banner; the summary opens below it in a capped scroll box.
+    const border = `1px solid ${alpha(columnTokens.accent, 0.25)}`
+    return (
+      <Box sx={{ mb: `${COLUMN_ROW_GAP_PX}px`, minWidth: 0, flexShrink: 0 }}>
+        <Box
+          data-testid="chat-context-summary-card"
+          sx={{
+            border,
+            borderRadius: `${columnTokens.radius.banner}px`,
+            bgcolor: alpha(columnTokens.accent, 0.06),
+            overflow: 'hidden'
+          }}
+        >
+          <Box
+            component="button"
+            type="button"
+            data-testid="chat-context-summary-toggle"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              width: '100%',
+              minWidth: 0,
+              m: 0,
+              border: 0,
+              padding: '6px 12px',
+              bgcolor: 'transparent',
+              color: columnTokens.text,
+              cursor: 'pointer',
+              font: 'inherit',
+              fontSize: columnTokens.fontSize.small,
+              lineHeight: '16px',
+              textAlign: 'left',
+              '&:focus-visible': columnTokens.focusRing
+            }}
+          >
+            <Box
+              component="span"
+              sx={{
+                color: columnTokens.accent,
+                fontWeight: 500,
+                whiteSpace: 'nowrap',
+                flexShrink: 0
+              }}
+            >
+              {title}
+            </Box>
+            <Box
+              component="span"
+              sx={{
+                flex: 1,
+                minWidth: 0,
+                color: columnTokens.muted,
+                fontSize: columnTokens.fontSize.micro,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {messageCountLabel}
+            </Box>
+            <CollapseIcon
+              sx={{
+                fontSize: 14,
+                flexShrink: 0,
+                color: columnTokens.muted,
+                transition: 'transform 120ms',
+                transform: expanded ? 'rotate(180deg)' : undefined,
+                '@media (prefers-reduced-motion: reduce)': { transition: 'none' }
+              }}
+            />
+          </Box>
+          {expanded ? (
+            <Box
+              data-testid="chat-context-summary-content"
+              sx={{
+                borderTop: border,
+                padding: '8px 12px',
+                maxHeight: '12rem',
+                overflowY: 'auto',
+                overflowX: 'hidden',
+                overflowWrap: 'anywhere',
+                fontSize: columnTokens.fontSize.small,
+                lineHeight: 1.5,
+                '& p': { m: '0 0 0.5em' },
+                '& > :last-child': { mb: 0 },
+                '& ul, & ol': { my: '0.4em', pl: '1.5em' },
+                '& ul': { listStyleType: 'disc' },
+                '& h1, & h2, & h3': { m: '0.8em 0 0.4em', fontSize: '1em', fontWeight: 600 },
+                '& strong': { fontWeight: 600 },
+                '& > :first-of-type': { mt: 0 },
+                '& code': { fontFamily: columnTokens.monoFont, fontSize: '0.9em' }
+              }}
+            >
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown>
+            </Box>
+          ) : null}
+        </Box>
+      </Box>
+    )
+  }
 
   return (
     <Box sx={{ px: 2, mb: 1.5, display: 'flex', justifyContent: 'flex-start' }}>
@@ -1267,8 +1731,10 @@ const PendingConfirmationPanel: React.FC<{
   confirmation: ChatPendingConfirmation
   active: boolean
   onResolve?: (requestId: string, confirmed: boolean) => void
-}> = ({ confirmation, active, onResolve }) => (
-  <Box sx={{ px: 2, mb: 2 }}>
+  columnStyle?: boolean
+}> = ({ confirmation, active, onResolve, columnStyle }) => (
+  // The Agent column already insets its rows by 8px and spaces them 12px apart.
+  <Box sx={columnStyle ? { mb: `${COLUMN_ROW_GAP_PX}px`, flexShrink: 0 } : { px: 2, mb: 2 }}>
     <Box
       data-testid="chat-pending-confirmation"
       sx={{
@@ -1416,9 +1882,18 @@ const FileAttachmentCard: React.FC<{
 }> = ({ attachment, ocrResult, onDownloadAttachment, t, theme }) => {
   const folderBodyColor = theme.palette.mode === 'light' ? '#f8fafc' : '#1f2937'
   const folderTabColor = theme.palette.mode === 'light' ? '#eef2ff' : '#111827'
+  // A report the request path refuses (no MAIN binding) is shown muted, with a short caption in
+  // place of the meta label; opening, dragging and downloading the file itself stay as they are.
+  // No aria-disabled on the card: it would expose the working Download button as disabled.
+  // So is a bound report that MAIN refused at the last verification in this window.
+  const refusedByMain = useReportBundleBindingRefused(attachment.reportBundleBinding)
+  const reportUnavailable =
+    isUnavailablePrimaryReportFile(attachment) ||
+    (refusedByMain && isPrimaryReportFileDescriptor(attachment))
 
   return (
     <Box
+      data-report-unavailable={reportUnavailable ? 'true' : undefined}
       draggable={Boolean(attachment.url)}
       onDragStart={(event) => {
         if (!attachment.url) return
@@ -1441,6 +1916,7 @@ const FileAttachmentCard: React.FC<{
         boxShadow: '0 10px 24px rgba(15,23,42,0.14)',
         cursor: 'default',
         overflow: 'visible',
+        ...(reportUnavailable ? { opacity: getAgentColumnTokens(theme).disabledOpacity } : null),
         '&::before': {
           content: '""',
           position: 'absolute',
@@ -1470,11 +1946,13 @@ const FileAttachmentCard: React.FC<{
             color="text.secondary"
             sx={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
           >
-            {buildFileMetaLabel({
-              fileName: attachment.fileName,
-              mimeType: attachment.mimeType,
-              sizeBytes: attachment.sizeBytes
-            })}
+            {reportUnavailable
+              ? t('chat.report_unavailable', { defaultValue: 'Unverified source' })
+              : buildFileMetaLabel({
+                  fileName: attachment.fileName,
+                  mimeType: attachment.mimeType,
+                  sizeBytes: attachment.sizeBytes
+                })}
           </Typography>
         </Box>
         <Typography
@@ -1532,7 +2010,8 @@ const sortReportBundleAttachmentsForDisplay = (
 const TextDragHandle: React.FC<{
   content: string
   title: string
-}> = ({ content, title }) => (
+  columnTokens?: AgentColumnTokens
+}> = ({ content, title, columnTokens }) => (
   <Tooltip title={title} placement="top">
     <IconButton
       size="small"
@@ -1543,16 +2022,23 @@ const TextDragHandle: React.FC<{
         event.dataTransfer.setData('text/plain', content || '')
         event.dataTransfer.effectAllowed = 'copy'
       }}
-      sx={{
-        color: 'text.disabled',
-        width: 28,
-        height: 28,
-        cursor: 'default',
-        '&:hover': { color: 'text.secondary' },
-        '&:active': { cursor: 'default' }
-      }}
+      sx={
+        columnTokens
+          ? ([
+              columnActionButtonSx(columnTokens),
+              { cursor: 'default', '&:active': { cursor: 'default' } }
+            ] as SxProps<Theme>)
+          : {
+              color: 'text.disabled',
+              width: 28,
+              height: 28,
+              cursor: 'default',
+              '&:hover': { color: 'text.secondary' },
+              '&:active': { cursor: 'default' }
+            }
+      }
     >
-      <DragIndicatorIcon sx={{ fontSize: 16 }} />
+      <DragIndicatorIcon sx={{ fontSize: columnTokens ? COLUMN_ACTION_ICON_SIZE + 1 : 16 }} />
     </IconButton>
   </Tooltip>
 )
@@ -1603,19 +2089,23 @@ const buildAttachmentDownloadMenuLabel = (
   switch (attachment.type) {
     case 'image':
       return t('chat.download_image_option', {
+        fileName,
         defaultValue: `Image: ${fileName}`
       })
     case 'video':
       return t('chat.download_video_option', {
+        fileName,
         defaultValue: `Video: ${fileName}`
       })
     case 'model3d':
       return t('chat.download_model_option', {
+        fileName,
         defaultValue: `3D model: ${fileName}`
       })
     case 'file':
     default:
       return t('chat.download_file_option', {
+        fileName,
         defaultValue: `File: ${fileName}`
       })
   }
@@ -1625,12 +2115,18 @@ const buildAttachmentDownloadMenuLabel = (
 const UserMessageEditForm: React.FC<{
   message: ChatMessage
   index: number
+  /** History the send of this edit keeps (already projected for the skill). */
+  historyPrefix: ChatMessage[]
   editingContent: string
   onSetEditingContent: (content: string) => void
   onDropImageAttachments?: (files: File[]) => Promise<ChatAttachment[]>
   onRegisterEditingAttachmentReceiver?: (
     receiver: ((attachment: ChatAttachment) => void) | null
   ) => void
+  preflightReports?: (
+    prefix: ChatMessage[],
+    attachments: ChatAttachment[] | undefined
+  ) => Promise<void>
   onCancel: () => void
   onSubmit: (content: string, attachments?: ChatAttachment[]) => void
   savedChatScrollPositionRef: React.MutableRefObject<{
@@ -1638,22 +2134,52 @@ const UserMessageEditForm: React.FC<{
     scrollLeft: number
   } | null>
   isLight: boolean
+  columnTokens?: AgentColumnTokens
 }> = ({
   message,
+  historyPrefix,
   editingContent,
   onSetEditingContent,
   onDropImageAttachments,
   onRegisterEditingAttachmentReceiver,
+  preflightReports,
   onCancel,
   onSubmit,
   savedChatScrollPositionRef,
-  isLight
+  isLight,
+  columnTokens
 }) => {
   const { t } = useTranslation()
-  const [editingAttachments, setEditingAttachments] = React.useState<ChatAttachment[]>(
-    () => message.attachments ?? []
+  const nextAttachmentId = React.useRef(0)
+  const makeEditingEntry = (attachment: ChatAttachment) => ({
+    attachment,
+    id: nextAttachmentId.current++
+  })
+  const [editingEntries, setEditingEntries] = React.useState(() =>
+    (message.attachments ?? []).map(makeEditingEntry)
   )
+  const [editingSource] = React.useState(() => structuredClone(message))
+  const sourceChanged = !isEqual(editingSource, message)
+  const editingAttachments = editingEntries.map((entry) => entry.attachment)
   const [attachmentError, setAttachmentError] = React.useState<string | null>(null)
+  // One MAIN report preflight at a time; a result that arrives after the form closed is ignored.
+  const reportPreflightRef = React.useRef<symbol | null>(null)
+  // Save shows busy while MAIN verifies (bounded by the preflight's own timeout).
+  const [reportChecking, setReportChecking] = React.useState(false)
+  React.useEffect(
+    () => () => {
+      reportPreflightRef.current = null
+    },
+    []
+  )
+  // What the form holds now, read when an async report preflight returns: a submit goes ahead
+  // only when the source message, the text and the attachments are still the checked ones.
+  const latestEditStateRef = React.useRef({ message, content: '', attachments: editingAttachments })
+  latestEditStateRef.current = {
+    message,
+    content: editingContent.trim(),
+    attachments: editingAttachments
+  }
   const [isDraggingImage, setIsDraggingImage] = React.useState(false)
   const pendingImageImportsRef = React.useRef(new Set<symbol>())
   const [pendingImageImportCount, setPendingImageImportCount] = React.useState(0)
@@ -1661,13 +2187,18 @@ const UserMessageEditForm: React.FC<{
     const pendingImports = pendingImageImportsRef.current
     return () => pendingImports.clear()
   }, [])
-  const visibleAttachments = getVisibleChatAttachments(editingAttachments)
-  const imageAttachments = visibleAttachments.filter((attachment) => attachment.type === 'image')
-  const nonImageAttachments = visibleAttachments.filter((attachment) => attachment.type !== 'image')
-  const imageAttachmentKeys = getChatAttachmentRenderKeys(imageAttachments)
-  const nonImageAttachmentKeys = getChatAttachmentRenderKeys(nonImageAttachments)
-  const removeAttachment = (attachment: ChatAttachment): void => {
-    setEditingAttachments((current) => current.filter((item) => item !== attachment))
+  const overImageLimit =
+    editingAttachments.filter((attachment) => attachment.type === 'image').length >
+    DEFAULT_CHAT_IMAGE_COUNT_LIMIT
+  const visibleEntries = editingEntries.filter(({ attachment }) =>
+    overImageLimit
+      ? attachment.type === 'image' || attachment.hiddenFromChatView !== true
+      : attachment.hiddenFromChatView !== true
+  )
+  const imageEntries = visibleEntries.filter(({ attachment }) => attachment.type === 'image')
+  const nonImageEntries = visibleEntries.filter(({ attachment }) => attachment.type !== 'image')
+  const removeAttachment = (id: number): void => {
+    setEditingEntries((current) => current.filter((entry) => entry.id !== id))
   }
   const handleImageDragOver = React.useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
@@ -1711,6 +2242,10 @@ const UserMessageEditForm: React.FC<{
 
       event.preventDefault()
       event.stopPropagation()
+      if (files.length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT) {
+        setAttachmentError(t('chat.image_count_over_limit'))
+        return
+      }
       setAttachmentError(null)
       const operation = Symbol('edit-image-import')
       const pendingImports = pendingImageImportsRef.current
@@ -1720,7 +2255,8 @@ const UserMessageEditForm: React.FC<{
         const attachments = await onDropImageAttachments(files)
         if (!pendingImports.has(operation)) return
         if (attachments.length > 0) {
-          setEditingAttachments((current) => [...current, ...attachments])
+          const entries = attachments.map(makeEditingEntry)
+          setEditingEntries((current) => [...current, ...entries])
         }
       } catch (error) {
         if (!pendingImports.has(operation)) return
@@ -1739,15 +2275,10 @@ const UserMessageEditForm: React.FC<{
     const receiveAttachment = (attachment: ChatAttachment) => {
       if (attachment.type !== 'image') return
       setAttachmentError(null)
-      setEditingAttachments((current) => {
-        const duplicate = current.some(
-          (item) =>
-            item.type === attachment.type &&
-            item.url === attachment.url &&
-            item.fileName === attachment.fileName
-        )
-        return duplicate ? current : [...current, attachment]
-      })
+      const entry = makeEditingEntry(attachment)
+      // Every receiver invocation represents a distinct incoming occurrence.
+      // Source URL/name equality does not establish event identity or user intent.
+      setEditingEntries((current) => [...current, entry])
     }
     onRegisterEditingAttachmentReceiver(receiveAttachment)
     return () => onRegisterEditingAttachmentReceiver(null)
@@ -1765,7 +2296,19 @@ const UserMessageEditForm: React.FC<{
     value: string
   } | null>(null)
   const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
-  const userBubbleText = isLight ? '#2f235f' : '#ffffff'
+  const userBubbleText = columnTokens ? columnTokens.text : isLight ? '#2f235f' : '#ffffff'
+  const editRadius = columnTokens ? `${columnTokens.radius.shell}px` : '18px'
+  const editButtonSx = columnTokens
+    ? {
+        minWidth: 0,
+        px: '10px',
+        py: '4px',
+        borderRadius: `${columnTokens.radius.control}px`,
+        fontSize: columnTokens.fontSize.small,
+        lineHeight: '16px',
+        textTransform: 'none'
+      }
+    : { borderRadius: '18px', textTransform: 'none' }
 
   React.useLayoutEffect(() => {
     const editor = editorRef.current
@@ -1836,15 +2379,38 @@ const UserMessageEditForm: React.FC<{
   )
 
   return (
-    <Box sx={{ px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
-      <Box sx={{ maxWidth: '85%', width: '100%' }}>
-        {imageAttachments.length > 0 ? (
+    <Box
+      sx={
+        columnTokens
+          ? { display: 'flex', justifyContent: 'flex-end' }
+          : { px: 2, mb: 2, display: 'flex', justifyContent: 'flex-end' }
+      }
+    >
+      <Box
+        data-testid="edit-message-bubble"
+        sx={
+          columnTokens
+            ? {
+                // The bubble stays while editing; it widens to 92% of the list.
+                maxWidth: '92%',
+                width: '100%',
+                minWidth: 0,
+                boxSizing: 'border-box',
+                bgcolor: columnTokens.surface,
+                color: columnTokens.text,
+                borderRadius: `${columnTokens.radius.shell}px`,
+                padding: '9px 14px 12px'
+              }
+            : { maxWidth: '85%', width: '100%' }
+        }
+      >
+        {columnTokens ? (
+          <ColumnUserCaption tokens={columnTokens} label={t('chat.transcript.you')} />
+        ) : null}
+        {imageEntries.length > 0 ? (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
-            {imageAttachments.map((attachment, attachmentIndex) => (
-              <Box
-                key={imageAttachmentKeys[attachmentIndex]}
-                sx={{ position: 'relative', width: 168, height: 128 }}
-              >
+            {imageEntries.map(({ attachment, id }, attachmentIndex) => (
+              <Box key={id} sx={{ position: 'relative', width: 168, height: 128 }}>
                 <ChatImage
                   src={normalizeLocalMediaUrl(attachment.url)}
                   media={attachment.media}
@@ -1858,7 +2424,7 @@ const UserMessageEditForm: React.FC<{
                 <IconButton
                   size="small"
                   aria-label={`Remove ${attachment.fileName || 'image'}`}
-                  onClick={() => removeAttachment(attachment)}
+                  onClick={() => removeAttachment(id)}
                   sx={{
                     position: 'absolute',
                     top: 4,
@@ -1887,17 +2453,21 @@ const UserMessageEditForm: React.FC<{
                     whiteSpace: 'nowrap'
                   }}
                 >
-                  {attachment.fileName || `Image ${attachmentIndex + 1}`}
+                  {attachment.fileName ||
+                    t('chat.image_n', {
+                      index: attachmentIndex + 1,
+                      defaultValue: `Image ${attachmentIndex + 1}`
+                    })}
                 </Typography>
               </Box>
             ))}
           </Box>
         ) : null}
-        {nonImageAttachments.length > 0 ? (
+        {nonImageEntries.length > 0 ? (
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
-            {nonImageAttachments.map((attachment, attachmentIndex) => (
+            {nonImageEntries.map(({ attachment, id }) => (
               <Box
-                key={nonImageAttachmentKeys[attachmentIndex]}
+                key={id}
                 sx={{
                   display: 'flex',
                   alignItems: 'center',
@@ -1915,12 +2485,16 @@ const UserMessageEditForm: React.FC<{
                   variant="body2"
                   sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                 >
-                  {attachment.fileName || 'Attachment'}
+                  {attachment.fileName || t('chat.attachment', { defaultValue: 'Attachment' })}
                 </Typography>
                 <IconButton
                   size="small"
-                  aria-label={`Remove ${attachment.fileName || 'attachment'}`}
-                  onClick={() => removeAttachment(attachment)}
+                  aria-label={t('chat.remove_attachment_named', {
+                    name:
+                      attachment.fileName || t('chat.attachment', { defaultValue: 'attachment' }),
+                    defaultValue: `Remove ${attachment.fileName || 'attachment'}`
+                  })}
+                  onClick={() => removeAttachment(id)}
                   sx={{ flexShrink: 0 }}
                 >
                   <CloseIcon sx={{ fontSize: 16 }} />
@@ -1937,7 +2511,7 @@ const UserMessageEditForm: React.FC<{
           onDrop={(event) => void handleImageDrop(event)}
           sx={{
             position: 'relative',
-            borderRadius: '18px',
+            borderRadius: editRadius,
             outline: isDraggingImage ? '2px dashed' : 'none',
             outlineColor: 'primary.main',
             outlineOffset: 2,
@@ -1956,8 +2530,15 @@ const UserMessageEditForm: React.FC<{
             variant="outlined"
             sx={{
               '& .MuiOutlinedInput-root': {
-                borderRadius: '18px',
-                bgcolor: userBubbleBg
+                borderRadius: editRadius,
+                bgcolor: columnTokens ? 'transparent' : userBubbleBg,
+                ...(columnTokens
+                  ? {
+                      padding: '8px 12px',
+                      fontSize: columnTokens.fontSize.base,
+                      lineHeight: columnTokens.bodyLineHeight
+                    }
+                  : {})
               },
               '& .MuiInputBase-input': {
                 color: userBubbleText
@@ -1965,33 +2546,95 @@ const UserMessageEditForm: React.FC<{
             }}
           />
         </Box>
+        {sourceChanged ? (
+          <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.25 }}>
+            {t('chat.edit_message_changed')}
+          </Typography>
+        ) : null}
         {attachmentError ? (
           <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.25 }}>
             {attachmentError}
           </Typography>
         ) : null}
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 1 }}>
-          <Button
-            variant="text"
-            size="small"
-            onClick={onCancel}
-            sx={{ borderRadius: '18px', textTransform: 'none' }}
-          >
-            {t('common.cancel', { defaultValue: 'Cancel' })}
+          <Button variant="text" size="small" onClick={onCancel} sx={editButtonSx}>
+            {t('chat.cancel', { defaultValue: 'Cancel' })}
           </Button>
           <Button
             variant="contained"
             size="small"
-            disabled={!editingContent.trim() || pendingImageImportCount > 0}
+            disabled={
+              sourceChanged ||
+              !editingContent.trim() ||
+              pendingImageImportCount > 0 ||
+              reportChecking
+            }
             startIcon={
-              pendingImageImportCount > 0 ? <CircularProgress size={12} color="inherit" /> : null
+              pendingImageImportCount > 0 || reportChecking ? (
+                <CircularProgress size={12} color="inherit" />
+              ) : null
             }
             onClick={() => {
               const newContent = editingContent.trim()
-              if (!newContent || pendingImageImportsRef.current.size > 0) return
-              onSubmit(newContent, editingAttachments.length > 0 ? editingAttachments : undefined)
+              if (sourceChanged || !newContent || pendingImageImportsRef.current.size > 0) return
+              try {
+                assertExplicitUserImageCount(editingAttachments)
+              } catch {
+                setAttachmentError(t('chat.image_count_over_limit'))
+                return
+              }
+              try {
+                assertNoUnverifiedPrimaryReports([
+                  ...historyPrefix,
+                  { attachments: editingAttachments }
+                ])
+              } catch (error) {
+                setAttachmentError(error instanceof Error ? error.message : String(error))
+                return
+              }
+              const submittedAttachments =
+                editingAttachments.length > 0 ? editingAttachments : undefined
+              if (
+                preflightReports &&
+                [...historyPrefix, { attachments: editingAttachments }].some((entry) =>
+                  entry.attachments?.some(isPrimaryReportFileDescriptor)
+                )
+              ) {
+                if (reportPreflightRef.current) return
+                const preflight = Symbol('edit-report-preflight')
+                reportPreflightRef.current = preflight
+                setReportChecking(true)
+                void Promise.resolve()
+                  .then(() => preflightReports(historyPrefix, submittedAttachments))
+                  .then(
+                    () => {
+                      if (reportPreflightRef.current !== preflight) return
+                      reportPreflightRef.current = null
+                      setReportChecking(false)
+                      // Changed while MAIN answered: keep the form, a new Save checks again.
+                      const latest = latestEditStateRef.current
+                      if (
+                        !isEqual(editingSource, latest.message) ||
+                        latest.content !== newContent ||
+                        !isEqual(latest.attachments, editingAttachments) ||
+                        pendingImageImportsRef.current.size > 0
+                      ) {
+                        return
+                      }
+                      onSubmit(newContent, submittedAttachments)
+                    },
+                    (error: unknown) => {
+                      if (reportPreflightRef.current !== preflight) return
+                      reportPreflightRef.current = null
+                      setReportChecking(false)
+                      setAttachmentError(error instanceof Error ? error.message : String(error))
+                    }
+                  )
+                return
+              }
+              onSubmit(newContent, submittedAttachments)
             }}
-            sx={{ borderRadius: '18px', textTransform: 'none' }}
+            sx={editButtonSx}
           >
             {t('chat.save_and_rerun', { defaultValue: 'Save & Rerun' })}
           </Button>
@@ -2000,6 +2643,27 @@ const UserMessageEditForm: React.FC<{
     </Box>
   )
 }
+
+/** The muted "You" line at the top of a user bubble in the Agent column. */
+const ColumnUserCaption: React.FC<{ tokens: AgentColumnTokens; label: string }> = ({
+  tokens,
+  label
+}) => (
+  <Typography
+    component="div"
+    data-testid="user-message-caption"
+    sx={{
+      mb: '4px',
+      fontSize: tokens.fontSize.small,
+      lineHeight: '16px',
+      color: tokens.muted,
+      userSelect: 'none',
+      cursor: 'default'
+    }}
+  >
+    {label}
+  </Typography>
+)
 
 // --- 用户消息气泡 ---
 const UserMessageBubble: React.FC<{
@@ -2014,6 +2678,7 @@ const UserMessageBubble: React.FC<{
   onSendModelToDcc: (attachment: ChatAttachment, target: DccBridgeTarget) => void
   t: TFunction<'translation'>
   theme: any
+  columnTokens?: AgentColumnTokens
 }> = ({
   message,
   active,
@@ -2024,56 +2689,74 @@ const UserMessageBubble: React.FC<{
   onDownloadAttachment,
   onSendModelToDcc,
   t,
-  theme
+  theme,
+  columnTokens
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
-  const attachmentKeys = getChatAttachmentRenderKeys(visibleAttachments)
+  const attachmentKeys = useChatAttachmentRenderKeys(visibleAttachments)
   const userBubbleBg = isLight ? '#eee7ff' : '#6f5bd6'
   const userBubbleText = isLight ? '#2f235f' : '#ffffff'
+  const columnActionSx = columnTokens ? columnActionButtonSx(columnTokens) : undefined
 
   return (
     <Box
-      sx={{
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'flex-end',
-        alignItems: 'flex-end',
-        mb: 2,
-        px: 2
-      }}
+      sx={
+        columnTokens
+          ? { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', minWidth: 0 }
+          : {
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'flex-end',
+              alignItems: 'flex-end',
+              mb: 2,
+              px: 2
+            }
+      }
     >
       <Box
+        data-testid="user-message-bubble"
         sx={{
           position: 'relative',
-          maxWidth: '85%',
-          bgcolor: userBubbleBg,
-          borderRadius: '18px',
-          px: 3,
-          py: 2,
           wordWrap: 'break-word',
           wordBreak: 'break-word',
           overflowWrap: 'break-word',
           userSelect: 'text',
           WebkitUserSelect: 'text',
-          cursor: 'text'
+          cursor: 'text',
+          ...(columnTokens
+            ? {
+                // Neutral surface, shrink-to-fit, at most 80% of the list.
+                maxWidth: '80%',
+                minWidth: 0,
+                boxSizing: 'border-box',
+                bgcolor: columnTokens.surface,
+                color: columnTokens.text,
+                borderRadius: `${columnTokens.radius.shell}px`,
+                padding: '9px 14px 12px'
+              }
+            : { maxWidth: '85%', bgcolor: userBubbleBg, borderRadius: '18px', px: 3, py: 2 })
         }}
       >
+        {columnTokens ? (
+          <ColumnUserCaption tokens={columnTokens} label={t('chat.transcript.you')} />
+        ) : null}
         {visibleAttachments.length > 0 && (
           <Box
             data-chat-user-attachments="true"
             sx={{
-              mb: message.content ? 1.5 : 0,
+              mb: message.content ? (columnTokens ? '6px' : 1.5) : 0,
               width: '100%',
               display: 'flex',
               flexDirection: 'column',
-              alignItems: 'flex-start'
+              alignItems: 'flex-start',
+              ...(columnTokens ? { gap: '6px' } : {})
             }}
           >
             {visibleAttachments.map((attachment, attIdx) => (
               <Box
                 key={attachmentKeys[attIdx]}
                 sx={{
-                  mb: 1,
+                  mb: columnTokens ? 0 : 1,
                   width: '100%',
                   display: 'flex',
                   justifyContent: 'flex-start'
@@ -2134,8 +2817,13 @@ const UserMessageBubble: React.FC<{
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
               overflowWrap: 'break-word',
-              color: userBubbleText,
-              lineHeight: 1.6
+              ...(columnTokens
+                ? {
+                    color: columnTokens.text,
+                    fontSize: columnTokens.fontSize.base,
+                    lineHeight: columnTokens.bodyLineHeight
+                  }
+                : { color: userBubbleText, lineHeight: 1.6 })
             }}
           >
             {message.content}
@@ -2151,8 +2839,8 @@ const UserMessageBubble: React.FC<{
           zIndex: 1,
           display: 'flex',
           alignItems: 'center',
-          gap: 0,
-          mt: 0.5,
+          gap: columnTokens ? '4px' : 0,
+          mt: columnTokens ? '4px' : 0.5,
           mr: 0,
           opacity: 1,
           visibility: 'visible',
@@ -2168,34 +2856,40 @@ const UserMessageBubble: React.FC<{
           copiedLabel={t('chat.prompt_copied')}
           content={message.content || ''}
           active={active}
-          buttonSx={{
-            color: 'text.disabled',
-            width: 28,
-            height: 28,
-            '&:hover': { color: 'text.secondary' },
-            '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
-              color: 'success.main'
+          iconSize={columnTokens ? COLUMN_ACTION_ICON_SIZE : undefined}
+          buttonSx={
+            columnActionSx ?? {
+              color: 'text.disabled',
+              width: 28,
+              height: 28,
+              '&:hover': { color: 'text.secondary' },
+              '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+                color: 'success.main'
+              }
             }
-          }}
+          }
         />
         <Tooltip title={t('chat.edit_message')} placement="top">
           <IconButton
             size="small"
             onClick={onEdit}
-            sx={{
-              color: 'text.disabled',
-              width: 28,
-              height: 28,
-              '&:hover': { color: 'text.secondary' }
-            }}
+            sx={
+              columnActionSx ?? {
+                color: 'text.disabled',
+                width: 28,
+                height: 28,
+                '&:hover': { color: 'text.secondary' }
+              }
+            }
           >
-            <EditIcon sx={{ fontSize: 14 }} />
+            <EditIcon sx={{ fontSize: columnTokens ? COLUMN_ACTION_ICON_SIZE : 14 }} />
           </IconButton>
         </Tooltip>
         {message.content ? (
           <TextDragHandle
             content={message.content}
             title={t('chat.drag_prompt_to_canvas', { defaultValue: 'Drag prompt to canvas' })}
+            columnTokens={columnTokens}
           />
         ) : null}
       </Box>
@@ -2220,6 +2914,11 @@ const AssistantMessageBubble: React.FC<{
   notifySuccess: (msg: string) => void
   t: TFunction<'translation'>
   theme: any
+  columnTokens?: AgentColumnTokens
+  /** When set, the working line is drawn there (below the transcript tail) instead of inline. */
+  workingLineHost?: HTMLElement | null
+  /** No working line at all, e.g. while an approval card waits for the user. */
+  workingLineHidden?: boolean
 }> = ({
   message,
   replyDownloadBaseName,
@@ -2229,16 +2928,19 @@ const AssistantMessageBubble: React.FC<{
   isLight,
   isLoading,
   loadingStatus,
+  workingLineHost,
+  workingLineHidden = false,
   onPreviewImage,
   onImageContextMenu,
   onDownloadAttachment,
   onSendModelToDcc,
   notifySuccess,
   t,
-  theme
+  theme,
+  columnTokens
 }) => {
   const visibleAttachments = sortReportBundleAttachmentsForDisplay(message.attachments)
-  const attachmentKeys = getChatAttachmentRenderKeys(visibleAttachments)
+  const attachmentKeys = useChatAttachmentRenderKeys(visibleAttachments)
   const retry = isLoading ? loadingStatus?.retry : undefined
   const [retryNow, setRetryNow] = React.useState(Date.now)
   React.useEffect(() => {
@@ -2255,22 +2957,65 @@ const AssistantMessageBubble: React.FC<{
     : loadingStatus?.detail
   const loadingProgress = formatChatLoadingStatusProgress(loadingStatus)
   const showLoadingStatus = isLoading && Boolean(loadingStatus?.label)
+  const renderWorkingLine = (label: string): React.ReactNode => {
+    // Agent column (owner's request): a running image tool shows only in its tool row, and
+    // routine request phases read like Kohaku, "KohakUwUing...", without step or detail.
+    if (workingLineHidden || (columnTokens && loadingStatus?.presentation === 'tool-row-only'))
+      return null
+    const routine =
+      Boolean(columnTokens) &&
+      !retry &&
+      (!loadingStatus?.label || loadingStatus.presentation === 'routine')
+    const line = (
+      <AssistantLoadingStatus
+        label={routine ? t('chat.agent_processing') : label}
+        progress={routine ? undefined : loadingProgress}
+        detail={routine ? undefined : loadingDetail}
+        theme={theme}
+        columnTokens={columnTokens}
+      />
+    )
+    return workingLineHost ? createPortal(line, workingLineHost) : line
+  }
 
   return (
-    <Box sx={{ px: 2 }}>
+    <Box sx={columnTokens ? { minWidth: 0 } : { px: 2 }}>
       <Box
+        data-testid="assistant-message-parts"
         sx={{
           flex: 1,
           minWidth: 0,
           wordBreak: 'break-word',
-          overflowWrap: 'break-word'
+          overflowWrap: 'break-word',
+          // No bubble in the Agent column: a plain column of parts, 6px apart, at most 90% wide.
+          ...(columnTokens
+            ? {
+                maxWidth: '90%',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+                fontSize: columnTokens.fontSize.base,
+                lineHeight: columnTokens.bodyLineHeight
+              }
+            : {})
         }}
       >
+        <ChatToolCalls
+          history={message.toolHistory}
+          live={isLoading}
+          columnStyle={Boolean(columnTokens)}
+        />
         {/* AI 附件 */}
         {visibleAttachments.length > 0 && (
-          <Box sx={{ mb: message.content ? 1.5 : 0 }}>
+          <Box
+            sx={
+              columnTokens
+                ? { display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 0 }
+                : { mb: message.content ? 1.5 : 0 }
+            }
+          >
             {visibleAttachments.map((attachment, attIdx) => (
-              <Box key={attachmentKeys[attIdx]} sx={{ mb: 1 }}>
+              <Box key={attachmentKeys[attIdx]} sx={{ mb: columnTokens ? 0 : 1 }}>
                 {attachment.type === 'image' ? (
                   <ChatImage
                     src={normalizeLocalMediaUrl(attachment.url)}
@@ -2317,6 +3062,7 @@ const AssistantMessageBubble: React.FC<{
               downloadMode={replyDownloadMode}
               batchSidecarExportEntries={batchSidecarExportEntries}
               attachments={visibleAttachments}
+              attachmentKeys={attachmentKeys}
               active={active}
               isLight={isLight}
               onPreviewImage={onPreviewImage}
@@ -2324,24 +3070,13 @@ const AssistantMessageBubble: React.FC<{
               onDownloadAttachment={onDownloadAttachment}
               notifySuccess={notifySuccess}
               t={t}
+              columnTokens={columnTokens}
             />
-            {showLoadingStatus ? (
-              <AssistantLoadingStatus
-                label={loadingStatus?.label || ''}
-                progress={loadingProgress}
-                detail={loadingDetail}
-                theme={theme}
-              />
-            ) : null}
+            {showLoadingStatus ? renderWorkingLine(loadingStatus?.label || '') : null}
           </>
         ) : visibleAttachments.length > 0 ? (
           showLoadingStatus ? (
-            <AssistantLoadingStatus
-              label={loadingStatus?.label || ''}
-              progress={loadingProgress}
-              detail={loadingDetail}
-              theme={theme}
-            />
+            renderWorkingLine(loadingStatus?.label || '')
           ) : (
             <AssistantMarkdownContent
               content=""
@@ -2349,6 +3084,7 @@ const AssistantMessageBubble: React.FC<{
               downloadMode={replyDownloadMode}
               batchSidecarExportEntries={batchSidecarExportEntries}
               attachments={visibleAttachments}
+              attachmentKeys={attachmentKeys}
               active={active}
               isLight={isLight}
               onPreviewImage={onPreviewImage}
@@ -2356,22 +3092,35 @@ const AssistantMessageBubble: React.FC<{
               onDownloadAttachment={onDownloadAttachment}
               notifySuccess={notifySuccess}
               t={t}
+              columnTokens={columnTokens}
             />
           )
         ) : isLoading ? (
-          <AssistantLoadingStatus
-            label={
-              loadingStatus?.label || t('chat.loading_status_default', { defaultValue: '正在处理' })
-            }
-            progress={loadingProgress}
-            detail={loadingDetail}
-            theme={theme}
-          />
-        ) : message.content !== undefined && message.content !== '' ? null : (
+          renderWorkingLine(
+            loadingStatus?.label || t('chat.loading_status_default', { defaultValue: '正在处理' })
+          )
+        ) : message.toolHistory?.length ||
+          (message.content !== undefined && message.content !== '') ? null : (
           <Typography variant="body2" sx={{ color: 'text.disabled', fontStyle: 'italic' }}>
             {t('chat.response_interrupted')}
           </Typography>
         )}
+        {!isLoading &&
+          // Cut off: the stream broke, or the run ended by a reload, a crash or quitting while
+          // the reply was being written (only the exact 'streaming' value counts).
+          (message.responseInterrupted || message.runState === 'streaming') &&
+          Boolean(
+            message.toolHistory?.length || (message.content !== undefined && message.content !== '')
+          ) && (
+            <Typography
+              component="p"
+              variant="caption"
+              color="text.secondary"
+              sx={{ mt: 0.5, mb: 0 }}
+            >
+              {t('chat.response_interrupted')}
+            </Typography>
+          )}
       </Box>
     </Box>
   )
@@ -2382,35 +3131,100 @@ const AssistantLoadingStatus: React.FC<{
   progress?: string | null
   detail?: string
   theme: any
-}> = ({ label, progress, detail, theme }) => (
-  <Box
-    data-testid="assistant-loading-status"
-    sx={{
-      mt: 0.75,
-      display: 'inline-flex',
-      alignItems: 'flex-start',
-      gap: 1,
-      px: 1.25,
-      py: 0.9,
-      borderRadius: '14px',
-      bgcolor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)',
-      border: '1px solid',
-      borderColor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'
-    }}
-  >
-    <CircularProgress size={16} sx={{ mt: '2px', flexShrink: 0 }} />
-    <Box sx={{ minWidth: 0 }}>
-      <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 600, lineHeight: 1.4 }}>
-        {progress ? `${label} ${progress}` : label}
-      </Typography>
-      {detail ? (
-        <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.35 }}>
-          {detail}
-        </Typography>
-      ) : null}
+  columnTokens?: AgentColumnTokens
+}> = ({ label, progress, detail, theme, columnTokens }) =>
+  columnTokens ? (
+    // The working line of the Agent column: a pulsing dot and one line of text, no box. A retry
+    // or progress detail follows the label on the same line ("… · 第 2 次重试，5 秒后"), muted,
+    // and the line ends in an ellipsis when it does not fit (the whole text is its tooltip).
+    <Box
+      data-testid="assistant-loading-status"
+      sx={{ padding: '8px 4px', minWidth: 0, color: columnTokens.attention }}
+    >
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          minWidth: 0,
+          fontSize: 14,
+          lineHeight: 1.2
+        }}
+      >
+        <Box
+          aria-hidden="true"
+          data-testid="assistant-loading-dot"
+          sx={{
+            width: 8,
+            height: 8,
+            flexShrink: 0,
+            borderRadius: '50%',
+            bgcolor: 'currentColor',
+            ...columnPulseSx
+          }}
+        />
+        <Box
+          component="span"
+          data-testid="assistant-loading-line"
+          title={[progress ? `${label} ${progress}` : label, detail].filter(Boolean).join(' · ')}
+          sx={{
+            flex: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          <Box
+            component="span"
+            sx={{ color: alpha(columnTokens.attention, 0.8), ...columnPulseSx }}
+          >
+            {progress ? `${label} ${progress}` : label}
+          </Box>
+          {detail ? (
+            <Box
+              component="span"
+              data-testid="assistant-loading-detail"
+              sx={{ fontSize: columnTokens.fontSize.small, color: columnTokens.muted }}
+            >
+              {` · ${detail}`}
+            </Box>
+          ) : null}
+        </Box>
+      </Box>
     </Box>
-  </Box>
-)
+  ) : (
+    <Box
+      data-testid="assistant-loading-status"
+      sx={{
+        mt: 0.75,
+        display: 'inline-flex',
+        alignItems: 'flex-start',
+        gap: 1,
+        px: 1.25,
+        py: 0.9,
+        borderRadius: '14px',
+        bgcolor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.04)',
+        border: '1px solid',
+        borderColor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'
+      }}
+    >
+      <CircularProgress size={16} sx={{ mt: '2px', flexShrink: 0 }} />
+      <Box sx={{ minWidth: 0 }}>
+        <Typography
+          variant="body2"
+          sx={{ color: 'text.primary', fontWeight: 600, lineHeight: 1.4 }}
+        >
+          {progress ? `${label} ${progress}` : label}
+        </Typography>
+        {detail ? (
+          <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.35 }}>
+            {detail}
+          </Typography>
+        ) : null}
+      </Box>
+    </Box>
+  )
 
 // --- AI 视频播放器 ---
 const AssistantVideoPlayer: React.FC<{ url: string; fileName?: string }> = ({ url, fileName }) => {
@@ -2522,6 +3336,8 @@ type ChatMarkdownRenderContextValue = {
   onPreviewImage: (url: string) => void
   onImageContextMenu: (event: React.MouseEvent, imageUrl: string) => void
   t: TFunction<'translation'>
+  /** Set in the Agent column only. */
+  columnTokens?: AgentColumnTokens
 }
 
 const ChatMarkdownRenderContext = React.createContext<ChatMarkdownRenderContextValue | null>(null)
@@ -2532,9 +3348,41 @@ const useChatMarkdownRenderContext = (): ChatMarkdownRenderContextValue => {
   return context
 }
 
-const ChatMarkdownParagraph: React.FC<React.PropsWithChildren> = ({ children }) => (
-  <div style={{ margin: '0.8em 0' }}>{children}</div>
-)
+const ChatMarkdownParagraph: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const { columnTokens } = useChatMarkdownRenderContext()
+  // The Agent column spaces paragraphs from its own style sheet (class, no inline margin).
+  return columnTokens ? (
+    <div className="chat-md-p">{children}</div>
+  ) : (
+    <div style={{ margin: '0.8em 0' }}>{children}</div>
+  )
+}
+
+/** True for a `code` element that is the content of a fenced block (Agent column only). */
+const ChatMarkdownFencedCodeContext = React.createContext(false)
+
+const ChatMarkdownPre: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const { columnTokens } = useChatMarkdownRenderContext()
+  return columnTokens ? (
+    <ChatMarkdownFencedCodeContext.Provider value={true}>
+      {children}
+    </ChatMarkdownFencedCodeContext.Provider>
+  ) : (
+    <pre>{children}</pre>
+  )
+}
+
+/** A wide table scrolls inside itself in the Agent column instead of widening the list. */
+const ChatMarkdownTable: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const { columnTokens } = useChatMarkdownRenderContext()
+  return columnTokens ? (
+    <div className="chat-md-table-scroll">
+      <table>{children}</table>
+    </div>
+  ) : (
+    <table>{children}</table>
+  )
+}
 
 const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ src, alt }) => {
   const { onPreviewImage, onImageContextMenu, t } = useChatMarkdownRenderContext()
@@ -2568,9 +3416,96 @@ const ChatMarkdownAnchor: React.FC<React.PropsWithChildren<{ href?: string }>> =
 )
 
 const ChatMarkdownCode = ({ node, inline, className, children, ...props }: any) => {
-  const { active, isLight, t } = useChatMarkdownRenderContext()
+  const { active, isLight, t, columnTokens } = useChatMarkdownRenderContext()
+  const fenced = React.useContext(ChatMarkdownFencedCodeContext)
   const codeMatch = /language-(\w+)/.exec(className || '')
   const codeContent = children == null ? '' : String(children).replace(/\n$/, '')
+  if (columnTokens && fenced) {
+    // Always-dark block: a header strip with the language and a text Copy button, then the code.
+    const language = (codeMatch?.[1] || 'text').toLowerCase()
+    return (
+      <div
+        className="chat-md-code-block"
+        data-testid="chat-code-block"
+        style={{
+          margin: '0.6em 0',
+          borderRadius: columnTokens.radius.content,
+          overflow: 'hidden',
+          backgroundColor: isLight ? COLUMN_CODE_BLOCK_BG.light : COLUMN_CODE_BLOCK_BG.dark,
+          color: '#e0def4'
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 8,
+            padding: '0.35em 0.8em',
+            backgroundColor: 'rgba(255,255,255,0.05)',
+            borderBottom: '1px solid rgba(255,255,255,0.08)',
+            fontSize: '0.8em',
+            lineHeight: 1.5,
+            fontFamily: columnTokens.monoFont,
+            color: '#a0a0b8',
+            userSelect: 'none',
+            cursor: 'default'
+          }}
+        >
+          <span>{language}</span>
+          <CopiableIconButton
+            copyLabel={t('chat.copy_code', { defaultValue: 'Copy code' })}
+            copiedLabel={t('chat.code_copied')}
+            content={codeContent}
+            active={active}
+            textLabels={{
+              copy: t('chat.transcript.copy_code'),
+              copied: t('chat.transcript.code_copied')
+            }}
+            feedbackMs={COLUMN_CODE_COPIED_FEEDBACK_MS}
+            buttonSx={{
+              m: 0,
+              flexShrink: 0,
+              padding: '0.15em 0.6em',
+              border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: `${columnTokens.radius.control}px`,
+              bgcolor: 'transparent',
+              color: '#c0c0d0',
+              font: 'inherit',
+              cursor: 'pointer',
+              '&:hover': { bgcolor: 'rgba(255,255,255,0.08)' },
+              '&:focus-visible': columnTokens.focusRing,
+              '&:disabled': { opacity: columnTokens.disabledOpacity, cursor: 'default' },
+              '&[data-copied="true"]': {
+                color: columnTokens.live,
+                borderColor: alpha(columnTokens.live, 0.5)
+              }
+            }}
+          />
+        </div>
+        <Prism
+          style={vscDarkPlus}
+          language={language}
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            background: 'transparent',
+            fontSize: '0.9em',
+            lineHeight: 1.5,
+            padding: '0.8em 1em',
+            overflowX: 'auto'
+          }}
+          codeTagProps={{
+            style: { fontFamily: columnTokens.monoFont, fontSize: 'inherit', lineHeight: 'inherit' }
+          }}
+          {...props}
+        >
+          {codeContent}
+        </Prism>
+      </div>
+    )
+  }
   return !inline && codeMatch ? (
     <div style={{ position: 'relative' }}>
       <div
@@ -2635,8 +3570,73 @@ const CHAT_MARKDOWN_COMPONENTS: MarkdownComponents = {
   p: ChatMarkdownParagraph,
   img: ChatMarkdownImage,
   a: ChatMarkdownAnchor,
-  code: ChatMarkdownCode
+  code: ChatMarkdownCode,
+  pre: ChatMarkdownPre,
+  table: ChatMarkdownTable
 }
+
+/** Markdown typography of the Agent column: 13px / 1.65 with compact block spacing. */
+const columnMarkdownSx = (tokens: AgentColumnTokens, isLight: boolean): SxProps<Theme> => ({
+  wordBreak: 'break-word',
+  overflowWrap: 'break-word',
+  minWidth: 0,
+  color: tokens.text,
+  fontSize: tokens.fontSize.base,
+  lineHeight: tokens.bodyLineHeight,
+  userSelect: 'text',
+  WebkitUserSelect: 'text',
+  cursor: 'text',
+  '& .chat-md-p': { m: '0 0 0.5em' },
+  '& .chat-md-body > :first-child': { mt: 0 },
+  '& .chat-md-body > :last-child': { mb: 0 },
+  '& ul, & ol': { pl: '1.5em', my: '0.4em' },
+  // The app's base style sheet removes list bullets everywhere; Markdown lists need them.
+  '& ul': { listStyleType: 'disc' },
+  '& li': { my: '0.2em', '&::marker': { color: tokens.muted } },
+  // A task item shows its checkbox where the bullet would be.
+  '& li.task-list-item': { listStyleType: 'none' },
+  '& li.task-list-item input[type="checkbox"]': {
+    m: '0 0.4em 0 -1.4em',
+    verticalAlign: 'middle'
+  },
+  '& li > .chat-md-p': { m: 0 },
+  '& code': {
+    bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
+    padding: '0.15em 0.35em',
+    borderRadius: `${tokens.radius.control}px`,
+    fontFamily: tokens.monoFont,
+    fontSize: '0.9em'
+  },
+  '& .chat-md-code-block code': { bgcolor: 'transparent', p: 0, borderRadius: 0 },
+  '& blockquote': {
+    m: '0.5em 0',
+    pl: '0.8em',
+    borderLeft: `3px solid ${tokens.accent}`,
+    color: tokens.muted
+  },
+  '& hr': { border: 'none', borderTop: `1px solid ${tokens.border}`, my: '0.8em' },
+  '& a': {
+    color: tokens.accent,
+    textDecoration: 'none',
+    '&:hover': { textDecoration: 'underline' }
+  },
+  '& strong': { fontWeight: 600 },
+  '& h1, & h2, & h3, & h4, & h5, & h6': { fontWeight: 600, m: '0.8em 0 0.4em', lineHeight: 1.4 },
+  '& h1': { fontSize: '1.3em' },
+  '& h2': { fontSize: '1.15em' },
+  '& h3': { fontSize: '1.05em' },
+  '& h4, & h5, & h6': { fontSize: '1em' },
+  '& .chat-md-table-scroll': { maxWidth: '100%', overflowX: 'auto', my: '0.5em' },
+  // Cells keep whole words, so a table that does not fit scrolls inside its wrapper.
+  '& table': {
+    borderCollapse: 'collapse',
+    fontSize: '0.9em',
+    wordBreak: 'normal',
+    overflowWrap: 'normal'
+  },
+  '& th, & td': { border: `1px solid ${tokens.border}`, padding: '0.3em 0.6em', textAlign: 'left' },
+  '& th': { fontWeight: 600, bgcolor: tokens.hover, whiteSpace: 'nowrap' }
+})
 
 const AssistantMarkdownContent: React.FC<{
   content: string
@@ -2644,6 +3644,7 @@ const AssistantMarkdownContent: React.FC<{
   downloadMode: AssistantReplyDownloadMode
   batchSidecarExportEntries?: AssistantSidecarExportEntry[]
   attachments: ChatAttachment[]
+  attachmentKeys: readonly string[]
   active: boolean
   isLight: boolean
   onPreviewImage: (url: string) => void
@@ -2651,19 +3652,22 @@ const AssistantMarkdownContent: React.FC<{
   onDownloadAttachment: (attachment: ChatAttachment) => void
   notifySuccess: (msg: string) => void
   t: TFunction<'translation'>
+  columnTokens?: AgentColumnTokens
 }> = ({
   content,
   replyDownloadBaseName,
   downloadMode,
   batchSidecarExportEntries,
   attachments,
+  attachmentKeys,
   active,
   isLight,
   onPreviewImage,
   onImageContextMenu,
   onDownloadAttachment,
   notifySuccess,
-  t
+  t,
+  columnTokens
 }) => {
   const videoRegex = /\[Generated Video\]\(([^)]+)\)/g
   const [downloadMenuAnchorEl, setDownloadMenuAnchorEl] = React.useState<HTMLElement | null>(null)
@@ -2710,13 +3714,14 @@ const AssistantMarkdownContent: React.FC<{
           }
         ]
   const attachmentDownloadOptions = attachments.map((attachment, index) => ({
-    key: `${attachment.type}:${attachment.url}:${index}`,
+    key: attachmentKeys[index],
     attachment,
     label: buildAttachmentDownloadMenuLabel(attachment, t),
     onClick: () => {
       onDownloadAttachment(attachment)
       notifySuccess(
         t('chat.attachment_downloaded', {
+          fileName: getAttachmentDownloadFileName(attachment),
           defaultValue: `${getAttachmentDownloadFileName(attachment)} downloaded`
         })
       )
@@ -2737,9 +3742,11 @@ const AssistantMarkdownContent: React.FC<{
     notifySuccess(
       isSidecarDownload && extension === '.txt'
         ? t('chat.sidecar_exported', {
+            fileName,
             defaultValue: `${fileName} exported as sidecar`
           })
         : t('chat.reply_downloaded', {
+            fileName,
             defaultValue: `${fileName} downloaded`
           })
     )
@@ -2756,9 +3763,11 @@ const AssistantMarkdownContent: React.FC<{
     notifySuccess(
       extension === '.txt'
         ? t('chat.sidecar_batch_exported', {
+            count: batchSidecarExportEntries?.length || 0,
             defaultValue: `${batchSidecarExportEntries?.length || 0} sidecar files exported`
           })
         : t('chat.sidecar_markdown_batch_exported', {
+            count: batchSidecarExportEntries?.length || 0,
             defaultValue: `${batchSidecarExportEntries?.length || 0} markdown records exported`
           })
     )
@@ -2778,89 +3787,103 @@ const AssistantMarkdownContent: React.FC<{
 
     setDownloadMenuAnchorEl(event.currentTarget)
   }
+  const columnActionSx = columnTokens ? columnActionButtonSx(columnTokens) : undefined
+  const markdown = textContent ? (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      urlTransform={(url) => url}
+      components={CHAT_MARKDOWN_COMPONENTS}
+    >
+      {textContent}
+    </ReactMarkdown>
+  ) : null
 
   return (
     <Box
       data-testid="assistant-markdown-content"
-      sx={{
-        wordBreak: 'break-word',
-        overflowWrap: 'break-word',
-        color: 'text.primary',
-        lineHeight: 1.8,
-        fontSize: '0.95rem',
-        userSelect: 'text',
-        WebkitUserSelect: 'text',
-        cursor: 'text',
-        '& p': { my: 1.2 },
-        '& p:first-of-type': { mt: 0 },
-        '& p:last-child': { mb: 0 },
-        '& ul, & ol': {
-          pl: 3,
-          my: 1.5,
-          '& li': {
-            my: 0.6,
-            '&::marker': {
-              color: 'text.secondary'
+      sx={
+        columnTokens
+          ? columnMarkdownSx(columnTokens, isLight)
+          : {
+              wordBreak: 'break-word',
+              overflowWrap: 'break-word',
+              color: 'text.primary',
+              lineHeight: 1.8,
+              fontSize: '0.95rem',
+              userSelect: 'text',
+              WebkitUserSelect: 'text',
+              cursor: 'text',
+              '& p': { my: 1.2 },
+              '& p:first-of-type': { mt: 0 },
+              '& p:last-child': { mb: 0 },
+              '& ul, & ol': {
+                pl: 3,
+                my: 1.5,
+                '& li': {
+                  my: 0.6,
+                  '&::marker': {
+                    color: 'text.secondary'
+                  }
+                }
+              },
+              '& li': {
+                my: 0.6,
+                '& p': { my: 0.3 }
+              },
+              '& code': {
+                bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
+                px: 0.5,
+                py: 0.25,
+                borderRadius: 0.5,
+                fontFamily: 'monospace',
+                fontSize: '0.9em'
+              },
+              '& pre': {
+                bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
+                p: 1.5,
+                borderRadius: 1,
+                overflow: 'auto',
+                my: 1.5,
+                '& code': {
+                  bgcolor: 'transparent',
+                  p: 0
+                }
+              },
+              '& blockquote': {
+                borderLeft: 'none',
+                pl: 3,
+                ml: 2,
+                mr: 0,
+                my: 1,
+                color: 'text.primary',
+                '& p': {
+                  my: 0.5
+                }
+              },
+              '& hr': {
+                border: 'none',
+                borderTop: '1px solid',
+                borderColor: isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.15)',
+                my: 3
+              },
+              '& a': {
+                color: 'primary.main',
+                textDecoration: 'none',
+                '&:hover': {
+                  textDecoration: 'underline'
+                }
+              },
+              '& strong': {
+                fontWeight: 600
+              },
+              '& h1, & h2, & h3, & h4, & h5, & h6': {
+                fontWeight: 600,
+                mt: 2.5,
+                mb: 1.5,
+                lineHeight: 1.4
+              }
             }
-          }
-        },
-        '& li': {
-          my: 0.6,
-          '& p': { my: 0.3 }
-        },
-        '& code': {
-          bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
-          px: 0.5,
-          py: 0.25,
-          borderRadius: 0.5,
-          fontFamily: 'monospace',
-          fontSize: '0.9em'
-        },
-        '& pre': {
-          bgcolor: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)',
-          p: 1.5,
-          borderRadius: 1,
-          overflow: 'auto',
-          my: 1.5,
-          '& code': {
-            bgcolor: 'transparent',
-            p: 0
-          }
-        },
-        '& blockquote': {
-          borderLeft: 'none',
-          pl: 3,
-          ml: 2,
-          mr: 0,
-          my: 1,
-          color: 'text.primary',
-          '& p': {
-            my: 0.5
-          }
-        },
-        '& hr': {
-          border: 'none',
-          borderTop: '1px solid',
-          borderColor: isLight ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.15)',
-          my: 3
-        },
-        '& a': {
-          color: 'primary.main',
-          textDecoration: 'none',
-          '&:hover': {
-            textDecoration: 'underline'
-          }
-        },
-        '& strong': {
-          fontWeight: 600
-        },
-        '& h1, & h2, & h3, & h4, & h5, & h6': {
-          fontWeight: 600,
-          mt: 2.5,
-          mb: 1.5,
-          lineHeight: 1.4
-        }
-      }}
+      }
     >
       {/*
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.5 }}>
@@ -2870,17 +3893,11 @@ const AssistantMarkdownContent: React.FC<{
           />
         </Box>
       */}
-      {textContent && (
+      {markdown && (
         <ChatMarkdownRenderContext.Provider
-          value={{ active, isLight, onPreviewImage, onImageContextMenu, t }}
+          value={{ active, isLight, onPreviewImage, onImageContextMenu, t, columnTokens }}
         >
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            urlTransform={(url) => url}
-            components={CHAT_MARKDOWN_COMPONENTS}
-          >
-            {textContent}
-          </ReactMarkdown>
+          {columnTokens ? <div className="chat-md-body">{markdown}</div> : markdown}
         </ChatMarkdownRenderContext.Provider>
       )}
       {videos.map((url) => (
@@ -2931,7 +3948,7 @@ const AssistantMarkdownContent: React.FC<{
                 fileName: getDownloadFileNameFromUrl(url, 'video.mp4')
               })
             }}
-            title="Download or reveal the file"
+            title={t('chat.download_attachment', { defaultValue: 'Download attachment' })}
           >
             <DownloadIcon fontSize="small" />
           </IconButton>
@@ -2943,8 +3960,9 @@ const AssistantMarkdownContent: React.FC<{
           sx={{
             display: 'flex',
             alignItems: 'center',
-            gap: 0.5,
-            mt: 1
+            gap: columnTokens ? '4px' : 0.5,
+            mt: columnTokens ? '4px' : 1,
+            ...(columnTokens ? { userSelect: 'none', cursor: 'default' } : {})
           }}
         >
           {hasTextContent ? (
@@ -2953,15 +3971,18 @@ const AssistantMarkdownContent: React.FC<{
               copiedLabel={t('chat.reply_copied', { defaultValue: 'Reply copied' })}
               content={textContent}
               active={active}
-              buttonSx={{
-                color: 'text.disabled',
-                width: 28,
-                height: 28,
-                '&:hover': { color: 'text.secondary' },
-                '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
-                  color: 'success.main'
+              iconSize={columnTokens ? COLUMN_ACTION_ICON_SIZE : undefined}
+              buttonSx={
+                columnActionSx ?? {
+                  color: 'text.disabled',
+                  width: 28,
+                  height: 28,
+                  '&:hover': { color: 'text.secondary' },
+                  '&.MuiButtonBase-root.MuiIconButton-colorSuccess': {
+                    color: 'success.main'
+                  }
                 }
-              }}
+              }
             />
           ) : null}
           <Tooltip title={downloadButtonLabel} placement="top">
@@ -2969,14 +3990,16 @@ const AssistantMarkdownContent: React.FC<{
               size="small"
               aria-label={downloadButtonLabel}
               onClick={handleOpenDownloadMenu}
-              sx={{
-                color: 'text.disabled',
-                width: 28,
-                height: 28,
-                '&:hover': { color: 'text.secondary' }
-              }}
+              sx={
+                columnActionSx ?? {
+                  color: 'text.disabled',
+                  width: 28,
+                  height: 28,
+                  '&:hover': { color: 'text.secondary' }
+                }
+              }
             >
-              <DownloadIcon sx={{ fontSize: 15 }} />
+              <DownloadIcon sx={{ fontSize: columnTokens ? COLUMN_ACTION_ICON_SIZE + 1 : 15 }} />
             </IconButton>
           </Tooltip>
           <Menu
@@ -3037,6 +4060,7 @@ const AssistantMarkdownContent: React.FC<{
               title={t('chat.drag_reply_to_canvas', {
                 defaultValue: '\u62d6\u62fd\u56de\u7b54\u5230\u753b\u677f'
               })}
+              columnTokens={columnTokens}
             />
           ) : null}
         </Box>

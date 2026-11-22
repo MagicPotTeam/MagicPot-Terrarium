@@ -1,16 +1,16 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { Dir, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, readdirSync, linkSync, truncateSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 vi.unmock('node:fs')
 vi.unmock('node:fs/promises')
 import { createTerminalPolicyRequest, type PolicyRule } from '../../../shared/magicAgentPlatform2'
 import { MagicAgentEventStore } from '../persistence/eventStore'
 import { MagicAgentPolicyAuthorizationService } from '../policy'
-import { CommandJobsToolHost, type CommandJobsSpawnProcess } from './commandJobs'
+import { CommandJobsToolHost, type CommandJobsKillProcessGroup, type CommandJobsSpawnProcess } from './commandJobs'
 import { createWindowsJobObjectConfinementAdapter } from './windowsJobObjectConfinement'
 
 const stores: MagicAgentEventStore[] = []
@@ -20,16 +20,24 @@ function mkdirRealTemp(): string {
   return realpathSync.native(mkdtempSync(path.join(tmpdir(), 'magic-command-jobs-')))
 }
 
+/** The fake OS process table of the running test: every fake child, keyed by its fake pid. */
+const fakeProcessTable = new Map<number, FakeChildProcess>()
+const FIRST_FAKE_PID = 4100
+let nextFakePid = FIRST_FAKE_PID
+const isFakePid = (pid: unknown): boolean => typeof pid === 'number' && fakeProcessTable.has(Math.abs(pid))
+
 class FakeChildProcess extends EventEmitter {
   readonly stdout = new PassThrough()
   readonly stderr = new PassThrough()
   readonly pid: number
   killed = false
+  closed = false
   readonly killSignals: (NodeJS.Signals | number | undefined)[] = []
 
   constructor(pid: number) {
     super()
     this.pid = pid
+    fakeProcessTable.set(pid, this)
   }
 
   kill(signal?: NodeJS.Signals | number): boolean {
@@ -44,11 +52,16 @@ class FakeChildProcess extends EventEmitter {
   }
 
   close(code: number | null, signal: NodeJS.Signals | null = null): void {
+    this.closed = true
     this.stdout.end()
     this.stderr.end()
     this.emit('close', code, signal)
   }
 }
+
+/** win32 stop controllers: taskkill and the tree sweep's PowerShell process-table snapshot. */
+const isProcessSnapshotCommand = (command: string) => path.win32.basename(command).toLowerCase() === 'powershell.exe'
+const isStopControllerCommand = (command: string) => path.win32.basename(command).toLowerCase() === 'taskkill.exe' || isProcessSnapshotCommand(command)
 
 type SpawnCall = Readonly<{
   command: string
@@ -57,23 +70,52 @@ type SpawnCall = Readonly<{
   child: FakeChildProcess
 }>
 
-function createFakeSpawner() {
+/**
+ * Injected in place of process.kill for the POSIX stop path. It behaves like the OS for the fake
+ * process table: a signal to the group of a live fake child closes that child, anything else is ESRCH.
+ */
+function createFakeProcessGroupKiller() {
+  return vi.fn<CommandJobsKillProcessGroup>((pid, signal) => {
+    const child = pid < 0 ? fakeProcessTable.get(-pid) : undefined
+    if (!child || child.closed) throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
+    child.close(null, signal)
+    return true
+  })
+}
+let killProcessGroup = createFakeProcessGroupKiller()
+/** Guard on the real process.kill: a fake pid is recorded and never delivered to the OS. */
+let processKill: MockInstance<typeof process.kill>
+beforeEach(() => {
+  killProcessGroup = createFakeProcessGroupKiller()
+  const realKill = process.kill.bind(process)
+  processKill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => (isFakePid(pid) ? true : realKill(pid, signal)))
+})
+
+/** Answers the win32 tree sweep's PowerShell snapshot from the fake process table (empty by default). */
+function createFakeSpawner(snapshotRows: () => unknown[] = () => []) {
   const calls: SpawnCall[] = []
-  let nextPid = 4100
   const spawnProcess = ((
     command: string,
     args: readonly string[] = [],
     options: SpawnOptions = {}
   ) => {
-    const child = new FakeChildProcess(nextPid++)
+    const child = new FakeChildProcess(nextFakePid++)
     calls.push({ command, args: [...args], options, child })
     queueMicrotask(() => {
-      child.emit('spawn')
-      if (command === 'taskkill') {
+      if (!args.includes('--spawn-error')) child.emit('spawn')
+      if (path.win32.basename(command).toLowerCase() === 'taskkill.exe') {
+        const pids = args.flatMap((arg, index) => (arg === '/PID' ? [Number(args[index + 1])] : []))
+        for (const pid of pids) calls.find((call) => call.child.pid === pid)?.child.close(null, 'SIGTERM')
+        child.close(0)
+        return
+      }
+      if (path.win32.basename(command).toLowerCase() === 'powershell.exe') {
+        child.stdout.write(JSON.stringify(snapshotRows()))
         child.close(0)
         return
       }
       if (args.includes('--spawn-error')) {
+        Object.defineProperty(child, 'pid', { value: undefined })
         child.emit('error', new Error('fake executable unavailable'))
         child.close(0)
         return
@@ -97,9 +139,14 @@ function createFakeSpawner() {
 }
 
 afterEach(() => {
+  // Must run before the spy and the fake process table are reset: no test may signal a fake pid for real.
+  const realSignalsToFakePids = processKill.mock.calls.filter(([pid]) => isFakePid(pid))
   vi.restoreAllMocks()
+  fakeProcessTable.clear()
+  nextFakePid = FIRST_FAKE_PID
   for (const store of stores.splice(0)) store.close()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  expect(realSignalsToFakePids).toEqual([])
 })
 
 function setup(
@@ -107,6 +154,7 @@ function setup(
   audit: boolean | 'file' = false,
   resourceConstraints?: Readonly<{
     metadata?: Record<string, boolean | number>
+    allowedToolNames?: string[]
     networkHosts?: string[]
   }>,
   confinementAdapter?: import('./commandJobs').CommandJobsConfinementAdapter,
@@ -156,6 +204,7 @@ function setup(
     allowedCommands: [command],
     allowedEnvironmentKeys: ['TEST_VALUE'],
     spawnProcess,
+    killProcessGroup,
     ...(audit ? { auditSink: auditStore } : {}),
     ...(confinementAdapter ? { confinementAdapter } : {})
   })
@@ -164,6 +213,7 @@ function setup(
     authorization,
     host,
     command,
+    killProcessGroup,
     store: auditStore,
     policyStore,
     databasePath
@@ -219,6 +269,106 @@ async function waitFor(host: CommandJobsToolHost, jobId: string) {
 }
 
 describe('CommandJobsToolHost', () => {
+  it.each<Record<string, number | boolean>>([
+    {}, { maxMemoryBytes: 1024 }, { maxCpuTimeMs: 100 },
+    { maxMemoryBytes: 2048, maxCpuTimeMs: 100 }, { maxMemoryBytes: 1024, maxCpuTimeMs: 200 }
+  ])('refuses missing or weakened mandatory execution caps before permit consumption: %j', async (metadata) => {
+    const fake = createFakeSpawner(), { root, authorization, policyStore } = setup(fake.spawnProcess, false, { metadata })
+    const prepare = vi.fn(() => fake.spawnProcess)
+    const host = new CommandJobsToolHost(authorization, { workspaceRoot: root, spawnProcess: fake.spawnProcess, killProcessGroup,
+      mandatoryResourceLimits: { maxMemoryBytes: 1024, maxCpuTimeMs: 100 },
+      confinementAdapter: { platform: 'test', capabilities: { memory: true, cpu: true, processCount: false, networkDeny: false, networkHosts: false }, prepare }
+    })
+    const input = approved(root, authorization, ['--output'])
+    await expect(host.background(input)).rejects.toThrow('mandatory resource cap')
+    expect(fake.calls).toHaveLength(0); expect(prepare).not.toHaveBeenCalled()
+    expect(policyStore.getResource<{ consumed: boolean }>('policy-audit', input.authorizationId)?.state.consumed).toBe(false)
+  })
+  it('uses the confinement adapter with actual mandatory permit caps, including tighter caps', async () => {
+    const fake = createFakeSpawner(), { root, authorization } = setup(fake.spawnProcess, false, { metadata: { maxMemoryBytes: 512, maxCpuTimeMs: 50 } })
+    const bypass = vi.fn(), prepare = vi.fn(() => fake.spawnProcess)
+    const host = new CommandJobsToolHost(authorization, { workspaceRoot: root, spawnProcess: bypass as unknown as CommandJobsSpawnProcess, killProcessGroup,
+      mandatoryResourceLimits: { maxMemoryBytes: 1024, maxCpuTimeMs: 100 },
+      confinementAdapter: { platform: 'test', capabilities: { memory: true, cpu: true, processCount: false, networkDeny: false, networkHosts: false }, prepare }
+    })
+    const job = await host.background(approved(root, authorization, ['--output']))
+    expect(await waitFor(host, job.jobId)).toMatchObject({ state: 'completed' })
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ metadata: { maxMemoryBytes: 512, maxCpuTimeMs: 50 } }))
+    expect(bypass).not.toHaveBeenCalled(); expect(fake.calls).toHaveLength(1)
+  })
+  it.each(['python.run', 'shell.execute', 'notebook.execute-cell'])('rejects a commands request with a permit restricted to %s before spawn', async (allowedName) => {
+    const fake = createFakeSpawner(), { root, authorization, host, policyStore } = setup(fake.spawnProcess, false, { allowedToolNames: [allowedName] })
+    const input = approved(root, authorization, ['--output'])
+    await expect(host.background(input)).rejects.toThrow('exact requested process tool')
+    expect(fake.calls).toEqual([])
+    expect(policyStore.getResource<{ consumed: boolean }>('policy-audit', input.authorizationId)?.state.consumed).toBe(false)
+  })
+  it('bounds orphan discovery at the directory iterator instead of materializing an entire directory', () => {
+    const { root, authorization } = setup()
+    const dir = path.join(root, '.magicpot/command-jobs')
+    for (let i = 0; i < 600; i++) writeFileSync(path.join(dir, `ignored-${i}.txt`), '')
+    const read = vi.spyOn(Dir.prototype, 'readSync')
+    new CommandJobsToolHost(authorization, { workspaceRoot: root })
+    expect(read.mock.calls.length).toBeLessThanOrEqual(512)
+    expect(read.mock.calls.length).toBeGreaterThan(0)
+  })
+  it('keeps live identity/state authoritative when executable-writable job JSON is forged or deleted', async () => {
+    const fake = createFakeSpawner(), { root, authorization, host } = setup(fake.spawnProcess)
+    const input = approved(root, authorization, ['--hang']), job = await host.background(input)
+    const file = path.join(root, '.magicpot/command-jobs', `${job.jobId}.json`)
+    writeFileSync(file, JSON.stringify({ ...job, state: 'completed', outcome: 'known', routeKey: 'foreign', sessionId: 'foreign' }))
+    expect(host.status({ ...input, jobId: job.jobId })).toMatchObject({ state: 'running', routeKey: 'route' })
+    await expect(host.stop({ jobId: job.jobId, routeKey: 'foreign', sessionId: 'foreign' })).rejects.toThrow('outside')
+    unlinkSync(file)
+    expect(await host.stop({ ...input, jobId: job.jobId })).toMatchObject({ state: 'stopped', outcome: 'known' })
+    if (process.platform === 'win32') expect(fake.calls.some((call) => path.isAbsolute(call.command) && path.basename(call.command).toLowerCase() === 'taskkill.exe')).toBe(true)
+  })
+  it('owns and terminates a spawned child even if the first post-spawn persistence fails', async () => {
+    const fake = createFakeSpawner()
+    let rootForSpawn = ''
+    const spawnProcess = ((command, args, options) => {
+      const child = fake.spawnProcess(command, args, options)
+      if (!isStopControllerCommand(command)) rmSync(path.join(rootForSpawn, '.magicpot/command-jobs'), { recursive: true, force: true })
+      return child
+    }) as CommandJobsSpawnProcess
+    const { root, authorization, host } = setup(spawnProcess); rootForSpawn = root
+    const onOwned = vi.fn(), onStarted = vi.fn()
+    await expect(host.background({ ...approved(root, authorization, ['--hang']), onOwned, onStarted })).rejects.toThrow('setup failed after spawn')
+    expect(onOwned).toHaveBeenCalledOnce(); expect(onStarted).not.toHaveBeenCalled()
+    expect(host.status({ jobId: onOwned.mock.calls[0][0].jobId, routeKey: 'route', sessionId: 'session' }).state).not.toBe('running')
+    expect(fake.calls.filter((call) => !isProcessSnapshotCommand(call.command))).toHaveLength(process.platform === 'win32' ? 2 : 1)
+    if (process.platform === 'win32') expect(() => host.assertNoUncertainStop()).not.toThrow()
+  })
+  it('rejects replaced/linked or oversized logs before allocating an unbounded read', async () => {
+    const fake = createFakeSpawner(), { root, authorization, host } = setup(fake.spawnProcess)
+    const input = approved(root, authorization, ['--output']), job = await host.background(input)
+    await waitFor(host, job.jobId)
+    const file = path.join(root, '.magicpot/command-jobs', `${job.jobId}.stdout.log`)
+    truncateSync(file, 8 * 1024 * 1024)
+    expect(() => host.read({ ...input, jobId: job.jobId, stream: 'stdout', maxBytes: 16 })).toThrow('bound')
+    unlinkSync(file)
+    const outside = path.join(root, 'outside.txt'); writeFileSync(outside, 'MUST_NOT_READ')
+    linkSync(outside, file)
+    expect(() => host.read({ ...input, jobId: job.jobId, stream: 'stdout', maxBytes: 16 })).toThrow('linked')
+  })
+  it('stops on output-storage failure without uncaught stream exceptions or losing child ownership', async () => {
+    const fake = createFakeSpawner(), { root, authorization, host } = setup(fake.spawnProcess)
+    const input = approved(root, authorization, ['--hang']), job = await host.background(input)
+    const file = path.join(root, '.magicpot/command-jobs', `${job.jobId}.stdout.log`)
+    writeFileSync(file, 'foreign log bytes')
+    expect(() => fake.calls[0].child.stdout.write('x'.repeat(1000))).not.toThrow()
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+    expect(stopped).toMatchObject({ state: 'failed', logsTruncated: true, outcome: 'known' })
+    expect(() => host.assertNoUncertainStop()).not.toThrow()
+  })
+  it('runs the synchronous final hook after asynchronous preparation before consuming or spawning', async () => {
+    const fake = createFakeSpawner(), { root, authorization, host, policyStore } = setup(fake.spawnProcess)
+    const input = approved(root, authorization, ['--hang'])
+    await expect(host.background({ ...input, beforeConsume: async () => undefined, beforeDispatch: () => { throw new Error('revoked') } })).rejects.toThrow('revoked')
+    expect(fake.calls).toEqual([])
+    expect(policyStore.getResource<{ consumed: boolean }>('policy-audit', input.authorizationId)?.state.consumed).toBe(false)
+    expect(readdirSync(path.join(root, '.magicpot/command-jobs')).length).toBeGreaterThan(0)
+  })
   it('persists completion and supports bounded cursor reads with cross-chunk redaction', async () => {
     const fake = createFakeSpawner()
     const { root, authorization, host } = setup(fake.spawnProcess)
@@ -252,9 +402,67 @@ describe('CommandJobsToolHost', () => {
     await expect(host.background(input)).rejects.toThrow()
   })
 
+  it('atomically rechecks capacity after concurrent pre-consumption awaits without consuming losing permits', async () => {
+    const fake = createFakeSpawner()
+    const { root, authorization } = setup(fake.spawnProcess)
+    const host = new CommandJobsToolHost(authorization, { workspaceRoot: root, spawnProcess: fake.spawnProcess, killProcessGroup, maxConcurrentJobs: 1 })
+    let resume!: () => void
+    const gate = new Promise<void>((resolve) => { resume = resolve })
+    const one = approved(root, authorization, ['--hang']), two = approved(root, authorization, ['--hang'])
+    const first = host.background({ ...one, beforeConsume: () => gate })
+    const second = host.background({ ...two, beforeConsume: () => gate }).catch((error) => error)
+    resume()
+    const job = await first
+    expect(await second).toMatchObject({ message: expect.stringContaining('Concurrent') })
+    expect(fake.calls.filter((call) => !isStopControllerCommand(call.command))).toHaveLength(1)
+    await host.stop({ ...one, jobId: job.jobId })
+  })
+
+  it('refuses dispatch after an await when another owned process enters termination', async () => {
+    const fake = createFakeSpawner()
+    const { root, authorization, host } = setup(fake.spawnProcess)
+    const first = approved(root, authorization, ['--hang']), second = approved(root, authorization, ['--hang'])
+    const job = await host.background(first)
+    let resume!: () => void
+    const gate = new Promise<void>((resolve) => { resume = resolve })
+    const pending = host.background({ ...second, beforeConsume: () => gate }).catch((error) => error)
+    const stopped = host.stop({ ...first, jobId: job.jobId })
+    resume()
+    expect(await pending).toMatchObject({ message: expect.stringContaining('termination') })
+    await stopped
+    expect(fake.calls.filter((call) => !isStopControllerCommand(call.command))).toHaveLength(1)
+  })
+
+  it.runIf(process.platform === 'win32')('keeps a nonzero termination controller exit unknown even when the owned child has closed', async () => {
+    const fake = createFakeSpawner()
+    const spawnProcess = ((command, args, options) => {
+      if (path.basename(String(command)).toLowerCase() !== 'taskkill.exe') return fake.spawnProcess(command, args, options)
+      const killer = new FakeChildProcess(9900)
+      queueMicrotask(() => { fake.calls[0].child.close(1); killer.close(128) })
+      return killer as unknown as ChildProcess
+    }) as CommandJobsSpawnProcess
+    const { root, authorization, host } = setup(spawnProcess)
+    const input = approved(root, authorization, ['--hang']), job = await host.background(input)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'unknown', termination: { controllerExitCode: 128, controllerTimedOut: false, controllerFailed: false, childClosed: true } })
+    expect(() => host.assertNoUncertainStop()).toThrow('unconfirmed')
+    expect(await host.stop({ ...input, jobId: job.jobId })).toMatchObject({ outcome: 'unknown' })
+  })
+  it('shares one termination completion for abort and an immediately repeated explicit stop', async () => {
+    const fake = createFakeSpawner()
+    const { root, authorization, host } = setup(fake.spawnProcess)
+    const input = approved(root, authorization, ['--hang']), controller = new AbortController()
+    const job = await host.background({ ...input, signal: controller.signal })
+    controller.abort()
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'known' })
+    expect(fake.calls.filter((call) => path.basename(call.command).toLowerCase() === 'taskkill.exe')).toHaveLength(process.platform === 'win32' ? 1 : 0)
+    expect(() => host.assertNoUncertainStop()).not.toThrow()
+  })
+
   it('terminates the process tree when combined output exceeds the enforced bound', async () => {
     const fake = createFakeSpawner()
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    const kill = killProcessGroup
     const { root, authorization, host } = setup(fake.spawnProcess)
     const job = await host.background({
       ...approved(root, authorization, ['--combined-limit']),
@@ -270,7 +478,7 @@ describe('CommandJobsToolHost', () => {
     })
     if (process.platform === 'win32') {
       expect(
-        fake.calls.some((call) => call.command === 'taskkill' && call.args.includes('/T'))
+        fake.calls.some((call) => path.basename(call.command).toLowerCase() === 'taskkill.exe' && call.args.includes('/T'))
       ).toBe(true)
     } else {
       expect(kill).toHaveBeenCalledWith(-fake.calls[0].child.pid, 'SIGTERM')
@@ -514,7 +722,7 @@ describe('CommandJobsToolHost', () => {
     expect(settled).toMatchObject({
       state: 'failed',
       outcome: 'known',
-      stopOutcome: 'spawn failed: fake executable unavailable'
+      stopOutcome: 'spawn-failed'
     })
     expect(
       host.status({ jobId: job.jobId, routeKey: 'route', sessionId: 'session' })
@@ -527,7 +735,7 @@ describe('CommandJobsToolHost', () => {
 
   it('times out and observes descendant process-group termination', async () => {
     const fake = createFakeSpawner()
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    const kill = killProcessGroup
     const { root, authorization, host } = setup(fake.spawnProcess)
     const job = await host.background({
       ...approved(root, authorization, ['--hang']),
@@ -537,7 +745,7 @@ describe('CommandJobsToolHost', () => {
     expect((await waitFor(host, job.jobId)).state).toBe('timed-out')
     if (process.platform === 'win32') {
       expect(
-        fake.calls.some((call) => call.command === 'taskkill' && call.args.includes('/T'))
+        fake.calls.some((call) => path.basename(call.command).toLowerCase() === 'taskkill.exe' && call.args.includes('/T'))
       ).toBe(true)
     } else {
       expect(kill).toHaveBeenCalledWith(-fake.calls[0].child.pid, 'SIGTERM')
@@ -547,7 +755,6 @@ describe('CommandJobsToolHost', () => {
 
   it('stops idempotently, scopes ownership, and marks live metadata interrupted on reopen', async () => {
     const fake = createFakeSpawner()
-    vi.spyOn(process, 'kill').mockImplementation(() => true)
     const { root, authorization, host, command } = setup(fake.spawnProcess)
     const running = await host.background(approved(root, authorization, ['--hang']))
 
@@ -565,7 +772,8 @@ describe('CommandJobsToolHost', () => {
     const reopened = new CommandJobsToolHost(authorization, {
       workspaceRoot: root,
       allowedCommands: [command],
-      spawnProcess: fake.spawnProcess
+      spawnProcess: fake.spawnProcess,
+      killProcessGroup
     })
     expect(
       reopened.status({ jobId: orphan.jobId, routeKey: 'route', sessionId: 'session' })
@@ -578,5 +786,160 @@ describe('CommandJobsToolHost', () => {
     fake.calls
       .filter((call) => call.command === command)
       .forEach((call) => call.child.close(null, 'SIGTERM'))
+  })
+
+  it('never delivers a real process.kill to a fake pid when a fake child is stopped, timed out or over its output limit', async () => {
+    const fake = createFakeSpawner(), { root, authorization, host } = setup(fake.spawnProcess)
+    const scope = { routeKey: 'route', sessionId: 'session' }
+    const stoppedJob = await host.background(approved(root, authorization, ['--hang']))
+    expect(await host.stop({ ...scope, jobId: stoppedJob.jobId })).toMatchObject({ state: 'stopped', outcome: 'known', stopOutcome: 'stop-requested' })
+    const timedOutJob = await host.background({ ...approved(root, authorization, ['--hang']), timeoutMs: 10 })
+    expect(await waitFor(host, timedOutJob.jobId)).toMatchObject({ state: 'timed-out', outcome: 'known', stopOutcome: 'runtime-limit' })
+    const limitedJob = await host.background({ ...approved(root, authorization, ['--combined-limit']), maxLogBytes: 8 })
+    expect(await waitFor(host, limitedJob.jobId)).toMatchObject({ state: 'failed', outcome: 'known', stopOutcome: 'output-limit' })
+
+    const children = fake.calls.filter((call) => call.command === 'fake-command').map((call) => call.child)
+    expect(children).toHaveLength(3)
+    expect(children.every((child) => isFakePid(child.pid) && child.closed)).toBe(true)
+    expect(processKill).not.toHaveBeenCalled()
+    if (process.platform === 'win32') expect(killProcessGroup).not.toHaveBeenCalled()
+    else expect(killProcessGroup.mock.calls).toEqual(children.flatMap((child) => [[-child.pid, 'SIGTERM'], [-child.pid, 'SIGKILL']]))
+    expect(() => host.assertNoUncertainStop()).not.toThrow()
+  })
+
+  it.skipIf(process.platform === 'win32')('stops a real process group through process.kill when no killProcessGroup is injected', async () => {
+    const { root, authorization } = setup(undefined, false, undefined, undefined, process.execPath)
+    // Production wiring: neither spawnProcess nor killProcessGroup is injected.
+    const host = new CommandJobsToolHost(authorization, { workspaceRoot: root, allowedCommands: [process.execPath] })
+    const input = approved(root, authorization, ['-e', 'setInterval(() => {}, 1000)'], process.execPath)
+    const job = await host.background(input)
+    try {
+      expect(job.pid).toEqual(expect.any(Number))
+      expect(isFakePid(job.pid)).toBe(false)
+
+      expect(await host.stop({ ...input, jobId: job.jobId })).toMatchObject({
+        state: 'stopped', outcome: 'known', stopOutcome: 'stop-requested',
+        termination: { childClosed: true, childExited: true }
+      })
+      expect(processKill.mock.calls).toEqual([[-job.pid!, 'SIGTERM'], [-job.pid!, 'SIGKILL']])
+      expect(killProcessGroup).not.toHaveBeenCalled()
+      expect(() => host.assertNoUncertainStop()).not.toThrow()
+    } finally {
+      // Never leave the real helper process behind when an expectation above fails.
+      if (job.pid) try { process.kill(-job.pid, 'SIGKILL') } catch { /* already gone: the expected case */ }
+    }
+  })
+})
+
+describe('CommandJobsToolHost win32 stop strategy', () => {
+  const FILETIME_UNIX_EPOCH = 116_444_736_000_000_000n
+  const filetime = (ms: number) => String(BigInt(ms) * 10_000n + FILETIME_UNIX_EPOCH)
+  const isTaskkill = (call: SpawnCall) => path.win32.basename(call.command).toLowerCase() === 'taskkill.exe'
+  const isPowerShell = (call: SpawnCall) => path.win32.basename(call.command).toLowerCase() === 'powershell.exe'
+  const win32Host = (
+    root: string,
+    authorization: MagicAgentPolicyAuthorizationService,
+    spawnProcess: CommandJobsSpawnProcess,
+    extra: Partial<ConstructorParameters<typeof CommandJobsToolHost>[1]> = {}
+  ) =>
+    new CommandJobsToolHost(authorization, {
+      workspaceRoot: root,
+      allowedCommands: ['fake-command'],
+      spawnProcess,
+      killProcessGroup,
+      platform: 'win32',
+      ...extra
+    })
+
+  it('sweeps an unconfined job: a grandchild born during the taskkill is killed before the stop is known', async () => {
+    let survivor: { p: number; q: number; c: string } | undefined
+    const fake = createFakeSpawner(() => (survivor ? [survivor] : []))
+    const spawnProcess = ((command: string, args: readonly string[], options: SpawnOptions) => {
+      if (path.win32.basename(command).toLowerCase() === 'taskkill.exe') {
+        // The job forks while the first taskkill runs: its new child is not in that enumeration.
+        if (args.includes('/T')) survivor = { p: 61_001, q: fake.calls[0].child.pid, c: filetime(Date.now()) }
+        else if (args.includes(String(61_001))) survivor = undefined
+      }
+      return fake.spawnProcess(command, args, options)
+    }) as CommandJobsSpawnProcess
+    const { root, authorization } = setup(fake.spawnProcess)
+    const host = win32Host(root, authorization, spawnProcess)
+    const input = approved(root, authorization, ['--hang'])
+    const job = await host.background(input)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'known', stopOutcome: 'stop-requested', termination: { controllerExitCode: 0, controllerTimedOut: false, controllerFailed: false, childClosed: true } })
+    expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([
+      ['/PID', String(fake.calls[0].child.pid), '/T', '/F'],
+      ['/PID', '61001', '/F']
+    ])
+    expect(fake.calls.filter(isPowerShell).length).toBeGreaterThanOrEqual(2)
+    expect(survivor).toBeUndefined()
+    expect(() => host.assertNoUncertainStop()).not.toThrow()
+  })
+
+  it('aims no taskkill at an unconfined job whose command has already exited, sweeps what it left behind and keeps the stop unknown', async () => {
+    // The command exited, but a process it started keeps its output pipes open, so the job is
+    // still live. Its pid may belong to a stranger by now: `taskkill /PID <pid> /T /F` could only
+    // fail or kill that stranger. 61002 was created before the exit and is swept; 61003 names
+    // the same parent pid but was created afterwards and must stay.
+    const startedAt = Date.now()
+    let leftBehind = true
+    const fake = createFakeSpawner(() => [
+      ...(leftBehind ? [{ p: 61_002, q: commandPid(), c: filetime(startedAt + 1) }] : []),
+      { p: 61_003, q: commandPid(), c: filetime(startedAt + 60_000) }
+    ])
+    const commandPid = () => fake.calls[0].child.pid
+    const spawnProcess = ((command: string, args: readonly string[], options: SpawnOptions) => {
+      if (path.win32.basename(command).toLowerCase() === 'taskkill.exe' && args.includes(String(61_002))) {
+        leftBehind = false
+        // The swept process held the pipes: the job's streams close now.
+        queueMicrotask(() => fake.calls[0].child.close(0))
+      }
+      return fake.spawnProcess(command, args, options)
+    }) as CommandJobsSpawnProcess
+    const { root, authorization } = setup(fake.spawnProcess)
+    const host = win32Host(root, authorization, spawnProcess)
+    const input = approved(root, authorization, ['--hang'])
+    const job = await host.background(input)
+    fake.calls[0].child.emit('exit', 0, null)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+
+    expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([['/PID', '61002', '/F']])
+    // As before for a root that taskkill could not kill: the stop is not called a success.
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'unknown', stopOutcome: 'termination-unconfirmed', termination: { controllerExitCode: null, childClosed: true } })
+  })
+
+  it('judges an unconfined stop as before the sweep when no process snapshot can be taken (no quarantine)', async () => {
+    // PowerShell blocked by policy, a broken WMI or a cold start beyond the bound: the sweep has
+    // no evidence either way. Quarantining the job host until a restart on every such PC would be
+    // worse than the old rule (taskkill exit 0 and the child's close), which therefore applies.
+    const fake = createFakeSpawner()
+    const { root, authorization } = setup(fake.spawnProcess)
+    const host = win32Host(root, authorization, fake.spawnProcess, { windowsProcessSnapshot: async () => undefined })
+    const input = approved(root, authorization, ['--hang'])
+    const job = await host.background(input)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'known', stopOutcome: 'stop-requested', termination: { controllerExitCode: 0, controllerFailed: false, childClosed: true } })
+    expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([['/PID', String(fake.calls[0].child.pid), '/T', '/F']])
+    expect(() => host.assertNoUncertainStop()).not.toThrow()
+  })
+
+  it('stops a confined job by ending the Job Object helper itself, without a sweep', async () => {
+    const helper = 'C:\\MagicPot\\bin\\magicpot-command-job\\magicpot-command-job.exe'
+    const fake = createFakeSpawner()
+    const confinedSpawn = ((command: string, args: readonly string[], options: SpawnOptions) =>
+      fake.spawnProcess(helper, ['1024', '-', '-', '--', command, ...args], options)) as CommandJobsSpawnProcess
+    const { root, authorization } = setup(fake.spawnProcess, false, { metadata: { maxMemoryBytes: 1024 } })
+    const host = win32Host(root, authorization, fake.spawnProcess, {
+      confinementAdapter: { platform: 'windows-job-object:test', capabilities: { memory: true, cpu: true, processCount: true, networkDeny: false, networkHosts: false }, prepare: () => confinedSpawn }
+    })
+    const input = approved(root, authorization, ['--hang'])
+    const job = await host.background(input)
+    const stopped = await host.stop({ ...input, jobId: job.jobId })
+    expect(fake.calls[0].command).toBe(helper)
+    expect(stopped).toMatchObject({ state: 'stopped', outcome: 'known' })
+    expect(fake.calls.filter(isTaskkill).map((call) => call.args)).toEqual([['/PID', String(fake.calls[0].child.pid), '/T', '/F']])
+    expect(fake.calls.filter(isPowerShell)).toEqual([])
   })
 })

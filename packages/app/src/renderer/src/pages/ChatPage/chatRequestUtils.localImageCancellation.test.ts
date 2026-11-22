@@ -1,0 +1,244 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_CONFIG } from '@shared/config/config'
+import { createImageResponse } from '../../testUtils/imageResponse'
+import {
+  normalizeChatAttachmentsForRequest,
+  requestChatCompletion,
+  requestChatCompletionStream
+} from './chatRequestUtils'
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((settle) => {
+    resolve = settle
+  })
+  return { promise, resolve }
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+describe.each([false, true])('ordinary local-image cancellation (stream: %s)', (streaming) => {
+  // Owner decision A (no-body contract): request images are read only from the body
+  // stream, so the former 'blob' and 'array-buffer' phases are now an abort while the
+  // body read is stalled, before any chunk ('body-read') or after one ('body-read-after-chunk').
+  it.each(['fetch', 'body-read', 'body-read-after-chunk', 'file-reader'] as const)(
+    'returns on abort during %s and ignores its late result',
+    async (phase) => {
+      const fetchGate = deferred<Response>()
+      const readGate = deferred<ReadableStreamReadResult<Uint8Array>>()
+      const streamed = phase === 'fetch' || phase === 'file-reader'
+      const constructedBlob = vi.fn()
+      const NativeBlob = globalThis.Blob
+      if (!streamed) {
+        class CountingBlob extends NativeBlob {
+          constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+            super(parts, options)
+            constructedBlob()
+          }
+        }
+        vi.stubGlobal('Blob', CountingBlob)
+      }
+      let cleaning = false
+      const readers: FakeReader[] = []
+      class FakeReader {
+        static readonly LOADING = 1
+        readyState = 0
+        result: string | null = null
+        error: DOMException | null = null
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        onabort: (() => void) | null = null
+        readAsDataURL = vi.fn(() => {
+          this.readyState = 1
+          if (phase !== 'file-reader' || cleaning) queueMicrotask(() => this.finish())
+        })
+        abort = vi.fn(() => {
+          this.readyState = 2
+          this.onabort?.()
+        })
+        constructor() {
+          readers.push(this)
+        }
+        finish() {
+          this.readyState = 2
+          this.result = 'data:image/png;base64,YQ=='
+          this.onload?.()
+        }
+      }
+      vi.stubGlobal('FileReader', FakeReader)
+      const streamResponse = createImageResponse('a')
+      const blob = streamed
+        ? vi.spyOn(streamResponse, 'blob')
+        : vi.fn(async () => new NativeBlob(['a'], { type: 'image/png' }))
+      const arrayBuffer = streamed
+        ? vi.spyOn(streamResponse, 'arrayBuffer')
+        : vi.fn(async () => new Uint8Array([97]).buffer)
+      // A stalled reader: the first read (or the second, after one chunk) waits on readGate.
+      const read = vi.fn((): Promise<ReadableStreamReadResult<Uint8Array>> =>
+        phase === 'body-read-after-chunk' && read.mock.calls.length === 1
+          ? Promise.resolve({ done: false, value: new Uint8Array([97]) })
+          : readGate.promise
+      )
+      const cancel = vi.fn(async () => {})
+      const stalledReads = phase === 'body-read-after-chunk' ? 2 : 1
+      const response = streamed
+        ? streamResponse
+        : ({
+            ok: true,
+            headers: { get: () => 'image/png' },
+            body: { getReader: () => ({ read, cancel, releaseLock: vi.fn() }) },
+            blob,
+            arrayBuffer
+          } as unknown as Response)
+      const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+        phase === 'fetch' ? fetchGate.promise : Promise.resolve(response)
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      const chat = vi.fn()
+      const chatStream = vi.fn()
+      const cancelConversation = vi.fn()
+      vi.stubGlobal('api', { svcLLMProxy: { chat, chatStream, cancelConversation } })
+      const profile = {
+        id: 'local-image-fixture',
+        provider: 'openai' as const,
+        deployment: 'cloud' as const,
+        model_use: 'chat' as const,
+        model_name: 'fixture',
+        base_url: 'https://fixture.invalid/v1',
+        api_key: 'fixture',
+        api_mode: 'responses' as const,
+        attachment_transports: ['request-data-url' as const]
+      }
+      const config = {
+        ...DEFAULT_CONFIG,
+        use_remote_llm: false,
+        llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [profile] }
+      }
+      const controller = new AbortController()
+      const request = {
+        config,
+        profileId: profile.id,
+        conversationId: 'local-image-cancellation',
+        signal: controller.signal,
+        messages: [
+          {
+            role: 'user' as const,
+            content: 'analyze',
+            attachments: [0, 1].map((index) => ({
+              type: 'image' as const,
+              url: `local-media:///fixture-${index}.png`,
+              fileName: `fixture-${index}.png`
+            }))
+          }
+        ]
+      }
+      const pending = (
+        streaming
+          ? requestChatCompletionStream({ ...request, onEvent: vi.fn() })
+          : requestChatCompletion(request)
+      ).catch((error: unknown) => error)
+      const settled = vi.fn()
+      void pending.then(settled)
+      try {
+        await vi.waitFor(() => {
+          if (phase === 'fetch') expect(fetchMock).toHaveBeenCalledOnce()
+          else if (!streamed) expect(read).toHaveBeenCalledTimes(stalledReads)
+          else expect(readers[0]?.readAsDataURL).toHaveBeenCalledOnce()
+        })
+        expect(fetchMock).toHaveBeenCalledOnce()
+        const lateLoad = readers[0]?.onload
+        controller.abort(new DOMException('stop preparing', 'AbortError'))
+        await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce(), { timeout: 500 })
+        expect(await pending).toMatchObject({ name: 'AbortError' })
+        expect(fetchMock.mock.calls[0][1]?.signal).toBe(controller.signal)
+        if (phase === 'file-reader') expect(readers[0].abort).toHaveBeenCalledOnce()
+        if (!streamed) expect(cancel).toHaveBeenCalled()
+
+        fetchGate.resolve(response)
+        // The late result would complete the image: a chunk for a first read, the end of
+        // the stream after a chunk.
+        readGate.resolve(
+          phase === 'body-read'
+            ? { done: false, value: new Uint8Array([97]) }
+            : { done: true, value: undefined }
+        )
+        lateLoad?.()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(fetchMock).toHaveBeenCalledOnce()
+        if (phase === 'fetch') expect(blob).not.toHaveBeenCalled()
+        if (!streamed) {
+          expect(readers).toHaveLength(0)
+          expect(constructedBlob).not.toHaveBeenCalled()
+          expect(read).toHaveBeenCalledTimes(stalledReads)
+          expect(blob).not.toHaveBeenCalled()
+          expect(arrayBuffer).not.toHaveBeenCalled()
+        }
+        expect(chat).not.toHaveBeenCalled()
+        expect(chatStream).not.toHaveBeenCalled()
+        expect(cancelConversation).not.toHaveBeenCalled()
+      } finally {
+        cleaning = true
+        fetchGate.resolve(response)
+        readGate.resolve({ done: true, value: undefined })
+        for (const reader of readers) reader.finish()
+        await pending
+      }
+    }
+  )
+
+  it('uses an already-aborted signal without starting an ordinary image fetch', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    const reason = new DOMException('stop before preparation', 'AbortError')
+    controller.abort(reason)
+    await expect(
+      normalizeChatAttachmentsForRequest([{ type: 'image', url: 'local-media:///fixture.png' }], {
+        allowRequestDataUrl: true,
+        signal: controller.signal
+      })
+    ).rejects.toBe(reason)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps a completed read successful when its old signal is aborted afterwards', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn(async () => createImageResponse('a'))
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await normalizeChatAttachmentsForRequest(
+      [{ type: 'image', url: 'local-media:///fixture.png' }],
+      { allowRequestDataUrl: true, signal: controller.signal }
+    )
+    expect(result?.[0].url).toBe('data:image/png;base64,YQ==')
+    controller.abort(new DOMException('after success', 'AbortError'))
+    expect(result?.[0].url).toBe('data:image/png;base64,YQ==')
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('preserves an ordinary body read failure while the signal is live', async () => {
+    const controller = new AbortController()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        createImageResponse(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(new Error('fixture body failure'))
+            }
+          })
+        )
+      )
+    )
+    await expect(
+      normalizeChatAttachmentsForRequest(
+        [{ type: 'image', url: 'local-media:///fixture.png', fileName: 'fixture.png' }],
+        { allowRequestDataUrl: true, signal: controller.signal }
+      )
+    ).rejects.toThrow(
+      'Unable to prepare image attachment "fixture.png" for the model: fixture body failure'
+    )
+  })
+})

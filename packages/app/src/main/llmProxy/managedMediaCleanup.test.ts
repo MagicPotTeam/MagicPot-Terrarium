@@ -11,6 +11,7 @@ import {
   type ManagedMediaCleanupAudit
 } from './managedMediaCleanup'
 import { managedMediaDerivativeIdentityFor } from './managedMediaDerivativeManifest'
+import { importManagedMedia, resolveManagedMediaReference } from './managedMediaStore'
 
 const referenced = '1'.repeat(64)
 const orphan = '2'.repeat(64)
@@ -775,5 +776,134 @@ describe('managedMediaCleanup safe planner', () => {
       }
     ])
     await expect(fs.stat(temporary)).resolves.toBeTruthy()
+  })
+})
+
+/** A small PNG the store accepts; `width` makes each test's image (and media ID) its own. */
+function tinyPng(width: number): Buffer {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+  const ihdr = Buffer.alloc(25)
+  ihdr.writeUInt32BE(13, 0)
+  ihdr.write('IHDR', 4, 'ascii')
+  ihdr.writeUInt32BE(width, 8)
+  ihdr.writeUInt32BE(1, 12)
+  ihdr[16] = 8
+  ihdr[17] = 6
+  const iend = Buffer.alloc(12)
+  iend.write('IEND', 4, 'ascii')
+  return Buffer.concat([signature, ihdr, iend])
+}
+
+describe('managedMediaCleanup and a reused (deduplicated) import', () => {
+  /**
+   * An orphan record past its retention time, left by an earlier run of the app (an import whose
+   * reference was never written, or an image of a deleted conversation), and an import of the
+   * same bytes now.
+   */
+  const setup = async (width: number) => {
+    const base = await createNodeTestArtifactDir('managed-media-cleanup-dedupe')
+    created.push(base)
+    const authorizedRoot = await fs.realpath(base)
+    const storeRoot = path.join(authorizedRoot, 'managed')
+    const bytes = tinyPng(width)
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
+    const relativePath = `originals/${sha256.slice(0, 2)}/${sha256}.png`
+    const absolutePath = path.join(storeRoot, ...relativePath.split('/'))
+    const metadataPath = path.join(storeRoot, 'metadata', `${sha256}.json`)
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true })
+    await fs.mkdir(path.dirname(metadataPath), { recursive: true })
+    await fs.writeFile(absolutePath, bytes)
+    const metadata = {
+      schema: 'magicpot.managed-media/v1',
+      version: 1,
+      sha256,
+      sizeBytes: bytes.length,
+      mimeType: 'image/png',
+      extension: 'png',
+      relativePath
+    }
+    await fs.writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`)
+    const old = new Date(Date.now() - FIXTURE_AGE_MS)
+    await fs.utimes(absolutePath, old, old)
+    await fs.utimes(metadataPath, old, old)
+    const importOnce = () =>
+      importManagedMedia(
+        storeRoot,
+        { bytes, mimeType: 'image/png', originalFileName: 'a.png', provenance: { source: 'test' } },
+        { authorizedRoot }
+      )
+    return { authorizedRoot, storeRoot, bytes, sha256, absolutePath, metadataPath, importOnce }
+  }
+
+  it('starts the retention time again for the files an import reuses', async () => {
+    const { sha256, absolutePath, metadataPath, importOnce } = await setup(2)
+    const before = Date.now() - 60_000
+    const reused = await importOnce()
+    expect(reused.reference.sha256).toBe(sha256)
+    expect(path.resolve(reused.absolutePath)).toBe(path.resolve(absolutePath))
+    expect((await fs.lstat(absolutePath)).mtimeMs).toBeGreaterThan(before)
+    expect((await fs.lstat(metadataPath)).mtimeMs).toBeGreaterThan(before)
+  })
+
+  it('keeps an orphan that an import reused after the plan was made', async () => {
+    const { storeRoot, bytes, sha256, absolutePath, metadataPath, importOnce } = await setup(3)
+    // The snapshot the plan uses was taken before the record that now names the image was written.
+    const plan = await planManagedMediaCleanup({ chatMediaRoot: storeRoot, referencedMediaIds: [] })
+    expect(plan.actions).toContainEqual(
+      expect.objectContaining({ kind: 'original-file', mediaId: sha256 })
+    )
+    await importOnce()
+    const result = await executeManagedMediaCleanup(plan, {
+      dryRun: false,
+      shouldContinue: () => true
+    })
+    expect(result.deleted).toEqual([])
+    expect(await fs.readFile(absolutePath)).toEqual(bytes)
+    await expect(fs.stat(metadataPath)).resolves.toBeTruthy()
+  })
+
+  it('keeps a planned orphan whose files were touched after the plan', async () => {
+    const { storeRoot, sha256, absolutePath, metadataPath } = await setup(4)
+    const plan = await planManagedMediaCleanup({ chatMediaRoot: storeRoot, referencedMediaIds: [] })
+    // Something else (an import by an earlier build, another process) refreshed the original.
+    const now = new Date()
+    await fs.utimes(absolutePath, now, now)
+    const result = await executeManagedMediaCleanup(plan, { dryRun: false })
+    expect(result.deleted).toEqual([])
+    expect(result.skipped).toContainEqual({
+      relativePath: `metadata/${sha256}.json`,
+      reason: 'orphan media record is within retention TTL'
+    })
+    await expect(fs.stat(absolutePath)).resolves.toBeTruthy()
+    await expect(fs.stat(metadataPath)).resolves.toBeTruthy()
+  })
+
+  it('never deletes what an import made between two deletes of the record hands out', async () => {
+    const { authorizedRoot, storeRoot, bytes, sha256, absolutePath, importOnce } = await setup(5)
+    const plan = await planManagedMediaCleanup({ chatMediaRoot: storeRoot, referencedMediaIds: [] })
+    const realRealpath = fs.realpath.bind(fs)
+    let reused: Awaited<ReturnType<typeof importOnce>> | undefined
+    let started = false
+    // The metadata is deleted first; the import runs just before the original's turn.
+    const realpathSpy = vi.spyOn(fs, 'realpath').mockImplementation((async (target: string) => {
+      if (!started && path.resolve(String(target)) === path.resolve(absolutePath)) {
+        started = true
+        reused = await importOnce()
+      }
+      return realRealpath(target)
+    }) as typeof fs.realpath)
+    let result: Awaited<ReturnType<typeof executeManagedMediaCleanup>>
+    try {
+      result = await executeManagedMediaCleanup(plan, { dryRun: false })
+    } finally {
+      realpathSpy.mockRestore()
+    }
+    expect(reused).toBeDefined()
+    expect(result.deleted).toEqual([`metadata/${sha256}.json`])
+    // The reference the import handed out resolves to the image.
+    const resolved = await resolveManagedMediaReference(storeRoot, reused!.reference, {
+      authorizedRoot
+    })
+    expect(await fs.readFile(resolved.absolutePath)).toEqual(bytes)
   })
 })

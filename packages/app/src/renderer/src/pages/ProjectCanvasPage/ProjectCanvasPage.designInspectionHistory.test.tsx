@@ -561,22 +561,29 @@ vi.mock('./components/ProjectCanvasImageCropOverlay', async () => {
         ref,
         () => ({
           confirm: () => {
-            const nextWidth = Math.max(40, item.width - 32)
-            const nextHeight = Math.max(40, item.height - 24)
+            // Same frame rule as the real overlay (pinned on the real component in
+            // components/ProjectCanvasImageCropOverlay.test.tsx, 'confirmed frame'):
+            // the frame is the crop size in source pixels, and the scale and the
+            // position compensate so the kept pixels stay where they were drawn.
+            const sourceWidth = item.sourceWidth || item.width
+            const sourceHeight = item.sourceHeight || item.height
+            const crop = {
+              x: 10,
+              y: 6,
+              width: Math.max(1, sourceWidth - 20),
+              height: Math.max(1, sourceHeight - 16)
+            }
+            const nextScaleX = item.scaleX * (item.width / sourceWidth)
+            const nextScaleY = item.scaleY * (item.height / sourceHeight)
             mockCropOverlayConfirm()
             onConfirm({
-              x: item.x + 12,
-              y: item.y + 8,
-              width: nextWidth,
-              height: nextHeight,
-              scaleX: item.scaleX * 1.15,
-              scaleY: item.scaleY * 1.1,
-              crop: {
-                x: 10,
-                y: 6,
-                width: Math.max(1, (item.sourceWidth || item.width) - 20),
-                height: Math.max(1, (item.sourceHeight || item.height) - 16)
-              }
+              x: item.x + crop.x * nextScaleX,
+              y: item.y + crop.y * nextScaleY,
+              width: crop.width,
+              height: crop.height,
+              scaleX: nextScaleX,
+              scaleY: nextScaleY,
+              crop
             })
           }
         }),
@@ -1775,34 +1782,37 @@ describe('ProjectCanvasPage generation-first entry', () => {
     const savedTargetImage = savedItems.find((item) => item.id === 'image-1')
     const savedPeerImage = savedItems.find((item) => item.id === 'image-2')
 
+    // Crop confirm keeps the user's original picture plus the crop region (never
+    // flattened into a new data URL). The crop is in the 320x240 source's pixel
+    // space (the decoded MockImage size, recorded as sourceWidth/Height). The
+    // frame is what the overlay reported, stored unchanged: width / height equal
+    // to the crop size, with the scale and the position compensating (the 160 x
+    // 160 picture showed the whole 320 x 240 source, so 0.5 and 160 / 240). That
+    // rule itself is pinned on the real overlay in
+    // components/ProjectCanvasImageCropOverlay.test.tsx ('confirmed frame').
     expect(savedTargetImage).toEqual(
       expect.objectContaining({
         id: 'image-1',
-        x: 92,
-        y: 48,
+        x: 85,
+        y: expect.closeTo(44, 6),
         width: 300,
         height: 224,
-        scaleX: 1.15,
-        scaleY: 1.1,
-        src: 'data:image/png;base64,mock-canvas',
+        scaleX: 0.5,
+        scaleY: expect.closeTo(160 / 240, 6),
+        src: 'file:///C:/magicpot/crop-target.png',
         fileName: 'crop-target.png',
-        sourceWidth: 300,
-        sourceHeight: 224
+        sourceWidth: 320,
+        sourceHeight: 240,
+        crop: { x: 10, y: 6, width: 300, height: 224 }
       })
     )
-    expect(savedTargetImage).not.toHaveProperty('crop')
+    expect(String(savedTargetImage?.src)).not.toMatch(/^data:/)
+    // The other image of the earlier multi-selection is saved unchanged.
     expect(savedPeerImage).toEqual(
-      expect.objectContaining({
-        id: 'image-2',
-        x: 280,
-        y: 40,
-        width: 160,
-        height: 160,
-        scaleX: 1,
-        scaleY: 1
-      })
+      expect.objectContaining(createImageItem('image-2', 280, 'crop-peer.png'))
     )
     expect(savedPeerImage).not.toHaveProperty('crop')
+    expect(savedPeerImage).not.toHaveProperty('cropSource')
     expect(savedItems.filter((item) => item.id === 'image-1')).toHaveLength(1)
     expect(savedItems.filter((item) => item.id === 'image-2')).toHaveLength(1)
   })
@@ -2146,7 +2156,15 @@ describe('ProjectCanvasPage generation-first entry', () => {
       shiftClick(secondFileButton)
 
       fireEvent.click(await screen.findByRole('button', { name: 'Generate From Selection' }))
+      // Nothing is reported while the dialog is only open.
+      expect(notifyWarning).not.toHaveBeenCalled()
+      expect(notifySuccess).not.toHaveBeenCalled()
       fireEvent.click(await screen.findByRole('button', { name: '发送给 默认 Agent 生成候选图' }))
+      // The click has started the hand-off but it has not been scheduled yet (the
+      // selection is still being prepared, and that can fail or be cancelled), so
+      // the user must not be told anything at this point.
+      expect(notifyWarning).not.toHaveBeenCalled()
+      expect(notifySuccess).not.toHaveBeenCalled()
 
       await waitFor(
         () => {
@@ -2159,7 +2177,12 @@ describe('ProjectCanvasPage generation-first entry', () => {
       const eventTypes = dispatchEventSpy.mock.calls.map(([event]) => (event as Event).type)
       expect(eventTypes).not.toContain('qapp:switch')
       expect(eventTypes).not.toContain('qapp:apply-task-pack')
-      expect(notifySuccess).toHaveBeenCalledWith('已发送给默认 Agent 生成候选图')
+      // The app only knows the delivery was scheduled (no acknowledgement from the
+      // Agent column yet), so the dialog reports it as scheduled, never as a success.
+      expect(notifyWarning).toHaveBeenCalledExactlyOnceWith(
+        'project_canvas.generation.delivery_scheduled'
+      )
+      expect(notifySuccess).not.toHaveBeenCalled()
     } finally {
       dispatchEventSpy.mockRestore()
     }

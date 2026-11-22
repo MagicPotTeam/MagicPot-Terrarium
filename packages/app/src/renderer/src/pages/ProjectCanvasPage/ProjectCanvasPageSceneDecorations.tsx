@@ -176,7 +176,8 @@ export function ProjectCanvasPageSceneOverlay({
   selectionRectRenderMode = 'react',
   stagePos,
   stageScale,
-  tool
+  tool,
+  clipToBounds = true
 }: {
   annotationColor: string
   annotationFillOpacity: number
@@ -192,6 +193,9 @@ export function ProjectCanvasPageSceneOverlay({
   stagePos: StagePosition
   stageScale: number
   tool: string
+  // false when a parent clips to the stage instead: the stage scene does, so that the box it
+  // moves with the live viewport during a gesture is not also the clipping box.
+  clipToBounds?: boolean
 }) {
   const selectionRectSvgRef = React.useRef<SVGSVGElement | null>(null)
   const selectionRectRectRef = React.useRef<SVGRectElement | null>(null)
@@ -486,7 +490,7 @@ export function ProjectCanvasPageSceneOverlay({
       sx={{
         position: 'absolute',
         inset: 0,
-        overflow: 'hidden',
+        overflow: clipToBounds ? 'hidden' : 'visible',
         pointerEvents: 'none'
       }}
     >

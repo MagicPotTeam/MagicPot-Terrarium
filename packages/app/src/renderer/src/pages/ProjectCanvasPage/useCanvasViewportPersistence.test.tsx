@@ -353,7 +353,8 @@ describe('useCanvasViewportPersistence', () => {
       'canvas-route-return-test',
       [],
       [],
-      null
+      null,
+      expect.anything()
     )
 
     const secondMount = renderPersistenceHook()
@@ -604,7 +605,8 @@ describe('useCanvasViewportPersistence', () => {
       'canvas-serialized-save-test',
       [],
       [],
-      null
+      null,
+      expect.anything()
     )
 
     act(() => {
@@ -630,7 +632,8 @@ describe('useCanvasViewportPersistence', () => {
       'canvas-serialized-save-test',
       [],
       [],
-      null
+      null,
+      expect.anything()
     )
   })
 
@@ -713,7 +716,8 @@ describe('useCanvasViewportPersistence', () => {
         canvasId,
         [],
         [],
-        null
+        null,
+        expect.anything()
       )
     })
 
@@ -770,7 +774,8 @@ describe('useCanvasViewportPersistence', () => {
         'canvas-native-save-test',
         [],
         [],
-        null
+        null,
+        expect.anything()
       )
       expect(mockReportUnsavedSaveResult).toHaveBeenCalledWith({
         requestId: 'save-request-1',
@@ -904,7 +909,477 @@ describe('useCanvasViewportPersistence', () => {
       'canvas-import-save-test',
       [],
       [],
-      null
+      null,
+      expect.anything()
     )
+  })
+
+  it('protects the assets of the live items, the undo history and the redo stack from pruning', async () => {
+    vi.useFakeTimers()
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+    const undoSnapshot = [createImageItem({ id: 'deleted-but-undoable' })]
+    const redoSnapshot = [createImageItem({ id: 'undone-but-redoable' })]
+
+    const { result } = renderHook(() => {
+      const [items, setItems] = React.useState<CanvasItem[]>([])
+      const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+      const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+      const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+      const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+      const [stageScale, setStageScale] = React.useState(1)
+      const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+      useCanvasViewportPersistence({
+        config: DEFAULT_CONFIG,
+        canvasId: 'canvas-protected-assets-test',
+        items,
+        groups,
+        groupBranches,
+        selectedIds,
+        figmaBinding,
+        stagePos,
+        stageScale,
+        stageSize: { width: 1280, height: 720 },
+        maxFitStageScale: 2,
+        clampStageScale: (value: number) => value,
+        getCanvasItemsVisualBounds: () => null,
+        hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+        nextZIndexRef: { current: 1 },
+        setItems,
+        setItemsWithHistory: setItems,
+        setGroups,
+        setGroupBranches,
+        setSelectedIds,
+        setStagePos,
+        setStageScale,
+        setFigmaBinding,
+        handleImportFiles: vi.fn(),
+        addModel3DToCanvas: vi.fn(),
+        addVideoToCanvas: vi.fn(),
+        getUndoRedoItemLists: () => [undoSnapshot, redoSnapshot]
+      })
+
+      return { setItems }
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    mockSaveCanvasItems.mockClear()
+    const pendingSave = createDeferred<void>()
+    mockSaveCanvasItems.mockReturnValueOnce(pendingSave.promise).mockResolvedValue(undefined)
+
+    act(() => {
+      result.current.setItems([createImageItem({ id: 'saved-image' })])
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+      await Promise.resolve()
+    })
+    expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+
+    // The board changes while that save is still running.
+    act(() => {
+      result.current.setItems([createImageItem({ id: 'newer-live-image' })])
+    })
+
+    const options = mockSaveCanvasItems.mock.calls[0][5] as {
+      getProtectedItems: () => Iterable<readonly CanvasItem[]>
+    }
+    const protectedIds = [...options.getProtectedItems()].map((list) => list.map((item) => item.id))
+    expect(protectedIds).toEqual([
+      ['newer-live-image'],
+      ['deleted-but-undoable'],
+      ['undone-but-redoable']
+    ])
+
+    await act(async () => {
+      pendingSave.resolve()
+      await vi.advanceTimersByTimeAsync(300)
+      await Promise.resolve()
+    })
+  })
+
+  it('does not mark the board dirty for a change that is not persisted', async () => {
+    vi.useFakeTimers()
+    const restoredItem = createImageItem({ id: 'clean-image' })
+    mockLoadCanvasItems.mockResolvedValue({
+      items: [restoredItem],
+      groups: [],
+      groupBranches: [],
+      figmaBinding: null
+    })
+
+    const { result } = renderHook(() => {
+      const [items, setItems] = React.useState<CanvasItem[]>([])
+      const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+      const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+      const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+      const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+      const [stageScale, setStageScale] = React.useState(1)
+      const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+      useCanvasViewportPersistence({
+        config: DEFAULT_CONFIG,
+        canvasId: 'canvas-clean-signature-test',
+        items,
+        groups,
+        groupBranches,
+        selectedIds,
+        figmaBinding,
+        stagePos,
+        stageScale,
+        stageSize: { width: 1280, height: 720 },
+        maxFitStageScale: 2,
+        clampStageScale: (value: number) => value,
+        getCanvasItemsVisualBounds: () => null,
+        hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+        nextZIndexRef: { current: 1 },
+        setItems,
+        setItemsWithHistory: setItems,
+        setGroups,
+        setGroupBranches,
+        setSelectedIds,
+        setStagePos,
+        setStageScale,
+        setFigmaBinding,
+        handleImportFiles: vi.fn(),
+        addModel3DToCanvas: vi.fn(),
+        addVideoToCanvas: vi.fn()
+      })
+
+      return { items, setItems }
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+      await Promise.resolve()
+    })
+    expect(result.current.items).toHaveLength(1)
+    mockSaveCanvasItems.mockClear()
+
+    // A thumbnail manifest, a decoded image and a session-only identity arrive after the restore.
+    act(() => {
+      result.current.setItems((current) =>
+        current.map(
+          (item) =>
+            ({
+              ...item,
+              thumbnailSet: { levels: [{ size: 256, url: 'blob:thumb' }] },
+              image: { width: 100, height: 100 },
+              sourceIdentity: { kind: 'session', id: 'session-1' }
+            }) as unknown as CanvasItem
+        )
+      )
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000)
+      await Promise.resolve()
+    })
+    window.dispatchEvent(new Event('blur'))
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+
+    // A persisted change still does.
+    act(() => {
+      result.current.setItems((current) => current.map((item) => ({ ...item, x: item.x + 10 })))
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+      await Promise.resolve()
+    })
+    expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+  })
+
+  describe('when a save may run', () => {
+    function renderDirtyBoard(canvasId: string) {
+      return renderHook(() => {
+        const [items, setItems] = React.useState<CanvasItem[]>([])
+        const [groups, setGroups] = React.useState<CanvasGroup[]>([])
+        const [groupBranches, setGroupBranches] = React.useState<CanvasGroupBranch[]>([])
+        const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+        const [stagePos, setStagePos] = React.useState({ x: 0, y: 0 })
+        const [stageScale, setStageScale] = React.useState(1)
+        const [figmaBinding, setFigmaBinding] = React.useState<CanvasFigmaBinding | null>(null)
+
+        useCanvasViewportPersistence({
+          config: DEFAULT_CONFIG,
+          canvasId,
+          items,
+          groups,
+          groupBranches,
+          selectedIds,
+          figmaBinding,
+          stagePos,
+          stageScale,
+          stageSize: { width: 1280, height: 720 },
+          maxFitStageScale: 2,
+          clampStageScale: (value: number) => value,
+          getCanvasItemsVisualBounds: () => null,
+          hydrateCanvasImageItemForCanvas: vi.fn(async (item) => item),
+          nextZIndexRef: { current: 1 },
+          setItems,
+          setItemsWithHistory: setItems,
+          setGroups,
+          setGroupBranches,
+          setSelectedIds,
+          setStagePos,
+          setStageScale,
+          setFigmaBinding,
+          handleImportFiles: vi.fn(),
+          addModel3DToCanvas: vi.fn(),
+          addVideoToCanvas: vi.fn()
+        })
+
+        return { setItems, setStagePos }
+      })
+    }
+
+    async function mountDirtyBoard(canvasId: string) {
+      vi.useFakeTimers()
+      mockLoadCanvasItems.mockResolvedValue({
+        items: [],
+        groups: [],
+        groupBranches: [],
+        figmaBinding: null
+      })
+      const rendered = renderDirtyBoard(canvasId)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+        await Promise.resolve()
+      })
+      mockSaveCanvasItems.mockClear()
+      act(() => {
+        rendered.result.current.setItems([createImageItem({ id: `${canvasId}-image` })])
+      })
+      return rendered
+    }
+
+    const saveOptionsOfCall = (index: number) =>
+      mockSaveCanvasItems.mock.calls[index][5] as { metadataOnly?: boolean }
+    const pointerEvent = (type: string, pointerId: number) =>
+      Object.assign(new Event(type), { pointerId })
+
+    it.each(['blur', 'visibilitychange'] as const)(
+      'flushes on %s with a metadata-only save and leaves moving bytes to the timer',
+      async (trigger) => {
+        await mountDirtyBoard(`canvas-flush-${trigger}`)
+        mockSaveCanvasItems.mockResolvedValueOnce('needs-bytes').mockResolvedValue(undefined)
+        const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+
+        await act(async () => {
+          if (trigger === 'blur') window.dispatchEvent(new Event('blur'))
+          else document.dispatchEvent(new Event('visibilitychange'))
+          await Promise.resolve()
+          await Promise.resolve()
+        })
+        hidden.mockRestore()
+
+        // Asked for the record alone; the storage layer said bytes are needed and wrote nothing.
+        expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+        expect(saveOptionsOfCall(0).metadataOnly).toBe(true)
+
+        // No second save is started by the event itself...
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(100)
+        })
+        expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+
+        // ...the pending autosave timer does the full save.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(400)
+          await Promise.resolve()
+        })
+        expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+        expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+      }
+    )
+
+    it('does not save again after a metadata-only flush succeeded', async () => {
+      await mountDirtyBoard('canvas-flush-clean')
+      await act(async () => {
+        window.dispatchEvent(new Event('blur'))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+      expect(saveOptionsOfCall(0).metadataOnly).toBe(true)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+    })
+
+    it('falls back to a full save at once when the page is going away', async () => {
+      await mountDirtyBoard('canvas-flush-pagehide')
+      mockSaveCanvasItems.mockResolvedValueOnce('needs-bytes').mockResolvedValue(undefined)
+
+      await act(async () => {
+        window.dispatchEvent(new Event('pagehide'))
+        await Promise.resolve()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(0).metadataOnly).toBe(true)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+    })
+
+    async function startHeldBlurFlush(canvasId: string) {
+      const rendered = await mountDirtyBoard(canvasId)
+      const heldFlush = createDeferred<unknown>()
+      mockSaveCanvasItems.mockImplementationOnce(() => heldFlush.promise).mockResolvedValue(undefined)
+      await act(async () => {
+        window.dispatchEvent(new Event('blur'))
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+      expect(saveOptionsOfCall(0).metadataOnly).toBe(true)
+      return { rendered, heldFlush }
+    }
+
+    it('still saves fully for a native save request that arrives during a metadata-only flush', async () => {
+      const { heldFlush } = await startHeldBlurFlush('canvas-flush-close')
+
+      await act(async () => {
+        requestUnsavedSave?.('close-during-flush')
+        await Promise.resolve()
+      })
+      await act(async () => {
+        heldFlush.resolve('needs-bytes')
+        await vi.advanceTimersByTimeAsync(10)
+      })
+
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+      expect(mockReportUnsavedSaveResult).toHaveBeenCalledWith({
+        requestId: 'close-during-flush',
+        success: true
+      })
+    })
+
+    it('still falls back to a full save when the page goes away during a metadata-only flush', async () => {
+      const { heldFlush } = await startHeldBlurFlush('canvas-flush-blur-pagehide')
+
+      await act(async () => {
+        window.dispatchEvent(new Event('pagehide'))
+        await Promise.resolve()
+      })
+      await act(async () => {
+        heldFlush.resolve('needs-bytes')
+        await vi.advanceTimersByTimeAsync(10)
+      })
+
+      // At once, not left to the autosave timer.
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+    })
+
+    it('still saves fully when the board unmounts during a metadata-only flush', async () => {
+      const { rendered, heldFlush } = await startHeldBlurFlush('canvas-flush-unmount')
+
+      rendered.unmount()
+      await act(async () => {
+        heldFlush.resolve('needs-bytes')
+        await vi.advanceTimersByTimeAsync(10)
+      })
+
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+      expect(mockSaveCanvasItems.mock.calls[1][1]).toBe('canvas-flush-unmount')
+    })
+
+    it('leaves moving bytes to the timer when only another flush joins a metadata-only flush', async () => {
+      const { heldFlush } = await startHeldBlurFlush('canvas-flush-double-blur')
+
+      await act(async () => {
+        window.dispatchEvent(new Event('blur'))
+        await Promise.resolve()
+      })
+      await act(async () => {
+        heldFlush.resolve('needs-bytes')
+        await vi.advanceTimersByTimeAsync(10)
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(2)
+      expect(saveOptionsOfCall(1).metadataOnly).toBeUndefined()
+    })
+
+    it('postpones the autosave while a pointer is down and saves once it is released', async () => {
+      await mountDirtyBoard('canvas-gesture-pointer')
+      act(() => {
+        window.dispatchEvent(pointerEvent('pointerdown', 7))
+      })
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+
+      act(() => {
+        window.dispatchEvent(pointerEvent('pointerup', 7))
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+      expect(saveOptionsOfCall(0).metadataOnly).toBeUndefined()
+    })
+
+    it('postpones the autosave while the viewport is moving', async () => {
+      const { result } = await mountDirtyBoard('canvas-gesture-viewport')
+      for (let step = 1; step <= 8; step += 1) {
+        act(() => {
+          if (step % 2 === 0) window.dispatchEvent(new Event('wheel'))
+          else result.current.setStagePos({ x: step, y: step })
+        })
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(200)
+          await Promise.resolve()
+        })
+      }
+      expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+    })
+
+    it('never holds a save back longer than ten seconds', async () => {
+      await mountDirtyBoard('canvas-gesture-cap')
+      act(() => {
+        window.dispatchEvent(pointerEvent('pointerdown', 3))
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).not.toHaveBeenCalled()
+
+      // The pointer is still down (a lost pointerup must not block saving forever).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+        await Promise.resolve()
+      })
+      expect(mockSaveCanvasItems).toHaveBeenCalledTimes(1)
+    })
   })
 })

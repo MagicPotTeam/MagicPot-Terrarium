@@ -9,6 +9,7 @@
   type SetStateAction
 } from 'react'
 import { useDispatch } from 'react-redux'
+import { useTranslation } from 'react-i18next'
 import type { ChatAttachment, LLMListProfilesResp, OCRResult } from '@shared/api/svcLLMProxy'
 import type { ProjectTraceSvc } from '@shared/api/svcProjectTrace'
 import type { DuplicateCheckVisualModelConfig } from '@shared/duplicateCheck/types'
@@ -109,8 +110,8 @@ import {
 import {
   executeCanvasTargetSemanticCanvasAction,
   isCanvasTargetSemanticCanvasActionName,
-  resolveCropRectangleForImage,
   resolveCanvasTargetSemanticCanvasActionSourceIds,
+  resolveCropRectangleForImage,
   type CanvasTargetSemanticCanvasActionState,
   type CanvasTargetSemanticCanvasActionResult
 } from './canvasTargetCanvasActions'
@@ -138,9 +139,34 @@ import {
   type CanvasTargetArtifactType
 } from './canvasTargetArtifactGraph'
 import { createCanvasImageItemDraft, createCanvasItemId } from './canvasAssetDraftFactories'
+import { collectCanvasTargetCanvasActionReferencedIds } from './canvasTargetCanvasActionSources'
+import {
+  authorizeCanvasTargetCanvasWrite,
+  collectCanvasTargetAttachedCaptions,
+  authorizeCanvasTargetSourceReferences,
+  canvasTargetEvidenceAllowsSelectionSnapshot,
+  canvasTargetMediaUrlKey,
+  canvasTargetSelectionHasUnverifiedCrop,
+  createCanvasTargetSelectionAuthority,
+  authorizeCanvasTargetMediaPlacementUrl,
+  collectCanvasTargetCanvasBlobUrlKeys,
+  isCanvasTargetSelectionUnchanged,
+  recordCanvasTargetRunOutputUrl,
+  type CanvasTargetMediaPlacementRefusal,
+  type CanvasTargetSelectionAuthority,
+  type CanvasTargetSourceReferenceVerdict
+} from './canvasTargetSelectionAuthority'
 import { hydrateCanvasImageItemForCanvas, loadImageFromSrc } from './canvasAssetIntakeHelpers'
 import { createMagicPotNativeProvenance } from './canvasProvenanceUtils'
 import { extractImageRegionLocally } from './localImageExtract'
+import { AGENT_SELECTION_RASTER_LIMITS, type CanvasRasterLimits } from './canvasExportRasterUtils'
+import { collectCascadeDeletedCanvasItemIds } from './canvasAttachedCaptionUtils'
+import {
+  collectCanvasTargetRunWrittenIds,
+  createCanvasTargetRunPendingWrites,
+  mergeCanvasTargetRunChange,
+  rebaseCanvasTargetRunView
+} from './canvasTargetRunCanvasMerge'
 import {
   appendMessageToExternalChat,
   openExternalAgentPane,
@@ -293,7 +319,8 @@ type UseCanvasTargetWorkflowOptions = {
   renderCanvasItemsImageDataUrl: (
     targetItems: CanvasItem[],
     includeBackground?: boolean,
-    clipBounds?: CanvasTargetSelectionBounds | null
+    clipBounds?: CanvasTargetSelectionBounds | null,
+    limits?: CanvasRasterLimits
   ) => Promise<string>
   setSelectionRect: Dispatch<SetStateAction<SelectionRect>>
   setItemsWithHistory: Dispatch<SetStateAction<CanvasItem[]>>
@@ -359,6 +386,9 @@ function resolveCanvasTargetNextZIndex(items: CanvasItem[], fallback: number): n
 async function executeCanvasTargetExtractImageRegionAction(
   action: CanvasTargetCanvasAction,
   options: {
+    // Only items the selection authority has already approved; nothing else
+    // is ever loaded here.
+    authorizedSourceItems: CanvasItem[]
     semanticState?: CanvasTargetSemanticCanvasActionState
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
@@ -373,9 +403,7 @@ async function executeCanvasTargetExtractImageRegionAction(
     }
   }
 
-  const sourceIds = resolveCanvasTargetSemanticCanvasActionSourceIds(action, options.semanticState)
-  const itemById = new Map(options.semanticState.items.map((item) => [item.id, item] as const))
-  const sourceItems = sourceIds.map((id) => itemById.get(id)).filter(isCanvasTargetImageItem)
+  const sourceItems = options.authorizedSourceItems.filter(isCanvasTargetImageItem)
 
   if (sourceItems.length === 0) {
     return {
@@ -507,13 +535,68 @@ async function executeCanvasTargetExtractImageRegionAction(
   }
 }
 
+function buildCanvasTargetSourceReferenceRefusal(
+  subject: string,
+  refusal: CanvasTargetMediaPlacementRefusal,
+  fallbackReasons: { evidenceMode: string; selection: string; notRunOutput?: string }
+): CanvasTargetCanvasActionResult {
+  if (refusal === 'not_run_output') {
+    return {
+      content: `${subject} skipped because its URL is neither a selected source nor a result of this run.`,
+      canvasDispatchCount: 0,
+      fallbackReason: fallbackReasons.notRunOutput || fallbackReasons.selection
+    }
+  }
+  if (refusal === 'evidence_mode') {
+    return {
+      content: `${subject} skipped by the current evidence policy.`,
+      canvasDispatchCount: 0,
+      fallbackReason: fallbackReasons.evidenceMode
+    }
+  }
+  return {
+    content:
+      refusal === 'not_selected'
+        ? `${subject} skipped because a source was not selected.`
+        : `${subject} skipped because a source is missing or changed since it was selected.`,
+    canvasDispatchCount: 0,
+    fallbackReason: fallbackReasons.selection
+  }
+}
+
+const CANVAS_TARGET_EXTRACT_REFUSAL_REASONS = {
+  evidenceMode: 'Source image extraction requires selected source assets.',
+  selection: 'Source image extraction requires explicitly selected items.'
+}
+
+const CANVAS_TARGET_WRITE_REFUSAL_REASONS = {
+  evidenceMode: 'Canvas edits by a run are limited to selected items and items the run created.',
+  selection: 'Canvas edits by a run are limited to selected items and items the run created.'
+}
+
+const CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS = {
+  evidenceMode: 'Placing a canvas source requires selected source assets.',
+  selection: 'Placing a canvas source requires explicitly selected items.',
+  notRunOutput: 'Canvas media actions only place selected sources or results of this run.'
+}
+
 async function executeCanvasTargetCanvasAction(
   action: CanvasTargetCanvasAction,
   options: {
     projectId: string
     fallbackText?: string
     generationSessionId?: string
+    evidenceMode: CanvasTargetEvidenceMode
+    selectionAuthority: CanvasTargetSelectionAuthority | null
+    knownCanvasUrlKeys?: ReadonlySet<string>
+    runOutputUrls?: ReadonlyMap<string, string>
+    runCreatedItemIds?: ReadonlySet<string>
+    runPlacedItemIds?: ReadonlySet<string>
     semanticState?: CanvasTargetSemanticCanvasActionState
+    // The live groups, which may hold members the run's view lacks; a group
+    // action is checked against both (a stale entry can only refuse).
+    liveGroups?: readonly CanvasGroup[]
+    runStartAttachedCaptions?: ReadonlyMap<string, string>
     commitSemanticResult?: (result: CanvasTargetSemanticCanvasActionResult) => void
     resolveCanvasTargetItemBounds?: (item: CanvasItem) => CanvasTargetBounds
   }
@@ -539,6 +622,24 @@ async function executeCanvasTargetCanvasAction(
       }
     }
 
+    // A run may change or remove only the items the user selected and the
+    // items it created itself (canvasTargetSelectionAuthority).
+    const write = authorizeCanvasTargetCanvasWrite({
+      action,
+      state: options.semanticState,
+      liveGroups: options.liveGroups,
+      runStartAttachedCaptions: options.runStartAttachedCaptions,
+      authority: options.selectionAuthority,
+      runCreatedItemIds: options.runCreatedItemIds || new Set<string>()
+    })
+    if (!write.allowed) {
+      return buildCanvasTargetSourceReferenceRefusal(
+        `Canvas ${action.action}`,
+        write.refusal,
+        CANVAS_TARGET_WRITE_REFUSAL_REASONS
+      )
+    }
+
     const semanticResult = executeCanvasTargetSemanticCanvasAction(action, options.semanticState)
     options.commitSemanticResult(semanticResult)
     return {
@@ -561,8 +662,36 @@ async function executeCanvasTargetCanvasAction(
   }
 
   switch (action.action) {
-    case 'extract_image_region':
-      return executeCanvasTargetExtractImageRegionAction(action, options)
+    case 'extract_image_region': {
+      // The restricted evidence modes do not authorize reading arbitrary
+      // original pixels for a model-planned extraction (and nothing outside a
+      // crop is ever read for them). In selected_sources every referenced
+      // item must be a selected original that is unchanged since selection;
+      // a reference that cannot be resolved refuses the whole action.
+      const references = options.semanticState
+        ? collectCanvasTargetCanvasActionReferencedIds(action, options.semanticState)
+        : null
+      const verdict: CanvasTargetSourceReferenceVerdict = references
+        ? authorizeCanvasTargetSourceReferences({
+            authority: options.selectionAuthority,
+            evidenceMode: options.evidenceMode,
+            referencedItemIds: references.ids,
+            unresolvedReferences: references.unresolved,
+            currentItems: options.semanticState?.items || []
+          })
+        : { allowed: false, refusal: 'no_authority', references: [] }
+      if (!verdict.allowed) {
+        return buildCanvasTargetSourceReferenceRefusal(
+          'Image extraction',
+          verdict.refusal,
+          CANVAS_TARGET_EXTRACT_REFUSAL_REASONS
+        )
+      }
+      return executeCanvasTargetExtractImageRegionAction(action, {
+        ...options,
+        authorizedSourceItems: verdict.items
+      })
+    }
     case 'add_text': {
       if (!text) {
         return {
@@ -603,6 +732,36 @@ async function executeCanvasTargetCanvasAction(
           fallbackReason: mediaUrlSafety.reason
         }
       }
+      // A model-authored URL that resolves to the source of a canvas item is
+      // a reference to that item: placing it would hand its bytes back to the
+      // run as a stage result. Only a selected, unchanged source (where the
+      // evidence mode allows source reads) or a blob this run produced itself
+      // may be placed; every other URL is refused, and the canonical URL, not
+      // the model's spelling of it, is what reaches the canvas.
+      if (!options.semanticState || !options.knownCanvasUrlKeys || !options.runOutputUrls) {
+        return buildCanvasTargetSourceReferenceRefusal(
+          `Canvas ${action.action}`,
+          'no_authority',
+          CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS
+        )
+      }
+      const placement = authorizeCanvasTargetMediaPlacementUrl({
+        url: mediaUrlSafety.url,
+        authority: options.selectionAuthority,
+        evidenceMode: options.evidenceMode,
+        currentItems: options.semanticState.items,
+        knownCanvasUrlKeys: options.knownCanvasUrlKeys,
+        runOutputUrls: options.runOutputUrls,
+        runPlacedItemIds: options.runPlacedItemIds
+      })
+      if (!placement.allowed) {
+        return buildCanvasTargetSourceReferenceRefusal(
+          `Canvas ${action.action}`,
+          placement.refusal,
+          CANVAS_TARGET_PLACE_SOURCE_REFUSAL_REASONS
+        )
+      }
+      const placementUrl = placement.url
       const mediaType =
         action.action === 'add_image'
           ? 'image'
@@ -612,7 +771,7 @@ async function executeCanvasTargetCanvasAction(
       const dispatchResult = await dispatchCanvasTargetMediaAttachmentToCanvas(
         {
           type: mediaType,
-          url: mediaUrlSafety.url,
+          url: placementUrl,
           fileName: action.fileName
         },
         options.projectId,
@@ -633,7 +792,7 @@ async function executeCanvasTargetCanvasAction(
         attachments: [
           {
             type: mediaType,
-            url: mediaUrlSafety.url,
+            url: placementUrl,
             fileName: action.fileName
           }
         ]
@@ -904,6 +1063,18 @@ function applyCanvasTargetQuickAppSelectionsToCatalog(
   }
 }
 
+/** Whether a QuickApp action of the plan takes the selection snapshot as an input. */
+const canvasTargetActionsBindSelectionSnapshot = (
+  actions: readonly CanvasTargetCapabilityAction[] | undefined
+): boolean =>
+  (actions || []).some(
+    (action) =>
+      action.type === 'quick_app' &&
+      (action.inputAssignments || []).some(
+        (assignment) => assignment.source === 'selection_snapshot'
+      )
+  )
+
 export function useCanvasTargetWorkflow({
   canvasId,
   projectName,
@@ -927,7 +1098,6 @@ export function useCanvasTargetWorkflow({
   setAnnotationStrokeWidth,
   setAnnotationFillOpacity,
   nextZIndexRef,
-  notifySuccess,
   notifyError,
   notifyWarning,
   notifyInfo,
@@ -936,6 +1106,7 @@ export function useCanvasTargetWorkflow({
   openTargetManager
 }: UseCanvasTargetWorkflowOptions) {
   const dispatch = useDispatch()
+  const { t } = useTranslation()
   const { config, buildEnv } = useConfig()
   const [targetSchemes, setTargetSchemes] = useState<TargetScheme[]>([])
   const [canvasTargetHistoryTargets, setCanvasTargetHistoryTargets] = useState<
@@ -980,10 +1151,20 @@ export function useCanvasTargetWorkflow({
   const [canvasTargetReport, setCanvasTargetReport] = useState<CanvasTargetReport | null>(null)
   const canvasTargetActiveRunIdRef = useRef<string | null>(null)
   const canvasTargetExternalChatRef = useRef<CanvasTargetExternalChatRun | null>(null)
+  // What the user selected when the target dialog was opened. Cleared when a
+  // new selection starts; a run keeps going only while it is still in place.
+  const canvasTargetSelectionAuthorityRef = useRef<CanvasTargetSelectionAuthority | null>(null)
   const latestItemsRef = useRef(items)
+  const latestGroupsRef = useRef(groups)
   const latestSelectedIdsRef = useRef(selectedIds)
+  // Counts the renders that handed this hook the live canvas. A run's write
+  // the live list may not show yet is stamped with this count when React
+  // processes it (createCanvasTargetRunPendingWrites).
+  const canvasRenderCountRef = useRef(0)
 
   latestItemsRef.current = items
+  latestGroupsRef.current = groups
+  canvasRenderCountRef.current += 1
   latestSelectedIdsRef.current = selectedIds
 
   useEffect(() => {
@@ -1076,6 +1257,7 @@ export function useCanvasTargetWorkflow({
     setCanvasTargetContextPack(null)
     setCanvasTargetReport(null)
     setCanvasTargetTargetItemIds([])
+    canvasTargetSelectionAuthorityRef.current = null
     setCanvasTargetSelectionBounds(null)
     setCanvasTargetSelectedTraceIds([])
     setSelectionRect(null)
@@ -1091,6 +1273,9 @@ export function useCanvasTargetWorkflow({
   const handleOpenCanvasTargetDialog = useCallback(
     async (targetItems: CanvasItem[], selectionBounds?: CanvasTargetSelectionBounds | null) => {
       if (targetItems.length === 0) return
+      // Capture before asynchronous dialog setup, not after the selection may
+      // already have changed under the user.
+      const openedSelectionAuthority = createCanvasTargetSelectionAuthority(targetItems)
 
       try {
         const projectTraceRef = await resolveCanvasProjectTraceProjectRef(canvasId, projectName)
@@ -1184,6 +1369,7 @@ export function useCanvasTargetWorkflow({
         setCanvasTargetReferenceTraces(traceDocuments)
         setCanvasTargetProfileOptions(profiles)
         setCanvasTargetQuickAppOptions(quickAppOptions)
+        canvasTargetSelectionAuthorityRef.current = openedSelectionAuthority
         setCanvasTargetTargetItemIds(targetItems.map((item) => item.id))
         setCanvasTargetSelectionBounds(normalizeCanvasTargetSelectionBounds(selectionBounds))
         setCanvasTargetTargetName('')
@@ -1448,6 +1634,31 @@ export function useCanvasTargetWorkflow({
       return
     }
 
+    // The authority this run was confirmed with. A run continues only while
+    // that same authority is in place (a new selection clears it), it names
+    // exactly the dialog's target items, and those items are unchanged.
+    const runSelectionAuthority = canvasTargetSelectionAuthorityRef.current
+    const selectionIsUnchanged = () =>
+      runSelectionAuthority !== null &&
+      canvasTargetSelectionAuthorityRef.current === runSelectionAuthority &&
+      runSelectionAuthority.itemIds.length === canvasTargetTargetItemIds.length &&
+      canvasTargetTargetItemIds.every((id) => runSelectionAuthority.itemSignatures.has(id)) &&
+      isCanvasTargetSelectionUnchanged(runSelectionAuthority, latestItemsRef.current)
+    // Every mode, structured_only included, starts only from the selection the
+    // user confirmed: an undo / redo or edit since then is refused here.
+    if (!selectionIsUnchanged()) {
+      setCanvasTargetError(t('project_canvas.target_run.selection_changed'))
+      return
+    }
+
+    // A restricted selection snapshot cannot safely re-interpret a legacy
+    // crop whose coordinate space is not authenticated against its source.
+    // Full selected_sources is a distinct, explicitly authorized contract.
+    if (canvasTargetSelectionHasUnverifiedCrop(canvasTargetEvidenceMode, targetItems)) {
+      setCanvasTargetError(t('project_canvas.target_run.unverified_crop'))
+      return
+    }
+
     if (!selectedScheme) {
       setCanvasTargetError(isChineseUi ? '请选择目标方案。' : 'Please choose a target scheme.')
       return
@@ -1497,6 +1708,16 @@ export function useCanvasTargetWorkflow({
       if (canvasTargetActiveRunIdRef.current !== runId) {
         throw new CanvasTargetCancelledError()
       }
+      // A replaced authority (a new selection) stops the run in every mode.
+      // structured_only reads no source, so it does not also require the
+      // selected items to stay unchanged while the run edits the canvas.
+      if (
+        canvasTargetSelectionAuthorityRef.current !== runSelectionAuthority ||
+        (normalizeCanvasTargetEvidenceMode(canvasTargetEvidenceMode) !== 'structured_only' &&
+          !selectionIsUnchanged())
+      ) {
+        throw new Error(t('project_canvas.target_run.selection_changed'))
+      }
     }
 
     setCanvasTargetDialogOpen(false)
@@ -1512,15 +1733,37 @@ export function useCanvasTargetWorkflow({
         console.warn('[CanvasTarget] Failed to persist history target.', historyError)
       }
 
+      // History persistence is asynchronous; do not begin raster work if the
+      // selection changed while it was pending.
+      ensureCanvasTargetRunActive()
       let snapshotDataUrl: string | null = null
-      try {
-        snapshotDataUrl = await renderCanvasItemsImageDataUrl(
-          targetItems,
-          false,
-          canvasTargetSelectionBounds
-        )
-      } catch (snapshotError) {
-        console.warn('[CanvasTarget] Failed to render selection snapshot.', snapshotError)
+      // Structured-only runs must not construct a visual snapshot, including
+      // for in-memory context or a possible diagnostic failure archive.
+      if (canvasTargetEvidenceAllowsSelectionSnapshot(canvasTargetEvidenceMode)) {
+        try {
+          // Bound the snapshot like the "send to Agent" overview (2000 px /
+          // 4 MP) instead of the 33.5 MP export ceiling. In selected_sources
+          // mode the sources are still attached separately at full size.
+          try {
+            snapshotDataUrl = await renderCanvasItemsImageDataUrl(
+              targetItems,
+              false,
+              canvasTargetSelectionBounds,
+              AGENT_SELECTION_RASTER_LIMITS
+            )
+          } catch (boundedError) {
+            // A selection more than 2000:1 wide cannot keep 1 px within the bound; its
+            // unbounded render stays small (at most 16384 x 9 px), so take that instead.
+            if (!(boundedError instanceof RangeError)) throw boundedError
+            snapshotDataUrl = await renderCanvasItemsImageDataUrl(
+              targetItems,
+              false,
+              canvasTargetSelectionBounds
+            )
+          }
+        } catch (snapshotError) {
+          console.warn('[CanvasTarget] Failed to render selection snapshot.', snapshotError)
+        }
       }
       ensureCanvasTargetRunActive()
 
@@ -1747,7 +1990,16 @@ export function useCanvasTargetWorkflow({
               includeReportFile: options?.includeReportFile ?? shouldCreateDocumentDeliverable,
               bundleRootDir: reportBundleRootDir,
               saveImageToPath: (req) => api().svcFs.saveImageToPath(req),
-              writeTextFile: (req) => api().svcFs.writeTextFile(req)
+              writeTextFile: (req) => api().svcFs.writeTextFile(req),
+              // MAIN binds the bundle to the conversation it is posted to. Without a
+              // conversation the message is dropped anyway, so nothing is registered.
+              ...(agentSessionId
+                ? {
+                    beginReportBundle: (req) => api().svcReportBundles.beginBundle(req),
+                    registerReportBundle: (req) => api().svcReportBundles.register(req),
+                    conversation: { conversationId: agentSessionId, storageScope: agentScope }
+                  }
+                : {})
             })
           : buildCanvasTargetAgentMessagePayload({
               report: nextReport,
@@ -1771,7 +2023,44 @@ export function useCanvasTargetWorkflow({
       const executedCapabilityActionIds = new Set<string>()
       let capabilityActionStageIndex = 0
       let runtimeCanvasItems = items
+      // Captions attached when the run starts are part of their item: a
+      // delete of the item may take them along (a caption attached during
+      // the run refuses it).
+      const runStartAttachedCaptions = collectCanvasTargetAttachedCaptions(items)
+      // Every blob: URL a canvas item carried at any point of the run, and
+      // the media URLs the run produced itself. A model-authored add_* URL is
+      // checked against both (authorizeCanvasTargetMediaPlacementUrl).
+      const runKnownCanvasUrlKeys = collectCanvasTargetCanvasBlobUrlKeys(
+        latestItemsRef.current,
+        collectCanvasTargetCanvasBlobUrlKeys(items, new Set<string>())
+      )
+      const runOutputUrls = new Map<string, string>()
+      // Items this run created (semantic createdIds and placed items). With
+      // the selected items, these are the only items the run may change.
+      const runCreatedItemIds = new Set<string>()
+      // Items the run placed on the canvas as its own output (model,
+      // QuickApp, extraction or final results). An add_* placement of a
+      // canvas source is not an output, so it is not listed here and its URL
+      // is not recorded in runOutputUrls.
+      const runPlacedItemIds = new Set<string>()
       let runtimeCanvasGroups = groups
+      // Items and groups the run's own semantic commits removed. The live
+      // canvas can lag behind those commits, so they are never taken back
+      // into the run's view from it.
+      const runRemovedItemIds = new Set<string>()
+      const runRemovedGroupIds = new Set<string>()
+      // Items the user removed from the live canvas during the run (dropped
+      // from the run's view by a rebase). A stage whose placed media the user
+      // deleted is not placed again.
+      const runUserRemovedItemIds = new Set<string>()
+      // The run's own writes the live canvas may not have rendered yet; the
+      // rebase before each action keeps the run's value for them.
+      const readCanvasRenderCount = () => canvasRenderCountRef.current
+      const runPendingItemWrites = createCanvasTargetRunPendingWrites(readCanvasRenderCount)
+      const runPendingGroupWrites = createCanvasTargetRunPendingWrites(readCanvasRenderCount)
+      // add_* stages that re-placed a canvas source (not a run output). A
+      // later materialization of such a stage is not a run output either.
+      const runSourceCopyStageIds = new Set<string>()
       let runtimeCanvasVersion = 1
       let runtimeSelectedIds = new Set(selectedIds)
       let lastCanvasItemIds: string[] = []
@@ -1891,6 +2180,7 @@ export function useCanvasTargetWorkflow({
         return executionJournal.length - 1
       }
 
+      ensureCanvasTargetRunActive()
       const rawControlPlan: CanvasTargetControlPlan = await requestCanvasTargetControlPlan({
         scheme: selectedScheme,
         contextPack,
@@ -1909,6 +2199,32 @@ export function useCanvasTargetWorkflow({
         canvasTargetEvidenceMode
       )
       ensureCanvasTargetRunActive()
+      // A QuickApp bound to the selection snapshot processes its pixels and may place its
+      // result on the canvas, so it gets the selection at the export ceiling, rendered only
+      // when the plan binds one. The model-facing copies keep the bounded snapshot.
+      let quickAppSnapshotAttachment = evidenceSnapshotAttachment
+      if (
+        evidenceSnapshotAttachment &&
+        canvasTargetActionsBindSelectionSnapshot(controlPlan.capabilityActions)
+      ) {
+        let fullSnapshotDataUrl: string | null = null
+        try {
+          fullSnapshotDataUrl = await renderCanvasItemsImageDataUrl(
+            targetItems,
+            false,
+            canvasTargetSelectionBounds
+          )
+        } catch (snapshotError) {
+          console.warn(
+            '[CanvasTarget] Failed to render the full-resolution selection snapshot.',
+            snapshotError
+          )
+        }
+        ensureCanvasTargetRunActive()
+        if (fullSnapshotDataUrl) {
+          quickAppSnapshotAttachment = { ...evidenceSnapshotAttachment, url: fullSnapshotDataUrl }
+        }
+      }
 
       await publishStage(
         buildCanvasTargetStage({
@@ -1953,7 +2269,27 @@ export function useCanvasTargetWorkflow({
       const executionPlanPreview = buildCanvasTargetExecutionPlanPreview({
         controlPlan,
         controlModelLabel,
-        isChineseUi
+        isChineseUi,
+        // Known only for actions that name canvas items directly; a stage or
+        // artifact reference resolves later in the run.
+        // An id the canvas does not hold yet (an item the run will create)
+        // leaves the count unknown. A delete also removes the captions
+        // attached to the deleted items, as a manual delete does.
+        resolveCanvasActionTargetCount: (action) => {
+          if (action.action === 'clear_canvas') return items.length
+          if (action.sourceStageId || action.sourceStageIds?.length) return null
+          if (action.artifactId || action.artifactIds?.length) return null
+          const canvasItemIds = new Set(items.map((item) => item.id))
+          if ((action.itemIds || []).some((itemId) => !canvasItemIds.has(itemId))) return null
+          const targetIds = resolveCanvasTargetSemanticCanvasActionSourceIds(action, {
+            items,
+            selectedIds,
+            nextZIndex: nextZIndexRef.current
+          })
+          return action.action === 'delete_items'
+            ? collectCascadeDeletedCanvasItemIds(items, targetIds).size
+            : targetIds.length
+        }
       })
       appendMessageToExternalChat({
         scope: agentScope,
@@ -2064,8 +2400,19 @@ export function useCanvasTargetWorkflow({
       const registerPlacedCanvasItems = (
         stageId: string,
         placedItems: CanvasItem[],
-        source?: 'quick_app' | 'canvas'
+        source?: 'quick_app' | 'canvas',
+        runOutput = true
       ) => {
+        // Only ids the run's view of the canvas did not hold yet, or that the
+        // run created itself (an extraction commits its items before they are
+        // registered here), are new items.
+        const knownIds = new Set(runtimeCanvasItems.map((item) => item.id))
+        placedItems.forEach((item) => {
+          if (knownIds.has(item.id) && !runCreatedItemIds.has(item.id)) return
+          runCreatedItemIds.add(item.id)
+          if (runOutput) runPlacedItemIds.add(item.id)
+        })
+        runPendingItemWrites.addPlaced(placedItems.map((item) => item.id))
         mergeRuntimeCanvasItems(placedItems)
         registerCanvasItemIds(
           stageId,
@@ -2096,9 +2443,11 @@ export function useCanvasTargetWorkflow({
       const registerStageAttachmentArtifacts = (
         stageId: string,
         source: string,
-        attachments: ChatAttachment[] | undefined
+        attachments: ChatAttachment[] | undefined,
+        runOutput = true
       ): string[] => {
         return (attachments || []).map((attachment, index) => {
+          if (runOutput) recordCanvasTargetRunOutputUrl(attachment.url, runOutputUrls)
           const artifactId = createCanvasTargetArtifactId(stageId, `attachment-${index + 1}`)
           registerArtifact({
             id: artifactId,
@@ -2149,17 +2498,28 @@ export function useCanvasTargetWorkflow({
           canvasDispatchCount = placedCanvasItems.length
         }
 
+        // Placing a stage's media again keeps what that stage's media was:
+        // the outputs of a model or QuickApp stage are run outputs, a copy
+        // of a canvas source placed by add_* is not.
+        const materializedRunOutput = !runSourceCopyStageIds.has(options.sourceStage.id)
+        if (!materializedRunOutput) runSourceCopyStageIds.add(stageId)
         const mediaArtifactIds = registerStageAttachmentArtifacts(
           options.sourceStage.id,
           options.sourceStage.kind === 'quick-app' ? 'quickapp' : 'model',
-          mediaAttachments
+          mediaAttachments,
+          materializedRunOutput
         )
         placedCanvasItems.forEach((item, index) => {
           const artifactId = mediaArtifactIds[index]
           if (artifactId) linkArtifactToCanvasItem(artifactId, item.id)
         })
-        registerPlacedCanvasItems(options.sourceStage.id, placedCanvasItems, 'canvas')
-        registerPlacedCanvasItems(stageId, placedCanvasItems, 'canvas')
+        registerPlacedCanvasItems(
+          options.sourceStage.id,
+          placedCanvasItems,
+          'canvas',
+          materializedRunOutput
+        )
+        registerPlacedCanvasItems(stageId, placedCanvasItems, 'canvas', materializedRunOutput)
 
         const outputCanvasVersion = runtimeCanvasVersion
         const fallbackReason =
@@ -2237,7 +2597,9 @@ export function useCanvasTargetWorkflow({
 
       const hasResolvedStageCanvasItems = (stageId: string): boolean => {
         const existingItemIds = new Set(runtimeCanvasItems.map((item) => item.id))
-        return (stageCanvasItemIds.get(stageId) || []).some((itemId) => existingItemIds.has(itemId))
+        return (stageCanvasItemIds.get(stageId) || []).some(
+          (itemId) => existingItemIds.has(itemId) || runUserRemovedItemIds.has(itemId)
+        )
       }
 
       const materializeStageMediaOutputIfNeeded = async (stageId: string): Promise<boolean> => {
@@ -2270,11 +2632,29 @@ export function useCanvasTargetWorkflow({
         }
       }
 
+      // QuickApp input IDs may name originals, copies of unrelated canvas items,
+      // or stage-created media. A fresh ID is not provenance. Until complete
+      // lineage is available, only the exact selected originals in the explicit
+      // full-source mode are eligible for item-backed references; the selection
+      // authority checks all of them before any is honoured.
       const getCanvasItemQuickAppAttachments = (itemIds: string[]): ChatAttachment[] => {
-        const itemById = new Map(runtimeCanvasItems.map((item) => [item.id, item] as const))
-        return itemIds
-          .map((itemId) => canvasItemToQuickAppAttachment(itemById.get(itemId)))
-          .filter((attachment): attachment is ChatAttachment => Boolean(attachment))
+        if (itemIds.length === 0) return []
+        const verdict = authorizeCanvasTargetSourceReferences({
+          authority: runSelectionAuthority,
+          evidenceMode: normalizedEvidenceMode,
+          referencedItemIds: itemIds,
+          currentItems: runtimeCanvasItems
+        })
+        if (!verdict.allowed) {
+          throw new Error(t('project_canvas.target_run.quick_app_source_refused'))
+        }
+        return verdict.items.map((item) => {
+          const attachment = canvasItemToQuickAppAttachment(item)
+          if (!attachment) {
+            throw new Error(t('project_canvas.target_run.quick_app_source_unresolved'))
+          }
+          return attachment
+        })
       }
 
       const getStageQuickAppAttachments = (stageId: string): ChatAttachment[] => {
@@ -2396,10 +2776,13 @@ export function useCanvasTargetWorkflow({
 
       const commitSemanticCanvasResult = (
         stageId: string,
-        result: CanvasTargetSemanticCanvasActionResult
+        result: CanvasTargetSemanticCanvasActionResult,
+        base: CanvasTargetSemanticCanvasActionState
       ) => {
-        const itemsChanged = result.items !== runtimeCanvasItems
-        const groupsChanged = Boolean(result.groups && result.groups !== runtimeCanvasGroups)
+        result.createdIds.forEach((itemId) => runCreatedItemIds.add(itemId))
+        const itemsChanged = result.items !== base.items
+        const baseGroups = base.groups || []
+        const groupsChanged = Boolean(result.groups && result.groups !== baseGroups)
         const selectionChanged = !areCanvasTargetIdSetsEqual(runtimeSelectedIds, result.selectedIds)
         const surfaceStateChanged = Boolean(
           result.bgColor ||
@@ -2413,12 +2796,38 @@ export function useCanvasTargetWorkflow({
         runtimeCanvasItems = result.items
         runtimeSelectedIds = new Set(result.selectedIds)
         nextZIndexRef.current = result.nextZIndex
+        // The user may have changed the canvas since the run built its view
+        // (base). Only what this action changed is applied to the live
+        // canvas; everything else keeps its live value.
         if (itemsChanged) {
-          setItemsWithHistory(result.items)
+          const resultItemIds = new Set(result.items.map((item) => item.id))
+          base.items.forEach((item) => {
+            if (!resultItemIds.has(item.id)) runRemovedItemIds.add(item.id)
+          })
+          const before = base.items
+          const after = result.items
+          const pending = runPendingItemWrites.addCommitted(collectCanvasTargetRunWrittenIds(before, after))
+          setItemsWithHistory((live) => {
+            runPendingItemWrites.stamp(pending)
+            return mergeCanvasTargetRunChange(live, before, after)
+          })
         }
         if (result.groups) {
           runtimeCanvasGroups = result.groups
-          setGroups(result.groups)
+          if (groupsChanged) {
+            const resultGroupIds = new Set(result.groups.map((group) => group.id))
+            baseGroups.forEach((group) => {
+              if (!resultGroupIds.has(group.id)) runRemovedGroupIds.add(group.id)
+            })
+            const after = result.groups
+            const pending = runPendingGroupWrites.addCommitted(
+              collectCanvasTargetRunWrittenIds(baseGroups, after)
+            )
+            setGroups((live) => {
+              runPendingGroupWrites.stamp(pending)
+              return mergeCanvasTargetRunChange(live, baseGroups, after)
+            })
+          }
         }
         if (result.bgColor) {
           handleBgColorChange(result.bgColor)
@@ -2528,7 +2937,7 @@ export function useCanvasTargetWorkflow({
                 userIntent: canvasTargetUserIntent,
                 controlProfileId: canvasTargetControlProfileId,
                 sourceAttachments: evidenceSourceAttachments,
-                snapshotAttachment: evidenceSnapshotAttachment,
+                snapshotAttachment: quickAppSnapshotAttachment,
                 upstreamAttachments: dedupeCanvasTargetAttachments([
                   ...quickAppInputBinding.referencedAttachments,
                   ...executedStageResults.flatMap((stage) => stage.responseAttachments || [])
@@ -2636,6 +3045,28 @@ export function useCanvasTargetWorkflow({
             continue
           }
 
+          // Rebase the run's view on the live canvas, so the write authority,
+          // the executor and the merge base see the current board: the
+          // user's edits, moves, deletions and group changes, and what the
+          // user added (neither selected nor run-created). Only the run's own
+          // writes the live canvas has not rendered yet keep the run's value.
+          const rebasedCanvasItems = rebaseCanvasTargetRunView(
+            runtimeCanvasItems,
+            latestItemsRef.current,
+            { removedByRun: runRemovedItemIds, keepFromView: runPendingItemWrites.unrendered() }
+          )
+          if (rebasedCanvasItems !== runtimeCanvasItems) {
+            const rebasedItemIds = new Set(rebasedCanvasItems.map((item) => item.id))
+            runtimeCanvasItems.forEach((item) => {
+              if (!rebasedItemIds.has(item.id)) runUserRemovedItemIds.add(item.id)
+            })
+          }
+          runtimeCanvasItems = rebasedCanvasItems
+          runtimeCanvasGroups = rebaseCanvasTargetRunView(
+            runtimeCanvasGroups,
+            latestGroupsRef.current,
+            { removedByRun: runRemovedGroupIds, keepFromView: runPendingGroupWrites.unrendered() }
+          )
           const semanticState: CanvasTargetSemanticCanvasActionState = {
             items: runtimeCanvasItems,
             groups: runtimeCanvasGroups,
@@ -2645,25 +3076,55 @@ export function useCanvasTargetWorkflow({
             stageCanvasItemIds
           }
           const executableCanvasAction = action
+          collectCanvasTargetCanvasBlobUrlKeys(runtimeCanvasItems, runKnownCanvasUrlKeys)
+          collectCanvasTargetCanvasBlobUrlKeys(latestItemsRef.current, runKnownCanvasUrlKeys)
           const canvasResult = await executeCanvasTargetCanvasAction(executableCanvasAction, {
             projectId: canvasId,
             fallbackText: options?.fallbackText,
             generationSessionId: stageId,
+            evidenceMode: normalizedEvidenceMode,
+            selectionAuthority: runSelectionAuthority,
+            knownCanvasUrlKeys: runKnownCanvasUrlKeys,
+            runOutputUrls,
+            runCreatedItemIds,
+            runPlacedItemIds,
             semanticState,
-            commitSemanticResult: (result) => commitSemanticCanvasResult(stageId, result),
+            liveGroups: latestGroupsRef.current,
+            runStartAttachedCaptions,
+            commitSemanticResult: (result) =>
+              commitSemanticCanvasResult(stageId, result, semanticState),
             resolveCanvasTargetItemBounds
           })
+          ensureCanvasTargetRunActive()
           if (!isCanvasTargetSemanticCanvasActionName(executableCanvasAction.action)) {
+            // add_* places an existing URL. It is a run output only when that
+            // URL already was one; a re-placed canvas source is not.
+            const placedExistingUrl = ['add_image', 'add_video', 'add_model3d'].includes(
+              executableCanvasAction.action
+            )
+            const placedRunOutput =
+              !placedExistingUrl ||
+              (canvasResult.attachments || []).every((attachment) => {
+                const key = canvasTargetMediaUrlKey(attachment.url)
+                return Boolean(key && runOutputUrls.has(key))
+              })
+            if (!placedRunOutput) runSourceCopyStageIds.add(stageId)
             const canvasAttachmentArtifactIds = registerStageAttachmentArtifacts(
               stageId,
               'canvas',
-              canvasResult.attachments
+              canvasResult.attachments,
+              placedRunOutput
             )
             ;(canvasResult.placedCanvasItems || []).forEach((item, index) => {
               const artifactId = canvasAttachmentArtifactIds[index]
               if (artifactId) linkArtifactToCanvasItem(artifactId, item.id)
             })
-            registerPlacedCanvasItems(stageId, canvasResult.placedCanvasItems || [], 'canvas')
+            registerPlacedCanvasItems(
+              stageId,
+              canvasResult.placedCanvasItems || [],
+              'canvas',
+              placedRunOutput
+            )
           }
           registerStageTextArtifact(stageId, 'canvas', canvasResult.content)
           const outputCanvasVersion = runtimeCanvasVersion
@@ -3033,39 +3494,9 @@ export function useCanvasTargetWorkflow({
           .join('\n\n')
       })
       ensureCanvasTargetRunActive()
-      const buildFinalCanvasEvidenceAttachment = async (): Promise<ChatAttachment | null> => {
-        if (normalizedEvidenceMode === 'structured_only') return null
-        const evidenceItemIds = new Set<string>()
-        for (const item of targetItems) evidenceItemIds.add(item.id)
-        for (const itemId of runtimeSelectedIds) evidenceItemIds.add(itemId)
-        for (const itemId of lastCanvasItemIds) evidenceItemIds.add(itemId)
-        for (const itemId of lastQuickAppCanvasItemIds) evidenceItemIds.add(itemId)
-        for (const itemIds of stageCanvasItemIds.values()) {
-          for (const itemId of itemIds) evidenceItemIds.add(itemId)
-        }
-        const finalEvidenceItems = runtimeCanvasItems.filter((item) => evidenceItemIds.has(item.id))
-        if (finalEvidenceItems.length === 0) return null
-
-        try {
-          const finalEvidenceDataUrl = await renderCanvasItemsImageDataUrl(
-            finalEvidenceItems,
-            false,
-            null
-          )
-          return finalEvidenceDataUrl
-            ? {
-                type: 'image',
-                url: finalEvidenceDataUrl,
-                mimeType: 'image/png',
-                fileName: 'canvas-target-final-evidence.png'
-              }
-            : null
-        } catch (snapshotError) {
-          console.warn('[CanvasTarget] Failed to render final canvas evidence.', snapshotError)
-          return null
-        }
-      }
-
+      // The original selection is not a snapshot of the final canvas. We cannot
+      // safely build one until runtime item lineage is authenticated, so omit it
+      // instead of mislabelling stale pixels or reading unrelated originals.
       const buildSummaryStageResults = () =>
         executedStageResults.map((stage) => ({
           id: stage.id,
@@ -3081,13 +3512,7 @@ export function useCanvasTargetWorkflow({
           fallbackReason: stage.fallbackReason
         }))
 
-      const buildSummaryAttachments = async (): Promise<ChatAttachment[]> => {
-        const finalCanvasEvidenceAttachment = await buildFinalCanvasEvidenceAttachment()
-        if (finalCanvasEvidenceAttachment) {
-          registerStageAttachmentArtifacts(`${runId}-final-evidence`, 'final_evidence', [
-            finalCanvasEvidenceAttachment
-          ])
-        }
+      const buildSummaryAttachments = (): ChatAttachment[] => {
         const summaryBaseAttachments = buildCanvasTargetAttachments({
           sourceAttachments: evidenceSourceAttachments,
           snapshotAttachment: evidenceSnapshotAttachment,
@@ -3098,7 +3523,6 @@ export function useCanvasTargetWorkflow({
           executedStageResults.flatMap((stage) => stage.responseAttachments || [])
         ).slice(0, 6)
         return dedupeCanvasTargetAttachments([
-          ...(finalCanvasEvidenceAttachment ? [finalCanvasEvidenceAttachment] : []),
           ...summaryBaseAttachments,
           ...summaryUpstreamAttachments
         ])
@@ -3119,7 +3543,8 @@ export function useCanvasTargetWorkflow({
         await waitForCanvasTargetProgressPaint()
         ensureCanvasTargetRunActive()
 
-        const summaryAttachments = await buildSummaryAttachments()
+        const summaryAttachments = buildSummaryAttachments()
+        ensureCanvasTargetRunActive()
         const summaryInputCanvasVersion = runtimeCanvasVersion
         const summaryInputItemIds = Array.from(runtimeSelectedIds)
         const summaryResult = await requestCanvasTargetSummaryExecution({
@@ -3196,6 +3621,14 @@ export function useCanvasTargetWorkflow({
         }
       }
 
+      const finalAcceptanceCaveat = t('project_canvas.target_run.final_evidence_missing')
+      appendMessageToExternalChat({
+        scope: agentScope,
+        sessionId: agentSessionId,
+        role: 'assistant',
+        content: finalAcceptanceCaveat,
+        modelName: controlModelLabel
+      })
       const finalSummaryRun = await requestAndPublishControlSummary({
         id: runId + '-control-summary',
         label: isChineseUi ? '控制总结' : 'Control summary'
@@ -3251,11 +3684,7 @@ export function useCanvasTargetWorkflow({
             : 'The control model final acceptance says the result still needs fixes. Review the Agent feedback.'
         )
       } else if (acceptanceStatus === 'accepted') {
-        notifySuccess(
-          isChineseUi
-            ? '画布目标已完成，可查看主控模型验收结果。'
-            : 'Canvas target is complete. Review the control model acceptance result.'
-        )
+        notifyWarning(finalAcceptanceCaveat)
       } else {
         notifyWarning(
           isChineseUi
@@ -3331,7 +3760,6 @@ export function useCanvasTargetWorkflow({
     items,
     nextZIndexRef,
     notifyError,
-    notifySuccess,
     notifyWarning,
     projectName,
     renderCanvasItemsImageDataUrl,
@@ -3346,7 +3774,8 @@ export function useCanvasTargetWorkflow({
     setItemsWithHistory,
     setSelectedIds,
     setShowGrid,
-    setTool
+    setTool,
+    t
   ])
 
   useEffect(() => {

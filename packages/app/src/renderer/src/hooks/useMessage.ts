@@ -1,7 +1,8 @@
-import React, { useCallback, useMemo } from 'react'
+import React, { useCallback, useContext, useMemo } from 'react'
 import { SnackbarProvider, useSnackbar } from 'notistack'
 import { GlobalStyles, IconButton } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
+import { AgentColumnToastContext } from './agentColumnToastContext'
 
 export type MessageProviderProps = {
   anchorOrigin?: {
@@ -74,6 +75,8 @@ function calculateErrorDuration(message: string): number {
 
 export function useMessage(): UseMessageReturn {
   const { enqueueSnackbar, closeSnackbar } = useSnackbar()
+  // Inside the Agent column its own toast stack shows the messages (while the column is shown).
+  const columnToasts = useContext(AgentColumnToastContext)
 
   const createCloseButton = useCallback(
     (snackbarId: string | number) => {
@@ -106,6 +109,8 @@ export function useMessage(): UseMessageReturn {
       if (isTransientCapacityError(message)) {
         return SUPPRESSED_TRANSIENT_ERROR_SNACKBAR_KEY
       }
+      const columnKey = columnToasts?.push('error', message, duration)
+      if (columnKey) return columnKey
       return enqueueSnackbar(message, {
         variant: 'error',
         autoHideDuration: duration === undefined ? calculateErrorDuration(message) : duration,
@@ -114,11 +119,13 @@ export function useMessage(): UseMessageReturn {
         action: createCloseButton
       })
     },
-    [enqueueSnackbar, createCloseButton]
+    [enqueueSnackbar, createCloseButton, columnToasts]
   )
 
   const notifyInfo = useCallback(
     (message: string, duration?: number | null) => {
+      const columnKey = columnToasts?.push('info', message, duration)
+      if (columnKey) return columnKey
       return enqueueSnackbar(message, {
         variant: 'info',
         autoHideDuration: duration === undefined ? calculateDuration(message) : duration,
@@ -127,11 +134,13 @@ export function useMessage(): UseMessageReturn {
         action: createCloseButton
       })
     },
-    [enqueueSnackbar, createCloseButton]
+    [enqueueSnackbar, createCloseButton, columnToasts]
   )
 
   const notifyWarning = useCallback(
     (message: string, duration?: number | null) => {
+      const columnKey = columnToasts?.push('warning', message, duration)
+      if (columnKey) return columnKey
       return enqueueSnackbar(message, {
         variant: 'warning',
         autoHideDuration: duration === undefined ? calculateDuration(message) : duration,
@@ -140,14 +149,15 @@ export function useMessage(): UseMessageReturn {
         action: createCloseButton
       })
     },
-    [enqueueSnackbar, createCloseButton]
+    [enqueueSnackbar, createCloseButton, columnToasts]
   )
 
   const closeMessage = useCallback(
     (key?: import('notistack').SnackbarKey) => {
+      if (columnToasts && (key === undefined || typeof key === 'string')) columnToasts.dismiss(key)
       closeSnackbar(key)
     },
-    [closeSnackbar]
+    [closeSnackbar, columnToasts]
   )
 
   return useMemo(

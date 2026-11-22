@@ -1206,6 +1206,13 @@ describe('canvasTargetWorkflow asset metadata', () => {
     expect(attachments[2]?.hiddenFromChatView).toBe(true)
   })
 
+  it('retains the original source for an uncropped item', async () => {
+    const original = 'data:image/png;base64,UNCROPPED_200'
+    const item = { ...createImageItem(), src: original, sourceWidth: 200, sourceHeight: 200, crop: undefined }
+    const attachments = await buildCanvasTargetSourceAttachments([item])
+    expect(attachments).toEqual([expect.objectContaining({ type: 'image', url: original })])
+  })
+
   it('builds original source attachments from selected canvas assets with local file info intact', () => {
     const attachments = buildCanvasTargetSourceAttachments([createImageItem(), createVideoItem()])
 

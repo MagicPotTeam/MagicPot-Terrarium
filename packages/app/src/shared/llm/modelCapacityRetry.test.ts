@@ -126,6 +126,41 @@ describe('persistent model capacity retry', () => {
     await expect(pending).resolves.toBe('ok')
     expect(seen.filter((event) => event.type === 'session')).toEqual([])
   })
+  it('leaves without another attempt or wait when the retry notice callback throws', async () => {
+    // Before the wait: the first notice throws, nothing is scheduled.
+    const refused = new Error('Team has ended.')
+    const op = vi.fn().mockRejectedValue(overloaded())
+    await expect(
+      retryModelCapacity(
+        {
+          onDelta: (event) => {
+            if (event.type === 'retry') throw refused
+          }
+        },
+        op
+      )
+    ).rejects.toBe(refused)
+    expect(op).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+    // After the wait: the notice that precedes the next attempt throws, no attempt follows.
+    let throwNow = false
+    const later = vi.fn().mockRejectedValueOnce(overloaded()).mockResolvedValue('second attempt')
+    const pending = retryModelCapacity(
+      {
+        onDelta: (event) => {
+          if (event.type === 'retry' && throwNow) throw refused
+        }
+      },
+      later
+    )
+    const rejected = expect(pending).rejects.toBe(refused)
+    await vi.advanceTimersByTimeAsync(1)
+    throwNow = true
+    await vi.advanceTimersByTimeAsync(2_000)
+    await rejected
+    expect(later).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
   it('keeps cancellation local to one call and never starts a pre-cancelled request', async () => {
     const a = new AbortController()
     const waiting = vi.fn().mockRejectedValue(overloaded())

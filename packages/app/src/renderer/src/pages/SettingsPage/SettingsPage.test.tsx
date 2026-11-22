@@ -1,7 +1,9 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import SettingsPage from './SettingsPage'
+
+const managementNavigation = vi.hoisted(() => ({ navigate: vi.fn(), dispatch: vi.fn(), updateConfig: vi.fn(), isReady: true }))
 
 let currentLanguage = 'zh-CN'
 let currentThemeMode: 'light' | 'dark' = 'light'
@@ -19,16 +21,24 @@ let translations: Record<string, string> = {
   'general.close': '\u5173\u95ed'
 }
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    i18n: { language: currentLanguage },
-    t: (key: string) => translations[key] ?? key
-  })
-}))
+vi.mock('react-i18next', async () => {
+  const { scopedLocaleTranslator } = await import('@renderer/testUtils/localeTranslator')
+  return {
+    useTranslation: () => ({
+      i18n: { language: currentLanguage },
+      // The management entry reads the locale files; the other keys use the fixture map.
+      t: (key: string) =>
+        scopedLocaleTranslator(currentLanguage, ['agent_management.'], (raw) => translations[raw] ?? raw)(key)
+    })
+  }
+})
 
 vi.mock('react-router-dom', () => ({
-  useLocation: () => ({ state: {} })
+  useLocation: () => ({ state: {}, search: '' }),
+  useNavigate: () => managementNavigation.navigate
 }))
+
+vi.mock('@renderer/store', () => ({ useAppDispatch: () => managementNavigation.dispatch }))
 
 vi.mock('@mui/material/styles', async () => {
   const actual =
@@ -54,9 +64,9 @@ vi.mock('@renderer/hooks/useConfig', () => ({
   useConfig: () => ({
     config: DEFAULT_CONFIG,
     buildEnv: {},
-    isReady: true,
+    isReady: managementNavigation.isReady,
     configUtils: {},
-    updateConfig: vi.fn()
+    updateConfig: managementNavigation.updateConfig
   })
 }))
 
@@ -85,6 +95,7 @@ vi.mock('./PanelAbout', () => ({
 }))
 
 beforeEach(() => {
+  managementNavigation.navigate.mockReset(); managementNavigation.dispatch.mockReset(); managementNavigation.updateConfig.mockReset(); managementNavigation.isReady = true
   currentLanguage = 'zh-CN'
   currentThemeMode = 'light'
   translations = {
@@ -124,6 +135,21 @@ describe('SettingsPage', () => {
     expect(screen.getAllByText('\u4e00\u822c\u8bbe\u7f6e')).toHaveLength(1)
   })
 
+  it('opens the management tab only from its real mounted Settings action without editing config', () => {
+    currentLanguage = 'en'; render(<SettingsPage />)
+    expect(managementNavigation.dispatch).not.toHaveBeenCalled(); expect(managementNavigation.navigate).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Agent management' }))
+    expect(managementNavigation.dispatch).toHaveBeenCalledWith({ type: 'layout/openTab', payload: { id: 'tab-agent-management', label: 'Agent management', routePath: '/agent-management', closable: true } })
+    expect(managementNavigation.navigate).toHaveBeenCalledWith('/agent-management')
+    expect(managementNavigation.dispatch.mock.invocationCallOrder[0]).toBeLessThan(managementNavigation.navigate.mock.invocationCallOrder[0])
+    expect(managementNavigation.updateConfig).not.toHaveBeenCalled()
+  })
+  it('offers a localized management entry while the existing config is loading', () => {
+    managementNavigation.isReady = false; render(<SettingsPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'Agent 管理' }))
+    expect(managementNavigation.navigate).toHaveBeenCalledWith('/agent-management')
+    expect(managementNavigation.updateConfig).not.toHaveBeenCalled()
+  })
   it('uses the light theme background and text colors when the UI mode is light', () => {
     const { container } = render(<SettingsPage />)
 

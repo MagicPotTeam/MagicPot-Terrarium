@@ -10,15 +10,23 @@ import {
   CanvasThumbnailSvcImpl,
   type CanvasThumbnailSvcImplOptions
 } from './svcCanvasThumbnailImpl'
+import {
+  authorizeScopedLocalMediaPath,
+  clearScopedLocalMediaPathsForTest
+} from '../localMediaAccess'
 
 const electronMock = vi.hoisted(() => ({
   userDataRoot: '',
+  isPackaged: false,
   createThumbnailFromPath: vi.fn(),
   createFromPath: vi.fn()
 }))
 
 vi.mock('electron', () => ({
   app: {
+    get isPackaged() {
+      return electronMock.isPackaged
+    },
     getPath: vi.fn((name: string) => {
       if (name === 'temp') return path.join(electronMock.userDataRoot, 'temp')
       if (name !== 'userData') {
@@ -77,7 +85,7 @@ function createManifest({
   sourcePath: string
   src?: string
 }): CanvasThumbnailManifest {
-  const canonicalPath = fs.realpathSync.native(sourcePath)
+  const canonicalPath = path.resolve(fs.realpathSync.native(sourcePath))
   const stats = fs.statSync(canonicalPath)
   const sourceSizeBytes = Math.floor(stats.size)
   const sourceLastModifiedMs = Math.floor(stats.mtimeMs)
@@ -131,15 +139,19 @@ describe('CanvasThumbnailSvcImpl', () => {
   })
 
   afterEach(() => {
+    electronMock.isPackaged = false
+    clearScopedLocalMediaPathsForTest()
     fs.rmSync(testRoot, { recursive: true, force: true })
     vol.reset()
   })
 
+  /** A file the user dropped on the board: main holds its scoped grant. */
   async function createSourceFile(filename = 'source.png'): Promise<string> {
     const sourcePath = path.join(testRoot, filename)
     await fsp.writeFile(sourcePath, Buffer.from([1, 2, 3, 4]))
     const mtime = new Date('2026-05-02T00:00:00.000Z')
     await fsp.utimes(sourcePath, mtime, mtime)
+    expect(authorizeScopedLocalMediaPath(sourcePath)).toBe(true)
     return sourcePath
   }
 
@@ -236,7 +248,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     const metadata = await service.getSourceFileMetadata({ fullPath: sourcePath })
 
     expect(metadata.exists).toBe(true)
-    expect(metadata.canonicalPath).toBe(fs.realpathSync.native(sourcePath))
+    expect(metadata.canonicalPath).toBe(path.resolve(fs.realpathSync.native(sourcePath)))
     expect(metadata.sizeBytes).toBe(4)
     expect(metadata.lastModifiedMs).toBe(stats.mtimeMs)
 
@@ -322,6 +334,27 @@ describe('CanvasThumbnailSvcImpl', () => {
     expect(read.manifest?.cacheKey).toBe(manifest.cacheKey)
   })
 
+  it('takes no cache root from the working folder of a packaged app', async () => {
+    // A packaged app is started from anywhere (on macOS from /, so /tmp would count).
+    const cwdRoot = path.join(process.cwd(), 'tmp', `thumbnail-cache-${Math.random()}`)
+    try {
+      electronMock.isPackaged = true
+      await expect(service.getThumbnailCacheRoot({ cacheRootDir: cwdRoot })).rejects.toThrow(
+        /Unsafe canvas thumbnail cache root/
+      )
+      await expect(
+        service.readThumbnailManifest({ cacheKey: 'thumb-0123456789abcdef', cacheRootDir: cwdRoot })
+      ).rejects.toThrow(/Unsafe canvas thumbnail cache root/)
+      expect(fs.existsSync(cwdRoot)).toBe(false)
+      // A development build keeps the repository's test folders.
+      electronMock.isPackaged = false
+      const { cacheRoot } = await service.getThumbnailCacheRoot({ cacheRootDir: cwdRoot })
+      expect(cacheRoot).toBe(fs.realpathSync.native(cwdRoot))
+    } finally {
+      fs.rmSync(cwdRoot, { recursive: true, force: true })
+    }
+  })
+
   it('allows an explicit magicpot temp cache root', async () => {
     const sourcePath = await createSourceFile()
     const manifest = createManifest({ sourcePath })
@@ -329,6 +362,109 @@ describe('CanvasThumbnailSvcImpl', () => {
 
     await writeManifestSet(manifest, cacheRoot)
     expect(fs.existsSync(path.join(cacheRoot, manifest.cacheKey, 'manifest.json'))).toBe(true)
+  })
+
+  it('refuses a cache root spelled outside the app bases even when it links inside them', async () => {
+    // The requested spelling is checked before it is canonicalized (a board file can carry it).
+    const inside = path.join(electronMock.userDataRoot, 'project-canvas-thumbnail-cache')
+    await fsp.mkdir(inside, { recursive: true })
+    // Outside the app's data, the repo test folders and the magicpot temp folders.
+    const link = path.join(os.tmpdir(), `elsewhere-link-to-cache-${process.pid}`)
+    await fsp.mkdir(os.tmpdir(), { recursive: true })
+    fs.symlinkSync(inside, link, 'dir')
+
+    await expect(service.getThumbnailCacheRoot({ cacheRootDir: link })).rejects.toThrow(
+      /Unsafe canvas thumbnail cache root/
+    )
+    await expect(
+      service.readThumbnailManifest({ cacheKey: 'thumb-0123456789abcdef', cacheRootDir: link })
+    ).rejects.toThrow(/Unsafe canvas thumbnail cache root/)
+    fs.unlinkSync(link)
+  })
+
+  it('tells nothing about and decodes nothing of a file the user did not grant', async () => {
+    // Outside every application root, never dropped or picked (a board file can name it).
+    const secretPath = path.join(testRoot, 'secret.png')
+    await fsp.writeFile(secretPath, Buffer.from([1, 2, 3, 4, 5, 6]))
+    const generateViaSidecar = vi.fn()
+    const guarded = createServiceWithSidecar(generateViaSidecar)
+
+    for (const fullPath of [secretPath, path.join(testRoot, 'missing.png')]) {
+      await expect(guarded.getSourceFileMetadata({ fullPath })).resolves.toEqual({
+        exists: false,
+        canonicalPath: path.resolve(fullPath),
+        sizeBytes: 0,
+        lastModifiedMs: 0
+      })
+    }
+    await expect(
+      guarded.createNativeThumbnail({ fullPath: secretPath, maxSide: 128 })
+    ).rejects.toThrow()
+    await expect(guarded.generateThumbnailSet({ fullPath: secretPath })).resolves.toMatchObject({
+      manifest: null,
+      status: 'failed'
+    })
+    expect(electronMock.createThumbnailFromPath).not.toHaveBeenCalled()
+    expect(generateViaSidecar).not.toHaveBeenCalled()
+
+    // A manifest naming it (written by the renderer) is refused before its file is looked at.
+    const granted = await createSourceFile()
+    const manifest = createManifest({ sourcePath: granted })
+    await expect(
+      writeManifestSet({ ...manifest, canonicalPath: secretPath.replace(/\\/g, '/') })
+    ).rejects.toThrow(/not authorized/)
+  })
+
+  it('reads an application-owned source without a grant', async () => {
+    const managedPath = path.join(electronMock.userDataRoot, '.chat_media', 'managed.png')
+    await fsp.mkdir(path.dirname(managedPath), { recursive: true })
+    await fsp.writeFile(managedPath, Buffer.from([1, 2, 3]))
+
+    await expect(service.getSourceFileMetadata({ fullPath: managedPath })).resolves.toMatchObject({
+      exists: true,
+      canonicalPath: path.resolve(fs.realpathSync.native(managedPath)),
+      sizeBytes: 3
+    })
+  })
+
+  it('never looks at the app data outside its media folders, nor decodes it', async () => {
+    const userData = electronMock.userDataRoot
+    const secrets = [
+      path.join(userData, 'config.json'),
+      path.join(userData, 'local-media-grants.json'),
+      path.join(userData, 'customSkills', 'cat', 'cat.png'),
+      path.join(userData, 'Local Storage', 'leveldb', '000003.png')
+    ]
+    for (const secret of secrets) {
+      await fsp.mkdir(path.dirname(secret), { recursive: true })
+      await fsp.writeFile(secret, Buffer.from([1, 2, 3]))
+      await expect(service.getSourceFileMetadata({ fullPath: secret })).resolves.toMatchObject({
+        exists: false
+      })
+      await expect(
+        service.createNativeRegion({ fullPath: secret, x: 0, y: 0, width: 1, height: 1 })
+      ).rejects.toThrow(/not authorized/)
+    }
+    expect(electronMock.createFromPath).not.toHaveBeenCalledWith(expect.stringContaining('config'))
+  })
+
+  it('drops the cached thumbnails of a board item whose grant was evicted', async () => {
+    const sourcePath = await createSourceFile()
+    const manifest = createManifest({ sourcePath })
+    await writeManifestSet(manifest)
+    await expect(
+      service.readThumbnailManifest({ cacheKey: manifest.cacheKey })
+    ).resolves.toMatchObject({ manifest: { cacheKey: manifest.cacheKey } })
+
+    // More than 1000 newer grants push it out: the board cannot display it, and main neither
+    // looks at it nor makes thumbnails of it.
+    clearScopedLocalMediaPathsForTest()
+    await expect(service.readThumbnailManifest({ cacheKey: manifest.cacheKey })).resolves.toEqual({
+      manifest: null
+    })
+    await expect(service.getSourceFileMetadata({ fullPath: sourcePath })).resolves.toMatchObject({
+      exists: false
+    })
   })
 
   it('rejects cache entries that resolve outside the authorized cache root through symlinks', async () => {
@@ -520,7 +656,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     expect(sidecarCalls).toHaveLength(1)
     expect(sidecarCalls[0]).toMatchObject({
       cacheRoot: fs.realpathSync.native(cacheRoot),
-      items: [{ id: manifest.cacheKey, path: fs.realpathSync.native(sourcePath) }],
+      items: [{ id: manifest.cacheKey, path: path.resolve(fs.realpathSync.native(sourcePath)) }],
       thumbnail: { levels: [128, 256], format: 'webp', allowUpscale: false },
       maxConcurrency: 3,
       maxDecodedPixels: 123456,
@@ -622,7 +758,7 @@ describe('CanvasThumbnailSvcImpl', () => {
 
   it('creates native regions with bounded crop and resize', async () => {
     const sourcePath = await createSourceFile()
-    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'source.png')
+    const authorizedSourcePath = path.join(electronMock.userDataRoot, '.chat_media', 'source.png')
     fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
     fs.copyFileSync(sourcePath, authorizedSourcePath)
     const png = Buffer.from([1, 2, 3, 4])
@@ -636,7 +772,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     })
 
     const response = await service.createNativeRegion({
-      fullPath: sourcePath.replace(testRoot, electronMock.userDataRoot),
+      fullPath: authorizedSourcePath,
       x: 4,
       y: 8,
       width: 64,
@@ -648,7 +784,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     })
 
     expect(electronMock.createFromPath).toHaveBeenCalledWith(
-      fs.realpathSync.native(authorizedSourcePath)
+      path.resolve(fs.realpathSync.native(authorizedSourcePath))
     )
     expect(response).toMatchObject({
       sourceWidth: 640,
@@ -666,7 +802,11 @@ describe('CanvasThumbnailSvcImpl', () => {
 
   it('rejects native regions above the output pixel budget', async () => {
     const sourcePath = await createSourceFile()
-    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'budget-source.png')
+    const authorizedSourcePath = path.join(
+      electronMock.userDataRoot,
+      '.chat_media',
+      'budget-source.png'
+    )
     fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
     fs.copyFileSync(sourcePath, authorizedSourcePath)
     const callsBefore = electronMock.createFromPath.mock.calls.length
@@ -685,7 +825,11 @@ describe('CanvasThumbnailSvcImpl', () => {
 
   it('rejects non-finite native region dimensions before decoding', async () => {
     const sourcePath = await createSourceFile('invalid-region.png')
-    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'invalid-region.png')
+    const authorizedSourcePath = path.join(
+      electronMock.userDataRoot,
+      '.chat_media',
+      'invalid-region.png'
+    )
     fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
     fs.copyFileSync(sourcePath, authorizedSourcePath)
     const callsBefore = electronMock.createFromPath.mock.calls.length
@@ -706,7 +850,11 @@ describe('CanvasThumbnailSvcImpl', () => {
 
   it('rejects native sources above the source byte budget before decoding', async () => {
     const sourcePath = await createSourceFile('oversized-region.png')
-    const authorizedSourcePath = path.join(electronMock.userDataRoot, 'oversized-region.png')
+    const authorizedSourcePath = path.join(
+      electronMock.userDataRoot,
+      '.chat_media',
+      'oversized-region.png'
+    )
     fs.mkdirSync(path.dirname(authorizedSourcePath), { recursive: true })
     fs.copyFileSync(sourcePath, authorizedSourcePath)
     const originalSize = fs.statSync(authorizedSourcePath).size
@@ -743,7 +891,7 @@ describe('CanvasThumbnailSvcImpl', () => {
     })
 
     expect(electronMock.createThumbnailFromPath).toHaveBeenCalledWith(
-      fs.realpathSync.native(sourcePath),
+      path.resolve(fs.realpathSync.native(sourcePath)),
       {
         width: 128,
         height: 128
@@ -753,5 +901,42 @@ describe('CanvasThumbnailSvcImpl', () => {
     expect(response.width).toBe(128)
     expect(response.height).toBe(96)
     expect(Array.from(response.data)).toEqual([9, 8, 7])
+  })
+
+  it('hands the OS thumbnailer only the image types a board shows', async () => {
+    electronMock.createThumbnailFromPath.mockResolvedValue({
+      getSize: () => ({ width: 64, height: 64 }),
+      isEmpty: () => false,
+      toPNG: () => Buffer.from([1])
+    })
+    for (const filename of [
+      'shortcut.lnk',
+      'site.url',
+      'Pictures.library-ms',
+      'drawing.svg',
+      'notes.txt'
+    ]) {
+      const sourcePath = await createSourceFile(filename)
+      await expect(
+        service.createNativeThumbnail({ fullPath: sourcePath, maxSide: 64 })
+      ).rejects.toThrow(/only of image files/)
+    }
+    // A link named like an image that points at another type.
+    const target = await createSourceFile('target.lnk')
+    const link = path.join(testRoot, 'photo.png')
+    fs.symlinkSync(target, link)
+    expect(authorizeScopedLocalMediaPath(link)).toBe(true)
+    await expect(service.createNativeThumbnail({ fullPath: link, maxSide: 64 })).rejects.toThrow(
+      /only of image files/
+    )
+    expect(electronMock.createThumbnailFromPath).not.toHaveBeenCalled()
+
+    const photo = await createSourceFile('Photo.JPG')
+    await expect(
+      service.createNativeThumbnail({ fullPath: photo, maxSide: 64 })
+    ).resolves.toMatchObject({
+      width: 64,
+      mimeType: 'image/png'
+    })
   })
 })

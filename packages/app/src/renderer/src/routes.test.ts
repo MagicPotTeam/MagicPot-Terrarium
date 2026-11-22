@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { getPathById, getRouteById, getRouteByPath } from './routes'
+import { getPathById, getRouteById, getRouteByPath, getSidebarRoutes } from './routes'
 import {
   LEGACY_PROJECT_WEBGL_ROUTE_PATH,
   PROJECT_CANVAS_ROUTE_PATH
 } from './pages/ProjectCanvasPage/projectCanvasRouting'
 
 describe('routes', () => {
+  it('registers a distinct lazy management route hidden from the sidebar without reviving removed Studio', () => {
+    const management = getRouteByPath('/agent-management')
+    expect(management).toMatchObject({ id: 'agent_management', path: '/agent-management', showInSidebar: false })
+    expect((management?.Page as unknown as { $$typeof?: symbol })?.$$typeof).toBe(Symbol.for('react.lazy'))
+    expect(getSidebarRoutes().some(route => route.path === '/agent-management')).toBe(false)
+    expect(getRouteByPath('/agent-studio')).toBeUndefined()
+  })
   it('registers the custom skill manager as a hidden peer route', () => {
     const route = getRouteByPath('/custom-skill-manager')
 
@@ -21,6 +28,10 @@ describe('routes', () => {
 
   it('does not expose the removed browser route anymore', () => {
     expect(getRouteByPath('/browser')).toBeUndefined()
+  })
+
+  it('does not expose the removed Agent Studio route anymore', () => {
+    expect(getRouteByPath('/agent-studio')).toBeUndefined()
   })
 
   it('registers ProjectCanvas as the canonical project surface and preserves a legacy WebGL alias', () => {

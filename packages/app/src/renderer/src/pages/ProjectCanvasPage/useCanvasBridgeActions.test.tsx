@@ -1,8 +1,12 @@
 import { act, renderHook } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
+import { createHash } from 'node:crypto'
+
+import { CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES } from './canvasCropProvenance'
+import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import { useCanvasBridgeActions } from './useCanvasBridgeActions'
-import type { CanvasGroup, CanvasImageItem, CanvasItem } from './types'
+import type { CanvasGroup, CanvasImageCropSource, CanvasImageItem, CanvasItem } from './types'
 
 const mockDispatch = vi.fn()
 
@@ -30,6 +34,91 @@ vi.mock('../ChatPage/chatVideoAttachmentUtils', () => ({
     lastFrameDataUrl: null
   }))
 }))
+
+type CropSourceFixture = {
+  loaded: HTMLImageElement[]
+  decodeInputs: string[]
+  objectUrlBlobs: Map<string, Blob>
+  fetch: Mock<(url: string) => Promise<unknown>>
+}
+
+const cropFixtureCleanups: Array<() => void> = []
+let lastCropFixture: CropSourceFixture | null = null
+
+// The crop record of a source: what the crop confirm stores (backlog item 26, owner decision 2).
+function cropRecord(bytes: Uint8Array, width: number, height: number): CanvasImageCropSource {
+  return {
+    version: 1,
+    origin: 'confirm',
+    width,
+    height,
+    sizeBytes: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex')
+  }
+}
+
+const LOCAL_SOURCE_BYTES = new TextEncoder().encode('synthetic local crop source bytes')
+const LOCAL_SOURCE_RECORD = cropRecord(LOCAL_SOURCE_BYTES, 100, 80)
+
+// A Blob as Chromium serves it: jsdom's Blob has no arrayBuffer(), and its
+// FileReader fallback waits on the fake timers these tests install.
+function browserBlob(bytes: Uint8Array, type: string): Blob {
+  const blob = new Blob([bytes.slice()], { type })
+  return Object.assign(blob, { arrayBuffer: async () => bytes.slice().buffer })
+}
+
+// Node's URL rejects jsdom Blobs: object URLs of the read bytes are stubbed and remembered.
+function installObjectUrlStub(): Map<string, Blob> {
+  const objectUrlBlobs = new Map<string, Blob>()
+  let next = 0
+  const create = vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob | MediaSource) => {
+    const url = `blob:crop-fixture-${++next}`
+    objectUrlBlobs.set(url, blob as Blob)
+    return url
+  })
+  const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+  cropFixtureCleanups.push(() => { create.mockRestore(); revoke.mockRestore() })
+  return objectUrlBlobs
+}
+
+// Serves the source bytes of a local-media URL; the fake Image decodes only an
+// object URL of those bytes, never the original URL.
+function installCropImageFixture(...originalSrcs: string[]): HTMLImageElement[] {
+  const loaded: HTMLImageElement[] = []
+  const decodeInputs: string[] = []
+  const objectUrlBlobs = installObjectUrlStub()
+  const sourcePaths = originalSrcs.map((src) => src.replace(/^local-media:\/\/\/?/, ''))
+  const fetchMock: Mock<(url: string) => Promise<unknown>> = vi.fn(async (url: string) => {
+    const requested = decodeURIComponent(String(url))
+    if (!sourcePaths.some((path) => requested.endsWith(path))) throw new Error('unexpected fetch')
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => String(LOCAL_SOURCE_BYTES.byteLength) },
+      blob: async () => browserBlob(LOCAL_SOURCE_BYTES, 'image/jpeg')
+    }
+  })
+  class FakeImage {
+    naturalWidth = 100
+    naturalHeight = 80
+    onload: ((event: Event) => void) | null = null
+    onerror: ((event: Event) => void) | null = null
+    crossOrigin: string | null = null
+    set src(value: string) {
+      decodeInputs.push(value)
+      Promise.resolve().then(() => {
+        if (objectUrlBlobs.get(value)?.size === LOCAL_SOURCE_BYTES.byteLength) this.onload?.(new Event('load'))
+        else this.onerror?.(new Event('error'))
+      })
+    }
+    constructor() { loaded.push(this as unknown as HTMLImageElement) }
+  }
+  vi.stubGlobal('Image', FakeImage)
+  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('electronFile', { resolveAuthorizedLocalMediaPath: vi.fn(async (path: string) => path) })
+  lastCropFixture = { loaded, decodeInputs, objectUrlBlobs, fetch: fetchMock }
+  return loaded
+}
 
 function createImageItem(
   id: string,
@@ -67,6 +156,8 @@ describe('useCanvasBridgeActions', () => {
   afterEach(() => {
     vi.runOnlyPendingTimers()
     vi.useRealTimers()
+    for (const cleanup of cropFixtureCleanups.splice(0)) cleanup()
+    lastCropFixture = null
   })
 
   it('dispatches only the explicit selection to the matching targetScope', async () => {
@@ -148,19 +239,152 @@ describe('useCanvasBridgeActions', () => {
     }
   })
 
+  it('passes overview limits in the fourth argument while leaving clip bounds unset', async () => {
+    const first = createImageItem('first', 'first.png')
+    const second: CanvasItem = { id: 'second', type: 'text', text: 'hello', x: 0, y: 0, width: 180, height: 51, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 2, locked: false, fill: '#ffffff', fontSize: 18, fontFamily: 'Arial', fontWeight: 'bold' }
+    const renderSnapshot = vi.fn(async () => 'data:image/png;base64,snapshot')
+    const { result } = renderHook(() => useCanvasBridgeActions({
+      canvasId: 'canvas-1', projectName: 'Demo', items: [first, second], groups: [],
+      notifySuccess: vi.fn(), notifyError: vi.fn(), extractPromptTextFromCanvasItems: () => 'text',
+      renderCanvasItemsImageDataUrl: renderSnapshot, renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg/>')
+    }))
+    await act(async () => { await result.current.handleSendCanvasItemsToAgent([first, second]); vi.runAllTimers() })
+    expect(renderSnapshot).toHaveBeenCalledOnce()
+    expect(renderSnapshot).toHaveBeenCalledWith([first, second], false, undefined, { maxSide: 2000, maxArea: 4000000 })
+  })
+
+  it('uses the same cropped snapshot for mixed-selection overview without changing canvas geometry', async () => {
+    const loaded = installCropImageFixture('local-media:///C:/MagicPot/selected.jpg')
+    const selected = createImageItem('selected-image', 'selected.jpg', {
+      sourceWidth: 100, sourceHeight: 80, x: 91, y: 27, width: 210, height: 70,
+      rotation: 23, scaleX: -1, scaleY: 2, zIndex: 3,
+      crop: { x: 10, y: 20, width: 30, height: 40 },
+      cropSource: LOCAL_SOURCE_RECORD
+    })
+    const text: CanvasItem = { id: 'selected-text', type: 'text', text: 'note', x: 40, y: 50,
+      width: 100, height: 30, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 5, locked: false,
+      fill: '#fff', fontSize: 14, fontFamily: 'Arial' }
+    const before = structuredClone(selected)
+    const drawImage = vi.fn()
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never)
+    const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,cropped-visible')
+    const renderSnapshot = vi.fn(async () => 'data:image/png;base64,overview')
+    const events = vi.spyOn(window, 'dispatchEvent')
+    const notifyError = vi.fn()
+    try {
+      const { result } = renderHook(() => useCanvasBridgeActions({
+        canvasId: 'canvas-1', projectName: 'Demo', items: [selected, text], groups: [],
+        notifySuccess: vi.fn(), notifyError, extractPromptTextFromCanvasItems: () => 'note',
+        renderCanvasItemsImageDataUrl: renderSnapshot, renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg/>')
+      }))
+      await act(async () => { await result.current.handleSendCanvasItemsToAgent([selected, text]); vi.runAllTimers() })
+      expect(loaded).toHaveLength(1)
+      expect(drawImage).toHaveBeenCalledWith(loaded[0], 10, 20, 30, 40, 0, 0, 30, 40)
+      expect(renderSnapshot).toHaveBeenCalledOnce()
+      const [overviewItems] = renderSnapshot.mock.calls[0] as unknown as [CanvasItem[]]
+      expect(overviewItems[0]).toMatchObject({
+        id: selected.id, src: 'data:image/png;base64,cropped-visible', x: 91, y: 27,
+        width: 210, height: 70, rotation: 23, scaleX: -1, scaleY: 2, zIndex: 3
+      })
+      expect(overviewItems[0]).not.toHaveProperty('crop')
+      expect(overviewItems[1]).toEqual(text)
+      expect(selected).toEqual(before)
+      expect(notifyError).not.toHaveBeenCalled()
+      const sentAttachments = events.mock.calls.flatMap(([event]) => {
+        if (event.type !== 'send-to-agent') return []
+        const detail = (event as CustomEvent<{ attachment?: { url?: string } }>).detail
+        return detail?.attachment?.url ? [detail.attachment.url] : []
+      })
+      expect(sentAttachments).toContain('data:image/png;base64,cropped-visible')
+      expect(sentAttachments).toContain('data:image/png;base64,overview')
+      expect(sentAttachments).not.toContain(selected.src)
+    } finally {
+      events.mockRestore(); toDataURL.mockRestore(); getContext.mockRestore(); vi.unstubAllGlobals()
+    }
+  })
+
+  it('never rereads a mutable full-crop source for a mixed overview or its attachment', async () => {
+    const loaded = installCropImageFixture('local-media:///C:/MagicPot/selected.jpg')
+    const selected = createImageItem('selected-image', 'selected.jpg', {
+      sourceWidth: 100, sourceHeight: 80, x: 91, y: 27, width: 210, height: 70,
+      rotation: 23, scaleX: -1, scaleY: 2, zIndex: 3,
+      crop: { x: 0, y: 0, width: 100, height: 80 },
+      cropSource: LOCAL_SOURCE_RECORD
+    })
+    const text: CanvasItem = { id: 'selected-text', type: 'text', text: 'note', x: 40, y: 50,
+      width: 100, height: 30, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 5, locked: false,
+      fill: '#fff', fontSize: 14, fontFamily: 'Arial' }
+    const before = structuredClone(selected)
+    const drawImage = vi.fn()
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never)
+    const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,full-snapshot')
+    const renderSnapshot = vi.fn(async () => 'data:image/png;base64,overview')
+    const events = vi.spyOn(window, 'dispatchEvent')
+    const notifyError = vi.fn()
+    try {
+      const { result } = renderHook(() => useCanvasBridgeActions({
+        canvasId: 'canvas-1', projectName: 'Demo', items: [selected, text], groups: [],
+        notifySuccess: vi.fn(), notifyError, extractPromptTextFromCanvasItems: () => 'note',
+        renderCanvasItemsImageDataUrl: renderSnapshot, renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg/>')
+      }))
+      await act(async () => { await result.current.handleSendCanvasItemsToAgent([selected, text]); vi.runAllTimers() })
+      expect(loaded).toHaveLength(1)
+      expect(drawImage).toHaveBeenCalledWith(loaded[0], 0, 0, 100, 80, 0, 0, 100, 80)
+      const [overviewItems] = renderSnapshot.mock.calls[0] as unknown as [CanvasItem[]]
+      expect(overviewItems[0]).toMatchObject({ src: 'data:image/png;base64,full-snapshot',
+        x: 91, y: 27, width: 210, height: 70, rotation: 23, scaleX: -1, scaleY: 2, zIndex: 3 })
+      expect(overviewItems[0]).not.toHaveProperty('crop')
+      expect(selected).toEqual(before)
+      expect(notifyError).not.toHaveBeenCalled()
+      const urls = events.mock.calls.flatMap(([event]) => {
+        if (event.type !== 'send-to-agent') return []
+        const detail = (event as CustomEvent<{ attachment?: { url?: string } }>).detail
+        return detail?.attachment?.url ? [detail.attachment.url] : []
+      })
+      expect(urls).toContain('data:image/png;base64,full-snapshot')
+      expect(urls).toContain('data:image/png;base64,overview')
+      expect(urls).not.toContain(selected.src)
+    } finally {
+      events.mockRestore(); toDataURL.mockRestore(); getContext.mockRestore(); vi.unstubAllGlobals()
+    }
+  })
+
+  it.each(['empty', 'null', 'throws'] as const)('does not deliver any partial selection when overview %s', async (mode) => {
+    const first = createImageItem('first', 'first.png')
+    const second: CanvasItem = { id: 'second', type: 'text', text: 'hello', x: 0, y: 0, width: 180, height: 51, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 2, locked: false, fill: '#ffffff', fontSize: 18, fontFamily: 'Arial', fontWeight: 'bold' }
+    const notifyError = vi.fn(), notifySuccess = vi.fn()
+    const events = vi.spyOn(window, 'dispatchEvent')
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const renderSnapshot = vi.fn(async (): Promise<string> => {
+      if (mode === 'throws') throw new RangeError('overview exceeds raster limits')
+      return mode === 'null' ? null as unknown as string : ''
+    })
+    try {
+      const { result } = renderHook(() => useCanvasBridgeActions({
+        canvasId: 'canvas-1', projectName: 'Demo', items: [first, second], groups: [],
+        notifySuccess, notifyError, extractPromptTextFromCanvasItems: () => 'text',
+        renderCanvasItemsImageDataUrl: renderSnapshot, renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg/>')
+      }))
+      await act(async () => { await result.current.handleSendCanvasItemsToAgent([first, second]); vi.runAllTimers() })
+      expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_overview_failed')
+      expect(notifySuccess).not.toHaveBeenCalled()
+      expect(mockDispatch).not.toHaveBeenCalled()
+      expect(events.mock.calls.filter(([event]) => event.type === 'send-to-agent' || event.type === 'chat:focus-composer')).toHaveLength(0)
+    } finally { events.mockRestore(); warning.mockRestore() }
+  })
+
   it('sends cropped image attachments as exported visible PNGs without changing canvas item semantics', async () => {
     const dispatchEventSpy = vi.spyOn(window, 'dispatchEvent')
-    const sourceCanvas = document.createElement('canvas')
-    sourceCanvas.width = 100
-    sourceCanvas.height = 80
+    const loaded = installCropImageFixture('local-media:///C:/MagicPot/selected.jpg')
     const selected = createImageItem('selected-image', 'selected.jpg', {
-      image: sourceCanvas,
       sourceWidth: 100,
       sourceHeight: 80,
       width: 30,
       height: 40,
-      crop: { x: 10, y: 20, width: 30, height: 40 }
+      crop: { x: 10, y: 20, width: 30, height: 40 },
+      cropSource: LOCAL_SOURCE_RECORD
     })
+    const original = structuredClone(selected)
     const drawImage = vi.fn()
     const getContextSpy = vi
       .spyOn(HTMLCanvasElement.prototype, 'getContext')
@@ -216,8 +440,11 @@ describe('useCanvasBridgeActions', () => {
           sourceHeight: 40
         })
       )
-      expect(drawImage).toHaveBeenCalledWith(sourceCanvas, 10, 20, 30, 40, 0, 0, 30, 40)
+      expect(drawImage).toHaveBeenCalledWith(loaded[0], 10, 20, 30, 40, 0, 0, 30, 40)
+      expect(loaded).toHaveLength(1)
+      expect(sendEvents.some(event => event.detail?.attachment?.url === selected.src)).toBe(false)
       expect(toDataURLSpy).toHaveBeenCalledWith('image/png')
+      expect(selected).toEqual(original)
       expect(selected.src).toBe('local-media:///C:/MagicPot/selected.jpg')
       expect(selected.crop).toEqual({ x: 10, y: 20, width: 30, height: 40 })
       expect(sendEvents.find((event) => event.detail?.hiddenText)?.detail?.hiddenText).toContain(
@@ -227,21 +454,45 @@ describe('useCanvasBridgeActions', () => {
       dispatchEventSpy.mockRestore()
       getContextSpy.mockRestore()
       toDataURLSpy.mockRestore()
+      vi.unstubAllGlobals()
     }
+  })
+
+  it('does not send a mixed selection when one cropped image fails', async () => {
+    const events = vi.spyOn(window, 'dispatchEvent')
+    const loaded = installCropImageFixture('local-media:///C:/MagicPot/cropped.jpg')
+    const cropped = createImageItem('cropped', 'cropped.jpg', { sourceWidth: 100, sourceHeight: 80, crop: {x: 10, y: 20, width: 30, height: 40}, cropSource: LOCAL_SOURCE_RECORD })
+    const other = createImageItem('other', 'other.png')
+    const text: CanvasItem = { id: 'text', type: 'text', text: 'keep me', x: 0, y: 0, width: 180, height: 51, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 2, locked: false, fill: '#ffffff', fontSize: 18, fontFamily: 'Arial', fontWeight: 'bold' }
+    const context = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
+    const notifyError = vi.fn(), notifySuccess = vi.fn(), renderSnapshot = vi.fn(async () => 'data:image/png;base64,snapshot')
+    try {
+      const {result} = renderHook(() => useCanvasBridgeActions({
+        canvasId:'canvas-1', projectName:'Demo', items:[cropped, other, text], groups:[], notifyError, notifySuccess,
+        extractPromptTextFromCanvasItems: () => 'keep me', renderCanvasItemsImageDataUrl:renderSnapshot,
+        renderCanvasItemsSvgMarkup:vi.fn(async () => '<svg/>')
+      }))
+      await act(async () => { await result.current.handleSendCanvasItemsToAgent([cropped, other, text]); vi.runAllTimers() })
+      expect(loaded).toHaveLength(1)
+      expect(context).toHaveBeenCalled()
+      expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_cropped_image_failed')
+      expect(notifySuccess).not.toHaveBeenCalled()
+      expect(renderSnapshot).not.toHaveBeenCalled()
+      expect(mockDispatch).not.toHaveBeenCalled()
+      expect(events.mock.calls.filter(([event]) => event.type === 'send-to-agent' || event.type === 'chat:focus-composer')).toHaveLength(0)
+    } finally { context.mockRestore(); events.mockRestore(); vi.unstubAllGlobals() }
   })
 
   it('does not fall back to the full original or a snapshot when cropped image materialization fails', async () => {
     const dispatchEventSpy = vi.spyOn(window, 'dispatchEvent')
-    const sourceCanvas = document.createElement('canvas')
-    sourceCanvas.width = 100
-    sourceCanvas.height = 80
+    installCropImageFixture('local-media:///C:/MagicPot/selected.jpg')
     const selected = createImageItem('selected-image', 'selected.jpg', {
-      image: sourceCanvas,
       sourceWidth: 100,
       sourceHeight: 80,
       width: 30,
       height: 40,
-      crop: { x: 10, y: 20, width: 30, height: 40 }
+      crop: { x: 10, y: 20, width: 30, height: 40 },
+      cropSource: LOCAL_SOURCE_RECORD
     })
     const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
     const renderSnapshot = vi.fn(async () => 'data:image/png;base64,cropped-snapshot')
@@ -288,6 +539,471 @@ describe('useCanvasBridgeActions', () => {
     } finally {
       dispatchEventSpy.mockRestore()
       getContextSpy.mockRestore()
+      vi.unstubAllGlobals()
     }
+  })
+
+  describe('async cropped sends without source dimensions', () => {
+    const source = 'data:image/png;base64,c3ludGhldGlj'
+    const croppedUrl = 'data:image/png;base64,Y3JvcHBlZA=='
+    // The record of the data: source's own bytes ('synthetic') and its 200x200 decode.
+    const sourceRecord = cropRecord(new TextEncoder().encode('synthetic'), 200, 200)
+
+    function makeSelection(crop: CanvasImageItem['crop'] = { x: 0, y: 0, width: 100, height: 100 }) {
+      return createImageItem('async-crop', 'async.png', {
+        src: source, image: undefined, sourceWidth: undefined, sourceHeight: undefined,
+        width: 100, height: 100, crop, cropSource: sourceRecord
+      })
+    }
+
+    // Decodes only an object URL of the read bytes, never the original data: URL.
+    function mockLoadedImage() {
+      const loaded: HTMLImageElement[] = []
+      const objectUrlBlobs = installObjectUrlStub()
+      class LoadedImage {
+        naturalWidth = 200
+        naturalHeight = 200
+        width = 200
+        height = 200
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        crossOrigin = ''
+        set src(value: string) {
+          Promise.resolve().then(() => objectUrlBlobs.get(value)?.size === sourceRecord.sizeBytes ? this.onload?.() : this.onerror?.())
+        }
+        constructor() { loaded.push(this as unknown as HTMLImageElement) }
+      }
+      vi.stubGlobal('Image', LoadedImage)
+      return loaded
+    }
+
+    function setup(items: CanvasItem[]) {
+      const notifyError = vi.fn(), notifySuccess = vi.fn()
+      const snapshot = vi.fn(async () => 'data:image/png;base64,c25hcHNob3Q=')
+      const events = vi.spyOn(window, 'dispatchEvent')
+      const { result } = renderHook(() => useCanvasBridgeActions({
+        canvasId: 'canvas-1', projectName: 'Demo', items, groups: [], notifyError, notifySuccess,
+        extractPromptTextFromCanvasItems: () => 'fixture', renderCanvasItemsImageDataUrl: snapshot,
+        renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg/>')
+      }))
+      const send = async () => { await act(async () => { await result.current.handleSendCanvasItemsToAgent(items, 'canvas-1.agent-2'); vi.runAllTimers() }) }
+      const sendEvents = () => events.mock.calls.map(([event]) => event as CustomEvent<{ attachment?: { url?: string } }>).filter(event => event.type === 'send-to-agent')
+      return { notifyError, notifySuccess, snapshot, events, send, sendEvents }
+    }
+
+    afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+    it.each(['null', 'throw'] as const)('fails closed for single and mixed selections when context is %s', async mode => {
+      mockLoadedImage()
+      const context = vi.spyOn(HTMLCanvasElement.prototype, 'getContext')
+      if (mode === 'null') context.mockReturnValue(null)
+      else context.mockImplementation(() => { throw new Error('fixture context failure') })
+      for (const mixed of [false, true]) {
+        mockDispatch.mockClear()
+        const cropped = makeSelection()
+        const before = { ...cropped, crop: { ...cropped.crop! } }
+        const other = createImageItem('other', 'other.png', { src: source, sourceWidth: undefined, sourceHeight: undefined })
+        const state = setup(mixed ? [other, cropped] : [cropped])
+        await state.send()
+        expect(state.notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_cropped_image_failed')
+        expect(state.notifySuccess).not.toHaveBeenCalled()
+        expect(state.snapshot).not.toHaveBeenCalled()
+        expect(mockDispatch).not.toHaveBeenCalled()
+        expect(state.sendEvents()).toHaveLength(0)
+        expect(cropped).toEqual(before)
+        state.events.mockRestore()
+      }
+    })
+
+    it('sends the loaded source crop, not its original URL', async () => {
+      const loaded = mockLoadedImage()
+      const drawImage = vi.fn()
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never)
+      const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(croppedUrl)
+      const cropped = makeSelection()
+      const before = { ...cropped, crop: { ...cropped.crop! } }
+      const state = setup([cropped])
+      await state.send()
+      expect(state.notifyError).not.toHaveBeenCalled()
+      expect(loaded.length).toBeGreaterThan(0)
+      expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 100, 100, 0, 0, 100, 100)
+      expect(loaded).toContain(drawImage.mock.calls[0][0])
+      expect(toDataURL).toHaveBeenCalledWith('image/png')
+      expect(state.sendEvents().some(event => event.detail?.attachment?.url === croppedUrl)).toBe(true)
+      expect(state.sendEvents().some(event => event.detail?.attachment?.url === source)).toBe(false)
+      expect(cropped).toEqual(before)
+    })
+
+    it('retains the original source for an uncropped image', async () => {
+      mockLoadedImage()
+      const item = makeSelection(undefined)
+      delete item.crop
+      const before = { ...item }
+      const state = setup([item])
+      await state.send()
+      expect(state.notifyError).not.toHaveBeenCalled()
+      expect(state.sendEvents().some(event => event.detail?.attachment?.url === source)).toBe(true)
+      expect(item).toEqual(before)
+    })
+
+    it.each(['null', 'empty data URL'] as const)('rejects the whole send if a full-crop snapshot fails: %s', async (failure) => {
+      mockLoadedImage()
+      const item = makeSelection({ x: 0, y: 0, width: 200, height: 200 })
+      const before = { ...item, crop: { ...item.crop! } }
+      const drawImage = vi.fn()
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+        failure === 'null' ? null : { drawImage } as never
+      )
+      const encode = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:,')
+      const state = setup([item])
+      await state.send()
+      if (failure === 'empty data URL') {
+        expect(drawImage).toHaveBeenCalledOnce()
+        expect(encode).toHaveBeenCalledOnce()
+      }
+      expect(state.notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_cropped_image_failed')
+      expect(state.sendEvents()).toHaveLength(0)
+      expect(state.snapshot).not.toHaveBeenCalled()
+      expect(item).toEqual(before)
+    })
+  })
+
+  describe('verified crop delivery', () => {
+    const textItem: CanvasItem = { id: 'note', type: 'text', text: 'note', x: 0, y: 0, width: 100,
+      height: 30, rotation: 0, scaleX: 1, scaleY: 1, zIndex: 5, locked: false, fill: '#fff',
+      fontSize: 14, fontFamily: 'Arial' }
+
+    function setup(
+      items: CanvasItem[],
+      extra: Partial<Parameters<typeof useCanvasBridgeActions>[0]> = {}
+    ) {
+      const notifyError = vi.fn(), notifySuccess = vi.fn()
+      const renderSnapshot = vi.fn(async (_items: CanvasItem[]) => 'data:image/png;base64,b3ZlcnZpZXc=')
+      const events = vi.spyOn(window, 'dispatchEvent')
+      const canvasCreation = vi.spyOn(document, 'createElement')
+      const hook = renderHook(() => useCanvasBridgeActions({
+        canvasId: 'canvas-1', projectName: 'Demo', items, groups: [], notifyError, notifySuccess,
+        extractPromptTextFromCanvasItems: () => 'note', renderCanvasItemsImageDataUrl: renderSnapshot,
+        renderCanvasItemsSvgMarkup: vi.fn(async () => '<svg/>'), ...extra
+      }))
+      const sendEvents = () => events.mock.calls
+        .map(([event]) => event as CustomEvent)
+        .filter((event) => event.type === 'send-to-agent' || event.type === 'chat:focus-composer')
+      const canvases = () => canvasCreation.mock.calls.filter(([tag]) => String(tag).toLowerCase() === 'canvas')
+      return { ...hook, notifyError, notifySuccess, renderSnapshot, sendEvents, canvases, events, canvasCreation }
+    }
+
+    afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+    it.each([
+      ['hash', { sha256: LOCAL_SOURCE_RECORD.sha256.replace(/^./, (c) => (c === '0' ? '1' : '0')) }],
+      ['byte size', { sizeBytes: LOCAL_SOURCE_RECORD.sizeBytes + 1 }],
+      ['pixel size', { width: 120 }]
+    ] as const)('refuses the whole selection once when the read source differs from the record in %s', async (_field, change) => {
+      const original = 'local-media:///C:/MagicPot/changed.jpg'
+      installCropImageFixture(original)
+      const cropped = createImageItem('changed', 'changed.jpg', {
+        sourceWidth: undefined, sourceHeight: undefined,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: { ...LOCAL_SOURCE_RECORD, ...change }
+      })
+      const before = structuredClone(cropped)
+      const state = setup([cropped, textItem])
+      await act(async () => { await state.result.current.handleSendCanvasItemsToAgent([cropped, textItem]); vi.runAllTimers() })
+      expect(lastCropFixture!.fetch).toHaveBeenCalledOnce()
+      expect(state.notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_cropped_image_failed')
+      expect(state.notifySuccess).not.toHaveBeenCalled()
+      expect(state.canvases()).toHaveLength(0)
+      expect(state.renderSnapshot).not.toHaveBeenCalled()
+      expect(mockDispatch).not.toHaveBeenCalled()
+      expect(state.sendEvents()).toHaveLength(0)
+      expect(cropped).toEqual(before)
+    })
+
+    it('reads each cropped source once, decodes those bytes and leaks no original URL or crop', async () => {
+      const first = 'local-media:///C:/MagicPot/first.jpg'
+      const second = 'local-media:///C:/MagicPot/second.jpg'
+      installCropImageFixture(first, second)
+      const sourceFields = {
+        image: { width: 100, height: 80 } as unknown as CanvasImageItem['image'],
+        sourceFile: new Blob(['original']),
+        thumbnailSet: { version: 1, cacheKey: 'thumb', levels: [] } as unknown as CanvasImageItem['thumbnailSet'],
+        sourceIdentity: { version: 1, kind: 'session-blob', sourceKey: 'k', cacheKey: 'c' } as unknown as CanvasImageItem['sourceIdentity'],
+        media: { kind: 'managed', url: first } as unknown as CanvasImageItem['media'],
+        cropSource: LOCAL_SOURCE_RECORD
+      }
+      const croppedA = createImageItem('crop-a', 'first.jpg', { ...sourceFields, sourceWidth: 100, sourceHeight: 80, crop: { x: 10, y: 20, width: 30, height: 40 } })
+      const croppedB = createImageItem('crop-b', 'second.jpg', { ...sourceFields, media: undefined, sourceWidth: 100, sourceHeight: 80, crop: { x: 0, y: 0, width: 100, height: 80 } })
+      const before = [croppedA, croppedB].map((item) => ({ ...item, crop: { ...item.crop! } }))
+      let encoded = 0
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: vi.fn() } as never)
+      vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockImplementation(() => `data:image/png;base64,Y3JvcC${++encoded}=`)
+      const state = setup([croppedA, croppedB, textItem])
+      await act(async () => { await state.result.current.handleSendCanvasItemsToAgent([croppedA, croppedB, textItem]); vi.runAllTimers() })
+      expect(state.notifyError).not.toHaveBeenCalled()
+
+      const fixture = lastCropFixture!
+      expect(fixture.fetch).toHaveBeenCalledTimes(2)
+      expect(fixture.fetch.mock.calls.map(([url]) => decodeURIComponent(String(url)).endsWith('first.jpg'))).toEqual([true, false])
+      expect(fixture.decodeInputs).toHaveLength(2)
+      for (const input of fixture.decodeInputs) {
+        expect([first, second]).not.toContain(input)
+        const blob = fixture.objectUrlBlobs.get(input)
+        expect(blob).toBeDefined()
+        expect(Array.from(new Uint8Array(await blob!.arrayBuffer()))).toEqual(Array.from(LOCAL_SOURCE_BYTES))
+      }
+
+      const [overviewItems] = state.renderSnapshot.mock.calls[0]
+      const attachments = state.events.mock.calls.flatMap(([event]) => {
+        if (event.type !== 'send-to-agent') return []
+        const detail = (event as CustomEvent<{ attachment?: { url?: string } }>).detail
+        return detail?.attachment ? [detail.attachment] : []
+      })
+      expect(attachments.map((attachment) => attachment.url)).toEqual([
+        'data:image/png;base64,Y3JvcC1=', 'data:image/png;base64,Y3JvcC2=', 'data:image/png;base64,b3ZlcnZpZXc='
+      ])
+      for (const item of overviewItems.slice(0, 2)) {
+        for (const key of ['crop', 'cropSource', 'image', 'thumbnailSet', 'sourceFile', 'sourceIdentity', 'media']) {
+          expect(item).not.toHaveProperty(key)
+        }
+      }
+      const delivered = JSON.stringify([overviewItems, state.sendEvents().map((event) => event.detail)])
+      expect(delivered).not.toContain(first)
+      expect(delivered).not.toContain(second)
+      expect(delivered).not.toContain('"crop"')
+      expect([croppedA, croppedB]).toEqual(before)
+    })
+
+    it('keeps the crop pixels of a verified send for later drags and nothing of a refused one', async () => {
+      const original = 'local-media:///C:/MagicPot/proven.jpg'
+      installCropImageFixture(original)
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+        drawImage: vi.fn()
+      } as never)
+      vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(
+        'data:image/png;base64,cHJvdmVuLWNyb3A='
+      )
+      const kept: Blob[] = []
+      const registry = createCanvasProvenCropRegistry(
+        {},
+        {
+          create: (blob) => {
+            kept.push(blob)
+            return `blob:proven-crop-${kept.length}`
+          },
+          revoke: vi.fn()
+        }
+      )
+      const cropped = createImageItem('proven', 'proven.jpg', {
+        sourceWidth: 100,
+        sourceHeight: 80,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: LOCAL_SOURCE_RECORD
+      })
+      const sent = setup([cropped], { provenCropRegistry: registry })
+      await act(async () => {
+        await sent.result.current.handleSendCanvasItemsToAgent([cropped])
+        vi.runAllTimers()
+      })
+      expect(sent.notifyError).not.toHaveBeenCalled()
+      expect(registry.lookup(cropped)).toEqual({
+        url: 'blob:proven-crop-1',
+        fileName: 'proven.png',
+        mimeType: 'image/png',
+        sizeBytes: 11,
+        width: 30,
+        height: 40
+      })
+      expect(kept).toHaveLength(1)
+      expect(kept[0]).toMatchObject({ type: 'image/png', size: 'proven-crop'.length })
+      sent.unmount()
+
+      const unproven = createImageItem('unproven', 'proven.jpg', {
+        sourceWidth: 100,
+        sourceHeight: 80,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: { ...LOCAL_SOURCE_RECORD, sizeBytes: LOCAL_SOURCE_RECORD.sizeBytes + 1 }
+      })
+      const refused = setup([unproven], { provenCropRegistry: registry })
+      await act(async () => {
+        await refused.result.current.handleSendCanvasItemsToAgent([unproven])
+        vi.runAllTimers()
+      })
+      expect(refused.notifyError).toHaveBeenCalledExactlyOnceWith(
+        'canvas.agent_send_cropped_image_failed'
+      )
+      expect(registry.lookup(unproven)).toBeNull()
+      expect(registry.entryCount).toBe(1)
+      expect(kept).toHaveLength(1)
+    })
+
+    it('sends a crop whose PNG is registered as that PNG once the source bytes verify: one read, no draw, no encode, no second entry (F2 part 5)', async () => {
+      const original = 'local-media:///C:/MagicPot/registered.jpg'
+      installCropImageFixture(original)
+      const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext')
+      const kept: Blob[] = []
+      const registry = createCanvasProvenCropRegistry(
+        {},
+        {
+          create: (blob) => {
+            kept.push(blob)
+            return `blob:registered-crop-${kept.length}`
+          },
+          revoke: vi.fn()
+        }
+      )
+      const cropped = createImageItem('registered', 'registered.jpg', {
+        sourceWidth: 100,
+        sourceHeight: 80,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: LOCAL_SOURCE_RECORD
+      })
+      const png = new Blob(['registered-crop'], { type: 'image/png' })
+      expect(registry.register(cropped, png, { width: 30, height: 40 })).not.toBeNull()
+      const state = setup([cropped, textItem], { provenCropRegistry: registry })
+      await act(async () => {
+        // The source read and its hash settle on real async work; the registered
+        // PNG is then read as a data: URL by a FileReader (timer driven here).
+        let settled = false
+        const sending = state.result.current
+          .handleSendCanvasItemsToAgent([cropped, textItem])
+          .finally(() => {
+            settled = true
+          })
+        await vi.waitFor(
+          () => {
+            if (!settled) throw new Error('the send is still running')
+          },
+          { timeout: 4000, interval: 5 }
+        )
+        await sending
+        vi.runAllTimers()
+      })
+
+      expect(state.notifyError).not.toHaveBeenCalled()
+      // The source is read once and its bytes are checked against the record;
+      // the decoded picture is never drawn and nothing is encoded again.
+      expect(lastCropFixture!.fetch).toHaveBeenCalledOnce()
+      expect(lastCropFixture!.decodeInputs).toHaveLength(1)
+      expect(lastCropFixture!.decodeInputs[0]).toMatch(/^blob:/)
+      expect(toDataURL).not.toHaveBeenCalled()
+      expect(getContext).not.toHaveBeenCalled()
+      const attachments = state.events.mock.calls.flatMap(([event]) => {
+        if (event.type !== 'send-to-agent') return []
+        const detail = (event as CustomEvent<{ attachment?: { url?: string; fileName?: string } }>)
+          .detail
+        return detail?.attachment ? [detail.attachment] : []
+      })
+      expect(attachments[0]).toEqual(
+        expect.objectContaining({
+          url: `data:image/png;base64,${btoa('registered-crop')}`,
+          fileName: 'registered.png'
+        })
+      )
+      const [overviewItems] = state.renderSnapshot.mock.calls[0]
+      expect(overviewItems[0]).toEqual(
+        expect.objectContaining({ src: `data:image/png;base64,${btoa('registered-crop')}` })
+      )
+      expect(overviewItems[0]).not.toHaveProperty('crop')
+      expect(JSON.stringify(state.sendEvents().map((event) => event.detail))).not.toContain(original)
+      expect(kept).toEqual([png])
+      expect(registry.entryCount).toBe(1)
+    })
+
+    it('refuses a crop whose source changed since its PNG was registered, and sends nothing of it', async () => {
+      const original = 'local-media:///C:/MagicPot/replaced.jpg'
+      installCropImageFixture(original)
+      const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext')
+      const registry = createCanvasProvenCropRegistry(
+        {},
+        { create: () => 'blob:registered-before-replace', revoke: vi.fn() }
+      )
+      // The record describes the bytes the crop was proven on; the file now holds other bytes.
+      const cropped = createImageItem('replaced', 'replaced.jpg', {
+        sourceWidth: 100,
+        sourceHeight: 80,
+        crop: { x: 10, y: 20, width: 30, height: 40 },
+        cropSource: {
+          ...LOCAL_SOURCE_RECORD,
+          sha256: LOCAL_SOURCE_RECORD.sha256.replace(/^./, (c) => (c === '0' ? '1' : '0'))
+        }
+      })
+      const png = new Blob(['registered-crop'], { type: 'image/png' })
+      expect(registry.register(cropped, png, { width: 30, height: 40 })).not.toBeNull()
+      const state = setup([cropped, textItem], { provenCropRegistry: registry })
+      await act(async () => {
+        await state.result.current.handleSendCanvasItemsToAgent([cropped, textItem])
+        vi.runAllTimers()
+      })
+
+      expect(state.notifyError).toHaveBeenCalledExactlyOnceWith(
+        'canvas.agent_send_cropped_image_failed'
+      )
+      expect(lastCropFixture!.fetch).toHaveBeenCalledOnce()
+      expect(toDataURL).not.toHaveBeenCalled()
+      expect(getContext).not.toHaveBeenCalled()
+      expect(state.sendEvents()).toHaveLength(0)
+      expect(state.renderSnapshot).not.toHaveBeenCalled()
+      // The entry stays for a drag of the proven pixels; the send does not use it.
+      expect(registry.entryCount).toBe(1)
+    })
+
+    it('allocates no canvas and decodes nothing when the canvas unmounts while the source is read', async () => {
+      const original = 'local-media:///C:/MagicPot/pending.jpg'
+      installCropImageFixture(original)
+      let serve!: () => void
+      const servedLater = new Promise<void>((resolve) => { serve = resolve })
+      const fixture = lastCropFixture!
+      const served = fixture.fetch.getMockImplementation()!
+      fixture.fetch.mockImplementationOnce(async (url: string) => { await servedLater; return served(url) })
+      const cropped = createImageItem('pending', 'pending.jpg', {
+        sourceWidth: 100, sourceHeight: 80, crop: { x: 10, y: 20, width: 30, height: 40 }, cropSource: LOCAL_SOURCE_RECORD
+      })
+      const state = setup([cropped])
+      let send!: Promise<boolean>
+      await act(async () => { send = state.result.current.handleSendCanvasItemsToAgent([cropped]); await Promise.resolve() })
+      state.unmount()
+      serve()
+      await act(async () => { await send; vi.runAllTimers() })
+      expect(await send).toBe(false)
+      expect(fixture.fetch).toHaveBeenCalledOnce()
+      expect(fixture.decodeInputs).toHaveLength(0)
+      expect(state.canvases()).toHaveLength(0)
+      expect(state.notifyError).not.toHaveBeenCalled()
+      expect(state.sendEvents()).toHaveLength(0)
+    })
+
+    it.each(['unsupported scheme', 'record over the byte cap', 'served over the byte cap'] as const)(
+      'refuses a cropped source with %s before decoding it', async (mode) => {
+        const original = 'local-media:///C:/MagicPot/large.jpg'
+        installCropImageFixture(original)
+        const fixture = lastCropFixture!
+        const blobRead = vi.fn()
+        if (mode === 'served over the byte cap') {
+          fixture.fetch.mockImplementationOnce(async () => ({
+            ok: true, status: 200,
+            headers: { get: () => String(CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES + 1) },
+            blob: blobRead
+          }))
+        }
+        const cropped = createImageItem('large', 'large.jpg', {
+          src: mode === 'unsupported scheme' ? 'https://example.com/large.jpg' : original,
+          sourceWidth: 100, sourceHeight: 80, crop: { x: 10, y: 20, width: 30, height: 40 },
+          cropSource: mode === 'record over the byte cap'
+            ? { ...LOCAL_SOURCE_RECORD, sizeBytes: CANVAS_CROP_SOURCE_EVIDENCE_MAX_BYTES + 1 }
+            : LOCAL_SOURCE_RECORD
+        })
+        const state = setup([cropped, textItem])
+        await act(async () => { await state.result.current.handleSendCanvasItemsToAgent([cropped, textItem]); vi.runAllTimers() })
+        expect(fixture.fetch).toHaveBeenCalledTimes(mode === 'served over the byte cap' ? 1 : 0)
+        expect(blobRead).not.toHaveBeenCalled()
+        expect(fixture.decodeInputs).toHaveLength(0)
+        expect(state.canvases()).toHaveLength(0)
+        expect(state.notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_cropped_image_failed')
+        expect(state.renderSnapshot).not.toHaveBeenCalled()
+        expect(state.sendEvents()).toHaveLength(0)
+      })
   })
 })

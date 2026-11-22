@@ -4,14 +4,12 @@ import {
   createIdleChatPageRunLifecycleState,
   isChatPageRunActive,
   isChatPageRunTerminal,
-  markChatPageRunRead,
   reduceChatPageRunEvent,
   startChatPageRun,
   clearScopedChatPageRunLifecycles,
   startScopedChatPageRun,
   readScopedChatPageRunLifecycle,
   applyScopedChatPageRunEvent,
-  markScopedChatPageRunRead,
   emitChatPageRunLifecycleEvent,
   type ChatPageRunLifecycleState
 } from './chatPageRunLifecycle'
@@ -23,13 +21,11 @@ describe('chat page run lifecycle', () => {
   it('starts explicitly and exposes the complete status vocabulary', () => {
     expect(createIdleChatPageRunLifecycleState()).toEqual({
       runId: null,
-      status: 'idle',
-      unread: false
+      status: 'idle'
     })
     expect(startChatPageRun(createIdleChatPageRunLifecycleState(), 'run-1')).toEqual({
       runId: 'run-1',
-      status: 'running',
-      unread: false
+      status: 'running'
     })
     expect(isChatPageRunActive('running')).toBe(true)
     expect(isChatPageRunActive('waiting-tool')).toBe(true)
@@ -48,8 +44,7 @@ describe('chat page run lifecycle', () => {
     expect(reduceChatPageRunEvent(state, { type: 'session', runId: 'run-1' })).toEqual(state)
     expect(reduceChatPageRunEvent(state, { type: 'error', runId: 'run-1' })).toEqual({
       runId: 'run-1',
-      status: 'failed',
-      unread: false
+      status: 'failed'
     })
   })
 
@@ -60,39 +55,32 @@ describe('chat page run lifecycle', () => {
       runId: 'run-1'
     })
 
-    expect(waiting).toEqual({ runId: 'run-1', status: 'waiting-tool', unread: false })
+    expect(waiting).toEqual({ runId: 'run-1', status: 'waiting-tool' })
     expect(reduceChatPageRunEvent(waiting, { type: 'text-delta', runId: 'run-1' })).toEqual(waiting)
     expect(reduceChatPageRunEvent(waiting, { type: 'tool-resumed', runId: 'run-1' })).toEqual({
       runId: 'run-1',
-      status: 'running',
-      unread: false
+      status: 'running'
     })
   })
 
-  it('accepts only an explicit done event as successful completion and unread output', () => {
+  it('accepts only an explicit done event as successful completion', () => {
     const completed = reduceChatPageRunEvent(runningState('run-1'), {
       type: 'done',
       runId: 'run-1'
     })
 
-    expect(completed).toEqual({ runId: 'run-1', status: 'completed', unread: true })
+    expect(completed).toEqual({ runId: 'run-1', status: 'completed' })
     expect(reduceChatPageRunEvent(completed, { type: 'text-delta', runId: 'run-1' })).toEqual(
       completed
     )
     expect(reduceChatPageRunEvent(completed, { type: 'done', runId: 'run-1' })).toEqual(completed)
-    expect(markChatPageRunRead(completed, 'run-1')).toEqual({
-      runId: 'run-1',
-      status: 'completed',
-      unread: false
-    })
   })
 
   it('keeps failed, cancelled, and interrupted outcomes distinct from success', () => {
     for (const type of ['error', 'cancelled', 'interrupted'] as const) {
       expect(reduceChatPageRunEvent(runningState('run-1'), { type, runId: 'run-1' })).toEqual({
         runId: 'run-1',
-        status: type === 'error' ? 'failed' : type,
-        unread: false
+        status: type === 'error' ? 'failed' : type
       })
     }
   })
@@ -103,26 +91,7 @@ describe('chat page run lifecycle', () => {
     expect(reduceChatPageRunEvent(run2, { type: 'done', runId: 'run-1' })).toEqual(run2)
     expect(reduceChatPageRunEvent(run2, { type: 'error', runId: 'run-1' })).toEqual(run2)
     expect(reduceChatPageRunEvent(run2, { type: 'waiting-tool', runId: 'run-1' })).toEqual(run2)
-    expect(run2).toEqual({ runId: 'run-2', status: 'running', unread: false })
-  })
-
-  it('does not let a stale read clear a newer run unread flag', () => {
-    const completedRun1 = reduceChatPageRunEvent(runningState('run-1'), {
-      type: 'done',
-      runId: 'run-1'
-    })
-    const completedRun2 = startChatPageRun(completedRun1, 'run-2')
-    const completedRun2WithUnread = reduceChatPageRunEvent(completedRun2, {
-      type: 'done',
-      runId: 'run-2'
-    })
-
-    expect(markChatPageRunRead(completedRun2WithUnread, 'run-1')).toEqual(completedRun2WithUnread)
-    expect(markChatPageRunRead(completedRun2WithUnread)).toEqual({
-      runId: 'run-2',
-      status: 'completed',
-      unread: false
-    })
+    expect(run2).toEqual({ runId: 'run-2', status: 'running' })
   })
 
   it('tracks independent scoped runs, rejects stale events, and publishes only accepted state', () => {
@@ -134,8 +103,7 @@ describe('chat page run lifecycle', () => {
       scope,
       sessionId,
       runId: 'run-1',
-      status: 'running',
-      unread: false
+      status: 'running'
     })
     expect(
       emitChatPageRunLifecycleEvent({
@@ -145,7 +113,7 @@ describe('chat page run lifecycle', () => {
         status: 'completed',
         timestamp: 10
       })
-    ).toMatchObject({ status: 'completed', unread: true, updatedAt: 10 })
+    ).toMatchObject({ status: 'completed', updatedAt: 10 })
     expect(
       emitChatPageRunLifecycleEvent({
         scope,
@@ -154,7 +122,7 @@ describe('chat page run lifecycle', () => {
         status: 'running',
         timestamp: 11
       })
-    ).toMatchObject({ status: 'completed', unread: true })
+    ).toMatchObject({ status: 'completed' })
 
     expect(
       emitChatPageRunLifecycleEvent({
@@ -167,7 +135,7 @@ describe('chat page run lifecycle', () => {
     expect(readScopedChatPageRunLifecycle(scope, sessionId).runId).toBe('run-1')
   })
 
-  it('isolates scope/session keys and does not let stale reads clear a replacement run', () => {
+  it('isolates scope/session keys and lets a new run replace the old one', () => {
     clearScopedChatPageRunLifecycles()
     startScopedChatPageRun({ scope: 'scope-a', sessionId: 'session-1', runId: 'run-a' })
     startScopedChatPageRun({ scope: 'scope-b', sessionId: 'session-1', runId: 'run-b' })
@@ -184,28 +152,25 @@ describe('chat page run lifecycle', () => {
     ).toBeNull()
 
     startScopedChatPageRun({ scope: 'scope-a', sessionId: 'session-1', runId: 'run-new' })
-    expect(markScopedChatPageRunRead('scope-a', 'session-1', 'run-a').runId).toBe('run-new')
+    expect(readScopedChatPageRunLifecycle('scope-a', 'session-1').runId).toBe('run-new')
   })
 
   it('keeps the mutable lifecycle controller explicit and terminal', () => {
     const lifecycle = createChatPageRunLifecycle()
 
     expect(lifecycle.getState()).toEqual(createIdleChatPageRunLifecycleState())
-    expect(lifecycle.start(7)).toEqual({ runId: 7, status: 'running', unread: false })
+    expect(lifecycle.start(7)).toEqual({ runId: 7, status: 'running' })
     expect(lifecycle.dispatch({ type: 'waiting-tool', runId: 7 })).toEqual({
       runId: 7,
-      status: 'waiting-tool',
-      unread: false
+      status: 'waiting-tool'
     })
     expect(lifecycle.dispatch({ type: 'tool-resumed', runId: 7 })).toEqual({
       runId: 7,
-      status: 'running',
-      unread: false
+      status: 'running'
     })
     expect(lifecycle.dispatch({ type: 'done', runId: 7 })).toEqual({
       runId: 7,
-      status: 'completed',
-      unread: true
+      status: 'completed'
     })
   })
 })

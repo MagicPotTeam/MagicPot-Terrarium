@@ -24,7 +24,6 @@ export type ChatPageRunStatus =
 export type ChatPageRunLifecycleState = {
   runId: ChatPageRunId | null
   status: ChatPageRunStatus
-  unread: boolean
 }
 
 export type ScopedChatPageRunLifecycleState = ChatPageRunLifecycleState & {
@@ -57,8 +56,6 @@ export type ChatPageRunLifecycleEvent = {
   sessionId: string
   runId: ChatPageRunId
   status: Exclude<ChatPageRunStatus, 'idle'>
-  /** Explicit unread override; normal completion defaults to unread. */
-  unread?: boolean
   timestamp?: number
 }
 
@@ -82,8 +79,7 @@ const TERMINAL_STATUSES: ReadonlySet<ChatPageRunStatus> = new Set([
 
 export const createIdleChatPageRunLifecycleState = (): ChatPageRunLifecycleState => ({
   runId: null,
-  status: 'idle',
-  unread: false
+  status: 'idle'
 })
 
 export const isChatPageRunActive = (status: ChatPageRunStatus): boolean =>
@@ -106,13 +102,12 @@ export const startChatPageRun = (
   runId: ChatPageRunId
 ): ChatPageRunLifecycleState => {
   if (isSameRun(state, runId)) {
-    return state.status === 'idle' ? { runId, status: 'running', unread: false } : state
+    return state.status === 'idle' ? { runId, status: 'running' } : state
   }
 
   return {
     runId,
-    status: 'running',
-    unread: false
+    status: 'running'
   }
 }
 
@@ -122,13 +117,7 @@ const transitionToTerminal = (
 ): ChatPageRunLifecycleState => {
   if (!isChatPageRunActive(state.status)) return state
 
-  return {
-    ...state,
-    status,
-    // Only an explicit successful `done` event creates unread output.  Error,
-    // cancellation, and interruption are terminal but are not success.
-    unread: status === 'completed'
-  }
+  return { ...state, status }
 }
 
 /**
@@ -168,25 +157,10 @@ export const reduceChatPageRunEvent = (
   }
 }
 
-/**
- * Mark the current run read.  A runId may be supplied by a caller handling a
- * pane-specific read action; a stale read cannot clear unread state for a
- * newer run.
- */
-export const markChatPageRunRead = (
-  state: ChatPageRunLifecycleState,
-  runId?: ChatPageRunId
-): ChatPageRunLifecycleState => {
-  if (runId !== undefined && !isSameRun(state, runId)) return state
-  if (!state.unread) return state
-  return { ...state, unread: false }
-}
-
 export type ChatPageRunLifecycleController = {
   getState: () => ChatPageRunLifecycleState
   start: (runId: ChatPageRunId) => ChatPageRunLifecycleState
   dispatch: (event: ChatPageRunEvent) => ChatPageRunLifecycleState
-  markRead: (runId?: ChatPageRunId) => ChatPageRunLifecycleState
 }
 
 /**
@@ -208,10 +182,6 @@ export const createChatPageRunLifecycle = (
     dispatch: (event) => {
       state = reduceChatPageRunEvent(state, event)
       return state
-    },
-    markRead: (runId) => {
-      state = markChatPageRunRead(state, runId)
-      return state
     }
   }
 }
@@ -227,7 +197,6 @@ const createScopedIdleState = (
   ...identity,
   runId: null,
   status: 'idle',
-  unread: false,
   updatedAt: 0
 })
 
@@ -271,7 +240,6 @@ export const startScopedChatPageRun = (options: {
     sessionId: options.sessionId,
     runId: options.runId,
     status: options.status || 'running',
-    unread: false,
     updatedAt: Date.now()
   }
   scopedChatPageRunLifecycles.set(chatPageRunLifecycleKey(options.scope, options.sessionId), state)
@@ -297,16 +265,7 @@ const applyScopedLifecycleStatus = (
   }
   if (nextStatus === 'waiting-tool' && !isChatPageRunActive(state.status)) return state
 
-  const unread =
-    event.unread !== undefined
-      ? event.unread
-      : nextStatus === 'completed'
-        ? true
-        : nextStatus === 'failed' || nextStatus === 'cancelled' || nextStatus === 'interrupted'
-          ? false
-          : state.unread
-
-  return { ...state, status: nextStatus, unread, updatedAt: event.timestamp ?? Date.now() }
+  return { ...state, status: nextStatus, updatedAt: event.timestamp ?? Date.now() }
 }
 
 /** Apply only events for the currently started run; stale/cross-scope events return null. */
@@ -322,21 +281,6 @@ export const applyScopedChatPageRunEvent = (
   return { ...next }
 }
 
-/** Mark unread independently of lifecycle status; stale run reads cannot clear a newer run. */
-export const markScopedChatPageRunRead = (
-  scope: string,
-  sessionId: string,
-  runId?: ChatPageRunId
-): ScopedChatPageRunLifecycleState => {
-  const key = chatPageRunLifecycleKey(scope, sessionId)
-  const current =
-    scopedChatPageRunLifecycles.get(key) || createScopedIdleState({ scope, sessionId })
-  if (runId !== undefined && current.runId !== runId) return { ...current }
-  const next = { ...current, unread: false, updatedAt: Date.now() }
-  scopedChatPageRunLifecycles.set(key, next)
-  return { ...next }
-}
-
 /** Producer helper: update the keyed cache and publish the exact DOM event contract. */
 export const emitChatPageRunLifecycleEvent = (
   event: ChatPageRunLifecycleEvent
@@ -347,10 +291,7 @@ export const emitChatPageRunLifecycleEvent = (
   const next = applyScopedChatPageRunEvent(event)
   const changed =
     next !== null &&
-    (!current ||
-      current.runId !== next.runId ||
-      current.status !== next.status ||
-      current.unread !== next.unread)
+    (!current || current.runId !== next.runId || current.status !== next.status)
   if (changed && typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent(CHAT_PAGE_RUN_LIFECYCLE_EVENT, {
@@ -359,7 +300,6 @@ export const emitChatPageRunLifecycleEvent = (
           sessionId: next.sessionId,
           runId: next.runId,
           status: next.status,
-          unread: next.unread,
           timestamp: next.updatedAt
         }
       })

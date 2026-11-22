@@ -15,7 +15,7 @@ vi.mock('node:http', () => ({
     throw new Error('Unexpected HTTP transport')
   }
 }))
-vi.mock('electron', () => ({ net: {} }))
+vi.mock('electron', () => ({ app: { isPackaged: false }, net: {} }))
 vi.mock('../config/config', () => ({ getConfig: configMock, onConfigCommitted: vi.fn() }))
 vi.mock('../assistantRuntime/runtime', () => ({ getAssistantRuntime: vi.fn() }))
 vi.mock('../mcp/runtime', () => ({ syncMcpClientManager: vi.fn() }))

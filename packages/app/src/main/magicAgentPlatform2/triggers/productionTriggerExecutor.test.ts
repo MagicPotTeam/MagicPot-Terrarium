@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { PolicyRequest } from '../../../shared/magicAgentPlatform2/policy'
+import { digestPolicyRequest, type PolicyRequest } from '../../../shared/magicAgentPlatform2/policy'
 import { MagicAgentEventStore } from '../persistence/eventStore'
-import { MagicAgentPolicyAuthorizationService } from '../policy'
+import { MagicAgentPolicyAuthorizationService, PermitConsumedError } from '../policy'
 import type { PersistentTriggerState } from './persistentTriggerStore'
 import type { TriggerOccurrenceState } from './triggerOccurrenceStore'
 import {
   ProductionTriggerExecutor,
+  TriggerOccurrenceNotExecutedError,
   TriggerOutcomePersistenceError
 } from './productionTriggerExecutor'
 import { TriggerExecutionOutcomeStore } from './executionOutcomeStore'
@@ -323,5 +324,148 @@ describe('production trigger executor', () => {
         trigger({ kind: 'agent-run', agentId: 'agent-1', prompt: 'p', route: { injected: true } })
       )
     ).rejects.toThrow()
+  })
+})
+
+describe('production trigger executor occurrence permit marker', () => {
+  const claimedOccurrence = (
+    patch: Partial<TriggerOccurrenceState> = {}
+  ): TriggerOccurrenceState => ({
+    schemaVersion: 1,
+    occurrenceId: 'occurrence-1',
+    triggerId: 'trigger-1',
+    source: 'manual',
+    scheduledAt: 321,
+    requestedAt: 300,
+    status: 'claimed',
+    attempt: 1,
+    idempotencyKey: 'occurrence-key',
+    semanticDigest: 'digest',
+    claim: { owner: 'worker-1', claimedAt: 310, expiresAt: 1310 },
+    createdAt: 300,
+    updatedAt: 310,
+    ...patch
+  })
+  const agentTarget = { kind: 'agent-run', agentId: 'agent-1', prompt: 'synthetic' }
+  const executorWith = (
+    effect: 'allow' | 'deny',
+    onOccurrencePermit?: ConstructorParameters<
+      typeof ProductionTriggerExecutor
+    >[0]['onOccurrencePermit']
+  ) => {
+    const service = setup(effect)
+    const runAgent = vi.fn(async (input) => input)
+    const executor = new ProductionTriggerExecutor({
+      authorizationService: service,
+      grantProvider: createGrantProvider(service, (request) => `grant-${request.requestId}`),
+      resolveTrustedRoute: () => ({ trusted: true }),
+      dispatch: { runAgent, runGraph: vi.fn() },
+      now: () => 1000,
+      ...(onOccurrencePermit === undefined ? {} : { onOccurrencePermit })
+    })
+    return { service, runAgent, executor }
+  }
+
+  it('marks the claimed occurrence after authorization and before its permit is consumed', async () => {
+    const order: string[] = []
+    const mark = vi.fn(() => {
+      order.push('mark')
+    })
+    const { service, runAgent, executor } = executorWith('allow', mark)
+    vi.spyOn(service, 'consumeExecutionPermit').mockImplementation((value) => {
+      order.push('consume')
+      return MagicAgentPolicyAuthorizationService.prototype.consumeExecutionPermit.call(
+        service,
+        value
+      )
+    })
+    runAgent.mockImplementation(async (input) => {
+      order.push('dispatch')
+      return input
+    })
+    await executor.executeOccurrence(trigger(agentTarget), claimedOccurrence())
+    expect(order).toEqual(['mark', 'consume', 'dispatch'])
+    const requestDigest = (mark.mock.calls[0] as unknown as [{ requestDigest: string }])[0]
+      .requestDigest
+    expect(requestDigest).toMatch(/^sha256:/)
+    expect(mark).toHaveBeenCalledWith({
+      occurrenceId: 'occurrence-1',
+      owner: 'worker-1',
+      authorizationId: `trigger-authorization:${requestDigest}`,
+      requestDigest
+    })
+  })
+
+  it('refuses an unclaimed occurrence before authorizing when marking is configured', async () => {
+    const mark = vi.fn()
+    const { service, runAgent, executor } = executorWith('allow', mark)
+    const authorize = vi.spyOn(service, 'authorize')
+    await expect(
+      executor.executeOccurrence(trigger(agentTarget), claimedOccurrence({ claim: undefined }))
+    ).rejects.toBeInstanceOf(TriggerOccurrenceNotExecutedError)
+    expect(authorize).not.toHaveBeenCalled()
+    expect(mark).not.toHaveBeenCalled()
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('marks again before refusing a permit that another caller consumed first', async () => {
+    const mark = vi.fn()
+    const { service, runAgent, executor } = executorWith('allow', mark)
+    vi.spyOn(service, 'consumeExecutionPermit').mockImplementationOnce(() => {
+      throw new PermitConsumedError()
+    })
+    await expect(
+      executor.executeOccurrence(trigger(agentTarget), claimedOccurrence())
+    ).rejects.toMatchObject({
+      name: 'TriggerOccurrenceNotExecutedError',
+      status: 'already-consumed'
+    })
+    expect(mark).toHaveBeenCalledTimes(2)
+    expect(mark.mock.calls[1]).toEqual(mark.mock.calls[0])
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('marks before refusing when the policy reports this attempt as consumed', async () => {
+    const mark = vi.fn()
+    const { service, runAgent, executor } = executorWith('allow', mark)
+    const authorize = vi
+      .spyOn(service, 'authorize')
+      .mockImplementationOnce(
+        () => ({ status: 'already-consumed', reason: 'already-consumed' }) as never
+      )
+    const consume = vi.spyOn(service, 'consumeExecutionPermit')
+    await expect(
+      executor.executeOccurrence(trigger(agentTarget), claimedOccurrence())
+    ).rejects.toMatchObject({
+      name: 'TriggerOccurrenceNotExecutedError',
+      status: 'already-consumed'
+    })
+    const requestDigest = digestPolicyRequest(authorize.mock.calls[0]?.[0].request as PolicyRequest)
+    expect(mark).toHaveBeenCalledExactlyOnceWith({
+      occurrenceId: 'occurrence-1',
+      owner: 'worker-1',
+      authorizationId: `trigger-authorization:${requestDigest}`,
+      requestDigest
+    })
+    expect(consume).not.toHaveBeenCalled()
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('does not mark a denied occurrence', async () => {
+    const mark = vi.fn()
+    const { runAgent, executor } = executorWith('deny', mark)
+    await expect(
+      executor.executeOccurrence(trigger(agentTarget), claimedOccurrence())
+    ).rejects.toMatchObject({ name: 'TriggerOccurrenceNotExecutedError', status: 'denied' })
+    expect(mark).not.toHaveBeenCalled()
+    expect(runAgent).not.toHaveBeenCalled()
+  })
+
+  it('does not mark on the interval path', async () => {
+    const mark = vi.fn()
+    const { runAgent, executor } = executorWith('allow', mark)
+    await executor.execute(trigger(agentTarget))
+    expect(runAgent).toHaveBeenCalledOnce()
+    expect(mark).not.toHaveBeenCalled()
   })
 })

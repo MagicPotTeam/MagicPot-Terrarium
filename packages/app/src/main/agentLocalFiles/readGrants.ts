@@ -104,10 +104,13 @@ function safeError(error: unknown): AgentLocalFileError | ServiceValidationError
   return new AgentLocalFileError('IO_ERROR')
 }
 
-function allowedComponent(component: string): boolean {
+function allowedComponent(component: string, allLocalPaths = false): boolean {
   if (!component || component.length > 255 || component === '.' || component === '..') return false
   if (/[<>:"|?*\u0000-\u001f\u007f]/.test(component) || /[. ]$/.test(component)) return false
   if (/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(component)) return false
+  // Main-owned desktop Agent mode reads ordinary local paths by default. This
+  // changes no mutation APIs and is not configurable through the chooser IPC.
+  if (allLocalPaths) return true
   const lower = component.toLowerCase()
   // Keep all session databases, their journals/locks and backups outside this generic reader.
   if (lower === '.kohakuterrarium' || /\.(?:kohakutr|kt)(?:$|[-.])/.test(lower)) return false
@@ -124,7 +127,7 @@ function allowedComponent(component: string): boolean {
   return !credentialExtension.test(component)
 }
 
-function localAbsolute(value: string): string {
+function localAbsolute(value: string, allLocalPaths = false): string {
   if (
     typeof value !== 'string' ||
     !value ||
@@ -137,9 +140,10 @@ function localAbsolute(value: string): string {
   if (/^[\\/]{2}/.test(value) || !path.isAbsolute(value)) return fail('PATH_DENIED')
   if (windows ? !/^[A-Za-z]:[\\/]/.test(value) : value.includes('\\')) return fail('PATH_DENIED')
   const root = path.parse(value).root
-  const components = value.slice(root.length).split(/[\\/]/)
-  if (!components.length || components.some((part) => !allowedComponent(part)))
-    return fail('PATH_DENIED')
+  const remainder = value.slice(root.length)
+  // Disk roots have no components; device/traversal syntax is always rejected.
+  const components = remainder ? remainder.split(/[\\/]/) : []
+  if (components.some((part) => !allowedComponent(part, allLocalPaths))) return fail('PATH_DENIED')
   return path.resolve(value)
 }
 
@@ -178,12 +182,18 @@ function checkSize(stat: BigIntStats, document = false, maxBytes: number = LIMIT
   if (!document && stat.size > BigInt(LIMITS.returnedBytes)) fail('TEXT_TOO_LARGE')
 }
 
-/** Main-internal, memory-only capabilities. authorize is ONLY for trusted native-dialog results. */
+/** Main-internal, memory-only read-only handles. Native chooser consumers keep
+ * the restricted default; only the main-owned local Agent bridge selects its
+ * default-all-paths policy. Neither mode exposes writes or executable content.
+ */
 export class LocalFileReadGrants {
   private readonly grants = new Map<string, Grant>()
   private readonly operations = new Map<string, Operation>()
 
-  constructor(private readonly documents?: LocalDocumentExtractor) {}
+  constructor(
+    private readonly documents?: LocalDocumentExtractor,
+    private readonly policy: Readonly<{ allLocalPaths?: boolean }> = {}
+  ) {}
 
   async authorize(
     senderId: number,
@@ -194,7 +204,7 @@ export class LocalFileReadGrants {
     const scopeKey = this.owner(senderId, scope)
     if (kind !== 'file' && kind !== 'directory')
       throw new ServiceValidationError('Local file service value')
-    const selected = localAbsolute(selectedPath)
+    const selected = localAbsolute(selectedPath, this.policy.allLocalPaths)
     this.prune()
     const pending = [...this.operations.values()].filter((op) => op.authorizing && !op.grant)
     if (
@@ -221,7 +231,10 @@ export class LocalFileReadGrants {
           public: {
             id: randomBytes(24).toString('base64url'),
             kind,
-            name: path.basename(root.path),
+            name:
+              path.basename(root.path) ||
+              path.parse(root.path).root.replace(/[\\/]/g, '') ||
+              'root',
             expiresAt: Date.now() + LIMITS.ttlMs,
             readOnly: true
           }
@@ -414,8 +427,15 @@ export class LocalFileReadGrants {
   async list(
     senderId: number,
     scope: AgentLocalFileScope,
-    params: LocalFileReadParams
+    params: LocalFileReadParams,
+    // Main callers can tighten the scan cap; renderer IPC cannot widen it.
+    limits: Readonly<{ maxEntries?: number }> = {}
   ): Promise<ListLocalFilesResponse> {
+    const requestedLimit = limits.maxEntries
+    const entryLimit =
+      typeof requestedLimit === 'number' && Number.isFinite(requestedLimit)
+        ? Math.max(1, Math.min(LIMITS.listEntries, Math.floor(requestedLimit)))
+        : LIMITS.listEntries
     const scopeKey = this.owner(senderId, scope)
     const req = parseAgentLocalFileValue(readParamsSchema, params)
     const grant = this.get(senderId, scopeKey, req.grantId)
@@ -430,16 +450,17 @@ export class LocalFileReadGrants {
         const entries: ListLocalFilesResponse['entries'] = []
         let truncated = false
         // Bound inspected entries, not just returned entries (a directory may contain only secrets).
-        for (let scanned = 0; scanned <= LIMITS.listEntries; scanned++) {
+        for (let scanned = 0; scanned <= entryLimit; scanned++) {
           this.check(op)
           const entry = await directory.read()
           this.check(op)
           if (!entry) break
-          if (scanned === LIMITS.listEntries) {
+          if (scanned === entryLimit) {
             truncated = true
             break
           }
-          if (!allowedComponent(entry.name) || entry.isSymbolicLink()) continue
+          if (!allowedComponent(entry.name, this.policy.allLocalPaths) || entry.isSymbolicLink())
+            continue
           try {
             const child = await this.inspect(path.join(target.path, entry.name), op)
             if (!target.chain.every((stat, i) => sameIdentity(stat, child.chain[i])))
@@ -605,9 +626,10 @@ export class LocalFileReadGrants {
 
   private async inspect(selected: string, op: Operation): Promise<Inspection> {
     this.check(op)
-    const absolute = localAbsolute(selected)
+    const absolute = localAbsolute(selected, this.policy.allLocalPaths)
     const root = path.parse(absolute).root
-    const components = absolute.slice(root.length).split(path.sep)
+    const remainder = absolute.slice(root.length)
+    const components = remainder ? remainder.split(path.sep) : []
     let current = root
     const chain: BigIntStats[] = []
     for (let i = -1; i < components.length; i++) {
@@ -619,7 +641,7 @@ export class LocalFileReadGrants {
       if (stat.isFile() && stat.nlink !== 1n) fail('PATH_DENIED')
       chain.push(stat)
     }
-    const canonical = localAbsolute(await fs.realpath(absolute))
+    const canonical = localAbsolute(await fs.realpath(absolute), this.policy.allLocalPaths)
     this.check(op)
     if (!samePath(absolute, canonical)) fail('PATH_DENIED')
     const fileSystem = await fs.statfs(absolute, { bigint: true })
@@ -638,7 +660,8 @@ export class LocalFileReadGrants {
       relative.length > 4096 ||
       path.isAbsolute(relative) ||
       path.win32.isAbsolute(relative) ||
-      (relative && relative.split(/[\\/]/).some((part) => !allowedComponent(part)))
+      (relative &&
+        relative.split(/[\\/]/).some((part) => !allowedComponent(part, this.policy.allLocalPaths)))
     )
       fail('PATH_DENIED')
     if (grant.public.kind === 'file' && relative !== '') fail('PATH_DENIED')

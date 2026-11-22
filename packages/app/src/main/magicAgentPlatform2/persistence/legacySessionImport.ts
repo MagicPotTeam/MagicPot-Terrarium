@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { promises as fs } from 'node:fs'
+import { constants, promises as fs, type BigIntStats } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { AssistantSessionStore } from '../../assistantRuntime/sessionStore'
@@ -140,28 +140,76 @@ function deepFreeze<T>(value: T): T {
   return value
 }
 
+type SourceDirectory = Readonly<{ path: string; stat: BigIntStats }>
+
+const sameIdentity = (a: BigIntStats, b: BigIntStats): boolean =>
+  a.ino !== 0n && b.ino !== 0n && a.dev === b.dev && a.ino === b.ino
+const sameSourceFile = (a: BigIntStats, b: BigIntStats): boolean =>
+  sameIdentity(a, b) &&
+  a.isFile() &&
+  b.isFile() &&
+  !a.isSymbolicLink() &&
+  !b.isSymbolicLink() &&
+  a.size === b.size &&
+  a.mtimeNs === b.mtimeNs &&
+  a.ctimeNs === b.ctimeNs
+
+async function inspectSourceDirectories(parent: string): Promise<SourceDirectory[]> {
+  const paths = [parent]
+  while (dirname(paths[0]) !== paths[0]) paths.unshift(dirname(paths[0]))
+  const directories: SourceDirectory[] = []
+  for (const path of paths) {
+    const stat = await fs.lstat(path, { bigint: true })
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.ino === 0n)
+      throw new LegacySessionImportValidationError('Source parent directories must not be links.')
+    directories.push({ path, stat })
+  }
+  return directories
+}
+
+async function assertSourceDirectoriesUnchanged(
+  directories: readonly SourceDirectory[]
+): Promise<void> {
+  for (const { path, stat } of directories) {
+    const current = await fs.lstat(path, { bigint: true })
+    if (current.isSymbolicLink() || !current.isDirectory() || !sameIdentity(stat, current))
+      throw new LegacySessionImportSourceChangedError()
+  }
+}
+
 async function readStableSource(
   sourcePath: string
 ): Promise<{ bytes: Buffer; path: string; sha256: string }> {
   const absolutePath = resolve(sourcePath)
   const parent = dirname(absolutePath)
+  // Walk both spellings without following links. Windows 8.3/case aliases are
+  // accepted by directory identity, never by trusting a differing realpath alone.
+  const originalDirectories = await inspectSourceDirectories(parent)
   const parentReal = await fs.realpath(parent)
+  const canonicalDirectories = await inspectSourceDirectories(parentReal)
   if (
-    (process.platform === 'win32' ? parentReal.toLowerCase() : parentReal) !==
-    (process.platform === 'win32' ? parent.toLowerCase() : parent)
+    originalDirectories.length !== canonicalDirectories.length ||
+    !originalDirectories.every(({ stat }, index) =>
+      sameIdentity(stat, canonicalDirectories[index].stat)
+    )
   )
-    throw new LegacySessionImportValidationError('Source parent directories must not be symlinks.')
+    throw new LegacySessionImportSourceChangedError()
+  const directories = [...originalDirectories, ...canonicalDirectories]
+  await assertSourceDirectoriesUnchanged(directories)
   const path = join(parentReal, basename(absolutePath))
   const pathStat = await fs.lstat(path, { bigint: true })
   if (pathStat.isSymbolicLink() || !pathStat.isFile())
     throw new LegacySessionImportValidationError('Source must be a regular file, not a symlink.')
-  const handle = await fs.open(path, 'r')
+  const handle = await fs.open(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
+  )
   let primaryError: unknown
   let result: { bytes: Buffer; path: string; sha256: string } | undefined
   try {
     const before = await handle.stat({ bigint: true })
-    if (!before.isFile())
-      throw new LegacySessionImportValidationError('Source must be a regular file.')
+    if (!sameSourceFile(pathStat, before)) throw new LegacySessionImportSourceChangedError()
+    await assertSourceDirectoriesUnchanged(directories)
     if (before.size > BigInt(MAX_LEGACY_SESSION_IMPORT_BYTES))
       throw new LegacySessionImportFileTooLargeError(before.size)
     const buffer = Buffer.allocUnsafe(MAX_LEGACY_SESSION_IMPORT_BYTES + 1)
@@ -174,15 +222,11 @@ async function readStableSource(
     if (offset > MAX_LEGACY_SESSION_IMPORT_BYTES)
       throw new LegacySessionImportFileTooLargeError(BigInt(offset))
     const after = await handle.stat({ bigint: true })
-    if (
-      !after.isFile() ||
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.size !== after.size ||
-      before.mtimeNs !== after.mtimeNs ||
-      BigInt(offset) !== after.size
-    )
+    if (!sameSourceFile(before, after) || BigInt(offset) !== after.size)
       throw new LegacySessionImportSourceChangedError()
+    const named = await fs.lstat(path, { bigint: true })
+    if (!sameSourceFile(after, named)) throw new LegacySessionImportSourceChangedError()
+    await assertSourceDirectoriesUnchanged(directories)
     const bytes = buffer.subarray(0, offset)
     result = { bytes, path, sha256: hashBytes(bytes) }
   } catch (error) {

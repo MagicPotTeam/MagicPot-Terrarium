@@ -25,11 +25,13 @@ import {
   OllamaAPICli,
   resolveOpenAIClientApiMode,
   type FetchImpl,
-  type OpenAIImageAttachmentLoader
+  type OpenAIImageAttachmentLoader,
+  type OpenAIResponsesInputPreparer
 } from './clients'
 import { KlingVideoAPICli, VolcengineSeedanceAPICli } from './videoClients'
 import { resolveOpencodeZenAlias, resolveOpencodeZenModelApi } from './opencodeZenModels'
 import { validateProviderBaseUrl } from './providerEndpointPolicy'
+import { retiredProfileKind, assertProfileNotRetired } from './retiredProfile'
 
 type ProfileLike = {
   api_key?: string
@@ -74,6 +76,8 @@ const normalizeCallType = (callType?: string): LLMProfileCallType | undefined =>
 }
 
 export const resolveProfileCallType = (profile: ProfileLike): LLMProfileCallType => {
+  const retired = retiredProfileKind(profile)
+  if (retired) return retired
   for (const extension of sharedHostExtensionApiV1.llmProfiles) {
     const resolved = extension.resolveProfileCallType?.(profile)
     if (resolved) {
@@ -320,6 +324,7 @@ export const isLocalBaseUrl = (url: string): boolean => {
 }
 
 export const resolveProfileProvider = (profile: ProfileLike): LLMProvider | undefined => {
+  if (retiredProfileKind(profile)) return undefined
   if (resolveProfileCallType(profile) === 'local') {
     return undefined
   }
@@ -453,6 +458,7 @@ export const isOllamaProfile = (profile: ProfileLike): boolean =>
   resolveProfileProvider(profile) === 'ollama'
 
 export const isRunnableProfile = (profile: ProfileLike): boolean => {
+  if (retiredProfileKind(profile)) return false
   for (const extension of sharedHostExtensionApiV1.llmProfiles) {
     const resolved = extension.isRunnableProfile?.(profile)
     if (typeof resolved === 'boolean') {
@@ -551,6 +557,8 @@ export const cliFromProfile = (
     fetchImpl?: FetchImpl
     imageAttachmentLoader?: OpenAIImageAttachmentLoader
     requireImageAttachmentLoader?: boolean
+    /** MAIN-owned preparation for the built-in ordinary Responses client. */
+    prepareResponsesInput?: OpenAIResponsesInputPreparer
     /** Enable provider-hosted tools for Codex-compatible gateways. */
     enableHostedTools?: boolean
     /** Codex-compatible gateways expose web search without file-search uploads. */
@@ -559,6 +567,7 @@ export const cliFromProfile = (
     forceStreaming?: boolean
   }
 ): LLMCli | undefined => {
+  assertProfileNotRetired(profile)
   if (!isRunnableProfile(profile)) {
     return undefined
   }
@@ -574,8 +583,10 @@ export const cliFromProfile = (
       }
     : profile
 
+  const { prepareResponsesInput, ...otherClientOptions } = options ?? {}
+  const extensionOptions = options ? otherClientOptions : undefined
   for (const extension of sharedHostExtensionApiV1.llmProfiles) {
-    const cli = extension.createCli?.(profileWithDefaults, options)
+    const cli = extension.createCli?.(profileWithDefaults, extensionOptions)
     if (cli) {
       return cli
     }
@@ -591,7 +602,7 @@ export const cliFromProfile = (
       profileWithDefaults.api_key,
       profileWithDefaults.base_url,
       profileWithDefaults.model_name,
-      options
+      extensionOptions
     )
   }
 
@@ -661,6 +672,7 @@ export const cliFromProfile = (
         fetchImpl: options?.fetchImpl,
         imageAttachmentLoader: options?.imageAttachmentLoader,
         requireImageAttachmentLoader: options?.requireImageAttachmentLoader,
+        prepareResponsesInput,
         requestTimeoutMs:
           typeof profile.request_timeout_ms === 'number' ? profile.request_timeout_ms : undefined
       })

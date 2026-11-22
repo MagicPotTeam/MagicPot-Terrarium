@@ -1,4 +1,13 @@
 import {
+  CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN,
+  CANVAS_MIRROR_ASSET_KEY_PATTERN,
+  CanvasMirrorAssetResp,
+  CopyCanvasMirrorAssetReq,
+  ListCanvasMirrorAssetsReq,
+  ListCanvasMirrorAssetsResp,
+  PruneCanvasMirrorAssetsReq,
+  PruneCanvasMirrorAssetsResp,
+  WriteCanvasMirrorAssetReq,
   FsSvc,
   MAX_FILENAME_LENGTH,
   MAX_FULL_FILE_BYTES,
@@ -24,20 +33,40 @@ import {
   ReadLoraTriggerWordsNativeResp,
   ReadTextFileReq,
   ReadTextFileResp,
+  ReadSkillResourceFileReq,
+  ReadSkillResourceFileResp,
   WriteTextFileReq,
-  WriteTextFileResp
+  WriteTextFileResp,
+  MAX_LISTED_FOLDER_ENTRIES,
+  formatLocalFileUnavailableMessage
 } from '@shared/api/svcFs'
-import fs from 'fs/promises'
+import fs, { type FileHandle } from 'fs/promises'
+import { createReadStream, type Stats } from 'fs'
 import * as path from 'path'
 import { getCurrentUserDataDirectoryState } from '../config/userDataDirectory'
 import { app } from 'electron'
-import { resolveAuthorizedLocalMediaPath } from '../localMediaAccess'
+import {
+  consumeLocalMediaReadGrant,
+  isLexicallyCoveredLocalMediaPath,
+  type LocalMediaRoot
+} from '../localMediaAccess'
+import { getLocalMediaAllowedRoots } from '../localMediaAllowedRoots'
+import { authorizeRendererLocalPath, checkRendererLocalPath } from '../rendererLocalPathAccess'
+import { QAPP_INPUT_IMAGE_DIRNAME } from '../userDataMediaFolders'
+import { CHAT_IMAGE_ATTACHMENT_MAX_BYTES } from '@shared/llm/chatAttachmentTransportLimits'
+import {
+  DEFAULT_IMPORT_SOURCE_GUARD,
+  importSourceRootKey,
+  readImportSourceFile,
+  type ImportSourceGate,
+  type ImportSourceGuard
+} from '../llmProxy/managedMediaStore'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff']
 const MAX_CONCURRENT_FS_OPS = 16
-const QAPP_INPUT_IMAGE_DIR = 'qapp-input-images'
+const QAPP_INPUT_IMAGE_DIR = QAPP_INPUT_IMAGE_DIRNAME
 const LORA_TRIGGER_SIDECAR_EXE =
   process.platform === 'win32' ? 'lora-trigger-sidecar.exe' : 'lora-trigger-sidecar'
 const LORA_TRIGGER_SIDECAR_TIMEOUT_MS = 1500
@@ -189,6 +218,46 @@ const assertReadableFileWithinLimit = async (fullPath: string, limit: number): P
   return stats.size
 }
 
+/**
+ * Reads a whole file through one handle, never more than `maxBytes` (checked on the handle
+ * before reading) nor more than the size measured then: a file that grows meanwhile is refused
+ * rather than read unbounded. `label` is the path the caller named, for messages.
+ */
+const readFileWithinByteBudget = (
+  fullPath: string,
+  maxBytes: number,
+  { label = fullPath, tooLargeHint = '' }: { label?: string; tooLargeHint?: string } = {}
+): Promise<Buffer> =>
+  runBoundedFsOp(async () => {
+    // Checked before the open too: opening a FIFO or a device could wait forever.
+    if (!(await fs.stat(fullPath)).isFile()) throw new Error(`Path is not a file: ${label}`)
+    const handle = await fs.open(fullPath, 'r')
+    try {
+      const stats = await handle.stat()
+      if (!stats.isFile()) throw new Error(`Path is not a file: ${label}`)
+      if (stats.size > maxBytes) {
+        throw new Error(`File exceeds the ${maxBytes}-byte full-file IPC limit${tooLargeHint}`)
+      }
+      // One byte more than the size measured detects growth.
+      const buffer = Buffer.allocUnsafe(stats.size + 1)
+      let totalBytes = 0
+      while (totalBytes < buffer.byteLength) {
+        const { bytesRead } = await handle.read(
+          buffer,
+          totalBytes,
+          buffer.byteLength - totalBytes,
+          totalBytes
+        )
+        if (bytesRead === 0) break
+        totalBytes += bytesRead
+      }
+      if (totalBytes > stats.size) throw new Error(`File changed while it was read: ${label}`)
+      return buffer.subarray(0, totalBytes)
+    } finally {
+      await handle.close()
+    }
+  })
+
 const readImageFileWithinByteBudget = (fullPath: string, maxBytes: number): Promise<Buffer> =>
   runBoundedFsOp(async () => {
     const handle = await fs.open(fullPath, 'r')
@@ -224,16 +293,590 @@ function normalizeExtension(value: string): string {
   return normalized.startsWith('.') ? normalized : `.${normalized}`
 }
 
+// ─── Canvas autosave mirror assets ───────────────────────────────────────────
+const CANVAS_MIRROR_ASSET_DIRNAME = 'assets'
+const CANVAS_MIRROR_CANVAS_FILENAME = 'project.mpcanvas'
+const CANVAS_MIRROR_SNAPSHOT_DIR_PATTERN =
+  /^snapshot-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const CANVAS_MIRROR_TEMP_FILE_PATTERN =
+  /^\.[bfu]-[0-9a-f]{40}(?:\.[a-z0-9]{1,16})?\.tmp-\d+-\d+-[0-9a-z]+$/
+/** Unreferenced entries younger than this are kept: another window may be about to reference them. */
+export const CANVAS_MIRROR_PRUNE_GRACE_MS = 10 * 60 * 1000
+
+const requireCanvasMirrorProjectDirName = (projectDirName: string): string => {
+  const name = requireBasename(projectDirName)
+  if (name !== name.trim() || name.includes(':')) {
+    throw new Error('Invalid canvas mirror project directory name')
+  }
+  return name
+}
+
+const requireCanvasMirrorAssetFileName = (assetFileName: string): string => {
+  if (
+    typeof assetFileName !== 'string' ||
+    !CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(assetFileName)
+  ) {
+    throw new Error('Invalid canvas mirror asset file name')
+  }
+  return assetFileName
+}
+
+const lstatOrNull = async (targetPath: string): Promise<Stats | null> => {
+  try {
+    return await runBoundedFsOp(() => fs.lstat(targetPath))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+/**
+ * Resolves <autoSaveRoot>/<projectDirName>/assets. Neither the project folder
+ * nor the asset folder may be a symbolic link, and the real asset folder must
+ * be exactly two levels below the real autosave root. Returns null when the
+ * folder does not exist and `create` is false.
+ */
+const resolveCanvasMirrorAssetDir = async (
+  projectDirName: string,
+  create: boolean
+): Promise<{ projectDir: string; assetDir: string } | null> => {
+  const autoSaveRoot = path.resolve(getCurrentUserDataDirectoryState().autoSaveRoot)
+  const projectDir = resolveContainedFile(
+    autoSaveRoot,
+    requireCanvasMirrorProjectDirName(projectDirName)
+  )
+  const assetDir = path.join(projectDir, CANVAS_MIRROR_ASSET_DIRNAME)
+
+  for (const directory of [projectDir, assetDir]) {
+    let stats = await lstatOrNull(directory)
+    if (!stats) {
+      if (!create) return null
+      await runBoundedFsOp(() => fs.mkdir(directory, { recursive: true }))
+      stats = await lstatOrNull(directory)
+    }
+    if (!stats || stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw new Error('Canvas mirror folder is not a plain directory')
+    }
+  }
+
+  const [realRoot, realAssetDir] = await Promise.all([
+    runBoundedFsOp(() => fs.realpath(autoSaveRoot)),
+    runBoundedFsOp(() => fs.realpath(assetDir))
+  ])
+  const relative = path.relative(realRoot, realAssetDir)
+  const segments = relative.split(path.sep)
+  if (
+    path.isAbsolute(relative) ||
+    segments.length !== 2 ||
+    segments.some((segment) => !segment || segment === '.' || segment === '..')
+  ) {
+    throw new Error('Canvas mirror folder is outside the autosave root')
+  }
+  return { projectDir, assetDir }
+}
+
+const canvasMirrorAssetWrites = new Map<string, Promise<CanvasMirrorAssetResp>>()
+
+/**
+ * Publishes one content-keyed mirror asset. An existing file is never
+ * replaced (the stored project file may reference it), except an empty file
+ * left behind by an interrupted write. The bytes go to a temporary file that
+ * this process creates itself ('wx', mode 0o644: no mode, read-only attribute
+ * or file flag of a source is inherited), is flushed and then linked into
+ * place, so a reader never sees a partial file. The temporary file is removed
+ * on every path out.
+ */
+const publishCanvasMirrorAsset = async (
+  assetDir: string,
+  assetFileName: string,
+  sourceSizeBytes: number,
+  writeTemp: (handle: FileHandle, wrote: (bytes: number) => void) => Promise<void>
+): Promise<CanvasMirrorAssetResp> => {
+  const destination = path.join(assetDir, requireCanvasMirrorAssetFileName(assetFileName))
+  const previous = canvasMirrorAssetWrites.get(destination)
+  const run = async (): Promise<CanvasMirrorAssetResp> => {
+    const existing = await lstatOrNull(destination)
+    if (existing && (existing.isSymbolicLink() || !existing.isFile())) {
+      throw new Error('Canvas mirror asset path is not a regular file')
+    }
+    const repairEmptyFile = !!existing && existing.size === 0 && sourceSizeBytes > 0
+    if (existing && !repairEmptyFile) {
+      return { status: 'exists', sizeBytes: existing.size }
+    }
+
+    // Only a file that has to be written needs room; the bytes stay reserved until it is
+    // published or given up, so copies running at the same time cannot overcommit the volume.
+    const space = await reserveCanvasMirrorSpace(assetDir, sourceSizeBytes)
+    if (!space) return { status: 'no-space', sizeBytes: sourceSizeBytes }
+
+    const tempPath = path.join(
+      assetDir,
+      `.${assetFileName}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    )
+    try {
+      await runBoundedFsOp(async () => {
+        const handle = await fs.open(tempPath, 'wx', 0o644)
+        try {
+          await writeTemp(handle, space.wrote)
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+      })
+      const written = await runBoundedFsOp(() => fs.lstat(tempPath))
+      if (written.size !== sourceSizeBytes) {
+        // The source changed while it was copied: publish nothing under this key.
+        throw new Error('Canvas mirror asset source changed while it was copied')
+      }
+      if (repairEmptyFile) {
+        await runBoundedFsOp(() => fs.rename(tempPath, destination))
+        return { status: 'written', sizeBytes: written.size }
+      }
+      try {
+        await runBoundedFsOp(() => fs.link(tempPath, destination))
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'EEXIST') {
+          const winner = await runBoundedFsOp(() => fs.lstat(destination))
+          return { status: 'exists', sizeBytes: winner.size }
+        }
+        // File systems without hard links: move into place unless it appeared meanwhile.
+        const appeared = await lstatOrNull(destination)
+        if (appeared) return { status: 'exists', sizeBytes: appeared.size }
+        await runBoundedFsOp(() => fs.rename(tempPath, destination))
+      }
+      return { status: 'written', sizeBytes: written.size }
+    } finally {
+      await fs.rm(tempPath, { force: true }).catch(() => undefined)
+      space.release()
+    }
+  }
+  const result = previous ? previous.then(run, run) : run()
+  canvasMirrorAssetWrites.set(destination, result)
+  try {
+    return await result
+  } finally {
+    if (canvasMirrorAssetWrites.get(destination) === result) {
+      canvasMirrorAssetWrites.delete(destination)
+    }
+  }
+}
+
+const getNewestTimeMs = (stats: Stats): number =>
+  Math.max(stats.mtimeMs || 0, stats.ctimeMs || 0, stats.birthtimeMs || 0)
+
+const decodeCanvasMirrorRefPart = (value: string): string => {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+/** Separators unified, leading and trailing ones dropped; lower case where the file system ignores case. */
+const toComparableCanvasMirrorPath = (value: string): string => {
+  const unified = value.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '')
+  return process.platform === 'win32' || process.platform === 'darwin'
+    ? unified.toLowerCase()
+    : unified
+}
+
+/**
+ * The "assets/<entry>/..." form of an absolute path or a local-media / file
+ * URL that points inside `assetDir`; null for anything else. Leading
+ * separators are ignored on both sides, as URLs written by earlier versions
+ * lost them.
+ */
+const resolveAbsoluteCanvasMirrorRef = (value: string, assetDir: string): string | null => {
+  let candidate = value.trim()
+  const scheme = ['local-media://', 'file://'].find((prefix) =>
+    candidate.toLowerCase().startsWith(prefix)
+  )
+  if (scheme) {
+    candidate = decodeCanvasMirrorRefPart(candidate.slice(scheme.length).split(/[?#]/)[0])
+  } else if (!path.isAbsolute(candidate) && !/^[a-zA-Z]:[\\/]/.test(candidate)) {
+    return null
+  }
+  // Compared segment by segment: a lower-case form can have another length than the
+  // original, so a prefix length of one must never be used to cut the other.
+  const dirSegments = toComparableCanvasMirrorPath(assetDir).split('/')
+  const fileSegments = candidate
+    .replace(/[\\/]+/g, '/')
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
+  if (
+    !dirSegments[0] ||
+    fileSegments.length <= dirSegments.length ||
+    dirSegments.some(
+      (segment, index) => toComparableCanvasMirrorPath(fileSegments[index]) !== segment
+    )
+  ) {
+    return null
+  }
+  const segments = fileSegments.slice(dirSegments.length)
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null
+  return `${CANVAS_MIRROR_ASSET_DIRNAME}/${segments.join('/')}`
+}
+
+/**
+ * Collects every reference into the asset folder found in a stored project
+ * file: relative "assets/..." strings, and absolute paths or local-media /
+ * file URLs that resolve inside `assetDir`.
+ */
+const collectCanvasMirrorAssetRefs = (
+  value: unknown,
+  target: Set<string>,
+  assetDir: string,
+  depth = 0
+): void => {
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[\\/]+/g, '/').replace(/^\.\//, '')
+    if (normalized.startsWith(`${CANVAS_MIRROR_ASSET_DIRNAME}/`)) {
+      target.add(normalized)
+      return
+    }
+    const absoluteRef = resolveAbsoluteCanvasMirrorRef(value, assetDir)
+    if (absoluteRef) target.add(absoluteRef)
+    return
+  }
+  if (!value || typeof value !== 'object' || depth > 64) return
+  if (Array.isArray(value)) {
+    for (const entry of value) collectCanvasMirrorAssetRefs(entry, target, assetDir, depth + 1)
+    return
+  }
+  for (const entry of Object.values(value)) {
+    collectCanvasMirrorAssetRefs(entry, target, assetDir, depth + 1)
+  }
+}
+
+/** Bytes kept free on the volume of the mirror besides the asset being copied. */
+const CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES = 256 * 1024 * 1024
+
+/** Bytes of mirror assets being written right now, by volume. */
+const canvasMirrorReservedBytesByVolume = new Map<string, number>()
+
+const getCanvasMirrorVolumeId = async (assetDir: string): Promise<string> => {
+  try {
+    const stats = await runBoundedFsOp(() => fs.stat(assetDir))
+    return `dev:${String(stats.dev)}`
+  } catch {
+    return `root:${path.parse(path.resolve(assetDir)).root.toLowerCase()}`
+  }
+}
+
+type CanvasMirrorSpaceReservation = {
+  /** Bytes of the asset that reached the temporary file (the volume's free space shows them now). */
+  wrote(bytes: number): void
+  release(): void
+}
+
+// Reservations of one volume are judged one at a time (see reserveCanvasMirrorSpace).
+const canvasMirrorSpaceChecksByVolume = new Map<string, Promise<unknown>>()
+
+/**
+ * Reserves room for one asset on the mirror's volume. The reservations of one
+ * volume are judged one at a time (bytes in flight, then free space, then the
+ * check and the reservation), so concurrent copies each see the bytes the
+ * others are still about to write.
+ * Resolves the reservation, or null when the volume cannot hold the asset
+ * besides the bytes in flight and the margin. Without volume statistics the
+ * write itself reports a full disk, and the copy is allowed.
+ */
+const reserveCanvasMirrorSpace = async (
+  assetDir: string,
+  sizeBytes: number
+): Promise<CanvasMirrorSpaceReservation | null> => {
+  const volumeId = await getCanvasMirrorVolumeId(assetDir)
+  const check = async (): Promise<CanvasMirrorSpaceReservation | null> => {
+    // The bytes in flight are read before the free space: a copy that reaches the disk
+    // while statfs runs gives back its reservation, and a free-space figure taken before
+    // its bytes landed must not be checked against the smaller remainder. The reserved
+    // figure can only shrink while this step runs (no other reservation of this volume
+    // is judged meanwhile), so the check errs on the side of refusing.
+    const reserved = canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0
+    let available = Number.POSITIVE_INFINITY
+    if (typeof fs.statfs === 'function') {
+      try {
+        const stats = await runBoundedFsOp(() => fs.statfs(assetDir))
+        available = Number(stats.bavail) * Number(stats.bsize)
+      } catch {
+        available = Number.POSITIVE_INFINITY
+      }
+    }
+    if (
+      Number.isFinite(available) &&
+      available < reserved + sizeBytes + CANVAS_MIRROR_FREE_SPACE_MARGIN_BYTES
+    ) {
+      return null
+    }
+    canvasMirrorReservedBytesByVolume.set(
+      volumeId,
+      (canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0) + sizeBytes
+    )
+    let outstanding = sizeBytes
+    const give = (bytes: number): void => {
+      const amount = Math.min(outstanding, Math.max(0, bytes))
+      if (amount <= 0) return
+      outstanding -= amount
+      const remaining = (canvasMirrorReservedBytesByVolume.get(volumeId) ?? 0) - amount
+      if (remaining > 0) canvasMirrorReservedBytesByVolume.set(volumeId, remaining)
+      else canvasMirrorReservedBytesByVolume.delete(volumeId)
+    }
+    return { wrote: give, release: () => give(outstanding) }
+  }
+  const previous = canvasMirrorSpaceChecksByVolume.get(volumeId) ?? Promise.resolve()
+  const step = previous.then(check, check)
+  const settled = step.catch(() => undefined)
+  canvasMirrorSpaceChecksByVolume.set(volumeId, settled)
+  void settled.then(() => {
+    if (canvasMirrorSpaceChecksByVolume.get(volumeId) === settled) {
+      canvasMirrorSpaceChecksByVolume.delete(volumeId)
+    }
+  })
+  return step
+}
+
+/**
+ * Folders the user configured in the settings that the renderer reads besides the application
+ * roots and its grants: the configured project folder (canvas project files) and the LoRA
+ * model folder (trigger words: sidecar text files, safetensors headers, its listing). Read from
+ * main's own config, never from the request.
+ */
+export type RendererConfiguredReadRoots = {
+  projectDirs: string[]
+  loraDirs: string[]
+}
+
+const NO_CONFIGURED_READ_ROOTS: RendererConfiguredReadRoots = { projectDirs: [], loraDirs: [] }
+
+let configuredReadRootsFailureLogged = false
+
+/**
+ * The configured folders from main's config. When they cannot be read, renderer reads there are
+ * refused (the canvas project folder and the LoRA lookup then find nothing): said once in the log.
+ */
+export const readConfiguredReadRootsFromConfig = async (): Promise<RendererConfiguredReadRoots> => {
+  try {
+    const [{ getConfig }, { getBuildEnv }, { ConfigUtils }] = await Promise.all([
+      import('../config/config'),
+      import('../config/buildEnv'),
+      import('@shared/config/configUtils')
+    ])
+    const config = getConfig()
+    const absolute = (value: string | undefined): string[] => {
+      const trimmed = value?.trim() ?? ''
+      return trimmed && path.isAbsolute(trimmed) ? [trimmed] : []
+    }
+    return {
+      projectDirs: absolute(config.download_dir),
+      loraDirs: absolute(new ConfigUtils(config, getBuildEnv(), path).getLoraDir())
+    }
+  } catch (error) {
+    if (!configuredReadRootsFailureLogged) {
+      configuredReadRootsFailureLogged = true
+      console.warn(
+        '[svcFs] Could not read the configured project and LoRA folders; renderer reads there are refused:',
+        error
+      )
+    }
+    return NO_CONFIGURED_READ_ROOTS
+  }
+}
+
+export const resetConfiguredReadRootsFailureLogForTest = (): void => {
+  configuredReadRootsFailureLogged = false
+}
+
+/**
+ * What a renderer read is for, and so where it may read (see getRendererReadAreas):
+ * - 'media': a local-media file (a canvas item, a chat attachment), authorized exactly as the
+ *   local-media protocol and readImageFromPath authorize it;
+ * - 'text': a canvas project file, or a trigger-word sidecar in the LoRA folder;
+ * - 'slice': a safetensors header in the LoRA folder;
+ * - 'directory': a project folder, the LoRA folder or a granted folder (listings, the sidecar);
+ * - 'skill-resource': a file a skill names as a resource.
+ * A skill or a board file names these paths, so text, slices, listings and skill resources
+ * reach only what their callers read: never the app's config, grants or chats. 'media' keeps
+ * the local-media protocol's policy (the app's data folder, where managed media lives).
+ */
+type RendererReadKind = 'media' | 'text' | 'slice' | 'directory' | 'skill-resource'
+
+/**
+ * One place a kind may read: its roots, whether the user's grants count too, and which files
+ * there it may read (checked on the named and on the canonical path, so a link cannot widen it).
+ */
+type RendererReadArea = {
+  roots: LocalMediaRoot[]
+  grants: boolean
+  fits: (filePath: string) => boolean
+  allowNetworkRoots: boolean
+}
+
+const PROJECT_CANVAS_FILE_EXTENSION = '.mpcanvas'
+/** Inside the LoRA folder: <name>.txt, <name>.json, <name>.metadata.json, <name>.civitai.info. */
+const LORA_TEXT_EXTENSIONS = ['.txt', '.json', '.info']
+const LORA_SLICE_EXTENSIONS = ['.safetensors']
+/** The custom skill folder of the app's data (ConfigUtils.getCustomSkillDir). */
+const CUSTOM_SKILL_DIRNAME = 'customSkills'
+/** A skill definition: it holds the skill's API key. */
+const SKILL_DEFINITION_SUFFIX = '.skill.json'
+
+const anyFile = (): boolean => true
+const withExtension =
+  (extensions: readonly string[]) =>
+  (filePath: string): boolean =>
+    extensions.includes(path.extname(filePath).toLowerCase())
+
+class RendererReadRefusedError extends Error {}
+
+const NOT_AUTHORIZED_MESSAGE = 'Local file path is not authorized'
+
+/** How readImageFromPath reads a read-granted file (a mapped network drive); for tests. */
+export type FsSvcImplDependencies = {
+  importSourceGuard?: ImportSourceGuard
+  importSourceGate?: ImportSourceGate
+  importSourceFs?: typeof fs
+  /** The configured folders renderer reads may use (default: from main's config). */
+  getConfiguredReadRoots?: () => Promise<RendererConfiguredReadRoots>
+  /** The gate of the authorization of renderer-named paths (default: rendererLocalPathGate). */
+  rendererPathGate?: ImportSourceGate
+}
+
 export class FsSvcImpl implements FsSvc {
+  constructor(private readonly dependencies: FsSvcImplDependencies = {}) {}
+
+  private getCustomSkillDir = (): string => path.join(app.getPath('userData'), CUSTOM_SKILL_DIRNAME)
+
+  private getRendererReadAreas = async (kind: RendererReadKind): Promise<RendererReadArea[]> => {
+    if (kind === 'media') {
+      return [
+        { roots: this.getMediaReadRoots(), grants: true, fits: anyFile, allowNetworkRoots: false }
+      ]
+    }
+    if (kind === 'skill-resource') {
+      return [
+        {
+          roots: [this.getCustomSkillDir()],
+          grants: true,
+          fits: (filePath) =>
+            !path.basename(filePath).toLowerCase().endsWith(SKILL_DEFINITION_SUFFIX),
+          allowNetworkRoots: false
+        }
+      ]
+    }
+    const configured = await (
+      this.dependencies.getConfiguredReadRoots ?? readConfiguredReadRootsFromConfig
+    )()
+    const storageState = getCurrentUserDataDirectoryState()
+    const projectRoots = [
+      storageState.projectRoot,
+      storageState.autoSaveRoot,
+      ...configured.projectDirs
+    ]
+    // A storage or model folder the user configured on a share stays readable there.
+    const area = (
+      roots: LocalMediaRoot[],
+      fits: (filePath: string) => boolean,
+      grants = false
+    ): RendererReadArea => ({ roots, grants, fits, allowNetworkRoots: true })
+    switch (kind) {
+      case 'text':
+        return [
+          area(projectRoots, withExtension([PROJECT_CANVAS_FILE_EXTENSION])),
+          area(configured.loraDirs, withExtension(LORA_TEXT_EXTENSIONS))
+        ]
+      case 'slice':
+        return [area(configured.loraDirs, withExtension(LORA_SLICE_EXTENSIONS))]
+      case 'directory':
+        return [area([...projectRoots, ...configured.loraDirs], anyFile, true)]
+    }
+  }
+
+  /**
+   * A skill resource reached through a grant may not be in the app's data outside the custom
+   * skill folder (a grant of a folder that holds it would otherwise expose its config).
+   */
+  private isOutsideAppDataOrInSkills = async (canonicalPath: string): Promise<boolean> => {
+    const canonical = async (value: string): Promise<string> =>
+      path.resolve(await fs.realpath(value).catch(() => value))
+    const [userData, skills] = await Promise.all([
+      canonical(app.getPath('userData')),
+      canonical(this.getCustomSkillDir())
+    ])
+    const inside = (root: string): boolean => {
+      const relative = path.relative(root, canonicalPath)
+      return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+    }
+    return !inside(userData) || inside(skills)
+  }
+
+  /**
+   * The canonical path of a path the renderer named, or a RendererReadRefusedError: only what
+   * the kind may read (see getRendererReadAreas). Off main's event loop and under the renderer
+   * path gate; a Windows network spelling never reaches the filesystem unless it was granted or
+   * lies in a configured network folder. The message of a refusal is chosen so that it never
+   * tells whether a file outside exists, and never calls a file missing that may be there:
+   * - outside every place the kind may read (by the path's text alone): not authorized;
+   * - inside one, when the filesystem did not answer in time (or every gate slot is held by
+   *   calls that did not): unavailable (formatLocalFileUnavailableMessage);
+   * - inside one, when the file does not exist or resolves outside: "File not found".
+   */
+  private authorizeRendererRead = async (
+    fullPath: string,
+    kind: RendererReadKind
+  ): Promise<string> => {
+    const areas = await this.getRendererReadAreas(kind)
+    let covered = false
+    let unavailable = false
+    for (const area of areas) {
+      if (!area.fits(fullPath)) continue
+      if (isLexicallyCoveredLocalMediaPath(fullPath, area.roots, { grants: area.grants })) {
+        covered = true
+      }
+      const decision = await checkRendererLocalPath(fullPath, area.roots, {
+        allowNetworkRoots: area.allowNetworkRoots,
+        grants: area.grants,
+        ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
+      })
+      const canonical = decision.canonicalPath
+      if (canonical === null) {
+        if (decision.reason === 'unavailable') unavailable = true
+        continue
+      }
+      // The canonical file must fit too: a symlink inside the folder cannot widen the kind.
+      if (!area.fits(canonical)) continue
+      if (kind === 'skill-resource' && !(await this.isOutsideAppDataOrInSkills(canonical))) {
+        continue
+      }
+      return canonical
+    }
+    if (!covered) throw new RendererReadRefusedError(NOT_AUTHORIZED_MESSAGE)
+    if (unavailable) throw new RendererReadRefusedError(formatLocalFileUnavailableMessage(fullPath))
+    throw new RendererReadRefusedError(`File not found: ${fullPath}`)
+  }
+
+  /** The canonical folder to list, or null (missing, unavailable or not authorized: nothing). */
+  private authorizeRendererFolder = async (folderPath: string): Promise<string | null> => {
+    try {
+      return await this.authorizeRendererRead(folderPath, 'directory')
+    } catch (error) {
+      if (error instanceof RendererReadRefusedError) return null
+      throw error
+    }
+  }
+
   listImagesInFolder = async (req: ListImagesInFolderReq): Promise<ListImagesInFolderResp> => {
     const { folderPath } = req
 
-    if (!(await pathExists(folderPath))) {
+    const canonicalFolder = await this.authorizeRendererFolder(folderPath)
+    if (!canonicalFolder) {
       return { images: [] }
     }
 
-    const files = await runBoundedFsOp(() => fs.readdir(folderPath))
+    // Listed through the canonical folder; the paths keep the spelling the caller named.
+    const files = await runBoundedFsOp(() => fs.readdir(canonicalFolder))
     const images = files
+      .slice(0, MAX_LISTED_FOLDER_ENTRIES)
       .filter((file) => {
         const ext = path.extname(file).toLowerCase()
         return IMAGE_EXTENSIONS.includes(ext)
@@ -249,7 +892,8 @@ export class FsSvcImpl implements FsSvc {
   listFilesInFolder = async (req: ListFilesInFolderReq): Promise<ListFilesInFolderResp> => {
     const { folderPath, extensions, recursive = false } = req
 
-    if (!(await pathExists(folderPath))) {
+    const canonicalFolder = await this.authorizeRendererFolder(folderPath)
+    if (!canonicalFolder) {
       return { files: [] }
     }
 
@@ -259,22 +903,30 @@ export class FsSvcImpl implements FsSvc {
         .filter((value) => value.length > 0)
         .map(normalizeExtension) ?? []
 
-    const directoriesToScan = [folderPath]
+    // Read through the canonical folder; the paths returned keep the spelling the caller named.
+    // Symbolic links are neither followed nor listed (a Dirent of a link is neither a file
+    // nor a directory), so the scan stays inside the authorized folder.
+    const directoriesToScan = [{ dir: canonicalFolder, shown: folderPath }]
     const files: ListFilesInFolderResp['files'] = []
+    // Every entry seen counts, at every level: a huge tree costs main a bounded scan.
+    let entriesSeen = 0
 
     while (directoriesToScan.length > 0) {
-      const currentDir = directoriesToScan.shift()
-      if (!currentDir) {
+      const current = directoriesToScan.shift()
+      if (!current) {
         continue
       }
 
-      const entries = await runBoundedFsOp(() => fs.readdir(currentDir, { withFileTypes: true }))
+      const entries = await runBoundedFsOp(() => fs.readdir(current.dir, { withFileTypes: true }))
       for (const entry of entries) {
-        const fullPath = path.join(currentDir, entry.name)
+        if (entriesSeen >= MAX_LISTED_FOLDER_ENTRIES) return { files, truncated: true }
+        entriesSeen += 1
+        const fullPath = path.join(current.dir, entry.name)
+        const shownPath = path.join(current.shown, entry.name)
 
         if (entry.isDirectory()) {
           if (recursive) {
-            directoriesToScan.push(fullPath)
+            directoriesToScan.push({ dir: fullPath, shown: shownPath })
           }
           continue
         }
@@ -290,10 +942,10 @@ export class FsSvcImpl implements FsSvc {
           continue
         }
 
-        const stats = await runBoundedFsOp(() => fs.stat(fullPath))
+        const stats = await runBoundedFsOp(() => fs.lstat(fullPath))
         files.push({
           filename: entry.name,
-          fullPath,
+          fullPath: shownPath,
           lastModifiedMs: stats.mtimeMs
         })
       }
@@ -373,18 +1025,6 @@ export class FsSvcImpl implements FsSvc {
   }
 
   readImageFromPath = async (req: ReadImageFromPathReq): Promise<ReadImageFromPathResp> => {
-    const storageState = getCurrentUserDataDirectoryState()
-    const fullPath = resolveAuthorizedLocalMediaPath(req.fullPath, [
-      app.getPath('userData'),
-      path.join(app.getPath('temp'), 'magicpot-local-media'),
-      storageState.projectRoot,
-      storageState.autoSaveRoot
-    ])
-
-    if (!fullPath) {
-      throw new Error('Local image path is not authorized')
-    }
-
     if (
       req.maxBytes !== undefined &&
       (!Number.isSafeInteger(req.maxBytes) ||
@@ -394,6 +1034,49 @@ export class FsSvcImpl implements FsSvc {
       throw new Error(`Invalid image maxBytes: expected 1-${MAX_FULL_FILE_BYTES}`)
     }
     const maxBytes = Math.min(MAX_FULL_FILE_BYTES, req.maxBytes ?? MAX_FULL_FILE_BYTES)
+
+    // A file the user dropped from a mapped network drive is read once under its one-use
+    // read grant (spent only by a valid request). The grant is found by the dropped path's
+    // text and names the canonical path main resolved when it granted the read, so nothing
+    // here touches the share on main's event loop; the read itself runs under the import-source
+    // gate, each call with its deadline, like an import's. It is an image for the composer:
+    // never more than its image limit, nor than the size main measured when it granted it.
+    const readGrant = consumeLocalMediaReadGrant(req.fullPath)
+    if (readGrant) {
+      try {
+        const buffer = await readImportSourceFile(readGrant.canonicalPath, {
+          maxBytes: Math.min(
+            maxBytes,
+            readGrant.sizeBytes ?? maxBytes,
+            CHAT_IMAGE_ATTACHMENT_MAX_BYTES
+          ),
+          guard: this.dependencies.importSourceGuard ?? DEFAULT_IMPORT_SOURCE_GUARD,
+          key: importSourceRootKey(readGrant.requestedPath),
+          file: readGrant.requestedPath,
+          ...(this.dependencies.importSourceGate
+            ? { gate: this.dependencies.importSourceGate }
+            : {}),
+          ...(this.dependencies.importSourceFs ? { fs: this.dependencies.importSourceFs } : {})
+        })
+        return {
+          image: new Uint8Array(buffer),
+          filename: path.basename(readGrant.canonicalPath)
+        }
+      } finally {
+        // The next file of the same drop may now be read.
+        readGrant.finished()
+      }
+    }
+
+    // Without a live read grant: the policy of the local-media protocol, off main's event loop
+    // (a path on a mapped drive whose share stopped answering must not block main), under the
+    // renderer path gate and the import-source deadline.
+    const fullPath = await authorizeRendererLocalPath(req.fullPath, this.getMediaReadRoots(), {
+      ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
+    })
+    if (!fullPath) {
+      throw new Error('Local image path is not authorized')
+    }
 
     if (!(await pathExists(fullPath))) {
       throw new Error(`File not found: ${fullPath}`)
@@ -416,29 +1099,37 @@ export class FsSvcImpl implements FsSvc {
     }
   }
 
-  readTextFile = async (req: ReadTextFileReq): Promise<ReadTextFileResp> => {
-    const { fullPath } = req
+  readTextFile = async (req: ReadTextFileReq): Promise<ReadTextFileResp> =>
+    this.readRendererTextFile(req.fullPath, 'text')
 
-    if (!(await pathExists(fullPath))) {
-      throw new Error(`File not found: ${fullPath}`)
-    }
+  readSkillResourceFile = async (
+    req: ReadSkillResourceFileReq
+  ): Promise<ReadSkillResourceFileResp> => this.readRendererTextFile(req.fullPath, 'skill-resource')
 
-    await assertReadableFileWithinLimit(fullPath, MAX_TEXT_FILE_BYTES)
+  private readRendererTextFile = async (
+    fullPath: string,
+    kind: 'text' | 'skill-resource'
+  ): Promise<ReadTextFileResp> => {
+    const canonicalPath = await this.authorizeRendererRead(fullPath, kind)
+    const buffer = await readFileWithinByteBudget(canonicalPath, MAX_TEXT_FILE_BYTES, {
+      label: fullPath,
+      tooLargeHint: '; use readFileSlice instead'
+    })
     return {
-      content: await runBoundedFsOp(() => fs.readFile(fullPath, 'utf8')),
+      content: buffer.toString('utf8'),
       filename: path.basename(fullPath)
     }
   }
 
   readFileFromPath = async (req: ReadFileFromPathReq): Promise<ReadFileFromPathResp> => {
     const { fullPath } = req
-
-    if (!(await pathExists(fullPath))) {
-      throw new Error(`File not found: ${fullPath}`)
-    }
-
-    await assertReadableFileWithinLimit(fullPath, MAX_FULL_FILE_BYTES)
-    const buffer = await runBoundedFsOp(() => fs.readFile(fullPath))
+    // The bytes of a local-media file (a canvas item, a chat attachment): what the local-media
+    // protocol would serve, no more.
+    const canonicalPath = await this.authorizeRendererRead(fullPath, 'media')
+    const buffer = await readFileWithinByteBudget(canonicalPath, MAX_FULL_FILE_BYTES, {
+      label: fullPath,
+      tooLargeHint: '; use readFileSlice instead'
+    })
     return {
       data: new Uint8Array(buffer),
       filename: path.basename(fullPath)
@@ -456,39 +1147,35 @@ export class FsSvcImpl implements FsSvc {
       throw new Error(`Invalid file slice length: expected 1-${MAX_READ_FILE_SLICE_BYTES}`)
     }
 
-    if (!(await pathExists(fullPath))) {
-      throw new Error(`File not found: ${fullPath}`)
-    }
-
-    const stats = await runBoundedFsOp(() => fs.stat(fullPath))
-    if (!stats.isFile()) {
-      throw new Error(`Path is not a file: ${fullPath}`)
-    }
-
-    if (offset >= stats.size) {
-      return {
-        data: new Uint8Array(),
-        filename: path.basename(fullPath),
-        fileSizeBytes: stats.size
+    const canonicalPath = await this.authorizeRendererRead(fullPath, 'slice')
+    // One handle for the type check, the size and the read.
+    const { buffer, bytesRead, fileSizeBytes } = await runBoundedFsOp(async () => {
+      // Checked before the open too: opening a FIFO or a device could wait forever.
+      if (!(await fs.stat(canonicalPath)).isFile()) {
+        throw new Error(`Path is not a file: ${fullPath}`)
       }
-    }
-
-    const bytesToRead = Math.min(length, stats.size - offset)
-    const { buffer, bytesRead } = await runBoundedFsOp(async () => {
-      const fd = await fs.open(fullPath, 'r')
+      const handle = await fs.open(canonicalPath, 'r')
       try {
+        const stats = await handle.stat()
+        if (!stats.isFile()) {
+          throw new Error(`Path is not a file: ${fullPath}`)
+        }
+        if (offset >= stats.size) {
+          return { buffer: Buffer.alloc(0), bytesRead: 0, fileSizeBytes: stats.size }
+        }
+        const bytesToRead = Math.min(length, stats.size - offset)
         const buffer = Buffer.alloc(bytesToRead)
-        const { bytesRead } = await fd.read(buffer, 0, bytesToRead, offset)
-        return { buffer, bytesRead }
+        const { bytesRead } = await handle.read(buffer, 0, bytesToRead, offset)
+        return { buffer, bytesRead, fileSizeBytes: stats.size }
       } finally {
-        await fd.close()
+        await handle.close()
       }
     })
 
     return {
       data: new Uint8Array(buffer.subarray(0, bytesRead)),
       filename: path.basename(fullPath),
-      fileSizeBytes: stats.size
+      fileSizeBytes
     }
   }
 
@@ -507,7 +1194,15 @@ export class FsSvcImpl implements FsSvc {
     await runBoundedFsOp(async () => {
       const tempPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`
       try {
-        await fs.writeFile(tempPath, content, 'utf8')
+        // Flushed before the rename: callers delete what the previous version
+        // of the file referenced once this write is acknowledged.
+        const handle = await fs.open(tempPath, 'w')
+        try {
+          await handle.writeFile(content, 'utf8')
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
         await fs.rename(tempPath, fullPath)
       } finally {
         await fs.rm(tempPath, { force: true }).catch(() => undefined)
@@ -520,23 +1215,203 @@ export class FsSvcImpl implements FsSvc {
     }
   }
 
+  /**
+   * The application roots the renderer may read media from (readImageFromPath, readFileFromPath,
+   * copyCanvasMirrorAsset): those of the local-media protocol, so the app's media folders and
+   * never the rest of its data folder; the temp media folder only once verified as main's own
+   * private directory.
+   */
+  private getMediaReadRoots = (): LocalMediaRoot[] => getLocalMediaAllowedRoots()
+
+  copyCanvasMirrorAsset = async (req: CopyCanvasMirrorAssetReq): Promise<CanvasMirrorAssetResp> => {
+    const assetFileName = requireCanvasMirrorAssetFileName(req.assetFileName)
+    // Canonical (symlinks resolved) and authorized exactly like readImageFromPath.
+    const sourcePath = await authorizeRendererLocalPath(req.sourcePath, this.getMediaReadRoots(), {
+      ...(this.dependencies.rendererPathGate ? { gate: this.dependencies.rendererPathGate } : {})
+    })
+    if (!sourcePath) {
+      throw new Error('Canvas mirror asset source is not authorized')
+    }
+    const sourceStats = await runBoundedFsOp(() => fs.stat(sourcePath))
+    if (!sourceStats.isFile()) {
+      throw new Error('Canvas mirror asset source is not a file')
+    }
+    // File to file: no IPC payload, so no payload limit; only the free disk space bounds it.
+    const location = await resolveCanvasMirrorAssetDir(req.projectDirName, true)
+    if (!location) throw new Error('Canvas mirror folder is unavailable')
+    // The free space is checked (and reserved) by the publish, as for a write.
+    return publishCanvasMirrorAsset(
+      location.assetDir,
+      assetFileName,
+      sourceStats.size,
+      async (handle, wrote) => {
+        // Streamed into our own temporary file, so a read-only source copies like any other.
+        for await (const chunk of createReadStream(sourcePath)) {
+          const buffer = chunk as Buffer
+          for (let offset = 0; offset < buffer.length;) {
+            const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset)
+            offset += bytesWritten
+            wrote(bytesWritten)
+          }
+        }
+      }
+    )
+  }
+
+  writeCanvasMirrorAsset = async (
+    req: WriteCanvasMirrorAssetReq
+  ): Promise<CanvasMirrorAssetResp> => {
+    const assetFileName = requireCanvasMirrorAssetFileName(req.assetFileName)
+    requireBoundedPayload(req.data, MAX_FULL_FILE_BYTES, 'Canvas mirror asset')
+    const location = await resolveCanvasMirrorAssetDir(req.projectDirName, true)
+    if (!location) throw new Error('Canvas mirror folder is unavailable')
+    return publishCanvasMirrorAsset(
+      location.assetDir,
+      assetFileName,
+      req.data.byteLength,
+      (handle) => handle.writeFile(Buffer.from(req.data))
+    )
+  }
+
+  listCanvasMirrorAssets = async (
+    req: ListCanvasMirrorAssetsReq
+  ): Promise<ListCanvasMirrorAssetsResp> => {
+    const location = await resolveCanvasMirrorAssetDir(req.projectDirName, false)
+    if (!location) return { assetFileNames: [] }
+    const entries = await runBoundedFsOp(() =>
+      fs.readdir(location.assetDir, { withFileTypes: true })
+    )
+    const assetFileNames: string[] = []
+    for (const entry of entries) {
+      if (!entry.isFile() || !CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(entry.name)) continue
+      // An empty file is an interrupted write; report it as missing so it is written again.
+      const stats = await lstatOrNull(path.join(location.assetDir, entry.name))
+      if (stats?.isFile() && stats.size > 0) assetFileNames.push(entry.name)
+    }
+    return { assetFileNames }
+  }
+
+  /**
+   * Deletes the content-keyed assets and the snapshot folders of earlier
+   * versions that the stored project file no longer references. Only entries
+   * directly under <autoSaveRoot>/<projectDirName>/assets that match one of
+   * those two name patterns are ever removed; entries younger than the grace
+   * period, entries the caller asks to keep and symbolic links are left alone.
+   * Without a readable project file nothing is deleted.
+   */
+  pruneCanvasMirrorAssets = async (
+    req: PruneCanvasMirrorAssetsReq
+  ): Promise<PruneCanvasMirrorAssetsResp> => {
+    const result: PruneCanvasMirrorAssetsResp = {
+      removedAssetFileNames: [],
+      removedSnapshotDirNames: []
+    }
+    const location = await resolveCanvasMirrorAssetDir(req.projectDirName, false)
+    if (!location) return result
+
+    const canvasPath = path.join(location.projectDir, CANVAS_MIRROR_CANVAS_FILENAME)
+    const referenced = new Set<string>()
+    try {
+      const canvasStats = await runBoundedFsOp(() => fs.lstat(canvasPath))
+      if (canvasStats.isSymbolicLink() || !canvasStats.isFile()) return result
+      if (canvasStats.size > MAX_TEXT_FILE_BYTES) return result
+      const parsed: unknown = JSON.parse(
+        await runBoundedFsOp(() => fs.readFile(canvasPath, 'utf8'))
+      )
+      if (!parsed || typeof parsed !== 'object') return result
+      collectCanvasMirrorAssetRefs(parsed, referenced, location.assetDir)
+    } catch {
+      return result
+    }
+
+    const keepEntryNames = new Set<string>(req.keepEntryNames)
+    const keepAssetKeys = new Set<string>(
+      req.keepAssetKeys.filter((key) => CANVAS_MIRROR_ASSET_KEY_PATTERN.test(key))
+    )
+    for (const ref of referenced) {
+      const entryName = ref.split('/')[1]
+      if (entryName) keepEntryNames.add(entryName)
+    }
+    const comparable = (name: string): string =>
+      process.platform === 'win32' || process.platform === 'darwin' ? name.toLowerCase() : name
+    const keepComparableNames = new Set([...keepEntryNames].map(comparable))
+
+    const now = Date.now()
+    const isYoung = (stats: Stats): boolean =>
+      now - getNewestTimeMs(stats) < CANVAS_MIRROR_PRUNE_GRACE_MS
+    const entries = await runBoundedFsOp(() =>
+      fs.readdir(location.assetDir, { withFileTypes: true })
+    )
+    for (const entry of entries) {
+      const entryPath = path.join(location.assetDir, entry.name)
+      if (path.dirname(entryPath) !== location.assetDir) continue
+      if (keepComparableNames.has(comparable(entry.name))) continue
+      try {
+        const stats = await runBoundedFsOp(() => fs.lstat(entryPath))
+        if (stats.isSymbolicLink()) continue
+
+        if (stats.isFile()) {
+          const isAsset = CANVAS_MIRROR_ASSET_FILE_NAME_PATTERN.test(entry.name)
+          const isTemp = CANVAS_MIRROR_TEMP_FILE_PATTERN.test(entry.name)
+          if (!isAsset && !isTemp) continue
+          if (isAsset && keepAssetKeys.has(entry.name.split('.')[0])) continue
+          if (isYoung(stats)) continue
+          await runBoundedFsOp(() => fs.unlink(entryPath))
+          if (isAsset) result.removedAssetFileNames.push(entry.name)
+          continue
+        }
+
+        if (!stats.isDirectory() || !CANVAS_MIRROR_SNAPSHOT_DIR_PATTERN.test(entry.name)) continue
+        // A writer of an earlier version fills the category folders of a snapshot before
+        // its project file; their timestamps move with every file it adds.
+        let newestMs = getNewestTimeMs(stats)
+        const children = await runBoundedFsOp(() => fs.readdir(entryPath, { withFileTypes: true }))
+        for (const child of children) {
+          const childStats = await lstatOrNull(path.join(entryPath, child.name))
+          if (childStats) newestMs = Math.max(newestMs, getNewestTimeMs(childStats))
+        }
+        if (now - newestMs < CANVAS_MIRROR_PRUNE_GRACE_MS) continue
+        await runBoundedFsOp(() => fs.rm(entryPath, { recursive: true, force: true }))
+        result.removedSnapshotDirNames.push(entry.name)
+      } catch (error) {
+        console.warn('[svcFs] Failed to prune a canvas mirror entry:', entry.name, error)
+      }
+    }
+    return result
+  }
+
   readLoraTriggerWordsNative = async (
     req: ReadLoraTriggerWordsNativeReq
   ): Promise<ReadLoraTriggerWordsNativeResp> => {
-    const loraDir = req.loraDir.trim()
-    const loraName = req.loraName.trim()
-    if (!loraDir || !loraName) {
-      return { triggerWords: '', source: '', nativeAvailable: false }
+    const unavailable = { triggerWords: '', source: '', nativeAvailable: false }
+    const loraDir = typeof req.loraDir === 'string' ? req.loraDir.trim() : ''
+    const loraName = typeof req.loraName === 'string' ? req.loraName.trim() : ''
+    // The name stays inside the folder: relative, no '..' segment, no drive or NUL.
+    if (
+      !loraDir ||
+      !loraName ||
+      loraName.includes('\0') ||
+      path.isAbsolute(loraName) ||
+      path.win32.isAbsolute(loraName) ||
+      /^[a-zA-Z]:/.test(loraName) ||
+      loraName.split(/[\\/]+/).some((segment) => segment === '..')
+    ) {
+      return unavailable
     }
 
     const sidecarPath = await resolveLoraTriggerSidecarPath()
     if (!sidecarPath) {
-      return { triggerWords: '', source: '', nativeAvailable: false }
+      return unavailable
+    }
+    // The sidecar reads the folder it is given: only a folder renderer reads may list.
+    const canonicalLoraDir = await this.authorizeRendererFolder(loraDir)
+    if (!canonicalLoraDir) {
+      return unavailable
     }
 
     const { stdout } = await execFileAsync(
       sidecarPath,
-      ['--lora-dir', loraDir, '--lora-name', loraName],
+      ['--lora-dir', canonicalLoraDir, '--lora-name', loraName],
       {
         timeout: LORA_TRIGGER_SIDECAR_TIMEOUT_MS,
         windowsHide: true,

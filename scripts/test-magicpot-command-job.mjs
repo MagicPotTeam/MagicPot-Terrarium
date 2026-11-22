@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
@@ -9,7 +10,9 @@ if (process.platform !== 'win32') {
 }
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const helper = path.join(
+const requestedHelper = process.argv.find((arg) => arg.startsWith('--helper='))?.slice('--helper='.length)
+if (requestedHelper && !path.isAbsolute(requestedHelper)) throw new Error('--helper must be an absolute local test artifact path')
+const helper = requestedHelper || path.join(
   root,
   'packages',
   'runtime-assets',
@@ -19,6 +22,12 @@ const helper = path.join(
   'magicpot-command-job.exe'
 )
 if (!existsSync(helper)) throw new Error(`Missing Windows command-job helper: ${helper}`)
+const capability = spawnSync(helper, ['--capabilities'], { encoding: 'utf8', timeout: 2000, maxBuffer: 1024 })
+if (capability.error || capability.status !== 0 || capability.stdout.trim() !== 'magicpot-command-job:atomic-job-list-empty-v2') throw new Error('Expected atomic Job Object helper capability')
+
+const completionNonce = randomBytes(32).toString('hex')
+const receipt = spawnSync(helper, ['-', '-', '2', '--', process.execPath, '-e', 'process.stdout.write(String(process.env.MAGICPOT_JOB_COMPLETION_NONCE))'], { env: { ...process.env, MAGICPOT_JOB_COMPLETION_NONCE: completionNonce }, encoding: 'utf8', timeout: 15000 })
+if (receipt.error || receipt.status !== 0 || receipt.stdout !== 'undefined' || receipt.stderr.trim() !== `MAGICPOT_JOB_EMPTY ${completionNonce}`) throw new Error(`Supervisor empty receipt or nonce stripping failed: ${JSON.stringify(receipt)}`)
 
 const run = (limits, source, timeout = 15_000) => {
   const started = Date.now()
@@ -123,6 +132,7 @@ if (tasklist.error || tasklist.stdout.includes(`"${descendantPid}"`))
 
 console.log(
   JSON.stringify({
+    completionReceipt: { jobEmpty: true, nonceNotInherited: true },
     argv: { preserved: true, cases: expectedArgv.length },
     cpu: { status: cpu.status, elapsedMs: cpu.elapsedMs },
     processCount: { status: processCount.status },

@@ -22,6 +22,26 @@ const status = {
 afterEach(() => vi.restoreAllMocks())
 
 describe('completed tool checkpoints', () => {
+  it('keeps a running invocation and replaces it with its terminal receipt', () => {
+    const running = { ...entry, status: 'running' as const, content: undefined }
+    const first = mergeToolCheckpoint(undefined, [running], { ...status, status: 'running' })!
+    expect(first).toEqual([running])
+    expect(mergeToolCheckpoint(first, [entry], status)).toEqual([entry])
+    expect(
+      mergeToolCheckpoint([entry], [running], { ...status, status: 'running' })
+    ).toBeUndefined()
+    expect(
+      mergeToolCheckpoint(first, [{ ...entry, args: { path: 'different.txt' } }], status)
+    ).toBeUndefined()
+  })
+  it('does not accept output disguised as a running invocation', () => {
+    expect(
+      mergeToolCheckpoint(undefined, [{ ...entry, status: 'running' }], {
+        ...status,
+        status: 'running'
+      })
+    ).toBeUndefined()
+  })
   it('accepts completed evidence and keeps it when an incoming snapshot is shorter', () => {
     const first = mergeToolCheckpoint(undefined, [entry], status)!
     const second = { ...entry, toolCallId: 'call-b', content: 'second' }

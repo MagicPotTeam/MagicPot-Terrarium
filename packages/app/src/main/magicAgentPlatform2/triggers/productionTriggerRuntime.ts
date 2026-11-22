@@ -1,6 +1,7 @@
 import type { PolicyJsonRecord, PolicyRequest } from '../../../shared/magicAgentPlatform2/policy'
 import type { MagicAgentPolicyAuthorizationService } from '../policy'
 import type { MagicAgentEventStore } from '../persistence/eventStore'
+import type { CooperativeOperationGate } from '../agents/cooperativeExecutionController'
 import { WorkflowCompletionTriggerSource } from './workflowCompletionTriggerSource'
 import { ChannelMessageTriggerSource } from './channelMessageTriggerSource'
 import { DriveStateTriggerSource } from './driveStateTriggerSource'
@@ -12,6 +13,8 @@ import { PersistentTriggerStore } from './persistentTriggerStore'
 import { StartupTriggerSource } from './startupTriggerSource'
 import { TriggerOccurrenceScheduler } from './triggerOccurrenceScheduler'
 import { TriggerOccurrenceStore } from './triggerOccurrenceStore'
+import type { TriggerOccurrenceState } from './triggerOccurrenceStore'
+import type { PersistentTriggerState } from './persistentTriggerStore'
 import { TriggerExecutionOutcomeStore } from './executionOutcomeStore'
 import type {
   TriggerAgentDispatchInput,
@@ -32,9 +35,13 @@ export type ProductionTriggerRuntimeOptions<TResult> = Readonly<{
     | undefined
     | Promise<{ grantId: string; expectedGrantUseCount?: number } | undefined>
   routeResolver: (trigger: Parameters<ProductionTriggerExecutor['execute']>[0]) => PolicyJsonRecord
+  /** MAIN-owned optional data delivery hook. A false result preserves the existing executor path. */
+  occurrenceBridge?: (trigger: PersistentTriggerState, occurrence: TriggerOccurrenceState) => Promise<boolean>
   now?: () => number
   pollInterval?: number
   bootId?: string
+  /** MAIN-owned gate for the interval scheduler only; occurrences have a separate host. */
+  cooperativeExecution?: CooperativeOperationGate
 }>
 
 export class ProductionTriggerRuntime<TResult = unknown> {
@@ -81,6 +88,16 @@ export class ProductionTriggerRuntime<TResult = unknown> {
       grantProvider: options.grantProvider,
       resolveTrustedRoute: options.routeResolver,
       outcomes: this.outcomes,
+      // markPermit needs a live claim, and the grant is awaited inside that claim without lease
+      // renewal. A grant provider that waits longer than the lease (30 s) makes every attempt fail
+      // closed: no permit consumed, one grant used per attempt, dead-letter at the third. Hosts
+      // that wait for a person need lease renewal or a claim taken after the approval.
+      onOccurrencePermit: ({ occurrenceId, owner, authorizationId, requestDigest }) => {
+        this.occurrences.markPermit(occurrenceId, owner, this.now(), {
+          authorizationId,
+          requestDigest
+        })
+      },
       dispatch: {
         runAgent: (input) => options.service.runAgent(input),
         runGraph: (input) => options.service.runGraph(input)
@@ -91,6 +108,7 @@ export class ProductionTriggerRuntime<TResult = unknown> {
       occurrences: this.occurrences,
       triggers: this.store,
       execute: async (trigger, occurrence) => {
+        if (options.occurrenceBridge && await options.occurrenceBridge(trigger, occurrence)) return
         await this.executor.executeOccurrence(trigger, occurrence)
       },
       pollIntervalMs: options.pollInterval,
@@ -102,12 +120,17 @@ export class ProductionTriggerRuntime<TResult = unknown> {
         await this.executor.execute(trigger)
       },
       pollIntervalMs: options.pollInterval,
-      now: options.now
+      now: options.now,
+      cooperativeExecution: options.cooperativeExecution
     })
   }
 
   start(): void {
+    // Reject before startup enqueue, calendar mutation or timer installation.
+    if (this.stopping) throw new Error('Trigger runtime is stopping.')
     if (this.started) return
+    const fault = this.scheduler.getFault()
+    if (fault) throw new Error('Trigger runtime scheduler is faulted.', { cause: fault.cause })
     this.started = true
     this.startupSource.enqueue()
     this.calendarCronSource.tick(this.now())
@@ -127,18 +150,39 @@ export class ProductionTriggerRuntime<TResult = unknown> {
     this.calendarCronTimer.unref?.()
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
     if (this.stopping) return this.stopping
-    if (!this.started) return
+    if (!this.started) return Promise.resolve()
     this.started = false
     if (this.calendarCronTimer) clearTimeout(this.calendarCronTimer)
     this.calendarCronTimer = undefined
-    this.stopping = Promise.all([this.scheduler.stop(), this.occurrenceScheduler.stop()])
-      .then(() => undefined)
-      .finally(() => {
-        this.stopping = undefined
-      })
-    return this.stopping
+    let resolve!: () => void
+    let reject!: (error: unknown) => void
+    const task = new Promise<void>((done, failed) => {
+      resolve = done
+      reject = failed
+    })
+    // Child stop can synchronously invoke admission-abort listeners. Publish first,
+    // but still stop children in this turn so pending admission cannot overtake us.
+    this.stopping = task
+    const invokeStop = (stop: () => Promise<void>): Promise<void> => {
+      try {
+        return stop()
+      } catch (error) {
+        return Promise.reject(error)
+      }
+    }
+    void Promise.allSettled([
+      invokeStop(() => this.scheduler.stop()),
+      invokeStop(() => this.occurrenceScheduler.stop())
+    ]).then((results) => {
+      // One failure cannot clear the restart guard while the other owner drains.
+      if (this.stopping === task) this.stopping = undefined
+      const failure = results.find((result) => result.status === 'rejected')
+      if (failure?.status === 'rejected') reject(failure.reason)
+      else resolve()
+    })
+    return task
   }
 }
 

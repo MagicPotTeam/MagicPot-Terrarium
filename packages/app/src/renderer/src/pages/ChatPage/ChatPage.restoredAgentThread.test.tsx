@@ -15,184 +15,13 @@ import {
   STORAGE_KEY_CURRENT_SESSION_ID
 } from './chatPageShared'
 import ChatPage from './ChatPage'
+import { installFakeIDBKeyRange } from '../../testUtils/fakeIdbKeyRange'
+// A transaction of this fake cannot complete while one of its requests is pending, as in a
+// browser; the per-file fake it replaces completed on a fixed timer and made this suite flaky.
+import { createFakeRestoredThreadIndexedDb as createFakeIndexedDb } from '../../testUtils/fakeRestoredThreadIndexedDb'
 
-type StoreMap = Map<string, Map<string, unknown>>
-
-type FakeIndexedDbState = {
-  stores: StoreMap
-  database: FakeIDBDatabase | null
-}
-
-const cloneValue = <T,>(value: T): T => {
-  if (value === undefined) return value
-  if (typeof structuredClone === 'function') return structuredClone(value)
-  return JSON.parse(JSON.stringify(value)) as T
-}
-
-class FakeIDBObjectStore {
-  constructor(
-    private readonly stores: StoreMap,
-    private readonly storeName: string
-  ) {}
-
-  get(key: string): {
-    result?: unknown
-    error?: DOMException
-    onsuccess?: () => void
-    onerror?: () => void
-  } {
-    const request: {
-      result?: unknown
-      error?: DOMException
-      onsuccess?: () => void
-      onerror?: () => void
-    } = {}
-
-    setTimeout(() => {
-      const value = this.stores.get(this.storeName)?.get(key)
-      request.result = value === undefined ? undefined : cloneValue(value)
-      request.onsuccess?.()
-    }, 0)
-
-    return request
-  }
-
-  getAll(): {
-    result?: unknown[]
-    error?: DOMException
-    onsuccess?: () => void
-    onerror?: () => void
-  } {
-    const request: {
-      result?: unknown[]
-      error?: DOMException
-      onsuccess?: () => void
-      onerror?: () => void
-    } = {}
-
-    setTimeout(() => {
-      request.result = [...(this.stores.get(this.storeName)?.values() || [])].map((value) =>
-        cloneValue(value)
-      )
-      request.onsuccess?.()
-    }, 0)
-
-    return request
-  }
-
-  put(value: unknown): void {
-    const record = value as { storageKey?: string; id?: string }
-    const key = record.storageKey || record.id
-    if (!key) throw new Error('Missing fake IndexedDB keyPath value')
-    this.stores.get(this.storeName)?.set(key, cloneValue(value))
-  }
-
-  delete(key: string): void {
-    this.stores.get(this.storeName)?.delete(key)
-  }
-}
-
-class FakeIDBTransaction {
-  error: DOMException | null = null
-  oncomplete: (() => void) | null = null
-  onerror: (() => void) | null = null
-
-  readonly completed: Promise<void>
-
-  constructor(private readonly stores: StoreMap) {
-    this.completed = new Promise((resolve) => {
-      setTimeout(() => {
-        if (!this.error) this.oncomplete?.()
-        resolve()
-      }, 8)
-    })
-  }
-
-  objectStore(name: string): FakeIDBObjectStore {
-    if (!this.stores.has(name)) throw new Error(`Missing fake object store: ${name}`)
-    return new FakeIDBObjectStore(this.stores, name)
-  }
-}
-
-class FakeIDBDatabase {
-  onclose: (() => void) | null = null
-  onversionchange: (() => void) | null = null
-  readonly objectStoreNames = {
-    contains: (name: string): boolean => this.state.stores.has(name)
-  }
-
-  private readonly pendingTransactions = new Set<Promise<void>>()
-
-  constructor(private readonly state: FakeIndexedDbState) {}
-
-  async waitForTransactions(): Promise<void> {
-    while (this.pendingTransactions.size) await Promise.all([...this.pendingTransactions])
-  }
-
-  createObjectStore(name: string): FakeIDBObjectStore {
-    if (!this.state.stores.has(name)) this.state.stores.set(name, new Map())
-    return new FakeIDBObjectStore(this.state.stores, name)
-  }
-
-  transaction(name: string, _mode: string): FakeIDBTransaction {
-    const transaction = new FakeIDBTransaction(this.state.stores)
-    this.pendingTransactions.add(transaction.completed)
-    void transaction.completed.then(() => this.pendingTransactions.delete(transaction.completed))
-    const originalObjectStore = transaction.objectStore.bind(transaction)
-    transaction.objectStore = (storeName: string) => originalObjectStore(storeName)
-    if (!this.state.stores.has(name)) throw new Error(`Missing fake transaction store: ${name}`)
-    return transaction
-  }
-
-  close(): void {
-    this.onclose?.()
-  }
-}
-
-const createFakeIndexedDb = () => {
-  const state: FakeIndexedDbState = {
-    stores: new Map(),
-    database: null
-  }
-
-  return {
-    api: {
-      open: (_name: string, _version: number) => {
-        const request: {
-          result?: FakeIDBDatabase
-          error?: DOMException
-          transaction?: unknown
-          onupgradeneeded?: (event: { target: { result: FakeIDBDatabase } }) => void
-          onsuccess?: () => void
-          onerror?: () => void
-          onblocked?: () => void
-        } = {}
-
-        setTimeout(() => {
-          if (!state.database) {
-            state.database = new FakeIDBDatabase(state)
-            request.result = state.database
-            request.onupgradeneeded?.({ target: { result: state.database } })
-          }
-          request.result = state.database
-          request.onsuccess?.()
-        }, 0)
-
-        return request
-      },
-      deleteDatabase: (_name: string) => {
-        const request: {
-          onsuccess?: () => void
-          onerror?: () => void
-          onblocked?: () => void
-        } = {}
-        setTimeout(() => request.onsuccess?.(), 0)
-        return request
-      }
-    },
-    state
-  }
-}
+// chatStorage reads one scope through a key range; jsdom has no IDBKeyRange of its own.
+installFakeIDBKeyRange()
 
 let activeFakeIndexedDb: ReturnType<typeof createFakeIndexedDb> | undefined
 
@@ -207,7 +36,9 @@ const fixture = vi.hoisted(() => ({
   config: null as Config | null,
   profiles: [] as LLMAPIProfile[],
   ipcChat: vi.fn(),
-  materializeAttachment: vi.fn()
+  materializeAttachment: vi.fn(),
+  importDataUrl: vi.fn(),
+  materializeForRequest: vi.fn()
 }))
 
 const createConfig = (): Config => ({
@@ -222,7 +53,10 @@ const createConfig = (): Config => ({
         provider: 'openai',
         api_mode: 'responses',
         model_use: 'vision',
-        is_vision_model: true
+        is_vision_model: true,
+        // Main refuses inline images for profiles without this declaration.
+        attachment_transports: ['request-data-url'],
+        preferred_attachment_transport: 'request-data-url'
       } as LLMAPIProfile
     ],
     customSkills: [],
@@ -304,7 +138,6 @@ vi.mock('./chatRequestUtils', async (importOriginal) => {
 vi.mock('./components/SessionSidebar', () => ({ default: () => null }))
 vi.mock('./components/SessionHistoryDialog', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
-vi.mock('./components/ChatSkillPicker', () => ({ default: () => null }))
 vi.mock('./components/ImagePreviewOverlay', () => ({ default: () => null }))
 vi.mock('./components/ImageContextMenu', () => ({ default: () => null }))
 vi.mock('./components/AgentLocalFilesPanel', () => ({ default: () => null }))
@@ -356,6 +189,8 @@ const hashBytes = (bytes: Uint8Array): string =>
   createHash('sha256').update(Buffer.from(bytes)).digest('hex')
 
 const pngHash = hashBytes(decodeBase64(PNG_BASE64))
+// The send-to-agent hand-off imports the inline PNG into managed media (content-addressed).
+const MANAGED_PNG_URL = `local-media:///fixture-chat-media/originals/${pngHash.slice(0, 2)}/${pngHash}.png`
 
 const readSessionFromUi = (): ChatSession | null => {
   const raw = screen.getByTestId('restored-agent-session').textContent?.trim() || ''
@@ -389,7 +224,7 @@ const waitForPersistedSession = async (
     const sessions = await loadAllSessions(scope)
     found = sessions.find(predicate)
     expect(found).toBeTruthy()
-  })
+  }, { timeout: 8000 })
   return found as ChatSession
 }
 
@@ -434,6 +269,32 @@ beforeEach(() => {
   fixture.ipcChat.mockImplementation(async () => ({
     content: `assistant-${fixture.ipcChat.mock.calls.length}`
   }))
+  fixture.importDataUrl.mockReset()
+  fixture.importDataUrl.mockImplementation(
+    async ({ dataUrl, originalFileName }: { dataUrl: string; originalFileName: string }) => {
+      const bytes = decodeBase64(dataUrl.split(',')[1])
+      const sha256 = hashBytes(bytes)
+      return {
+        reference: {
+          version: 1,
+          kind: 'managed',
+          relativePath: `user-output/chat-attachments/originals/${sha256.slice(0, 2)}/${sha256}.png`,
+          sha256,
+          sizeBytes: bytes.byteLength,
+          mimeType: 'image/png',
+          originalFileName
+        },
+        localMediaUrl: `local-media:///fixture-chat-media/originals/${sha256.slice(0, 2)}/${sha256}.png`
+      }
+    }
+  )
+  fixture.materializeForRequest.mockReset()
+  fixture.materializeForRequest.mockImplementation(async () => ({
+    transport: 'request-data-url',
+    dataUrl: PNG_DATA_URL,
+    mimeType: 'image/png',
+    sizeBytes: decodeBase64(PNG_BASE64).byteLength
+  }))
 
   const fakeIndexedDb = createFakeIndexedDb()
   activeFakeIndexedDb = fakeIndexedDb
@@ -448,7 +309,10 @@ beforeEach(() => {
         cancelConversation: vi.fn(async () => undefined),
         signHy3DModel: vi.fn()
       },
-      svcManagedMedia: {},
+      svcManagedMedia: {
+        importDataUrl: fixture.importDataUrl,
+        materializeForRequest: fixture.materializeForRequest
+      },
       svcAgentLocalFiles: {},
       svcFs: {},
       svcHyper: {
@@ -517,13 +381,18 @@ describe('ChatPage restored agent thread persistence', () => {
       (session) =>
         session.id === sessionId &&
         session.messages.some(
-          (message) => message.role === 'user' && message.attachments?.[0]?.url === PNG_DATA_URL
+          (message) => message.role === 'user' && message.attachments?.[0]?.url === MANAGED_PNG_URL
         )
     )
-    expect(firstPersisted.messages[0]?.attachments?.[0]?.url).toBe(PNG_DATA_URL)
-    expect(
-      hashBytes(decodeBase64(firstPersisted.messages[0].attachments![0].url.split(',')[1]))
-    ).toBe(pngHash)
+    // Stored as a managed descriptor, never as the inline data URL it arrived as.
+    expect(firstPersisted.messages[0]?.attachments?.[0]?.url).toBe(MANAGED_PNG_URL)
+    expect(firstPersisted.messages[0]?.attachments?.[0]?.media).toEqual(
+      expect.objectContaining({ kind: 'managed', sha256: pngHash })
+    )
+    expect(JSON.stringify(firstPersisted)).not.toContain('data:')
+    expect(fixture.importDataUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ dataUrl: PNG_DATA_URL, originalFileName: PNG_FILE_NAME })
+    )
 
     fireEvent.change(screen.getByTestId('restored-agent-composer-input'), {
       target: { value: 'Follow up in plain text.' }
@@ -554,7 +423,12 @@ describe('ChatPage restored agent thread persistence', () => {
         expect.objectContaining({
           role: 'user',
           content: 'Describe this owned PNG.',
-          attachments: [expect.objectContaining({ url: PNG_DATA_URL })]
+          attachments: [
+            expect.objectContaining({
+              url: MANAGED_PNG_URL,
+              media: expect.objectContaining({ sha256: pngHash })
+            })
+          ]
         }),
         expect.objectContaining({ role: 'user', content: 'Follow up in plain text.' })
       ])
@@ -625,5 +499,7 @@ describe('ChatPage restored agent thread persistence', () => {
     )
     expect(otherSession.messages.flatMap((message) => message.attachments || [])).toEqual([])
     otherRemount.unmount()
-  })
+    // The managed path settles through the save-conflict retry of the fake store; same
+    // budget as ChatPage.restoredManagedAgentThread needs.
+  }, 20_000)
 })

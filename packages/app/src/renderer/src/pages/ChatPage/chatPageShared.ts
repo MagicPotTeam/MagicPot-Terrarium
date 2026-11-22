@@ -4,7 +4,6 @@ import {
   applyScopedChatPageRunEvent,
   CHAT_PAGE_RUN_LIFECYCLE_EVENT,
   clearScopedChatPageRunLifecycles,
-  markScopedChatPageRunRead,
   readScopedChatPageRunLifecycle,
   readScopedChatPageRunLifecycles,
   startScopedChatPageRun,
@@ -78,7 +77,6 @@ const getScopedRunStateEvent = (state: ChatSessionRunState): ChatSessionRunState
   sessionId: state.sessionId,
   runId: state.runId as ChatPageRunId,
   status: state.status === 'idle' ? 'running' : state.status,
-  unread: state.unread,
   timestamp: state.updatedAt
 })
 export const startScopedChatRun = (
@@ -110,9 +108,7 @@ export const dispatchScopedChatRunEvent = (
   }) as ChatSessionRunState | null
   const changed =
     next !== null &&
-    (current.runId !== next.runId ||
-      current.status !== next.status ||
-      current.unread !== next.unread)
+    (current.runId !== next.runId || current.status !== next.status)
   if (changed && typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent(CHAT_SESSION_RUN_STATE_EVENT, {
@@ -128,24 +124,6 @@ export const readScopedChatRun = (scope: string, sessionId: string): ChatSession
 
 export const readScopedChatRuns = (scope: string): ChatSessionRunState[] =>
   readScopedChatPageRunLifecycles(scope) as ChatSessionRunState[]
-
-export const markScopedChatRunRead = (
-  scope: string,
-  sessionId: string,
-  runId?: ChatPageRunId
-): ChatSessionRunState => {
-  const before = readScopedChatPageRunLifecycle(scope, sessionId) as ChatSessionRunState
-  const next = markScopedChatPageRunRead(scope, sessionId, runId) as ChatSessionRunState
-  const changed = before.unread !== next.unread && next.unread === false
-  if (changed && typeof window !== 'undefined') {
-    window.dispatchEvent(
-      new CustomEvent(CHAT_SESSION_RUN_STATE_EVENT, {
-        detail: getScopedRunStateEvent(next)
-      })
-    )
-  }
-  return next
-}
 
 export { CHAT_PAGE_RUN_LIFECYCLE_EVENT, clearScopedChatPageRunLifecycles }
 export type { ChatPageRunId, ChatPageRunStatus } from '@shared/chatPageRunLifecycle'
@@ -374,6 +352,13 @@ export const updateScopedActiveLoadingSessionId = (
 
   return [...nextIds]
 }
+
+/**
+ * Whether a chat request of any scope is running in this window (one this window sends or an
+ * external one it tracks). Every change is announced with CHAT_SESSION_LOADING_STATE_EVENT.
+ */
+export const hasRunningScopedChatRequests = (): boolean =>
+  activeLoadingSessionIdsByScope.size > 0 || externalLoadingSessionIdsByScope.size > 0
 
 export const readScopedExternalLoadingSessionIds = (scope: string): string[] => {
   clearLegacyExternalLoadingSessionIds(scope)

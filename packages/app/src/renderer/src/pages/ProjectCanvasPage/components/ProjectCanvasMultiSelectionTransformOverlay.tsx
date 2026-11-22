@@ -281,7 +281,8 @@ function buildSelectionPreviewTransform(
 }
 
 function shouldBroadcastSelectionPreview(item: CanvasItem) {
-  return item.type !== 'image' && item.type !== 'file'
+  if (item.type === 'image') return typeof item.teamImageLabel === 'string' && item.teamImageLabel.trim().length > 0
+  return item.type !== 'file'
 }
 
 const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
@@ -584,19 +585,20 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
       const session = sessionRef.current
       const nextBounds = draftBoundsRef.current
 
-      sessionRef.current = null
       draftBoundsRef.current = null
       detachWindowPointerListeners()
       clearPointerCanvasViewportRect()
       flushPreviewBoundsChange()
 
       if (!session || !nextBounds || !baseBounds) {
+        sessionRef.current = null
         emitPreviewBoundsChange(null)
         clearItemPreviewTransforms(true)
         return
       }
 
       if (event.pointerId !== session.pointerId) {
+        sessionRef.current = null
         emitPreviewBoundsChange(null)
         clearItemPreviewTransforms(true)
         return
@@ -606,41 +608,64 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
         const dx = nextBounds.x - session.startBounds.x
         const dy = nextBounds.y - session.startBounds.y
         if (Math.abs(dx) <= 0.001 && Math.abs(dy) <= 0.001) {
+          sessionRef.current = null
           emitPreviewBoundsChange(null)
           clearItemPreviewTransforms(true)
           return
         }
 
-        onTransformEnd(
-          items.map((item) => ({
-            id: item.id,
-            attrs: buildSelectionDragUpdate(item, { dx, dy })
-          }))
-        )
-        emitPreviewBoundsChange(null)
-        clearItemPreviewTransforms(false)
+        broadcastPreviewItems.forEach((item) => {
+          cancelCanvasSync(item.id)
+          window.dispatchEvent(new CustomEvent(`canvas-sync-${item.id}`, { detail: buildSelectionPreviewTransform(item, session, nextBounds) }))
+        })
+        let committed = false
+        try {
+          onTransformEnd(
+            items.map((item) => ({
+              id: item.id,
+              attrs: buildSelectionDragUpdate(item, { dx, dy })
+            }))
+          )
+          committed = true
+        } finally {
+          sessionRef.current = null
+          emitPreviewBoundsChange(null)
+          clearItemPreviewTransforms(!committed)
+        }
         return
       }
 
       const widthChanged = Math.abs(nextBounds.width - session.startBounds.width) > 0.001
       const heightChanged = Math.abs(nextBounds.height - session.startBounds.height) > 0.001
       if (!widthChanged && !heightChanged) {
+        sessionRef.current = null
         emitPreviewBoundsChange(null)
         clearItemPreviewTransforms(true)
         return
       }
 
-      onTransformEnd(
-        items.map((item) => ({
-          id: item.id,
-          attrs: buildSelectionTransformUpdate(item, session.startBounds, nextBounds)
-        }))
-      )
-      emitPreviewBoundsChange(null)
-      clearItemPreviewTransforms(false)
+      broadcastPreviewItems.forEach((item) => {
+        cancelCanvasSync(item.id)
+        window.dispatchEvent(new CustomEvent(`canvas-sync-${item.id}`, { detail: buildSelectionPreviewTransform(item, session, nextBounds) }))
+      })
+      let committed = false
+      try {
+        onTransformEnd(
+          items.map((item) => ({
+            id: item.id,
+            attrs: buildSelectionTransformUpdate(item, session.startBounds, nextBounds)
+          }))
+        )
+        committed = true
+      } finally {
+        sessionRef.current = null
+        emitPreviewBoundsChange(null)
+        clearItemPreviewTransforms(!committed)
+      }
     },
     [
       baseBounds,
+      broadcastPreviewItems,
       clearItemPreviewTransforms,
       clearPointerCanvasViewportRect,
       detachWindowPointerListeners,
@@ -830,13 +855,14 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
         zIndex: 6
       }}
     >
+      {/* Plain elements: one drag surface per selected item, so no styled wrapper per item. */}
       {itemDragSurfaces.map((surface) => (
-        <Box
+        <div
           key={surface.id}
           data-canvas-multi-select-drag-surface="true"
           data-canvas-multi-select-drag-surface-item-id={surface.id}
           onPointerDown={startDrag}
-          sx={{
+          style={{
             position: 'absolute',
             left: surface.left,
             top: surface.top,
@@ -876,4 +902,41 @@ const ProjectCanvasMultiSelectionTransformOverlay: React.FC<
   )
 }
 
-export default React.memo(ProjectCanvasMultiSelectionTransformOverlay)
+/**
+ * A pan only moves the overlay box, and the registered viewport callback already writes its
+ * position. So a committed stagePos change alone does not re-render the overlay when that callback
+ * and the stage refs are present. A scale change still re-renders it: the drag surfaces are sized in
+ * screen pixels.
+ */
+function areMultiSelectionTransformOverlayPropsEqual(
+  previousProps: Readonly<ProjectCanvasMultiSelectionTransformOverlayProps>,
+  nextProps: Readonly<ProjectCanvasMultiSelectionTransformOverlayProps>
+) {
+  const followsViewportImperatively =
+    nextProps.registerViewportCallback != null &&
+    nextProps.stagePosRef != null &&
+    nextProps.stageScaleRef != null
+  const stagePosEqual =
+    previousProps.stagePos === nextProps.stagePos ||
+    followsViewportImperatively ||
+    (previousProps.stagePos.x === nextProps.stagePos.x &&
+      previousProps.stagePos.y === nextProps.stagePos.y)
+
+  return (
+    stagePosEqual &&
+    previousProps.canvasContainerRef === nextProps.canvasContainerRef &&
+    previousProps.items === nextProps.items &&
+    previousProps.livePreviewSyncItemIds === nextProps.livePreviewSyncItemIds &&
+    previousProps.onPreviewBoundsChange === nextProps.onPreviewBoundsChange &&
+    previousProps.registerViewportCallback === nextProps.registerViewportCallback &&
+    previousProps.stagePosRef === nextProps.stagePosRef &&
+    previousProps.stageScale === nextProps.stageScale &&
+    previousProps.stageScaleRef === nextProps.stageScaleRef &&
+    previousProps.onTransformEnd === nextProps.onTransformEnd
+  )
+}
+
+export default React.memo(
+  ProjectCanvasMultiSelectionTransformOverlay,
+  areMultiSelectionTransformOverlayPropsEqual
+)

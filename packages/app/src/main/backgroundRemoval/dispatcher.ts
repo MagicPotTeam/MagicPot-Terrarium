@@ -262,6 +262,7 @@ export function createBackgroundRemovalDispatcher(
         signal: controller.signal
       }
       const leaseResult = await options.capability.acquire(task.capabilityRef, acquiredDeadline)
+      if (leaseResult.status === 'lease') ownsLease = true
       if (controller.signal.aborted || deadlineExpired(task.deadline)) {
         return fail(signal?.aborted || task.deadline.signal?.aborted ? 'CANCELLED' : 'EXPIRED')
       }

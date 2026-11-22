@@ -1,5 +1,6 @@
 import type { LLMDeployment, LLMProviderOption } from '@shared/config/config'
 import { sharedHostExtensionApiV1 } from '@shared/extensions/generatedRegistry'
+import { retiredProfileKind } from './retiredProfile'
 
 export type LLMReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -267,6 +268,10 @@ export const getReasoningEffortLabel = (effort: LLMReasoningEffort): string => {
 export const resolveChatProfileCapabilities = (
   profile?: ChatCapabilityProfile | null
 ): ChatProfileCapabilities => {
+  if (retiredProfileKind(profile)) return {
+    reasoningEfforts: [], attachmentTransports: [],
+    supportsAutoContextCompression: false, supportsSessionContinuation: false
+  }
   const applyExtensions = (baseCapabilities: ChatProfileCapabilities): ChatProfileCapabilities => {
     let nextCapabilities = baseCapabilities
     for (const extension of sharedHostExtensionApiV1.llmProfiles) {

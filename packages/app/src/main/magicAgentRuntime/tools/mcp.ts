@@ -1,17 +1,14 @@
+import { bundledCreativeDeclarations } from '@shared/magicAgentRuntime/bundledCreativeDeclarations'
 import { createAdapter, objectSchema, statusSchema } from './helpers'
 
 export const mcpToolAdapter = createAdapter([
   {
-    name: 'mcp.status',
-    category: 'mcp',
-    description: 'Return MCP client/server status through a registered MCP adapter.',
+    ...bundledCreativeDeclarations['mcp.status'],
     inputSchema: statusSchema,
     dependency: 'mcpStatus'
   },
   {
-    name: 'mcp.tool.call',
-    category: 'mcp',
-    description: 'Call a discovered MCP tool through a registered MCP adapter.',
+    ...bundledCreativeDeclarations['mcp.tool.call'],
     inputSchema: objectSchema(
       {
         toolName: {

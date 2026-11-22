@@ -36,8 +36,8 @@ export type EnsureManagedMediaDerivativeResp =
   | { status: 'fallbackOriginal'; reason: 'animated-gif'; localMediaUrl: string }
 
 export type MaterializeManagedMediaForRequestReq =
-  | { reference: MediaReference; transport: 'request-data-url' }
-  | { reference: MediaReference; transport: 'chunked-binary-v1' }
+  | { reference: MediaReference; transport: 'request-data-url'; maxBytes?: number }
+  | { reference: MediaReference; transport: 'chunked-binary-v1'; maxBytes?: number }
 
 export type MaterializeManagedMediaForRequestResp =
   | {
@@ -74,6 +74,34 @@ export type ImportManagedMediaDataUrlReq = {
   /** Optional physical lifecycle namespace. Omitted requests retain legacy storage. */
   storage?: ManagedMediaStorage
 }
+
+/**
+ * Path-less data (a pasted image, a generated blob) sent as bytes, never as a base64 string.
+ * A file on disk goes through importFile instead.
+ */
+export type ImportManagedMediaBytesReq = {
+  bytes: Uint8Array
+  mimeType: string
+  originalFileName: string
+  /** Optional physical lifecycle namespace. Omitted requests retain legacy storage. */
+  storage?: ManagedMediaStorage
+}
+
+/**
+ * Main's message when an import source does not answer within its deadline. Managed media
+ * errors reach the renderer as their message only, so the composer recognizes the timeout
+ * by this text and shows its own short notice instead.
+ */
+export const MANAGED_MEDIA_IMPORT_TIMEOUT_MESSAGE = 'Managed media source did not respond in time'
+
+/**
+ * How long the renderer waits for main's import grant of one file. main answers within a
+ * slot wait (4 x 15 s) plus one call (15 s); past this the file counts as not answering.
+ */
+export const MANAGED_MEDIA_IMPORT_GRANT_WAIT_MS = 90_000
+
+/** Largest path-less import (importBytes); the renderer refuses larger data before reading it. */
+export const MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES = 64 * 1024 * 1024
 
 export type ImportManagedMediaResp = {
   reference: MediaReference
@@ -113,6 +141,7 @@ export type ReclaimLegacyManagedMediaResp = { queued: true }
 export type ManagedMediaSvc = {
   importFile(req: ImportManagedMediaFileReq): Promise<ImportManagedMediaResp>
   importDataUrl(req: ImportManagedMediaDataUrlReq): Promise<ImportManagedMediaResp>
+  importBytes(req: ImportManagedMediaBytesReq): Promise<ImportManagedMediaResp>
   migrateLegacyDataUrl(req: MigrateLegacyManagedMediaReq): Promise<MigrateLegacyManagedMediaResp>
   reclaimLegacyMigration(req: ReclaimLegacyManagedMediaReq): Promise<ReclaimLegacyManagedMediaResp>
   updateReferenceSnapshot(
@@ -208,6 +237,15 @@ const isSafeOriginalFileName = (value: unknown): value is string =>
   !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/iu.test(value)
 
 /**
+ * Windows reserved device names, which name a device in any folder (with any extension). Win32
+ * rule: the part before the first '.', with trailing spaces removed, is a reserved word. So
+ * 'CON', 'NUL .txt' and 'com1.png' are devices, but 'Con Edison bill.png' or 'AUX cable.jpg'
+ * are ordinary files.
+ */
+export const WINDOWS_DEVICE_NAME =
+  /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³]) *(?:\..*)?$/iu
+
+/**
  * This validates transport syntax only. importFile is intentionally fed from a user-selected
  * Electron File path; the main-owned store remains the authority for canonical/symlink/root checks.
  */
@@ -215,7 +253,8 @@ const isCanonicalAbsoluteFileSource = (value: unknown): value is string => {
   if (typeof value !== 'string' || !value || value !== value.trim() || value.includes('\0')) {
     return false
   }
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(value)) {
+  // A Windows drive letter ('C:\\', 'C:/') is a path, not a one-letter URI scheme.
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(value) && !/^[A-Za-z]:[\\/]/u.test(value)) {
     try {
       const url = new URL(value)
       if (
@@ -232,7 +271,9 @@ const isCanonicalAbsoluteFileSource = (value: unknown): value is string => {
       return (
         decoded.startsWith('/') &&
         !decoded.includes('\\') &&
-        !decoded.split('/').some((segment) => segment === '.' || segment === '..')
+        !decoded.startsWith('/??/') &&
+        !decoded.split('/').some((segment) => segment === '.' || segment === '..') &&
+        !(/^\/[A-Za-z]:/u.test(decoded) && WINDOWS_DEVICE_NAME.test(decoded.split('/').pop() || ''))
       )
     } catch {
       return false
@@ -240,10 +281,15 @@ const isCanonicalAbsoluteFileSource = (value: unknown): value is string => {
   }
   const normalized = value.replace(/\\/g, '/')
   const absolute = normalized.startsWith('/') || /^[A-Za-z]:\//u.test(normalized)
+  const windowsStyle = /^[A-Za-z]:/u.test(value) || value.includes('\\')
   return (
     absolute &&
     !normalized.includes('//') &&
-    !normalized.split('/').some((segment) => segment === '.' || segment === '..')
+    // NT object namespace (the '\' + '?' + '?' + '\' prefix before UNC\host\share): a UNC or
+    // device path in disguise.
+    !normalized.startsWith('/??/') &&
+    !normalized.split('/').some((segment) => segment === '.' || segment === '..') &&
+    !(windowsStyle && WINDOWS_DEVICE_NAME.test(normalized.split('/').pop() || ''))
   )
 }
 
@@ -275,6 +321,28 @@ export const validateImportManagedMediaFileReq = (value: unknown): ImportManaged
   const storage = validateManagedMediaStorage(value.storage)
   return {
     sourcePath: value.sourcePath,
+    mimeType: value.mimeType.toLowerCase(),
+    originalFileName: value.originalFileName,
+    ...(storage ? { storage } : {})
+  }
+}
+
+export const validateImportManagedMediaBytesReq = (value: unknown): ImportManagedMediaBytesReq => {
+  if (
+    !isRecord(value) ||
+    !hasAllowedKeys(value, ['bytes', 'mimeType', 'originalFileName'], ['storage']) ||
+    !(value.bytes instanceof Uint8Array) ||
+    value.bytes.byteLength <= 0 ||
+    value.bytes.byteLength > MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES ||
+    typeof value.mimeType !== 'string' ||
+    !MIME_TYPE_PATTERN.test(value.mimeType) ||
+    !isSafeOriginalFileName(value.originalFileName)
+  ) {
+    throw new ServiceValidationError('svcManagedMedia.importBytes request')
+  }
+  const storage = validateManagedMediaStorage(value.storage)
+  return {
+    bytes: value.bytes,
     mimeType: value.mimeType.toLowerCase(),
     originalFileName: value.originalFileName,
     ...(storage ? { storage } : {})
@@ -489,13 +557,14 @@ export const validateEnsureManagedMediaDerivativeResp = (
 export const validateMaterializeManagedMediaForRequestReq = (
   value: unknown
 ): MaterializeManagedMediaForRequestReq => {
-  if (!isRecord(value) || !hasExactKeys(value, ['reference', 'transport'])) {
+  if (!isRecord(value) || !hasAllowedKeys(value, ['reference', 'transport'], ['maxBytes'])) {
     throw new ServiceValidationError('svcManagedMedia.materializeForRequest request')
   }
   const reference = normalizeMediaReference(value.reference)
   if (
     !reference ||
     reference.kind !== 'managed' ||
+    ('maxBytes' in value && !isPositiveSafeInteger(value.maxBytes)) ||
     (value.transport !== 'request-data-url' && value.transport !== 'chunked-binary-v1')
   ) {
     throw new ServiceValidationError('svcManagedMedia.materializeForRequest request')
@@ -505,7 +574,8 @@ export const validateMaterializeManagedMediaForRequestReq = (
   // binary transport and makes the response shape disagree with the request.
   return {
     reference,
-    transport: value.transport as MaterializeManagedMediaForRequestReq['transport']
+    transport: value.transport as MaterializeManagedMediaForRequestReq['transport'],
+    ...(value.maxBytes !== undefined ? { maxBytes: value.maxBytes as number } : {})
   }
 }
 
@@ -607,6 +677,11 @@ export const managedMediaSvcDef: ServiceDefSheet<ManagedMediaSvc> = {
   importDataUrl: {
     type: 'unary',
     request: validateImportManagedMediaDataUrlReq,
+    response: validateImportManagedMediaResp
+  },
+  importBytes: {
+    type: 'unary',
+    request: validateImportManagedMediaBytesReq,
     response: validateImportManagedMediaResp
   },
   migrateLegacyDataUrl: {

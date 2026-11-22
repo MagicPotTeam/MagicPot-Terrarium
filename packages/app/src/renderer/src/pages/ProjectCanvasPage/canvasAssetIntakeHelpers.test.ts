@@ -7,20 +7,34 @@ import {
   CANVAS_IMAGE_PROXY_MAX_SIDE,
   CANVAS_IMAGE_PROXY_MEDIUM_BATCH_MAX_SIDE,
   CANVAS_IMAGE_PROXY_SMALL_BATCH_MAX_SIDE,
+  bindCanvasThumbnailSetToSource,
   buildCanvasImageDisplayAsset,
   buildCanvasImagePlaceholderAsset,
+  createCanvasImagePendingPixelsAsset,
   getCanvasImagePreviewMaxSideForBatch,
+  getCanvasThumbnailHydrationGenerationConcurrency,
   hydrateCanvasImageItemForCanvas,
+  isCanvasImagePendingPixelsAsset,
   loadImageFromSrc,
-  readCanvasImageBlobMetadata
+  readCanvasImageBlobMetadata,
+  resolveCanvasImageThumbnailDisplayAsset
 } from './canvasAssetIntakeHelpers'
-import { isCanvasImageDeferredPlaceholderPreview } from './canvasImageAssetUtils'
+import {
+  getCanvasImageAssetSize,
+  isCanvasImageDeferredPlaceholderPreview,
+  isCanvasImagePlaceholderAsset
+} from './canvasImageAssetUtils'
+import { resolveCanvasImageLodDecision } from './canvasImageLodPolicy'
 import {
   buildCanvasImageSourceIdentity,
+  buildCanvasSessionSourceIdentity,
   canvasThumbnailManifestFromSet,
-  createCanvasThumbnailSet
+  createCanvasThumbnailSet,
+  isCanvasThumbnailSetFresh
 } from './canvasThumbnailCache'
-import type { CanvasImageItem } from './types'
+import { resetCanvasThumbnailWorkerPoolForTest } from './canvasThumbnailWorkerClient'
+import type { CanvasImageThumbnailLevel, CanvasThumbnailLevelSize } from './canvasThumbnailTypes'
+import type { CanvasImageAsset, CanvasImageItem } from './types'
 
 function createImage(width: number, height: number): HTMLImageElement {
   const image = document.createElement('img')
@@ -297,6 +311,84 @@ describe('canvasAssetIntakeHelpers', () => {
     expect(createImageBitmapMock).not.toHaveBeenCalled()
   })
 
+  it('swaps the header size of a JPEG that its EXIF orientation turns by a quarter', async () => {
+    const createImageBitmapMock = vi.fn(async () => {
+      throw new Error('bitmap decode should not be used for JPEG metadata')
+    })
+    Object.defineProperty(globalThis, 'createImageBitmap', {
+      configurable: true,
+      writable: true,
+      value: createImageBitmapMock
+    })
+    /** SOI, an APP1 EXIF segment with only the orientation tag, then SOF0 with the stored size. */
+    const createJpegWithExif = (
+      storedWidth: number,
+      storedHeight: number,
+      orientation: number,
+      littleEndian: boolean
+    ) => {
+      const u16 = (value: number) =>
+        littleEndian ? [value & 0xff, value >> 8] : [value >> 8, value & 0xff]
+      const u32 = (value: number) =>
+        littleEndian ? [value & 0xff, 0, 0, 0] : [0, 0, 0, value & 0xff]
+      const tiff = [
+        ...(littleEndian ? [0x49, 0x49] : [0x4d, 0x4d]),
+        ...u16(42),
+        ...u32(8),
+        ...u16(1),
+        ...u16(0x0112),
+        ...u16(3),
+        ...u32(1),
+        ...u16(orientation),
+        0,
+        0,
+        ...u32(0)
+      ]
+      const exif = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff]
+      const app1Length = exif.length + 2
+      return new Blob([
+        new Uint8Array([
+          0xff,
+          0xd8,
+          0xff,
+          0xe1,
+          app1Length >> 8,
+          app1Length & 0xff,
+          ...exif,
+          0xff,
+          0xc0,
+          0x00,
+          0x11,
+          0x08,
+          (storedHeight >> 8) & 0xff,
+          storedHeight & 0xff,
+          (storedWidth >> 8) & 0xff,
+          storedWidth & 0xff,
+          0x03,
+          ...Array.from({ length: 9 }, () => 0)
+        ])
+      ])
+    }
+    const sizeOf = async (orientation: number, littleEndian = false) => {
+      const metadata = await readCanvasImageBlobMetadata(
+        createJpegWithExif(1600, 1000, orientation, littleEndian)
+      )
+      return [metadata?.width, metadata?.height]
+    }
+
+    // 1-4 keep the stored size (mirrored or turned by a half), 5-8 are shown as 1000 x 1600.
+    for (const orientation of [1, 2, 3, 4]) {
+      expect(await sizeOf(orientation)).toEqual([1600, 1000])
+    }
+    for (const orientation of [5, 6, 7, 8]) {
+      expect(await sizeOf(orientation)).toEqual([1000, 1600])
+      expect(await sizeOf(orientation, true)).toEqual([1000, 1600])
+    }
+    // A value outside 1-8 is ignored.
+    expect(await sizeOf(9)).toEqual([1600, 1000])
+    expect(createImageBitmapMock).not.toHaveBeenCalled()
+  })
+
   it('reads WebP image dimensions from headers without bitmap decoding', async () => {
     const createImageBitmapMock = vi.fn()
     Object.defineProperty(globalThis, 'createImageBitmap', {
@@ -472,6 +564,34 @@ describe('canvasAssetIntakeHelpers', () => {
       sourceWidth: 640,
       sourceHeight: 360
     })
+  })
+
+  it.each([false, true])('does not invent crop source dimensions from displayed bounds, known=%s', async (known) => {
+    const sourceIdentity = buildCanvasImageSourceIdentity({ canonicalPath: 'C:/synthetic/original.png', sizeBytes: 123, lastModifiedMs: 1 })!
+    const thumbnailSet = createCanvasThumbnailSet({
+      identity: sourceIdentity,
+      levels: ([128, 256, 512, 1024, 2048] as const).map((maxSide) => ({ maxSide, src: 'data:image/png;base64,c3ludGhldGljLXRodW1ibmFpbA==', filename: `${maxSide}.png`, mimeType: 'image/png' as const, width: 100, height: 100, sizeBytes: 10 })),
+      now: new Date('2026-05-02T00:00:00.000Z')
+    })
+    // Source dimensions are a synthetic fixture assumption; no source decode or network occurs.
+    const sourceUrl = 'data:image/png;base64,c3ludGhldGljLTIwMHgyMDA='
+    const thumbnailImage = createImage(100, 100)
+    const loadImageFromSrc = vi.fn(async (src: string) => {
+      if (src !== thumbnailSet.levels[0].src) throw new Error('unexpected original source load')
+      return { img: thumbnailImage, width: 100, height: 100 }
+    })
+    const item: CanvasImageItem = {
+      id: 'synthetic-crop', type: 'image', src: sourceUrl, sourceIdentity, thumbnailSet,
+      x: 0, y: 0, width: 100, height: 100, rotation: 0, scaleX: 1, scaleY: 1,
+      zIndex: 1, locked: false, crop: { x: 0, y: 0, width: 100, height: 100 },
+      ...(known ? { sourceWidth: 200, sourceHeight: 200 } : {})
+    }
+    const hydrated = await hydrateCanvasImageItemForCanvas({ item, loadImageFromSrc })
+    expect(loadImageFromSrc).toHaveBeenCalledOnce()
+    expect(hydrated?.image).toBe(thumbnailImage)
+    expect(hydrated?.crop).toEqual(item.crop)
+    expect(hydrated?.sourceWidth).toBe(known ? 200 : undefined)
+    expect(hydrated?.sourceHeight).toBe(known ? 200 : undefined)
   })
 
   it('rehydrates local images from warm thumbnail cache without loading the source image', async () => {
@@ -691,5 +811,483 @@ describe('canvasAssetIntakeHelpers', () => {
       image: thumbnailImage,
       thumbnailSet
     })
+  })
+
+  describe('thumbnail sets whose top levels are the source itself', () => {
+    const sourceSrc = 'local-media:///C:/assets/small.png'
+    const createSourceIdentity = () =>
+      buildCanvasImageSourceIdentity({
+        canonicalPath: 'C:/assets/small.png',
+        sizeBytes: 4096,
+        lastModifiedMs: 123456
+      })!
+    const fileLevel = (
+      maxSide: CanvasThumbnailLevelSize,
+      fileSide: number
+    ): CanvasImageThumbnailLevel => ({
+      maxSide,
+      src: `local-media:///cache/small/${fileSide}.webp`,
+      filename: `${fileSide}.webp`,
+      mimeType: 'image/webp',
+      width: fileSide,
+      height: Math.round(fileSide * 0.75),
+      sizeBytes: fileSide * 10
+    })
+    /** A 1024 x 768 source: files for 128, 256 and 512; 1024 and 2048 repeat the 512 file. */
+    const createSetOfSmallSource = () =>
+      createCanvasThumbnailSet({
+        identity: createSourceIdentity(),
+        levels: [
+          fileLevel(128, 128),
+          fileLevel(256, 256),
+          fileLevel(512, 512),
+          fileLevel(1024, 512),
+          fileLevel(2048, 512)
+        ]
+      })
+
+    it('points the levels without a file of their own at the source', () => {
+      const thumbnailSet = createSetOfSmallSource()
+      const bound = bindCanvasThumbnailSetToSource(thumbnailSet, {
+        src: sourceSrc,
+        sourceWidth: 1024,
+        sourceHeight: 768,
+        sizeBytes: 4096
+      })
+
+      expect(
+        bound.levels.map((level) => [level.maxSide, level.src, level.width, level.height])
+      ).toEqual([
+        [128, 'local-media:///cache/small/128.webp', 128, 96],
+        [256, 'local-media:///cache/small/256.webp', 256, 192],
+        [512, 'local-media:///cache/small/512.webp', 512, 384],
+        [1024, sourceSrc, 1024, 768],
+        [2048, sourceSrc, 1024, 768]
+      ])
+      expect(bound.levels[3].sizeBytes).toBe(4096)
+      // Still a complete, fresh set for the renderer, and binding twice changes nothing.
+      expect(isCanvasThumbnailSetFresh(bound, createSourceIdentity())).toBe(true)
+      expect(bindCanvasThumbnailSetToSource(bound, { src: sourceSrc })).toBe(bound)
+      // The stored set is not touched.
+      expect(thumbnailSet.levels[4].src).toBe('local-media:///cache/small/512.webp')
+    })
+
+    it('sizes a source-backed level like the level it stands for when the source size is unknown', () => {
+      const bound = bindCanvasThumbnailSetToSource(createSetOfSmallSource(), { src: sourceSrc })
+      expect(
+        bound.levels.slice(3).map((level) => [level.maxSide, level.width, level.height])
+      ).toEqual([
+        [1024, 1024, 768],
+        [2048, 2048, 1536]
+      ])
+    })
+
+    it('leaves a set with one file per level as it is', () => {
+      const thumbnailSet = createCanvasThumbnailSet({
+        identity: createSourceIdentity(),
+        levels: ([128, 256, 512, 1024, 2048] as const).map((side) => fileLevel(side, side))
+      })
+      expect(
+        bindCanvasThumbnailSetToSource(thumbnailSet, {
+          src: sourceSrc,
+          sourceWidth: 4096,
+          sourceHeight: 3072
+        })
+      ).toBe(thumbnailSet)
+    })
+
+    it('shows the source for a small import of a small image and the 512 file for a large batch', async () => {
+      const thumbnailSet = createSetOfSmallSource()
+      const readThumbnailManifest = vi.fn(async () => ({
+        manifest: canvasThumbnailManifestFromSet(thumbnailSet)
+      }))
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: { svcCanvasThumbnail: { readThumbnailManifest } }
+      })
+      const loaded: string[] = []
+      const loadImageFromSrcFn = vi.fn(async (src: string) => {
+        loaded.push(src)
+        return { img: createImage(1, 1), width: 1, height: 1 }
+      })
+      const resolve = (maxPreviewSide: number) =>
+        resolveCanvasImageThumbnailDisplayAsset({
+          src: sourceSrc,
+          sourceIdentity: createSourceIdentity(),
+          sourceWidth: 1024,
+          sourceHeight: 768,
+          maxPreviewSide,
+          loadImageFromSrcFn
+        })
+
+      // 1-4 images at once ask for 2048 px: for a 1024 px source that is the source.
+      const single = await resolve(CANVAS_IMAGE_PROXY_MAX_SIDE)
+      // 32 and more ask for 512 px: that level has a file.
+      const batch = await resolve(CANVAS_IMAGE_PROXY_DEFAULT_BATCH_MAX_SIDE)
+
+      expect(loaded).toEqual([sourceSrc, 'local-media:///cache/small/512.webp'])
+      for (const result of [single, batch]) {
+        expect(result?.thumbnailSet.levels.map((level) => level.src)).toEqual([
+          'local-media:///cache/small/128.webp',
+          'local-media:///cache/small/256.webp',
+          'local-media:///cache/small/512.webp',
+          sourceSrc,
+          sourceSrc
+        ])
+      }
+    })
+
+    const installLevelGenerationMocks = (sourceWidth: number, sourceHeight: number) => {
+      // No Worker in this environment: the levels are made in scope, with the same code.
+      const createImageBitmapMock = vi.fn(async () => ({
+        width: sourceWidth,
+        height: sourceHeight,
+        close: vi.fn()
+      }))
+      Object.defineProperty(globalThis, 'createImageBitmap', {
+        configurable: true,
+        writable: true,
+        value: createImageBitmapMock
+      })
+      HTMLCanvasElement.prototype.getContext = (() =>
+        ({
+          clearRect: vi.fn(),
+          drawImage: vi.fn(),
+          imageSmoothingEnabled: false,
+          imageSmoothingQuality: 'low'
+        }) as unknown as CanvasRenderingContext2D) as unknown as typeof HTMLCanvasElement.prototype.getContext
+      const pendingEncodes: Array<{ width: number; finish: () => void }> = []
+      HTMLCanvasElement.prototype.toBlob = vi.fn(function (
+        this: HTMLCanvasElement,
+        callback: BlobCallback
+      ) {
+        const width = this.width
+        pendingEncodes.push({
+          width,
+          finish: () => callback(new Blob([`level-${width}`], { type: 'image/webp' }))
+        })
+      }) as unknown as typeof HTMLCanvasElement.prototype.toBlob
+      return { createImageBitmapMock, pendingEncodes }
+    }
+
+    it('reads the cache once and shows the display level of a cold large image before the larger levels are encoded', async () => {
+      resetCanvasThumbnailWorkerPoolForTest()
+      const identity = createSourceIdentity()
+      const readThumbnailManifest = vi.fn(async () => ({ manifest: null }))
+      const writeThumbnailSet = vi.fn(
+        async ({ manifest }: { manifest: ReturnType<typeof canvasThumbnailManifestFromSet> }) => ({
+          manifest: {
+            ...manifest,
+            levels: manifest.levels.map((level) => ({
+              ...level,
+              src: `local-media:///cache/large/${level.filename}`
+            }))
+          }
+        })
+      )
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: { svcCanvasThumbnail: { readThumbnailManifest, writeThumbnailSet } }
+      })
+      const { createImageBitmapMock, pendingEncodes } = installLevelGenerationMocks(4096, 3072)
+      const order: string[] = []
+      const firstImages: CanvasImageAsset[] = []
+      const levelImage = createImage(512, 384)
+      let nextUrl = 0
+      URL.createObjectURL = vi.fn(() => `blob:level-${++nextUrl}`)
+      URL.revokeObjectURL = vi.fn()
+
+      const resolving = resolveCanvasImageThumbnailDisplayAsset({
+        src: 'local-media:///C:/assets/large.png',
+        sourceIdentity: identity,
+        sourceFile: new Blob(['large-source'], { type: 'image/png' }),
+        sourceWidth: 4096,
+        sourceHeight: 3072,
+        maxPreviewSide: CANVAS_IMAGE_PROXY_DEFAULT_BATCH_MAX_SIDE,
+        onFirstImage: (image) => {
+          order.push('first-image')
+          firstImages.push(image)
+        },
+        loadImageFromSrcFn: async (src) => {
+          order.push(`load ${src}`)
+          return { img: levelImage, width: 512, height: 384 }
+        }
+      })
+
+      // The 512 level is encoded first and shown at once: four encodes are still to come.
+      await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+      expect(pendingEncodes[0].width).toBe(512)
+      pendingEncodes.shift()?.finish()
+      await vi.waitFor(() => expect(firstImages).toHaveLength(1))
+      expect(order).toEqual(['load blob:level-1', 'first-image'])
+      expect(firstImages[0]).toBe(levelImage)
+      // Real pixels, not a placeholder: nothing has to replace this image later.
+      expect(isCanvasImagePlaceholderAsset(firstImages[0])).toBe(false)
+      expect(writeThumbnailSet).not.toHaveBeenCalled()
+
+      for (let index = 0; index < 4; index += 1) {
+        await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+        pendingEncodes.shift()?.finish()
+      }
+      const result = await resolving
+
+      expect(readThumbnailManifest).toHaveBeenCalledTimes(1)
+      expect(writeThumbnailSet).toHaveBeenCalledTimes(1)
+      // The same image element: the canvas uploads it once. No read of the file just written.
+      expect(result?.image).toBe(levelImage)
+      expect(order).toEqual(['load blob:level-1', 'first-image'])
+      expect(firstImages).toHaveLength(1)
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:level-1')
+      // One decode of the source, no second bitmap for the early image.
+      expect(createImageBitmapMock).toHaveBeenCalledTimes(1)
+      // A 4096 px source has a file for every level: nothing points at the source.
+      expect(new Set(result?.thumbnailSet.levels.map((level) => level.src)).size).toBe(5)
+    })
+
+    it('shows the freshly encoded level of a small source from its bytes, without an early hand-over', async () => {
+      resetCanvasThumbnailWorkerPoolForTest()
+      const writeThumbnailSet = vi.fn(
+        async ({ manifest }: { manifest: ReturnType<typeof canvasThumbnailManifestFromSet> }) => ({
+          manifest: {
+            ...manifest,
+            levels: manifest.levels.map((level) => ({
+              ...level,
+              src: `local-media:///cache/small/${level.filename}`
+            }))
+          }
+        })
+      )
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: {
+          svcCanvasThumbnail: {
+            readThumbnailManifest: vi.fn(async () => ({ manifest: null })),
+            writeThumbnailSet
+          }
+        }
+      })
+      const { createImageBitmapMock, pendingEncodes } = installLevelGenerationMocks(1024, 768)
+      URL.createObjectURL = vi.fn(() => 'blob:generated-512')
+      URL.revokeObjectURL = vi.fn()
+      const onFirstImage = vi.fn()
+      const loaded: string[] = []
+
+      const resolving = resolveCanvasImageThumbnailDisplayAsset({
+        src: sourceSrc,
+        sourceIdentity: createSourceIdentity(),
+        sourceFile: new Blob(['small-source'], { type: 'image/png' }),
+        sourceWidth: 1024,
+        sourceHeight: 768,
+        maxPreviewSide: CANVAS_IMAGE_PROXY_DEFAULT_BATCH_MAX_SIDE,
+        onFirstImage,
+        loadImageFromSrcFn: async (src) => {
+          loaded.push(src)
+          return { img: createImage(512, 384), width: 512, height: 384 }
+        }
+      })
+      // 128, 256 and 512: smallest first, the 512 level is the last encode of the job.
+      for (const width of [128, 256, 512]) {
+        await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+        expect(pendingEncodes[0].width).toBe(width)
+        pendingEncodes.shift()?.finish()
+      }
+      const result = await resolving
+
+      expect(result).not.toBeNull()
+      expect(onFirstImage).not.toHaveBeenCalled()
+      expect(createImageBitmapMock).toHaveBeenCalledTimes(1)
+      // Shown from the bytes that were just encoded, not read back through local-media.
+      expect(loaded).toEqual(['blob:generated-512'])
+      const writtenLevels = writeThumbnailSet.mock.calls[0][0].manifest.levels
+      expect(writtenLevels.map((level) => level.filename)).toEqual([
+        '128.webp',
+        '256.webp',
+        '512.webp',
+        '512.webp',
+        '512.webp'
+      ])
+      expect(result?.thumbnailSet.levels.map((level) => level.src)).toEqual([
+        'local-media:///cache/small/128.webp',
+        'local-media:///cache/small/256.webp',
+        'local-media:///cache/small/512.webp',
+        sourceSrc,
+        sourceSrc
+      ])
+    })
+
+    it('shows the source itself for an image smaller than the display level', async () => {
+      resetCanvasThumbnailWorkerPoolForTest()
+      Object.defineProperty(window, 'api', {
+        configurable: true,
+        writable: true,
+        value: {
+          svcCanvasThumbnail: { readThumbnailManifest: vi.fn(async () => ({ manifest: null })) }
+        }
+      })
+      const { pendingEncodes } = installLevelGenerationMocks(300, 200)
+      let nextUrl = 0
+      URL.createObjectURL = vi.fn(() => `blob:transient-${++nextUrl}`)
+      URL.revokeObjectURL = vi.fn()
+      const onFirstImage = vi.fn()
+      const loaded: string[] = []
+      const tinySrc = 'blob:pasted-tiny'
+      const identity = buildCanvasSessionSourceIdentity({
+        sourceKey: 'canvas-session:tiny',
+        sizeBytes: 900,
+        mimeType: 'image/png',
+        fileName: 'tiny.png'
+      })
+
+      const resolving = resolveCanvasImageThumbnailDisplayAsset({
+        src: tinySrc,
+        sourceIdentity: identity,
+        sourceFile: new Blob(['tiny-source'], { type: 'image/png' }),
+        sourceWidth: 300,
+        sourceHeight: 200,
+        maxPreviewSide: CANVAS_IMAGE_PROXY_DEFAULT_BATCH_MAX_SIDE,
+        onFirstImage,
+        loadImageFromSrcFn: async (src) => {
+          loaded.push(src)
+          return { img: createImage(300, 200), width: 300, height: 200 }
+        }
+      })
+      // A 300 px image gets the 128 and 256 files only.
+      for (const width of [128, 256]) {
+        await vi.waitFor(() => expect(pendingEncodes).toHaveLength(1))
+        expect(pendingEncodes[0].width).toBe(width)
+        pendingEncodes.shift()?.finish()
+      }
+      const result = await resolving
+
+      expect(onFirstImage).not.toHaveBeenCalled()
+      // 512 px was asked for: that is the source's own 300 px, not an enlarged 256 px file.
+      expect(loaded).toEqual([tinySrc])
+      expect(
+        result?.thumbnailSet.levels.map((level) => [level.maxSide, level.width, level.height])
+      ).toEqual([
+        [128, 128, 85],
+        [256, 256, 171],
+        [512, 300, 200],
+        [1024, 300, 200],
+        [2048, 300, 200]
+      ])
+      expect(result?.thumbnailSet.levels.slice(2).every((level) => level.src === tinySrc)).toBe(
+        true
+      )
+      expect(isCanvasThumbnailSetFresh(result?.thumbnailSet, identity)).toBe(true)
+    })
+  })
+
+  it('opens a board of uncached images a few thumbnail generations at a time', async () => {
+    resetCanvasThumbnailWorkerPoolForTest()
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      writable: true,
+      value: {
+        svcCanvasThumbnail: { readThumbnailManifest: vi.fn(async () => ({ manifest: null })) }
+      }
+    })
+    // Each generation starts by reading its source: hold every read.
+    const pendingReads: Array<() => void> = []
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          pendingReads.push(() => resolve({ ok: false, status: 404 } as Response))
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const loadImageFromSrc = vi.fn(async () => ({
+      img: createImage(64, 48),
+      width: 64,
+      height: 48
+    }))
+    const items: CanvasImageItem[] = Array.from({ length: 20 }, (_, index) => ({
+      id: `reopened-${index}`,
+      type: 'image',
+      src: `local-media:///C:/board/reopened-${index}.png`,
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 240,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      sourceIdentity: buildCanvasImageSourceIdentity({
+        canonicalPath: `C:/board/reopened-${index}.png`,
+        sizeBytes: 1000 + index,
+        lastModifiedMs: 1700000000000
+      })!
+    }))
+
+    try {
+      const hydrations = items.map((item) =>
+        hydrateCanvasImageItemForCanvas({ item, loadImageFromSrc })
+      )
+      const limit = getCanvasThumbnailHydrationGenerationConcurrency()
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(limit))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      // The others wait in turn instead of all reading their source (and later generating) at once.
+      expect(fetchMock).toHaveBeenCalledTimes(limit)
+
+      for (let round = 0; round < 40 && fetchMock.mock.calls.length < items.length; round += 1) {
+        pendingReads.splice(0).forEach((finish) => finish())
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      pendingReads.splice(0).forEach((finish) => finish())
+      const hydrated = await Promise.all(hydrations)
+      expect(fetchMock).toHaveBeenCalledTimes(items.length)
+      expect(hydrated.every((item) => item?.image)).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('makes one flat pending tile per import and marks it as a placeholder', () => {
+    HTMLCanvasElement.prototype.getContext = (() =>
+      null) as typeof HTMLCanvasElement.prototype.getContext
+    const first = createCanvasImagePendingPixelsAsset()
+    const second = createCanvasImagePendingPixelsAsset()
+
+    expect(first).not.toBeNull()
+    // Each import tells its own waiting frames apart by the tile object.
+    expect(second).not.toBe(first)
+    expect(isCanvasImagePendingPixelsAsset(first)).toBe(true)
+    expect(isCanvasImagePendingPixelsAsset(second)).toBe(true)
+    expect(isCanvasImagePlaceholderAsset(first)).toBe(true)
+    expect(isCanvasImagePendingPixelsAsset(document.createElement('canvas'))).toBe(false)
+    expect(isCanvasImagePendingPixelsAsset(undefined)).toBe(false)
+  })
+
+  it('keeps the pending tile cheap as a texture and quiet for the renderer', () => {
+    HTMLCanvasElement.prototype.getContext = (() =>
+      null) as typeof HTMLCanvasElement.prototype.getContext
+    const tile = createCanvasImagePendingPixelsAsset()
+    const { width, height } = getCanvasImageAssetSize(tile)
+
+    // The renderer makes one texture of it per frame that waits: a few KiB each, not 1 MiB.
+    expect(width * height * 4).toBeLessThanOrEqual(8 * 1024)
+
+    // A waiting frame at overview size asks for no source decode of its own ...
+    const frame = {
+      id: 'pending',
+      src: 'local-media:///C:/board/pending.png',
+      width: 400,
+      height: 300,
+      scaleX: 1,
+      scaleY: 1,
+      sourceWidth: 4096,
+      sourceHeight: 3072
+    }
+    const overview = resolveCanvasImageLodDecision({ item: frame, image: tile, stageScale: 1 })
+    expect(overview.usesPlaceholderPreview).toBe(true)
+    expect(overview.shouldUseSourceTexture).toBe(false)
+    // ... only one that fills the screen does, like a frame that already has its 512 px preview.
+    const closeUp = resolveCanvasImageLodDecision({ item: frame, image: tile, stageScale: 3 })
+    expect(closeUp.shouldUseSourceTexture).toBe(true)
   })
 })

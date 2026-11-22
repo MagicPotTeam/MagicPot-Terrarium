@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiDef } from '@shared/api'
 import { createServer, initServerIpc } from './serverIpc'
+import { parseStartupStorageMetadataRequest, parseStartupStorageMetadataResponse, startupStorageMetadataUnavailable } from '@shared/api/startupStorageMetadata'
 import { FigPluginCenterSvcImpl } from './svcFigPluginCenterImpl'
 import { AgentLocalFilesSvcImpl } from './svcAgentLocalFilesImpl'
 
@@ -14,7 +15,7 @@ const CANVAS_THUMBNAIL_METHODS = [
   'createNativeRegion'
 ] as const
 
-const { createServiceClass, handleMock, onMock } = vi.hoisted(() => {
+const { createServiceClass, handleMock, onMock, catalogDelegateFactory, platformConstructor, storageDelegateFactory, stateConstructor, managedMediaConstructor, resolveAuthorizedLocalMediaPathMock, consumeImportGrantMock } = vi.hoisted(() => {
   const createServiceClass = () =>
     class {
       [methodName: string]: unknown
@@ -37,7 +38,21 @@ const { createServiceClass, handleMock, onMock } = vi.hoisted(() => {
   return {
     createServiceClass,
     handleMock: vi.fn(),
-    onMock: vi.fn()
+    onMock: vi.fn(),
+    catalogDelegateFactory: vi.fn((_getMainWindow: () => Electron.BrowserWindow | null) => vi.fn(async () => ({ status: 'unavailable', reason: 'unavailable' }))),
+    platformConstructor: vi.fn(),
+    storageDelegateFactory: vi.fn((_getMainWindow: () => Electron.BrowserWindow | null) => vi.fn(async () => ({ status: 'unavailable', reason: 'unavailable' }))),
+    stateConstructor: vi.fn(),
+    managedMediaConstructor: vi.fn(),
+    // The policy's own answer shape: the canonical path and whether only an import grant covers it.
+    resolveAuthorizedLocalMediaPathMock: vi.fn((filePath: string, roots: readonly string[]) =>
+      roots.some((root) => filePath.startsWith(`${root}/`))
+        ? { canonicalPath: filePath, viaImportGrant: false }
+        : null
+    ),
+    consumeImportGrantMock: vi.fn((_canonicalPath: string, _kind?: string) => ({
+      finished: vi.fn()
+    }))
   }
 })
 
@@ -54,7 +69,8 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('./svcAdobeBridgeImpl', () => ({ AdobeBridgeSvcImpl: createServiceClass() }))
-vi.mock('./svcStateImpl', () => ({ StateSvcImpl: createServiceClass() }))
+vi.mock('./svcStateImpl', () => ({ StateSvcImpl: vi.fn(function (deps?: unknown) { stateConstructor(deps); return new (createServiceClass())() }) }))
+vi.mock('../storageMetadata/startupStorageReadBinding', () => ({ createStartupStorageReadDelegate: storageDelegateFactory }))
 vi.mock('./svcComfyImpl', () => ({ ComfySvcImpl: createServiceClass() }))
 vi.mock('./svcComfyBatchImpl', () => ({ ComfyBatchSvcImpl: createServiceClass() }))
 vi.mock('./svcCanvasThumbnailImpl', () => ({ CanvasThumbnailSvcImpl: createServiceClass() }))
@@ -74,12 +90,96 @@ vi.mock('./svcFsImpl', () => ({ FsSvcImpl: createServiceClass() }))
 vi.mock('./svcDccBridgeImpl', () => ({ DccBridgeSvcImpl: createServiceClass() }))
 vi.mock('./svcDuplicateCheckImpl', () => ({ DuplicateCheckSvcImpl: createServiceClass() }))
 vi.mock('./svcAppUpdateImpl', () => ({ AppUpdateSvcImpl: createServiceClass() }))
-vi.mock('./svcMagicAgentPlatformImpl', () => ({ MagicAgentPlatformSvcImpl: createServiceClass() }))
-vi.mock('./svcManagedMediaImpl', () => ({ ManagedMediaSvcImpl: createServiceClass() }))
+vi.mock('./svcMagicAgentPlatformImpl', () => ({
+  MagicAgentPlatformSvcImpl: vi.fn(function (deps?: unknown) {
+    platformConstructor(deps)
+    return new (createServiceClass())()
+  })
+}))
+vi.mock('../magicAgentRuntime/installedCatalogReadBinding', () => ({
+  createInstalledCatalogReadDelegate: catalogDelegateFactory
+}))
+vi.mock('./svcManagedMediaImpl', () => ({
+  ManagedMediaSvcImpl: vi.fn(function (deps?: unknown) {
+    managedMediaConstructor(deps)
+    return new (createServiceClass())()
+  }),
+  MANAGED_MEDIA_IMPORT_FILE_MAX_BYTES: 1024
+}))
+vi.mock('../localMediaAccess', () => ({
+  authorizeLocalMediaImportSourcePathAsync: resolveAuthorizedLocalMediaPathMock,
+  spendLocalMediaImportGrant: consumeImportGrantMock
+}))
+vi.mock('../localMediaAllowedRoots', () => ({ getLocalMediaAllowedRoots: () => ['/app-root'] }))
+vi.mock('./svcReportBundlesImpl', () => ({ ReportBundlesSvcImpl: createServiceClass() }))
 describe('serverIpc createServer', () => {
   beforeEach(() => {
     handleMock.mockClear()
-    onMock.mockClear()
+    onMock.mockClear(); catalogDelegateFactory.mockClear(); platformConstructor.mockClear(); storageDelegateFactory.mockClear(); stateConstructor.mockClear()
+  })
+
+  it('gives the renderer-facing managed media service the source-path policy, the size cap and the source deadlines', async () => {
+    managedMediaConstructor.mockClear()
+    createServer()
+    expect(managedMediaConstructor).toHaveBeenCalledOnce()
+    const deps = managedMediaConstructor.mock.calls[0]?.[0] as {
+      authorizeImportSourcePath?: (
+        sourcePath: string
+      ) => Promise<{ canonicalPath: string; viaImportGrant: boolean } | null>
+      maxImportFileBytes?: number
+      importSourceGuard?: { operationTimeoutMs: number }
+    }
+    expect(deps.maxImportFileBytes).toBe(1024)
+    expect(deps.importSourceGuard?.operationTimeoutMs).toBeGreaterThan(0)
+    await expect(deps.authorizeImportSourcePath?.('/app-root/a.png')).resolves.toEqual({
+      canonicalPath: '/app-root/a.png',
+      viaImportGrant: false
+    })
+    await expect(deps.authorizeImportSourcePath?.('/elsewhere/a.png')).resolves.toBeNull()
+    expect(resolveAuthorizedLocalMediaPathMock).toHaveBeenLastCalledWith('/elsewhere/a.png', ['/app-root'])
+    // importFile spends a one-use import grant through main's own grant store.
+    const { consumeImportGrant } = deps as {
+      consumeImportGrant?: (canonicalPath: string) => unknown
+    }
+    expect(consumeImportGrant?.('/picked/a.png')).toMatchObject({ finished: expect.any(Function) })
+    expect(consumeImportGrantMock).toHaveBeenCalledWith('/picked/a.png', 'import')
+  })
+
+  it('puts the source-path authorization under the import-source deadline, keyed by its root', async () => {
+    managedMediaConstructor.mockClear()
+    createServer()
+    const deps = managedMediaConstructor.mock.calls[0]?.[0] as {
+      authorizeImportSourcePath: (sourcePath: string) => Promise<string | null>
+      importSourceGuard: { operationTimeoutMs: number }
+    }
+    const stalled: Array<() => void> = []
+    resolveAuthorizedLocalMediaPathMock.mockImplementation(((filePath: string) =>
+      filePath.startsWith('/mnt/dead/')
+        ? new Promise<null>((resolve) => stalled.push(() => resolve(null)))
+        : { canonicalPath: filePath, viaImportGrant: false }) as never)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const outcomes = ['/mnt/dead/a.png', '/mnt/dead/b.png'].map((sourcePath) =>
+        deps.authorizeImportSourcePath(sourcePath).catch((error: unknown) => error)
+      )
+      await vi.advanceTimersByTimeAsync(deps.importSourceGuard.operationTimeoutMs)
+      for (const outcome of outcomes)
+        await expect(outcome).resolves.toMatchObject({ code: 'MANAGED_MEDIA_IMPORT_TIMEOUT' })
+      // The dead mount holds its two calls; a file elsewhere is still authorized.
+      await expect(deps.authorizeImportSourcePath('/app-root/c.png')).resolves.toEqual({
+        canonicalPath: '/app-root/c.png',
+        viaImportGrant: false
+      })
+    } finally {
+      vi.useRealTimers()
+      stalled.forEach((release) => release())
+      resolveAuthorizedLocalMediaPathMock.mockImplementation(
+        (filePath: string, roots: readonly string[]) =>
+          roots.some((root) => filePath.startsWith(`${root}/`))
+            ? { canonicalPath: filePath, viaImportGrant: false }
+            : null
+      )
+    }
   })
 
   it('creates the remaining service registry', () => {
@@ -95,6 +195,80 @@ describe('serverIpc createServer', () => {
     expect(apiDef.svcManagedMedia.ensureDerivative.type).toBe('unary')
     expect(api.svcComfyBatch).toBeDefined()
     expect(apiDef.svcComfyBatch.start.type).toBe('unary')
+  })
+
+  it('injects only the MAIN catalog delegate made with the original authoritative window getter into the IPC-created constructor', () => {
+    const firstWindow = {} as Electron.BrowserWindow, secondWindow = {} as Electron.BrowserWindow
+    let current: Electron.BrowserWindow | null = firstWindow
+    const getMainWindow = vi.fn(() => current)
+    createServer(undefined, getMainWindow)
+    expect(catalogDelegateFactory).toHaveBeenCalledExactlyOnceWith(getMainWindow)
+    expect(getMainWindow).not.toHaveBeenCalled()
+    const delegate = catalogDelegateFactory.mock.results[0]?.value
+    expect(platformConstructor).toHaveBeenCalledExactlyOnceWith({ installedCatalogRead: delegate })
+    expect(delegate).not.toHaveBeenCalled()
+    expect(catalogDelegateFactory.mock.calls[0]?.[0]()).toBe(firstWindow)
+    current = secondWindow; expect(catalogDelegateFactory.mock.calls[0]?.[0]()).toBe(secondWindow)
+    current = null; expect(catalogDelegateFactory.mock.calls[0]?.[0]()).toBeNull()
+  })
+  it('default IPC constructor gets a null-window delegate rather than selecting or installing a window', () => {
+    createServer()
+    expect(catalogDelegateFactory).toHaveBeenCalledOnce()
+    const getter = catalogDelegateFactory.mock.calls[0]?.[0]
+    expect(getter).toBeTypeOf('function'); expect(getter!()).toBeNull()
+    expect(platformConstructor).toHaveBeenCalledExactlyOnceWith({ installedCatalogRead: catalogDelegateFactory.mock.results[0]?.value })
+  })
+  it('registers the exact strict RAW catalog unary while the mocked constructor remains only an injection observer', async () => {
+    const getter = vi.fn(() => null)
+    initServerIpc(undefined, getter)
+    expect(catalogDelegateFactory).toHaveBeenCalledExactlyOnceWith(getter)
+    expect(platformConstructor).toHaveBeenCalledExactlyOnceWith({ installedCatalogRead: catalogDelegateFactory.mock.results[0]?.value })
+    expect(apiDef.svcMagicAgentPlatform.readInstalledCatalog.type).toBe('unary')
+    expect(apiDef.svcMagicAgentPlatform.readInstalledCatalog.ipcResult).toBeUndefined()
+    const handler = handleMock.mock.calls.find(([name]) => name === 'svcMagicAgentPlatform.readInstalledCatalog')?.[1]
+    expect(handler).toBeTypeOf('function')
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try { await expect(handler({ sender: { id: 42, getURL: () => 'file:///app/index.html#/agent-management' }, senderFrame: { url: 'file:///app/index.html#/agent-management', parent: null } }, { path: 'PRIVATE' })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' }) }
+    finally { errorLog.mockRestore() }
+    expect(catalogDelegateFactory.mock.results[0]?.value).not.toHaveBeenCalled()
+  })
+
+  it('injects an independent storage delegate with the ORIGINAL getter callable and no eager access, retaining catalog injection', () => {
+    const first = {} as Electron.BrowserWindow, second = {} as Electron.BrowserWindow
+    let current: Electron.BrowserWindow | null = first
+    const getter = vi.fn(() => current)
+    createServer(undefined, getter)
+    expect(storageDelegateFactory).toHaveBeenCalledExactlyOnceWith(getter)
+    expect(catalogDelegateFactory).toHaveBeenCalledExactlyOnceWith(getter)
+    expect(getter).not.toHaveBeenCalled()
+    const delegate = storageDelegateFactory.mock.results[0]?.value
+    expect(stateConstructor).toHaveBeenCalledExactlyOnceWith({ startupStorageRead: delegate })
+    expect(platformConstructor).toHaveBeenCalledExactlyOnceWith({ installedCatalogRead: catalogDelegateFactory.mock.results[0]?.value })
+    expect(delegate).not.toBe(catalogDelegateFactory.mock.results[0]?.value); expect(delegate).not.toHaveBeenCalled()
+    const received = storageDelegateFactory.mock.calls[0]?.[0]
+    expect(received!()).toBe(first); current = second; expect(received!()).toBe(second); current = null; expect(received!()).toBeNull()
+  })
+  it('keeps default storage IPC getter null and does not silently choose a global window', () => {
+    createServer()
+    expect(storageDelegateFactory).toHaveBeenCalledOnce()
+    expect(storageDelegateFactory.mock.calls[0]?.[0]()).toBeNull()
+    expect(stateConstructor).toHaveBeenCalledExactlyOnceWith({ startupStorageRead: storageDelegateFactory.mock.results[0]?.value })
+    expect(storageDelegateFactory.mock.results[0]?.value).not.toHaveBeenCalled()
+  })
+  it('registers canonical storage raw unary with EXACT parser identities and malformed requests deny before the observer implementation', async () => {
+    const getter = vi.fn(() => null)
+    initServerIpc(undefined, getter)
+    expect(storageDelegateFactory).toHaveBeenCalledExactlyOnceWith(getter)
+    const definition = (apiDef.svcState as unknown as Record<string, { type: unknown; request?: unknown; response?: unknown }>).readStartupStorageMetadata
+    expect(definition.type).toBe('unary'); expect(Object.hasOwn(definition, 'ipcResult')).toBe(false)
+    expect(definition.request).toBe(parseStartupStorageMetadataRequest); expect(definition.response).toBe(parseStartupStorageMetadataResponse)
+    const callback = handleMock.mock.calls.find(([name]) => name === 'svcState.readStartupStorageMetadata')?.[1]
+    expect(callback).toBeTypeOf('function')
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(callback({ sender: { id: 42, getURL: () => 'file:///app/index.html#/agent-management' }, senderFrame: { url: 'file:///app/index.html#/agent-management', parent: null } }, { path: 'PRIVATE' })).resolves.toBe(startupStorageMetadataUnavailable)
+      expect(storageDelegateFactory.mock.results[0]?.value).not.toHaveBeenCalled(); expect(log).not.toHaveBeenCalled(); expect(getter).not.toHaveBeenCalled()
+    } finally { log.mockRestore() }
   })
 
   it('registers the real manifest-only FIGPLUGIN core service without initializing storage', () => {
@@ -222,6 +396,19 @@ describe('serverIpc createServer', () => {
       'svcManagedMedia.ensureDerivative',
       expect.any(Function)
     )
+  })
+
+  it('registers svcReportBundles on ipcMain', () => {
+    const api = createServer()
+    expect(api.svcReportBundles).toBeDefined()
+    initServerIpc()
+    for (const methodName of ['beginBundle', 'register', 'verify'] as const) {
+      expect(apiDef.svcReportBundles[methodName].type).toBe('unary')
+      expect(handleMock).toHaveBeenCalledWith(
+        `svcReportBundles.${methodName}`,
+        expect.any(Function)
+      )
+    }
   })
 
   it('registers svcCanvasThumbnail unary methods on ipcMain', () => {

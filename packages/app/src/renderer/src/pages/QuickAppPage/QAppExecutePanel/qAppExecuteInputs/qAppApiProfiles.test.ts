@@ -3,6 +3,15 @@ import { DEFAULT_CONFIG } from '@shared/config/config'
 import { findQAppApiProfile, getQAppApiProfiles } from './qAppApiProfiles'
 
 describe('getQAppApiProfiles', () => {
+  it('rejects explicit retired profiles instead of silently picking another API', () => {
+    const kind = ['chat', 'gpt', '-web'].join('')
+    const config = { ...DEFAULT_CONFIG, plugin_config: { ...DEFAULT_CONFIG.plugin_config!, api_profiles: [
+      { id: 'retired', call_type: kind, model_name: 'old-model', base_url: 'https://old.test/v1', api_key: 'old' },
+      { id: 'normal', model_name: 'normal-model', base_url: 'https://api.test/v1', api_key: 'owned' }
+    ] } }
+    expect(() => findQAppApiProfile(config, { profileId: 'retired' })).toThrow('removed')
+    expect(findQAppApiProfile(config)?.id).toBe('normal')
+  })
   it('prefers quick app api profiles when they exist', () => {
     const config = {
       ...DEFAULT_CONFIG,

@@ -1,13 +1,15 @@
 import React from 'react'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react'
 import { ThemeProvider } from '@mui/material'
 import { describe, expect, it, vi } from 'vitest'
 import type { Stage as KonvaStage } from 'konva/lib/Stage'
 
 import { theme } from '@renderer/theme'
 import ProjectCanvasPageSelectionOverlays from './ProjectCanvasPageSelectionOverlays'
+import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import type { CanvasDragPayload } from './projectCanvasPageShared'
 import type { CanvasItem, CanvasVideoItem } from './types'
+import { useCanvasSelectionUiActions } from './useCanvasSelectionUiActions'
 
 vi.mock('react-konva', () => ({
   Line: () => null
@@ -1319,6 +1321,188 @@ describe('ProjectCanvasPageSelectionOverlays', () => {
     expect(setCanvasDragPayload).toHaveBeenCalled()
 
     canvasContainer.remove()
+  })
+
+  it('says why a multi-item drag of a crop without kept pixels does not start (review of F2)', async () => {
+    const canvasContainer = createCanvasContainer()
+    // A proven crop (synthetic record) whose PNG is not in the registry yet.
+    const cropped = createImageItem({
+      id: 'image-1',
+      src: 'local-media:///C:/MagicPot/cropped.png',
+      sourceWidth: 400,
+      sourceHeight: 300,
+      crop: { x: 10, y: 20, width: 100, height: 80 },
+      cropSource: {
+        version: 1,
+        origin: 'confirm',
+        width: 400,
+        height: 300,
+        sizeBytes: 5000,
+        sha256: 'cd'.repeat(32)
+      }
+    })
+    const other = createImageItem({
+      id: 'image-2',
+      src: 'local-media:///C:/MagicPot/other.png',
+      x: 260
+    })
+    const notifyError = vi.fn()
+    const registry = createCanvasProvenCropRegistry(
+      {},
+      { create: () => 'blob:never', revoke: vi.fn() }
+    )
+    // The page's real payload builder: it refuses a crop without kept pixels.
+    const { result } = renderHook(() =>
+      useCanvasSelectionUiActions({
+        alpha: (color: string) => color,
+        annoTool: 'rect',
+        annotationFillOpacity: 0,
+        annotationStrokeWidth: 1,
+        canvasContainerRef: { current: null },
+        canvasId: 'canvas-1',
+        contextMenuTarget: null,
+        extractPromptTextFromCanvasItems: () => '',
+        getCanvasItemsBounds: () => ({ minX: 0, minY: 0, maxX: 400, maxY: 300 }),
+        handleCopyCanvasItemsAsImage: vi.fn(),
+        handleDownloadCanvasItemsAsImage: vi.fn(),
+        handleSendCanvasItemsSnapshotToPhotoshop: vi.fn(),
+        handleSendCanvasItemsToAgent: vi.fn(),
+        isChineseUi: false,
+        isFillableAnnotationShape: () => false,
+        items: [cropped, other],
+        labelDialogItemId: null,
+        labelDialogText: '',
+        nextZIndex: { current: 1 },
+        notifyError,
+        notifySuccess: vi.fn(),
+        provenCropRegistry: registry,
+        selectedIds: new Set([cropped.id, other.id]),
+        setAnnotationFillOpacity: vi.fn(),
+        setContextMenuTarget: vi.fn(),
+        setCroppingImageId: vi.fn(),
+        setExtractingImageId: vi.fn(),
+        setImageContextMenu: vi.fn(),
+        setItems: vi.fn(),
+        setItemsWithHistory: vi.fn(),
+        setLabelDialogOpen: vi.fn(),
+        setPendingTextureModelId: vi.fn(),
+        setSelectedIds: vi.fn(),
+        setTextureImportDialogOpen: vi.fn(),
+        setTool: vi.fn(),
+        stagePos: { x: 0, y: 0 },
+        stageScale: 1,
+        t: (key: string) => key,
+        tool: 'select',
+        tryHandleCanvasExternalDropRef: { current: null },
+        actionMessageKeyRef: { current: null },
+        theme: {
+          palette: {
+            mode: 'dark',
+            common: { black: '#000', white: '#fff' },
+            background: { paper: '#111' },
+            text: { primary: '#fff' }
+          }
+        }
+      })
+    )
+    const setCanvasDragPayload = vi.fn()
+    try {
+      render(
+        <ThemeProvider theme={theme}>
+          <ProjectCanvasPageSelectionOverlays
+            tool="select"
+            selectionOverlayGroups={[]}
+            exactSelectedGroup={null}
+            stagePos={{ x: 0, y: 0 }}
+            stageScale={1}
+            stageSize={{ width: 800, height: 600 }}
+            selectedIds={new Set([cropped.id, other.id])}
+            items={[cropped, other]}
+            stageRef={{ current: null }}
+            canvasContainerRef={{ current: canvasContainer }}
+            canvasContainerElement={canvasContainer}
+            lastClickedId={other.id}
+            mediaCaptionActionLabel="Caption"
+            legacySelectionToolbarEnabled={false}
+            groupCreateLabel="Group"
+            handleFocusGroup={vi.fn()}
+            buildCanvasDragPayload={result.current.buildCanvasDragPayload}
+            setCanvasDragPayload={setCanvasDragPayload}
+            handleFlipImage={vi.fn()}
+            handleCropImage={vi.fn()}
+            handleCopyCanvasImage={vi.fn()}
+            handleDownloadCanvasImage={vi.fn()}
+            handleOpenAgentSendMenu={vi.fn()}
+            handleOpenMediaCaptionEditor={vi.fn()}
+            handleSendCanvasItemsToAgent={vi.fn()}
+            handleToggleVideoPlayback={vi.fn()}
+            handleOpenModel3DViewer={vi.fn()}
+            handleOpenDccExportMenu={vi.fn()}
+            handleDownloadBlobItem={vi.fn()}
+            handleCopyCanvasItemsAsImage={vi.fn()}
+            handleDownloadCanvasItemsAsImage={vi.fn()}
+            // No snapshot: a selection with an unkept crop never gets one.
+            getQuickCanvasItemsImageUrl={vi.fn(() => null)}
+            prepareQuickCanvasItemsImageUrl={vi.fn(async () => null)}
+            handleGenerateCanvasItems={vi.fn()}
+            handleCreateGroup={vi.fn()}
+            Model3DIcon={() => null}
+            ExportIcon={() => null}
+          />
+        </ThemeProvider>
+      )
+      const toolbar = await waitFor(() => {
+        const stack = canvasContainer.querySelector('.selection-action-stack') as HTMLElement | null
+        expect(stack).toBeTruthy()
+        return stack!
+      })
+      const event = new Event('dragstart', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { setData: vi.fn(), effectAllowed: 'all' }
+      })
+      fireEvent(within(toolbar).getAllByRole('button')[0], event)
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(setCanvasDragPayload).not.toHaveBeenCalled()
+      expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.drag_cropped_image_unavailable')
+    } finally {
+      canvasContainer.remove()
+    }
+  })
+
+  it.each([false, true])('cancels image drag only when crop payload preparation fails (failure=%s)', async (failure) => {
+    const canvasContainer = createCanvasContainer()
+    const selectedImage = createImageItem({ src: 'data:image/png;base64,c3ludGhldGlj', fileName: 'source.png' })
+    const buildCanvasDragPayload = vi.fn((): CanvasDragPayload => {
+      if (failure) throw new Error('CANVAS_CROP_EXPORT_UNAVAILABLE')
+      return { sourceCanvasId: 'canvas-1' }
+    })
+    const setCanvasDragPayload = vi.fn()
+    const stageRef = { current: { getStage: () => ({ findOne: vi.fn(() => null) }) } } as unknown as React.RefObject<KonvaStage | null>
+    try {
+      render(<ThemeProvider theme={theme}><ProjectCanvasPageSelectionOverlays
+        tool="select" selectionOverlayGroups={[]} exactSelectedGroup={null} stagePos={{ x: 0, y: 0 }}
+        stageScale={1} stageSize={{ width: 800, height: 600 }} selectedIds={new Set(['image-1'])}
+        items={[selectedImage]} stageRef={stageRef} canvasContainerRef={{ current: canvasContainer }}
+        lastClickedId="image-1" mediaCaptionActionLabel="Edit caption" legacySelectionToolbarEnabled={false}
+        groupCreateLabel="Group" handleFocusGroup={vi.fn()} buildCanvasDragPayload={buildCanvasDragPayload}
+        setCanvasDragPayload={setCanvasDragPayload} handleFlipImage={vi.fn()} handleCropImage={vi.fn()}
+        handleCopyCanvasImage={vi.fn()} handleDownloadCanvasImage={vi.fn()} handleOpenAgentSendMenu={vi.fn()}
+        handleOpenMediaCaptionEditor={vi.fn()} handleSendCanvasItemsToAgent={vi.fn()}
+        handleToggleVideoPlayback={vi.fn()} handleOpenModel3DViewer={vi.fn()} handleOpenDccExportMenu={vi.fn()}
+        handleDownloadBlobItem={vi.fn()} handleCopyCanvasItemsAsImage={vi.fn()} handleDownloadCanvasItemsAsImage={vi.fn()}
+        getQuickCanvasItemsImageUrl={vi.fn()} prepareQuickCanvasItemsImageUrl={vi.fn(async () => 'blob:fixture')}
+        handleGenerateCanvasItems={vi.fn()} handleCreateGroup={vi.fn()} Model3DIcon={() => null} ExportIcon={() => null}
+      /></ThemeProvider>)
+      await waitFor(() => expect(canvasContainer.querySelector('.canvas-image-drag-button')).toBeTruthy())
+      const event = new Event('dragstart', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', { value: { setData: vi.fn(), effectAllowed: 'all' } })
+      fireEvent(canvasContainer.querySelector('.canvas-image-drag-button')!, event)
+      expect(buildCanvasDragPayload).toHaveBeenCalledOnce()
+      expect(event.defaultPrevented).toBe(failure)
+      if (failure) expect(setCanvasDragPayload).not.toHaveBeenCalled()
+      else expect(setCanvasDragPayload).toHaveBeenCalledOnce()
+    } finally { canvasContainer.remove() }
   })
 
   it('prepares and reuses a cached quick drag preview for text selections', async () => {

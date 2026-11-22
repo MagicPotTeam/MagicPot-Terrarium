@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CommandJobRecord, CommandsBackgroundInput } from './commandJobs'
@@ -168,6 +168,27 @@ describe('PythonToolHost', () => {
       sha256: (++count === 1 ? 'a' : 'b').repeat(64)
     }))
     await expect(tool.run(executionInput(tool))).rejects.toThrow(/identity changed/)
+  })
+
+  it('does not materialize inline Python while merely describing a request, or after rejection/abort', async () => {
+    const workspace = root(), tool = host(workspace)
+    const input = executionInput(tool)
+    expect(existsSync(path.join(workspace, '.magicpot/python/inline'))).toBe(false)
+    const controller = new AbortController(); controller.abort(new Error('Owner stopped'))
+    await expect(tool.run({ ...input, signal: controller.signal })).rejects.toThrow(/Owner stopped/)
+    expect(existsSync(path.join(workspace, '.magicpot/python/inline'))).toBe(false)
+    const denied = host(workspace, { ...manager(), background: vi.fn(async () => { throw new Error('not authorized') }) })
+    await expect(denied.run(executionInput(denied))).rejects.toThrow(/not authorized/)
+    expect(existsSync(path.join(workspace, '.magicpot/python/inline'))).toBe(false)
+  })
+
+  it('stops only the owned process when cancellation arrives while polling', async () => {
+    const workspace = root(), jobs = manager(), controller = new AbortController()
+    const tool = host(workspace, jobs)
+    vi.mocked(jobs.status).mockImplementationOnce(() => { controller.abort(new Error('Document replaced')); return { state: 'running' } as CommandJobRecord })
+    await expect(tool.run({ ...executionInput(tool), signal: controller.signal })).rejects.toThrow(/Document replaced/)
+    expect(jobs.stop).toHaveBeenCalledWith({ jobId: '00000000-0000-0000-0000-000000000001', routeKey: 'route', sessionId: 'session' })
+    expect(jobs.read).not.toHaveBeenCalled()
   })
 
   it('returns durable background identity and captures only declared regular artifacts for run', async () => {

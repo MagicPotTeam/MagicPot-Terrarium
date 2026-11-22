@@ -97,6 +97,16 @@ describe('svcStateImpl', () => {
   )
   vi.mocked(mcpRuntime.syncMcpClientManager).mockResolvedValue(undefined)
 
+  it('reads passive MCP status without invoking global synchronization', async () => {
+    mockConfig({})
+    vi.mocked(mcpRuntime.syncMcpClientManager).mockClear()
+    const service = new StateSvcImpl()
+    await service.getMcpStatus({ passive: true })
+    expect(mcpRuntime.syncMcpClientManager).not.toHaveBeenCalled()
+    await service.getMcpStatus({})
+    expect(mcpRuntime.syncMcpClientManager).toHaveBeenCalledOnce()
+  })
+
   it('should get config', async () => {
     mockConfig({
       use_remote_comfyui: true,

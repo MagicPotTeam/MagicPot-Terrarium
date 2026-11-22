@@ -4,14 +4,11 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { Box } from '@mui/material'
 import ChatPrimarySelection from './components/ChatPrimarySelection'
-import ChatSkillPicker from './components/ChatSkillPicker'
 import {
   NO_SKILL_VALUE,
-  buildCustomSkillCategories,
   findCustomSkillById,
   getCustomSkillName,
-  getSkillCategoryForSkillId,
-  getSkillsForCategory
+  getSkillCategoryForSkillId
 } from './chatSkillUtils'
 import {
   BUILT_IN_IMAGE_INTERROGATION_SKILL_ID,
@@ -59,28 +56,10 @@ const SkillHarness: React.FC = () => {
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null)
   const [selectedSkillCategory, setSelectedSkillCategory] = useState<string>(NO_SKILL_VALUE)
 
-  const skillCategories = useMemo(() => buildCustomSkillCategories(availableSkills), [])
-  const skillsForSelectedCategory = useMemo(
-    () => getSkillsForCategory(availableSkills, selectedSkillCategory),
-    [selectedSkillCategory]
-  )
   const selectedSkill = useMemo(
     () => findCustomSkillById(availableSkills, selectedSkillId),
     [selectedSkillId]
   )
-
-  const handleSelectSkillCategory = (category: string) => {
-    const nextCategory = category || NO_SKILL_VALUE
-    const currentSkillCategory = selectedSkillId
-      ? getSkillCategoryForSkillId(availableSkills, selectedSkillId)
-      : NO_SKILL_VALUE
-
-    setSelectedSkillCategory(nextCategory)
-
-    if (!nextCategory || currentSkillCategory !== nextCategory) {
-      setSelectedSkillId(null)
-    }
-  }
 
   const handleSelectSkill = (skillId: string | null) => {
     const nextSkill = findCustomSkillById(availableSkills, skillId)
@@ -102,41 +81,34 @@ const SkillHarness: React.FC = () => {
         selectedSkillLabel={selectedSkill ? getCustomSkillName(selectedSkill) : 'chat.skill_none'}
         onSelectProfile={setActiveProfileId}
       />
-      <Box sx={{ mt: 4 }}>
-        <ChatSkillPicker
-          compact={false}
-          customSkills={availableSkills}
-          skillCategories={skillCategories}
-          selectedSkillCategory={selectedSkillCategory}
-          selectedSkillId={selectedSkillId}
-          skillsForSelectedCategory={skillsForSelectedCategory}
-          onSelectSkillCategory={handleSelectSkillCategory}
-          onSelectSkill={handleSelectSkill}
-        />
+      {/* Stands in for the "/" menu's Skills group: one control per skill. */}
+      <Box sx={{ mt: 4 }} data-skill-category={selectedSkillCategory}>
+        {availableSkills.map((skill) => (
+          <button
+            key={skill.id}
+            type="button"
+            aria-pressed={skill.id === selectedSkillId}
+            onClick={() => handleSelectSkill(skill.id === selectedSkillId ? null : skill.id)}
+          >
+            {`choose ${getCustomSkillName(skill)}`}
+          </button>
+        ))}
       </Box>
     </Box>
   )
 }
 
 describe('ChatPage agent skill flow', () => {
-  it('shows a grid-style skill picker and selects normal skills', async () => {
+  it('keeps the model selector while a normal skill is selected', async () => {
     render(<SkillHarness />)
     const user = userEvent.setup()
 
     expect(screen.getByRole('button', { name: 'GPT-4o' })).toBeInTheDocument()
-    expect(screen.getByTestId('chat-skill-picker-grid')).toBeInTheDocument()
-    expect(screen.getByText('Design')).toBeInTheDocument()
-    expect(screen.getByText('Ops')).toBeInTheDocument()
 
-    const designSkill = screen.getByText('Design Critic')
-    const opsAgentSkill = screen.getByText('Ops Agent')
-    const opsDraftSkill = screen.getByText('Ops Draft')
-
-    expect(designSkill).toBeInTheDocument()
-    expect(opsAgentSkill).toBeInTheDocument()
-    expect(opsDraftSkill).toBeInTheDocument()
-
+    const opsDraftSkill = screen.getByRole('button', { name: 'choose Ops Draft' })
     await user.click(opsDraftSkill)
+    expect(opsDraftSkill).toHaveAttribute('aria-pressed', 'true')
+    expect(opsDraftSkill.parentElement).toHaveAttribute('data-skill-category', 'Ops')
 
     expect(screen.getByRole('button', { name: 'GPT-4o' })).toBeInTheDocument()
     expect(screen.getByText('chat.model:')).toBeTruthy()
@@ -150,15 +122,14 @@ describe('ChatPage agent skill flow', () => {
     render(<SkillHarness />)
     const user = userEvent.setup()
 
-    const opsAgentSkill = screen.getByText('Ops Agent')
-    await user.click(opsAgentSkill)
+    await user.click(screen.getByRole('button', { name: 'choose Ops Agent' }))
 
     expect(screen.queryByRole('button', { name: 'GPT-4o' })).toBeNull()
     expect(screen.getByText('chat.agent_skill_active:')).toBeTruthy()
     expect(screen.getAllByText('Ops Agent').length).toBeGreaterThan(0)
   })
 
-  it('surfaces image interrogation on the same skill picker workflow', () => {
+  it('offers image interrogation as a normal skill', () => {
     render(<SkillHarness />)
 
     expect(findCustomSkillById(availableSkills, BUILT_IN_IMAGE_INTERROGATION_SKILL_ID)?.type).toBe(
@@ -168,12 +139,12 @@ describe('ChatPage agent skill flow', () => {
     expect(screen.queryByText('chat.agent_skill_active:')).toBeNull()
   })
 
-  it('surfaces prompt translation on the same skill picker workflow', () => {
+  it('offers prompt translation as a normal skill', () => {
     render(<SkillHarness />)
 
     expect(findCustomSkillById(availableSkills, BUILT_IN_PROMPT_TRANSLATION_SKILL_ID)?.type).toBe(
       'normal'
     )
-    expect(screen.getByTestId('chat-skill-picker-grid')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'GPT-4o' })).toBeInTheDocument()
   })
 })

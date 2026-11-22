@@ -13,6 +13,7 @@ import { useConfig } from '@renderer/hooks/useConfig'
 import { defaultCliFromProfile } from './api/LLM'
 import { fileToDataUrl, selectFile } from '@renderer/utils/fileUtils'
 import { getQAppPromptSettings } from './qAppPromptSettings'
+import { getServiceErrorMessage } from '@shared/api/apiUtils/serviceValidation'
 import { getDroppedImageDropError, getDroppedImageFile } from '@renderer/utils/droppedImageUtils'
 
 const REPLACE_DESCRIPTION = '{{description}}'
@@ -99,8 +100,7 @@ const buildExeInputPrompt: ExeInputBuilder<'InputPrompt'> = (
     const { t, i18n } = useTranslation()
     const qAppPromptSettings = getQAppPromptSettings(config)
 
-    const resolveError = (error: unknown) =>
-      error instanceof Error ? error.message : String(error)
+    const resolveError = (error: unknown) => getServiceErrorMessage(error)
 
     const resolvedPromptDescription =
       promptDescription || (t('qapp.prompt.default_description') as string)

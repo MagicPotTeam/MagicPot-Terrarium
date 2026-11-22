@@ -126,6 +126,90 @@ describe('managed media request materialization races (real filesystem)', () => 
     )
   })
 
+  it.each(['request-data-url', 'chunked-binary-v1'] as const)(
+    'enforces an optional source byte cap before resolving %s and accepts the exact boundary',
+    async (transport) => {
+      const { imported, target, bytes } = await fixture('original')
+      const resolveReference = vi.fn(resolveManagedMediaReference)
+      const readMediaBytes = vi.fn(readManagedMediaBytes)
+      const service = new ManagedMediaSvcImpl({
+        getMediaDir: () => root,
+        resolveReference,
+        readMediaBytes
+      })
+      const request = { reference: imported.reference, transport }
+      await expect(
+        service.materializeForRequest({ ...request, maxBytes: bytes.length - 1 })
+      ).rejects.toMatchObject({
+        code: 'MANAGED_MEDIA_REQUEST_SIZE_LIMIT'
+      })
+      expect(resolveReference).not.toHaveBeenCalled()
+      expect(readMediaBytes).not.toHaveBeenCalled()
+      const result = await service.materializeForRequest({ ...request, maxBytes: bytes.length })
+      expect(resolveReference).toHaveBeenCalledTimes(1)
+      expect(readMediaBytes).toHaveBeenCalledTimes(1)
+      expect(readMediaBytes.mock.calls[0][2]).toMatchObject({ maxBytes: bytes.length })
+      if (result.transport === 'chunked-binary-v1') {
+        expect(await assembleBinaryChunks(result.reference, result.chunks)).toEqual(
+          new Uint8Array(bytes)
+        )
+      } else {
+        expect(Buffer.from(result.dataUrl.split(',')[1], 'base64')).toEqual(bytes)
+      }
+      expect(await fs.readFile(target)).toEqual(bytes)
+    }
+  )
+
+  it('snapshots a bounded request before asynchronous resolution', async () => {
+    const { imported, bytes } = await fixture('original')
+    let entered!: () => void
+    let release!: () => void
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const realpath = vi.fn(async () => {
+      entered()
+      await gate
+      return root
+    }) as unknown as typeof fs.realpath
+    const readMediaBytes = vi.fn(readManagedMediaBytes)
+    const service = new ManagedMediaSvcImpl({ getMediaDir: () => root, realpath, readMediaBytes })
+    const request = {
+      reference: { ...imported.reference },
+      transport: 'request-data-url' as const,
+      maxBytes: bytes.length
+    }
+    const result = service.materializeForRequest(request)
+    await waiting
+    request.maxBytes = 1
+    request.reference.sizeBytes = 1
+    release()
+    await expect(result).resolves.toMatchObject({ sizeBytes: bytes.length })
+    expect(readMediaBytes.mock.calls[0][2]).toMatchObject({ maxBytes: bytes.length })
+  })
+
+  it('cannot bypass a bounded request with a forged smaller reference or on-disk growth', async () => {
+    const { imported, target, bytes } = await fixture('original')
+    const service = new ManagedMediaSvcImpl({ getMediaDir: () => root })
+    const request = { reference: imported.reference, transport: 'request-data-url' as const }
+    await expect(
+      service.materializeForRequest({
+        ...request,
+        reference: { ...imported.reference, sizeBytes: bytes.length - 1 },
+        maxBytes: bytes.length - 1
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_CORRUPT' })
+    await fs.appendFile(target, Buffer.from([0]))
+    await expect(
+      service.materializeForRequest({ ...request, maxBytes: bytes.length })
+    ).rejects.toMatchObject({
+      code: 'MANAGED_MEDIA_CORRUPT'
+    })
+  })
+
   it('resolves and materializes legacy scoped references from the real filesystem', async () => {
     const scopedRoot = path.join(root, 'codex-images-owned-scope')
     const imported = await importManagedMedia(

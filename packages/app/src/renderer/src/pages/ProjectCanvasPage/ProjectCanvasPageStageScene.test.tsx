@@ -2,7 +2,11 @@ import React from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
-import ProjectCanvasPageStageScene from './ProjectCanvasPageStageScene'
+import ProjectCanvasPageStageScene, {
+  PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS
+} from './ProjectCanvasPageStageScene'
+import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
+import { resolveCanvasImageDisplayCrop } from './canvasImageDisplayUtils'
 import type {
   CanvasAnnotationItem,
   CanvasFileItem,
@@ -13,6 +17,7 @@ import type {
   CanvasVideoItem
 } from './types'
 import type { ProjectCanvasImagePreview } from './projectCanvasRenderBoundary'
+import { emitCanvasLayoutResizeInteraction } from './canvasLayoutResizeInteraction'
 import {
   createProjectCanvasWebGLRuntimeMetrics,
   type ProjectCanvasWebGLRuntimeMetrics
@@ -34,6 +39,7 @@ const {
   measureCanvasTextBoxHeightMock,
   syncItemPreviewSpy,
   syncViewportSpy,
+  setViewportInteractingSpy,
   scheduleCanvasSyncMock,
   cancelCanvasSyncMock
 } = vi.hoisted(() => ({
@@ -61,6 +67,7 @@ const {
   ),
   syncItemPreviewSpy: vi.fn(),
   syncViewportSpy: vi.fn(),
+  setViewportInteractingSpy: vi.fn(),
   scheduleCanvasSyncMock: vi.fn(),
   cancelCanvasSyncMock: vi.fn()
 }))
@@ -78,14 +85,15 @@ let webglLoadedIds = new Set<string>()
 let webglResidentIds = new Set<string>()
 let webglFailedIds = new Set<string>()
 let latestWebGLMetrics: ProjectCanvasWebGLRuntimeMetrics = createTestWebGLMetrics()
-let latestWebGLLayerProps: {
+type WebGLLayerMockProps = {
   items: CanvasImageItem[]
   onReadyChange?: (ready: boolean) => void
   onResidentIdsChange?: (residentIds: Set<string>) => void
   onResolvedIdsChange?: (resolvedIds: Set<string>) => void
   onFailedIdsChange?: (failedIds: Set<string>) => void
   onMetricsChange?: (metrics: typeof latestWebGLMetrics) => void
-} | null = null
+}
+let latestWebGLLayerProps: WebGLLayerMockProps | null = null
 
 vi.mock('./canvasTextLayout', () => ({
   CANVAS_TEXT_LINE_HEIGHT: 1.5,
@@ -121,6 +129,14 @@ vi.mock('react-konva', async () => {
   }
 })
 
+const cropSourceEvidenceMock = vi.hoisted(() => ({ read: vi.fn() }))
+
+vi.mock('./canvasCropProvenance', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./canvasCropProvenance')>()
+  cropSourceEvidenceMock.read.mockImplementation(actual.readCanvasImageSourceEvidence)
+  return { ...actual, readCanvasImageSourceEvidence: cropSourceEvidenceMock.read }
+})
+
 vi.mock('../../components/MaxSizeLayout', () => ({
   default: ({ children }: { children: React.ReactNode }) => <>{children}</>
 }))
@@ -148,7 +164,10 @@ vi.mock('./components/CanvasItemPlaceholder', () => ({
       }
     })
 
-    return <div data-testid={`canvas-placeholder-${props.item.id}`} />
+    // Like the real proxy, the hit target opts back into pointer events.
+    return (
+      <div data-testid={`canvas-placeholder-${props.item.id}`} style={{ pointerEvents: 'auto' }} />
+    )
   }
 }))
 
@@ -223,6 +242,7 @@ vi.mock('./components/ProjectCanvasWebGLImageLayer', async () => {
         ref: React.ForwardedRef<{
           syncItemPreview: typeof syncItemPreviewSpy
           syncViewport: typeof syncViewportSpy
+          setViewportInteracting: typeof setViewportInteractingSpy
         }>
       ) {
         webglLayerRenderCount += 1
@@ -231,7 +251,8 @@ vi.mock('./components/ProjectCanvasWebGLImageLayer', async () => {
 
         ReactModule.useImperativeHandle(ref, () => ({
           syncItemPreview: syncItemPreviewSpy,
-          syncViewport: syncViewportSpy
+          syncViewport: syncViewportSpy,
+          setViewportInteracting: setViewportInteractingSpy
         }))
 
         ReactModule.useEffect(() => {
@@ -400,6 +421,36 @@ function createAnnotationItem(
   }
 }
 
+// jsdom's CSSOM drops `!important` and getComputedStyle lets the proxy's own inline
+// `pointer-events: auto` win, so check the cascade directly: the element must be matched by a
+// `pointer-events: none` rule whose source text is marked important (it has to beat the proxy's own
+// pointer-events in the browser).
+function isForcedPointerEventsNone(element: Element) {
+  const styleText = Array.from(document.querySelectorAll('style'))
+    .map((style) => style.textContent ?? '')
+    .join('\n')
+  for (const sheet of Array.from(document.styleSheets)) {
+    let rules: CSSRuleList
+    try {
+      rules = sheet.cssRules
+    } catch {
+      continue
+    }
+    for (const rule of Array.from(rules)) {
+      if (!(rule instanceof CSSStyleRule)) continue
+      if (rule.style.getPropertyValue('pointer-events') !== 'none') continue
+      if (!element.matches(rule.selectorText)) continue
+      const sourceRule = styleText
+        .split('}')
+        .find((chunk) =>
+          chunk.replace(/\s+/g, '').startsWith(rule.selectorText.replace(/\s+/g, ''))
+        )
+      if (sourceRule && /pointer-events:\s*none\s*!important/.test(sourceRule)) return true
+    }
+  }
+  return false
+}
+
 function createBaseProps(visibleItems: CanvasItem[]) {
   return {
     activeOcrHover: null,
@@ -451,6 +502,7 @@ function createBaseProps(visibleItems: CanvasItem[]) {
     setExtractingImageId: vi.fn(),
     setInlineTextEdit: vi.fn(),
     setItemsWithHistory: vi.fn(),
+    setItemsWithoutHistory: vi.fn(),
     setLabelDialogItemId: vi.fn(),
     setLabelDialogOpen: vi.fn(),
     setLabelDialogText: vi.fn(),
@@ -472,6 +524,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
   beforeEach(() => {
     syncItemPreviewSpy.mockReset()
     syncViewportSpy.mockReset()
+    setViewportInteractingSpy.mockReset()
     measureCanvasAnnotationTextHeightMock.mockClear()
     measureCanvasTextBoxHeightMock.mockClear()
     scheduleCanvasSyncMock.mockReset()
@@ -641,6 +694,13 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(syncItemPreviewSpy).toHaveBeenNthCalledWith(2, item.id, null)
   })
 
+  it('broadcasts DOM previews for explicitly labelled team images', async () => {
+    const item = { ...createImageItem('team-image-preview'), teamImageLabel: '文案·图1' }
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    render(<ProjectCanvasPageStageScene {...createBaseProps([item])} items={[item]} visibleItems={[item]} />)
+    await waitFor(() => expect(imageInteractionOverlayProps.get(item.id)?.broadcastDomPreviewSync).toBe(true))
+  })
+
   it('keeps the sorted WebGL item array stable across runtime route updates', async () => {
     const backItem = createImageItem('image-stable-webgl-back')
     const frontItem = createImageItem('image-stable-webgl-front')
@@ -750,6 +810,180 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       root.setAttribute('data-project-canvas-marquee-active', 'true')
     })
     expect(getComputedStyle(highResLayer as HTMLElement).display).not.toBe('none')
+  })
+
+  it('keeps the high-resolution source layer mounted through a gesture and a panel resize', async () => {
+    const item = {
+      ...createImageItem('image-jumbo-gesture-source'),
+      width: 6_000,
+      height: 2_000,
+      sourceWidth: 6_000,
+      sourceHeight: 2_000,
+      image: createImageItem('image-jumbo-gesture-preview').image
+    }
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    const baseProps = createBaseProps([item])
+
+    const { rerender } = render(<ProjectCanvasPageStageScene {...baseProps} />)
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    await waitFor(() => {
+      expect(root).toHaveAttribute('data-project-canvas-high-res-dom-image-count', '1')
+    })
+    const highResItem = document.querySelector(
+      `[data-project-canvas-high-res-image-item-id="${item.id}"]`
+    )
+    expect(highResItem).not.toBeNull()
+
+    rerender(<ProjectCanvasPageStageScene {...baseProps} isViewportInteracting />)
+    expect(root).toHaveAttribute('data-project-canvas-high-res-dom-image-count', '1')
+    expect(
+      document.querySelector(`[data-project-canvas-high-res-image-item-id="${item.id}"]`)
+    ).toBe(highResItem)
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(true, 'right')
+    })
+    try {
+      expect(root).toHaveAttribute('data-project-canvas-high-res-dom-image-count', '1')
+    } finally {
+      act(() => {
+        emitCanvasLayoutResizeInteraction(false)
+      })
+    }
+
+    rerender(<ProjectCanvasPageStageScene {...baseProps} isViewportInteracting={false} />)
+    expect(
+      document.querySelector(`[data-project-canvas-high-res-image-item-id="${item.id}"]`)
+    ).toBe(highResItem)
+  })
+
+  it('follows a layout panel drag without re-rendering the stage', async () => {
+    const item = createImageItem('image-layout-resize')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+
+    render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    await waitFor(() => {
+      expect(root).toHaveAttribute('data-project-canvas-webgl-primary-image-count', '1')
+    })
+    const webglRendersBefore = webglLayerRenderCount
+    const stageCommitsBefore = root.getAttribute('data-project-canvas-react-commit-count')
+    setViewportInteractingSpy.mockClear()
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(true, 'right')
+    })
+    expect(setViewportInteractingSpy).toHaveBeenLastCalledWith(true)
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(false)
+    })
+    expect(setViewportInteractingSpy).toHaveBeenLastCalledWith(false)
+    expect(root.getAttribute('data-project-canvas-react-commit-count')).toBe(stageCommitsBefore)
+    expect(webglLayerRenderCount).toBe(webglRendersBefore)
+  })
+
+  it('commits the WebGL runtime reports after a layout panel drag together, once settled', async () => {
+    const item = createImageItem('image-layout-resize-settle')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+
+    render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    await waitFor(() => {
+      expect(root).toHaveAttribute('data-project-canvas-webgl-primary-image-count', '1')
+    })
+    const layerProps = latestWebGLLayerProps as WebGLLayerMockProps
+    const onMetricsChange = layerProps.onMetricsChange as (
+      metrics: ProjectCanvasWebGLRuntimeMetrics
+    ) => void
+    const onResidentIdsChange = layerProps.onResidentIdsChange as (ids: Set<string>) => void
+    const commitCount = () => Number(root.getAttribute('data-project-canvas-react-commit-count'))
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(true, 'right')
+    })
+    act(() => {
+      emitCanvasLayoutResizeInteraction(false)
+    })
+    const stageCommitsAfterDrag = commitCount()
+
+    // The layer resizes and reports several times while the newly visible images settle.
+    act(() => {
+      onResidentIdsChange(new Set())
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 11 }))
+    })
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS - 100)
+      )
+    })
+    act(() => {
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 12 }))
+      onResidentIdsChange(new Set([item.id]))
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 13 }))
+    })
+    // Each report pushed the window back, so nothing has committed yet.
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS - 100)
+      )
+    })
+    expect(commitCount()).toBe(stageCommitsAfterDrag)
+    expect(root).not.toHaveAttribute('data-project-canvas-webgl-sprite-count', '13')
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 200))
+    })
+    expect(commitCount()).toBe(stageCommitsAfterDrag + 1)
+    expect(root).toHaveAttribute('data-project-canvas-webgl-sprite-count', '13')
+
+    // Outside the window, reports commit as before.
+    act(() => {
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 14 }))
+    })
+    expect(root).toHaveAttribute('data-project-canvas-webgl-sprite-count', '14')
+  })
+
+  it('starts a new layout drag without flushing the reports of the previous one', async () => {
+    const item = createImageItem('image-layout-resize-restart')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+
+    render(<ProjectCanvasPageStageScene {...createBaseProps([item])} />)
+
+    const root = screen.getByTestId('project-canvas-stage-root')
+    await waitFor(() => {
+      expect(root).toHaveAttribute('data-project-canvas-webgl-primary-image-count', '1')
+    })
+    const onMetricsChange = (latestWebGLLayerProps as WebGLLayerMockProps).onMetricsChange as (
+      metrics: ProjectCanvasWebGLRuntimeMetrics
+    ) => void
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(true, 'right')
+      emitCanvasLayoutResizeInteraction(false)
+      onMetricsChange(createTestWebGLMetrics({ spriteCount: 21 }))
+      emitCanvasLayoutResizeInteraction(true, 'right')
+    })
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS + 100)
+      )
+    })
+    // Still dragging: the report stays queued.
+    expect(root).not.toHaveAttribute('data-project-canvas-webgl-sprite-count', '21')
+
+    act(() => {
+      emitCanvasLayoutResizeInteraction(false)
+    })
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, PROJECT_CANVAS_LAYOUT_RESIZE_SETTLE_MS + 100)
+      )
+    })
+    expect(root).toHaveAttribute('data-project-canvas-webgl-sprite-count', '21')
   })
 
   it('budgets jumbo source overlays by visible pixels instead of a four item cap', async () => {
@@ -1385,7 +1619,7 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(updateSelection?.(new Set())).toEqual(new Set([items[0].id]))
   })
 
-  it('suspends WebGL image proxy content and multi-selection transform chrome during viewport interaction', async () => {
+  it('keeps WebGL image hit proxies and multi-selection transform chrome mounted during viewport interaction', async () => {
     const selectedItem = createImageItem('image-selected')
     const siblingItem = createImageItem('image-sibling')
     siblingItem.x = 420
@@ -1401,19 +1635,21 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       expect(latestWebGLItems.map((item) => item.id)).toEqual([selectedItem.id, siblingItem.id])
     })
 
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(2)
+    })
     expect(
       screen
         .getByTestId('project-canvas-stage-root')
         .querySelector('[data-project-canvas-proxy-layer="dom"]')
-    ).toBeNull()
-    expect(canvasPlaceholderProps.size).toBe(0)
+    ).not.toBeNull()
     expect(imageInteractionOverlayProps.size).toBe(0)
     expect(rectInteractionOverlayProps.size).toBe(0)
     expect(screen.getByTestId('project-canvas-stage-root')).toHaveAttribute(
       'data-project-canvas-proxy-layer-candidate-count',
-      '0'
+      '2'
     )
-    expect(screen.queryByTestId('mock-multi-selection-transform-overlay')).toBeNull()
+    expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBeInTheDocument()
 
     rerender(
       <ProjectCanvasPageStageScene
@@ -1432,6 +1668,570 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
         .querySelector('[data-project-canvas-proxy-layer="dom"]')
     ).not.toBeNull()
     expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBeInTheDocument()
+  })
+
+  it('keeps WebGL hit proxies mounted and inert through a gesture without re-rendering them', async () => {
+    const firstItem = createImageItem('image-gesture-first')
+    const secondItem = createImageItem('image-gesture-second')
+    secondItem.x = 420
+    setMockWebGLRuntime({ loadedIds: [firstItem.id, secondItem.id] })
+    const baseProps = createBaseProps([firstItem, secondItem])
+    const noSelection = new Set<string>()
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={noSelection} />
+    )
+
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(2)
+    })
+    const stageLayerRoot = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-stage-layer-root="true"]') as HTMLElement
+    expect(stageLayerRoot).not.toBeNull()
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(false)
+    const firstProxyNode = screen.getByTestId(`canvas-placeholder-${firstItem.id}`)
+    const rendersBeforeGesture = canvasPlaceholderRenderCounts.get(firstItem.id)
+
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} isViewportInteracting selectedIds={noSelection} />
+    )
+
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(true)
+    expect(screen.getByTestId(`canvas-placeholder-${firstItem.id}`)).toBe(firstProxyNode)
+    expect(canvasPlaceholderProps.size).toBe(2)
+    expect(isForcedPointerEventsNone(firstProxyNode)).toBe(true)
+    expect(canvasPlaceholderRenderCounts.get(firstItem.id)).toBe(rendersBeforeGesture)
+    for (const props of canvasPlaceholderProps.values()) {
+      expect(props).not.toHaveProperty('isViewportInteracting')
+    }
+
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting={false}
+        selectedIds={noSelection}
+      />
+    )
+
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(false)
+    expect(screen.getByTestId(`canvas-placeholder-${firstItem.id}`)).toBe(firstProxyNode)
+    expect(isForcedPointerEventsNone(firstProxyNode)).toBe(false)
+    expect(canvasPlaceholderRenderCounts.get(firstItem.id)).toBe(rendersBeforeGesture)
+  })
+
+  it('keeps the selection overlays mounted through a gesture and only makes the multi-selection handles inert', async () => {
+    const firstItem = createImageItem('image-selection-gesture-first')
+    const secondItem = createImageItem('image-selection-gesture-second')
+    secondItem.x = 420
+    setMockWebGLRuntime({ loadedIds: [firstItem.id, secondItem.id] })
+    const selectedIds = new Set([firstItem.id, secondItem.id])
+    const baseProps = createBaseProps([firstItem, secondItem])
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={selectedIds} />
+    )
+
+    const overlayNode = await screen.findByTestId('mock-multi-selection-transform-overlay')
+    const sceneOverlayNode = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-scene-overlay="dom"]')
+    expect(sceneOverlayNode).not.toBeNull()
+    const overlayItems = latestMultiSelectionTransformOverlayProps?.items
+    const overlayTransformEnd = latestMultiSelectionTransformOverlayProps?.onTransformEnd
+    const dragSurface = overlayNode.querySelector(
+      '[data-canvas-multi-select-drag-surface="true"]'
+    ) as HTMLElement
+    dragSurface.style.pointerEvents = 'auto'
+    expect(isForcedPointerEventsNone(dragSurface)).toBe(false)
+
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} isViewportInteracting selectedIds={selectedIds} />
+    )
+
+    expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBe(overlayNode)
+    expect(
+      screen
+        .getByTestId('project-canvas-stage-root')
+        .querySelector('[data-project-canvas-scene-overlay="dom"]')
+    ).toBe(sceneOverlayNode)
+    expect(isForcedPointerEventsNone(dragSurface)).toBe(true)
+
+    // Gesture end: same items in a new visibleItems array and a new committed position.
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        visibleItems={[...baseProps.visibleItems]}
+        isViewportInteracting={false}
+        selectedIds={selectedIds}
+        stagePos={{ x: 30, y: -10 }}
+      />
+    )
+
+    expect(screen.getByTestId('mock-multi-selection-transform-overlay')).toBe(overlayNode)
+    expect(latestMultiSelectionTransformOverlayProps?.items).toBe(overlayItems)
+    expect(latestMultiSelectionTransformOverlayProps?.onTransformEnd).toBe(overlayTransformEnd)
+    expect(isForcedPointerEventsNone(dragSurface)).toBe(false)
+
+    const handle = document.createElement('div')
+    handle.setAttribute('data-canvas-multi-select-handle', 'top-left')
+    handle.style.pointerEvents = 'auto'
+    overlayNode.appendChild(handle)
+    expect(isForcedPointerEventsNone(handle)).toBe(false)
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting
+        selectedIds={selectedIds}
+        stagePos={{ x: 30, y: -10 }}
+      />
+    )
+    expect(isForcedPointerEventsNone(handle)).toBe(true)
+  })
+
+  it('commits a multi-selection transform through one history update', async () => {
+    const firstItem = createImageItem('image-multi-commit-first')
+    const secondItem = createImageItem('image-multi-commit-second')
+    secondItem.x = 420
+    setMockWebGLRuntime({ loadedIds: [firstItem.id, secondItem.id] })
+    const baseProps = createBaseProps([firstItem, secondItem])
+
+    render(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        selectedIds={new Set([firstItem.id, secondItem.id])}
+      />
+    )
+    await screen.findByTestId('mock-multi-selection-transform-overlay')
+
+    const onTransformEnd = latestMultiSelectionTransformOverlayProps?.onTransformEnd as (
+      updates: Array<{ id: string; attrs: Partial<CanvasItem> }>
+    ) => void
+    onTransformEnd([{ id: secondItem.id, attrs: { x: 500, y: 12 } }])
+
+    const historyUpdate = (baseProps.setItemsWithHistory as ReturnType<typeof vi.fn>).mock.calls.at(
+      -1
+    )?.[0] as (previous: CanvasItem[]) => CanvasItem[]
+    const [nextFirst, nextSecond] = historyUpdate([firstItem, secondItem])
+    expect(nextFirst).toBe(firstItem)
+    expect(nextSecond).toEqual({ ...secondItem, x: 500, y: 12 })
+  })
+
+  it('moves the mounted scene overlay with the live viewport and resets it at the committed one', async () => {
+    const item = createImageItem('image-scene-overlay-follow')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    const viewportCallbacks = new Set<(pos: { x: number; y: number }, scale: number) => void>()
+    const registerViewportCallback = vi.fn(
+      (callback: (pos: { x: number; y: number }, scale: number) => void) => {
+        viewportCallbacks.add(callback)
+        callback({ x: 0, y: 0 }, 1)
+        return () => {
+          viewportCallbacks.delete(callback)
+        }
+      }
+    )
+    const drawingState = { shape: 'rect', startX: 0, startY: 0, x: 10, y: 10, w: 40, h: 30 }
+    const baseProps = {
+      ...createBaseProps([item]),
+      drawingState,
+      tool: 'annotate',
+      selectedIds: new Set<string>(),
+      registerViewportCallback
+    }
+
+    const { rerender } = render(<ProjectCanvasPageStageScene {...baseProps} />)
+    await waitFor(() => {
+      expect(viewportCallbacks.size).toBeGreaterThan(0)
+    })
+    const follower = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-scene-overlay-follower="true"]') as HTMLElement
+    expect(follower.style.transform).toBe('')
+
+    act(() => {
+      viewportCallbacks.forEach((callback) => callback({ x: 50, y: 20 }, 2))
+    })
+    expect(follower.style.transform).toBe('translate3d(50px, 20px, 0) scale(2)')
+    // Only the content moves: the stage-sized clip box around the follower stays where it is,
+    // and nothing inside the follower clips to the moved box.
+    const clipBox = follower.parentElement as HTMLElement
+    expect(clipBox).toHaveAttribute('data-project-canvas-scene-overlay-clip', 'true')
+    expect(clipBox.style.overflow).toBe('hidden')
+    expect(clipBox.style.position).toBe('absolute')
+    expect(clipBox.style.transform).toBe('')
+    expect(follower.style.overflow).toBe('visible')
+    const sceneOverlayRoot = follower.querySelector(
+      '[data-project-canvas-scene-overlay="dom"]'
+    ) as HTMLElement
+    expect(getComputedStyle(sceneOverlayRoot).overflow).toBe('visible')
+
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} stagePos={{ x: 50, y: 20 }} stageScale={2} />
+    )
+    expect(follower.style.transform).toBe('')
+
+    // Nothing to show: the overlay is not moved at all.
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        drawingState={null}
+        stagePos={{ x: 50, y: 20 }}
+        stageScale={2}
+      />
+    )
+    act(() => {
+      viewportCallbacks.forEach((callback) => callback({ x: 90, y: 20 }, 2))
+    })
+    expect(follower.style.transform).toBe('')
+  })
+
+  it('gives proxies stable stage refs that follow the live and the committed viewport', async () => {
+    const item = createImageItem('image-proxy-stage-refs')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    const viewportCallbacks = new Set<(pos: { x: number; y: number }, scale: number) => void>()
+    const registerViewportCallback = vi.fn(
+      (callback: (pos: { x: number; y: number }, scale: number) => void) => {
+        viewportCallbacks.add(callback)
+        return () => {
+          viewportCallbacks.delete(callback)
+        }
+      }
+    )
+    const baseProps = {
+      ...createBaseProps([item]),
+      selectedIds: new Set<string>(),
+      registerViewportCallback
+    }
+
+    const { rerender } = render(<ProjectCanvasPageStageScene {...baseProps} />)
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.has(item.id)).toBe(true)
+    })
+    const proxyProps = canvasPlaceholderProps.get(item.id) as {
+      stagePosRef: { current: { x: number; y: number } }
+      stageScaleRef: { current: number }
+    }
+    const { stagePosRef, stageScaleRef } = proxyProps
+    expect(stagePosRef.current).toEqual({ x: 0, y: 0 })
+    expect(stageScaleRef.current).toBe(1)
+
+    act(() => {
+      viewportCallbacks.forEach((callback) => callback({ x: 70, y: -15 }, 1.5))
+    })
+    expect(stagePosRef.current).toEqual({ x: 70, y: -15 })
+    expect(stageScaleRef.current).toBe(1.5)
+
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} stagePos={{ x: 80, y: -20 }} stageScale={2} />
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.get(item.id)?.stageScale).toBe(2)
+    })
+    expect(canvasPlaceholderProps.get(item.id)?.stagePosRef).toBe(stagePosRef)
+    expect(canvasPlaceholderProps.get(item.id)?.stageScaleRef).toBe(stageScaleRef)
+    expect(stagePosRef.current).toEqual({ x: 80, y: -20 })
+    expect(stageScaleRef.current).toBe(2)
+  })
+
+  it('makes proxies inert as soon as the viewport driver reports a gesture, before React commits it', async () => {
+    const item = createImageItem('image-driver-gesture')
+    setMockWebGLRuntime({ loadedIds: [item.id] })
+    const interactionCallbacks = new Set<(active: boolean) => void>()
+    const registerViewportInteractionCallback = vi.fn((callback: (active: boolean) => void) => {
+      interactionCallbacks.add(callback)
+      callback(false)
+      return () => {
+        interactionCallbacks.delete(callback)
+      }
+    })
+
+    render(
+      <ProjectCanvasPageStageScene
+        {...createBaseProps([item])}
+        selectedIds={new Set<string>()}
+        {...({ registerViewportInteractionCallback } as Record<string, unknown>)}
+      />
+    )
+
+    await waitFor(() => {
+      expect(interactionCallbacks.size).toBe(1)
+    })
+    const stageLayerRoot = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-stage-layer-root="true"]') as HTMLElement
+
+    act(() => {
+      interactionCallbacks.forEach((callback) => callback(true))
+    })
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(true)
+
+    act(() => {
+      interactionCallbacks.forEach((callback) => callback(false))
+    })
+    expect(stageLayerRoot.classList.contains('is-viewport-interacting')).toBe(false)
+  })
+
+  it('routes click, double-click, drag start and context menu to the right item after a pan and a zoom', async () => {
+    const imageItem = createImageItem('image-after-gesture')
+    const otherImageItem = createImageItem('image-after-gesture-other')
+    otherImageItem.x = 480
+    const textItem = createTextItem('text-after-gesture')
+    textItem.x = 900
+    setMockWebGLRuntime({ loadedIds: [imageItem.id, otherImageItem.id] })
+    const baseProps = createBaseProps([imageItem, otherImageItem, textItem])
+    const noSelection = new Set<string>()
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={noSelection} />
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(3)
+    })
+
+    // Pan, then a zoom; each gesture ends with a committed viewport.
+    rerender(
+      <ProjectCanvasPageStageScene {...baseProps} isViewportInteracting selectedIds={noSelection} />
+    )
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting={false}
+        selectedIds={noSelection}
+        stagePos={{ x: -120, y: 40 }}
+      />
+    )
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting
+        selectedIds={noSelection}
+        stagePos={{ x: -120, y: 40 }}
+      />
+    )
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        isViewportInteracting={false}
+        selectedIds={noSelection}
+        stagePos={{ x: -300, y: -20 }}
+        stageScale={2}
+      />
+    )
+
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.get(imageItem.id)?.stageScale).toBe(2)
+    })
+    const viewportLayer = screen
+      .getByTestId('project-canvas-stage-root')
+      .querySelector('[data-project-canvas-item-interaction-viewport="true"]') as HTMLElement
+    expect(viewportLayer.style.transform).toBe('translate3d(-300px, -20px, 0) scale(2)')
+
+    const imageProxyProps = canvasPlaceholderProps.get(imageItem.id) as {
+      item: CanvasItem
+      onSelect: (additive?: boolean) => void
+      onDragStart: (itemId: string) => void
+      onContextMenu: (event: MouseEvent) => void
+      isDraggable: boolean
+    }
+    expect(imageProxyProps.item).toBe(imageItem)
+    expect(imageProxyProps.isDraggable).toBe(true)
+
+    imageProxyProps.onSelect(false)
+    const selectionUpdate = (baseProps.setSelectedIds as ReturnType<typeof vi.fn>).mock.calls.at(
+      -1
+    )?.[0] as (previous: Set<string>) => Set<string>
+    expect([...selectionUpdate(new Set([otherImageItem.id]))]).toEqual([imageItem.id])
+
+    imageProxyProps.onDragStart(imageItem.id)
+    expect(baseProps.dragContextRef.current.draggingId).toBe(imageItem.id)
+    baseProps.dragContextRef.current.draggingId = null
+
+    const contextMenuEvent = new MouseEvent('contextmenu', { clientX: 10, clientY: 20 })
+    imageProxyProps.onContextMenu(contextMenuEvent)
+    expect(baseProps.handleImageContextMenu).toHaveBeenLastCalledWith(contextMenuEvent, imageItem)
+
+    const otherProxyProps = canvasPlaceholderProps.get(otherImageItem.id) as {
+      onContextMenu: (event: MouseEvent) => void
+    }
+    otherProxyProps.onContextMenu(contextMenuEvent)
+    expect(baseProps.handleImageContextMenu).toHaveBeenLastCalledWith(
+      contextMenuEvent,
+      otherImageItem
+    )
+
+    const textProxyProps = canvasPlaceholderProps.get(textItem.id) as {
+      onDoubleClick: () => void
+    }
+    act(() => {
+      textProxyProps.onDoubleClick()
+    })
+    expect(baseProps.setInlineTextEdit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: textItem.id, text: textItem.text, isNew: false })
+    )
+  })
+
+  it('keeps the callbacks a proxy kept from an earlier render acting on the latest selection, tool and handlers', async () => {
+    const imageItem = createImageItem('image-stale-callbacks')
+    const textItem = createTextItem('text-stale-callbacks')
+    textItem.x = 600
+    const annotationItem = createAnnotationItem('annotation-stale-callbacks', { x: 900 })
+    setMockWebGLRuntime({ loadedIds: [imageItem.id] })
+    const baseProps = createBaseProps([imageItem, textItem, annotationItem])
+    const noSelection = new Set<string>()
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={noSelection} />
+    )
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.size).toBe(3)
+    })
+
+    // What a memoised proxy holds when its comparator skips every later render.
+    type ProxyCallbacks = {
+      onSelect: (additive?: boolean) => void
+      onContextMenu: (event: MouseEvent) => void
+      onDragEnd: (id: string, x: number, y: number, evt?: PointerEvent) => void
+      onTransformEnd: (id: string, attrs: Partial<CanvasItem>) => void
+      onPreviewChange?: (itemId: string, preview: unknown) => void
+      onDoubleClick?: () => void
+    }
+    const keptImageProxy = { ...canvasPlaceholderProps.get(imageItem.id) } as ProxyCallbacks
+    const keptTextProxy = { ...canvasPlaceholderProps.get(textItem.id) } as ProxyCallbacks
+    const keptAnnotationProxy = {
+      ...canvasPlaceholderProps.get(annotationItem.id)
+    } as ProxyCallbacks
+
+    // The selection changes: the page hands down handlers that close over the new selection.
+    const nextSelection = new Set([textItem.id])
+    const nextHandleImageContextMenu = vi.fn()
+    const nextHandleDragEnd = vi.fn()
+    const nextHandleTransformEnd = vi.fn()
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        selectedIds={nextSelection}
+        handleImageContextMenu={nextHandleImageContextMenu}
+        handleDragEnd={nextHandleDragEnd}
+        handleTransformEnd={nextHandleTransformEnd}
+      />
+    )
+
+    const contextMenuEvent = new MouseEvent('contextmenu', { clientX: 4, clientY: 8 })
+    keptImageProxy.onContextMenu(contextMenuEvent)
+    expect(nextHandleImageContextMenu).toHaveBeenLastCalledWith(contextMenuEvent, imageItem)
+    expect(baseProps.handleImageContextMenu).not.toHaveBeenCalled()
+
+    keptImageProxy.onDragEnd(imageItem.id, 30, 40)
+    expect(nextHandleDragEnd).toHaveBeenLastCalledWith(imageItem.id, 30, 40, undefined)
+    keptTextProxy.onDragEnd(textItem.id, 50, 60)
+    expect(nextHandleDragEnd).toHaveBeenLastCalledWith(textItem.id, 50, 60, undefined)
+    keptAnnotationProxy.onDragEnd(annotationItem.id, 910, 84)
+    expect(nextHandleDragEnd).toHaveBeenCalledTimes(3)
+    expect(baseProps.handleDragEnd).not.toHaveBeenCalled()
+
+    keptTextProxy.onTransformEnd(textItem.id, { rotation: 15 })
+    expect(nextHandleTransformEnd).toHaveBeenLastCalledWith(textItem.id, { rotation: 15 })
+    expect(baseProps.handleTransformEnd).not.toHaveBeenCalled()
+
+    // The tool changes to the hand tool: a click on a kept proxy must not select it, and an image
+    // drag preview must not reach the WebGL layer.
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        tool="hand"
+        selectedIds={nextSelection}
+        handleImageContextMenu={nextHandleImageContextMenu}
+        handleDragEnd={nextHandleDragEnd}
+        handleTransformEnd={nextHandleTransformEnd}
+      />
+    )
+    keptImageProxy.onSelect(false)
+    keptTextProxy.onSelect(true)
+    keptAnnotationProxy.onSelect(false)
+    expect(baseProps.setSelectedIds).not.toHaveBeenCalled()
+
+    expect(keptImageProxy.onPreviewChange).toBeTypeOf('function')
+    syncItemPreviewSpy.mockClear()
+    keptImageProxy.onPreviewChange?.(imageItem.id, {
+      x: 1,
+      y: 2,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      width: 100,
+      height: 80
+    })
+    expect(syncItemPreviewSpy).not.toHaveBeenCalled()
+    // Clearing a preview is always allowed (the proxy clears on unmount).
+    keptImageProxy.onPreviewChange?.(imageItem.id, null)
+    expect(syncItemPreviewSpy).toHaveBeenLastCalledWith(imageItem.id, null)
+
+    // Back to the select tool: the same kept callbacks select again.
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        tool="select"
+        selectedIds={nextSelection}
+        handleImageContextMenu={nextHandleImageContextMenu}
+        handleDragEnd={nextHandleDragEnd}
+        handleTransformEnd={nextHandleTransformEnd}
+      />
+    )
+    keptImageProxy.onSelect(false)
+    const selectionUpdate = (baseProps.setSelectedIds as ReturnType<typeof vi.fn>).mock.calls.at(
+      -1
+    )?.[0] as (previous: Set<string>) => Set<string>
+    expect([...selectionUpdate(nextSelection)]).toEqual([imageItem.id])
+
+    // The text editor opened from a kept double-click uses the latest setter.
+    const nextSetInlineTextEdit = vi.fn()
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        tool="select"
+        selectedIds={nextSelection}
+        setInlineTextEdit={nextSetInlineTextEdit}
+      />
+    )
+    act(() => {
+      keptTextProxy.onDoubleClick?.()
+    })
+    expect(nextSetInlineTextEdit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: textItem.id, isNew: false })
+    )
+    expect(baseProps.setInlineTextEdit).not.toHaveBeenCalled()
+  })
+
+  it('gives the multi-selection overlay stable callbacks that commit through the latest history setter', async () => {
+    const firstItem = createImageItem('image-multi-stale-first')
+    const secondItem = createImageItem('image-multi-stale-second')
+    secondItem.x = 420
+    setMockWebGLRuntime({ loadedIds: [firstItem.id, secondItem.id] })
+    const baseProps = createBaseProps([firstItem, secondItem])
+    const selection = new Set([firstItem.id, secondItem.id])
+
+    const { rerender } = render(
+      <ProjectCanvasPageStageScene {...baseProps} selectedIds={selection} />
+    )
+    await screen.findByTestId('mock-multi-selection-transform-overlay')
+    const keptOnTransformEnd = latestMultiSelectionTransformOverlayProps?.onTransformEnd as (
+      updates: Array<{ id: string; attrs: Partial<CanvasItem> }>
+    ) => void
+
+    const nextSetItemsWithHistory = vi.fn()
+    rerender(
+      <ProjectCanvasPageStageScene
+        {...baseProps}
+        selectedIds={selection}
+        setItemsWithHistory={nextSetItemsWithHistory}
+      />
+    )
+    // Same identity, so the overlay's comparator does not re-render it for a new setter...
+    expect(latestMultiSelectionTransformOverlayProps?.onTransformEnd).toBe(keptOnTransformEnd)
+    // ...and the kept callback still commits through the latest one.
+    keptOnTransformEnd([{ id: firstItem.id, attrs: { x: 7 } }])
+    expect(nextSetItemsWithHistory).toHaveBeenCalledTimes(1)
+    expect(baseProps.setItemsWithHistory).not.toHaveBeenCalled()
   })
 
   it('forwards viewport driver callbacks into the WebGL layer imperative viewport sync', async () => {
@@ -3099,6 +3899,48 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(mouseUpArg?.evt.button).toBe(0)
   })
 
+  it('ends a hand-tool pan exactly once when the pointer is released outside the canvas, even after a page re-render with new handlers', async () => {
+    const item = createFileItem('file-hand-release')
+    const props = createBaseProps([item])
+    props.tool = 'hand'
+
+    const view = render(<ProjectCanvasPageStageScene {...props} />)
+
+    await waitFor(() => {
+      expect(canvasPlaceholderProps.has(item.id)).toBe(true)
+    })
+
+    const overlay = screen.getByTestId(`canvas-placeholder-${item.id}`)
+    fireEvent.pointerDown(overlay, {
+      button: 0,
+      buttons: 1,
+      clientX: 140,
+      clientY: 160,
+      pointerId: 1,
+      pointerType: 'mouse'
+    })
+    expect(props.handleStageMouseDown).toHaveBeenCalledTimes(1)
+
+    // The page re-renders mid-pan with a new mouse-up handler.
+    const nextHandleStageMouseUp = vi.fn()
+    view.rerender(
+      <ProjectCanvasPageStageScene {...props} handleStageMouseUp={nextHandleStageMouseUp} />
+    )
+
+    fireEvent.pointerUp(document.body, {
+      button: 0,
+      clientX: 900,
+      clientY: 20,
+      pointerId: 1,
+      pointerType: 'mouse'
+    })
+    fireEvent.mouseUp(document.body, { button: 0, clientX: 900, clientY: 20 })
+
+    expect(props.handleStageMouseUp).not.toHaveBeenCalled()
+    expect(nextHandleStageMouseUp).toHaveBeenCalledTimes(1)
+    expect(nextHandleStageMouseUp.mock.calls[0]?.[0]?.type).toBe('pointerup')
+  })
+
   it('starts marquee capture from non-interactive stage wrapper elements above the stage event layer', () => {
     const props = createBaseProps([])
 
@@ -3709,7 +4551,766 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     expect(setCroppingImageId).toHaveBeenCalledWith(null)
   })
 
-  it('flattens confirmed image crops into the canvas item source data', async () => {
+  // SHA-256 and byte size of the 9 bytes behind 'data:image/png;base64,c3ludGhldGlj'.
+  const SYNTHETIC_SOURCE_SHA256 = 'b3cc0475bb78a5026098858e9889acf666d31062d513d303314eca31d36e72f2'
+  const SYNTHETIC_SOURCE_SIZE_BYTES = 9
+
+  it.each([
+    { label: 'unknown source dimensions', knownSize: false },
+    { label: 'known full source dimensions', knownSize: true }
+  ])('preserves a sibling crop unless it is a confirmed identity: $label', async ({ knownSize }) => {
+    // A's 200x200 source is represented by a synthetic data URL; this test does not decode it.
+    // Known size: the record attests the 9 synthetic bytes ("synthetic") as a 200x200 source.
+    const sibling: CanvasImageItem = {
+      ...createImageItem('sibling'),
+      src: 'data:image/png;base64,c3ludGhldGlj', image: undefined,
+      sourceWidth: knownSize ? 200 : undefined,
+      sourceHeight: knownSize ? 200 : undefined,
+      width: 100, height: 100,
+      crop: knownSize
+        ? { x: 0, y: 0, width: 200, height: 200 }
+        : { x: 0, y: 0, width: 100, height: 100 },
+      ...(knownSize
+        ? {
+            cropSource: {
+              version: 1 as const, origin: 'confirm' as const, width: 200, height: 200,
+              sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES, sha256: SYNTHETIC_SOURCE_SHA256
+            }
+          }
+        : {})
+    }
+    const before = { ...sibling, crop: { ...sibling.crop! } }
+    const target = createImageItem('crop-target')
+    const setItemsWithHistory = vi.fn()
+    render(<ProjectCanvasPageStageScene {...createBaseProps([sibling, target])}
+      tool="crop-select" croppingImageId={target.id} setItemsWithHistory={setItemsWithHistory} />)
+    const confirm = cropOverlayProps.get(target.id)?.onConfirm as (updates: Partial<CanvasImageItem>) => void
+    expect(confirm).toBeTypeOf('function')
+    act(() => confirm({ width: 80, height: 60 }))
+    await waitFor(() => expect(setItemsWithHistory).toHaveBeenCalledTimes(1))
+    const updateItems = setItemsWithHistory.mock.calls[0][0] as (prev: CanvasImageItem[]) => CanvasImageItem[]
+    const [nextSibling, nextTarget] = updateItems([sibling, target])
+    if (knownSize) expect(nextSibling.crop).toBeUndefined()
+    else expect(nextSibling.crop).toEqual(before.crop)
+    expect(sibling).toEqual(before)
+    expect(nextTarget).toEqual(expect.objectContaining({ id: target.id, width: 80, height: 60 }))
+  })
+
+  it('preserves sibling crop with equal-sized thumbnail and potentially stale source hints', async () => {
+    // Synthetic identities only: thumbnail is 100x100; source is assumed 200x200. No decoding.
+    const thumbnail = document.createElement('canvas')
+    thumbnail.width = 100
+    thumbnail.height = 100
+    const sibling: CanvasImageItem = {
+      ...createImageItem('sibling-stale-hints'),
+      src: 'data:image/png;base64,c3ludGhldGljLW9yaWdpbmFsLTIwMHgyMDA=',
+      image: thumbnail, sourceWidth: 100, sourceHeight: 100, width: 100, height: 100,
+      crop: { x: 0, y: 0, width: 100, height: 100 }
+    }
+    const before = { ...sibling, crop: { ...sibling.crop! } }
+    const target = createImageItem('crop-target-stale-sibling')
+    const setItemsWithHistory = vi.fn()
+    render(<ProjectCanvasPageStageScene {...createBaseProps([sibling, target])}
+      tool="crop-select" croppingImageId={target.id} setItemsWithHistory={setItemsWithHistory} />)
+    const confirm = cropOverlayProps.get(target.id)?.onConfirm as (updates: Partial<CanvasImageItem>) => void
+    expect(confirm).toBeTypeOf('function')
+    act(() => confirm({ width: 80, height: 60 }))
+    await waitFor(() => expect(setItemsWithHistory).toHaveBeenCalledTimes(1))
+    const updateItems = setItemsWithHistory.mock.calls[0][0] as (prev: CanvasImageItem[]) => CanvasImageItem[]
+    const [nextSibling] = updateItems([sibling, target])
+    expect(nextSibling.crop).toEqual(before.crop)
+    expect(sibling).toEqual(before)
+  })
+
+  it('retains unverified preview-coordinate crops on confirmation instead of flattening source', async () => {
+    // Preview, source, and drawing are synthetic; equal source dimensions do not
+    // establish that the stored crop coordinates were measured in the source.
+    const item = { ...createImageItem('preview-coordinate-target'), sourceWidth: 200, sourceHeight: 200 }
+    const crop = { x: 20, y: 10, width: 50, height: 50 }
+    const setItemsWithHistory = vi.fn()
+    const drawImage = vi.fn()
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never)
+    const encode = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,Y3JvcA==')
+    vi.stubGlobal('Image', class {
+      naturalWidth = 200
+      naturalHeight = 200
+      onload: (() => void) | null = null
+      onerror: (() => void) | null = null
+      set src(_value: string) { queueMicrotask(() => this.onload?.()) }
+    })
+    try {
+      render(<ProjectCanvasPageStageScene {...createBaseProps([item])} tool="crop-select"
+        croppingImageId={item.id} setItemsWithHistory={setItemsWithHistory} />)
+      const confirm = cropOverlayProps.get(item.id)?.onConfirm as (updates: Partial<CanvasImageItem>) => void
+      expect(confirm).toBeTypeOf('function')
+      await act(async () => { confirm({ width: 50, height: 50, crop }); await Promise.resolve() })
+      await waitFor(() => expect(setItemsWithHistory).toHaveBeenCalledTimes(1))
+      const update = setItemsWithHistory.mock.calls[0][0] as (prev: CanvasImageItem[]) => CanvasImageItem[]
+      const [result] = update([item])
+      expect(result).toMatchObject({ id: item.id, src: item.src, crop })
+      expect(drawImage).not.toHaveBeenCalled()
+      expect(encode).not.toHaveBeenCalled()
+      expect(item).not.toHaveProperty('crop')
+    } finally { getContext.mockRestore(); encode.mockRestore(); vi.unstubAllGlobals() }
+  })
+
+  describe('crop source record after confirm (synthetic sources, no decoding)', () => {
+    const syntheticEvidence = (width: number, height: number) => ({
+      sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+      sha256: SYNTHETIC_SOURCE_SHA256,
+      width,
+      height,
+      image: document.createElement('img')
+    })
+    const confirmedCrop = { x: 20, y: 10, width: 80, height: 60 }
+
+    function renderCropTarget(
+      target: CanvasImageItem,
+      siblings: CanvasImageItem[] = [],
+      extra: Record<string, unknown> = {}
+    ) {
+      const setItemsWithHistory = vi.fn()
+      const setItemsWithoutHistory = vi.fn()
+      const props = {
+        ...createBaseProps([...siblings, target]),
+        tool: 'crop-select',
+        croppingImageId: target.id,
+        setItemsWithHistory,
+        setItemsWithoutHistory,
+        ...extra
+      }
+      const view = render(<ProjectCanvasPageStageScene {...props} />)
+      const confirm = cropOverlayProps.get(target.id)?.onConfirm as (
+        updates: Partial<CanvasImageItem>
+      ) => void
+      expect(confirm).toBeTypeOf('function')
+      return { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory }
+    }
+
+    function deferEvidence() {
+      let resolve!: (value: unknown) => void
+      cropSourceEvidenceMock.read.mockImplementationOnce(
+        () => new Promise((settle) => (resolve = settle))
+      )
+      return {
+        resolve: (value: unknown) => resolve(value),
+        isCurrent: () => (cropSourceEvidenceMock.read.mock.calls.at(-1)?.[1] as () => boolean)()
+      }
+    }
+
+    beforeEach(() => {
+      cropSourceEvidenceMock.read.mockClear()
+    })
+
+    // What the real setters do: the scene is rendered again with the new items.
+    function show(
+      view: ReturnType<typeof render>,
+      props: Record<string, unknown>,
+      items: CanvasItem[]
+    ) {
+      view.rerender(
+        <ProjectCanvasPageStageScene
+          {...props}
+          visibleItems={items}
+          itemIdSet={new Set(items.map((item) => item.id))}
+        />
+      )
+    }
+
+    function applyConfirm(setItemsWithHistory: ReturnType<typeof vi.fn>, items: CanvasItem[], call = 0) {
+      return (setItemsWithHistory.mock.calls[call][0] as (prev: CanvasItem[]) => CanvasItem[])(items)
+    }
+
+    function applyRecord(setItemsWithoutHistory: ReturnType<typeof vi.fn>, items: CanvasItem[], call = 0) {
+      return (setItemsWithoutHistory.mock.calls[call][0] as (prev: CanvasItem[]) => CanvasItem[])(
+        items
+      )
+    }
+
+    it('attaches a confirm record when the evidence equals the crop space and writes the absent source size', async () => {
+      // In-memory image 200x120 and no explicit source size: the overlay measured in 200x120.
+      const target = createImageItem('record-target')
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      expect(setItemsWithHistory).toHaveBeenCalledTimes(1)
+      expect(cropSourceEvidenceMock.read).toHaveBeenCalledWith(
+        target.src,
+        expect.any(Function),
+        expect.objectContaining({ maxBytes: expect.any(Number) })
+      )
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+
+      await waitFor(() => expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1))
+      expect(setItemsWithHistory).toHaveBeenCalledTimes(1)
+      const confirmed = (
+        setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      )([target])
+      const attach = setItemsWithoutHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      const [attested] = attach(confirmed) as CanvasImageItem[]
+      expect(attested).toEqual(
+        expect.objectContaining({
+          id: target.id,
+          src: target.src,
+          crop: confirmedCrop,
+          sourceWidth: 200,
+          sourceHeight: 120,
+          cropSource: {
+            version: 1,
+            origin: 'confirm',
+            width: 200,
+            height: 120,
+            sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+            sha256: SYNTHETIC_SOURCE_SHA256
+          }
+        })
+      )
+      expect(target).not.toHaveProperty('cropSource')
+    })
+
+    it('attests the record through attestCanvasItems, for the present and every snapshot of the same crop (F2)', async () => {
+      const target = createImageItem('attest-target')
+      const evidence = deferEvidence()
+      const attestCanvasItems = vi.fn()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target, [], {
+        attestCanvasItems
+      })
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+      await waitFor(() => expect(attestCanvasItems).toHaveBeenCalledTimes(1))
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+
+      const attest = attestCanvasItems.mock.calls[0][0] as (item: CanvasItem) => CanvasItem
+      const [confirmed] = applyConfirm(setItemsWithHistory, [target]) as CanvasImageItem[]
+      // A history snapshot: runtime refs stripped, moved after the confirm.
+      const { image: _image, ...snapshot } = { ...confirmed, x: 400 }
+      const attestedSnapshot = attest(snapshot as CanvasItem) as CanvasImageItem
+      expect(attestedSnapshot).toEqual(
+        expect.objectContaining({ x: 400, sourceWidth: 200, sourceHeight: 120, crop: confirmedCrop })
+      )
+      expect(attestedSnapshot.cropSource).toEqual(
+        expect.objectContaining({ origin: 'confirm', width: 200, height: 120 })
+      )
+      for (const other of [
+        target,
+        { ...confirmed, crop: { ...confirmedCrop, width: 81 } },
+        { ...confirmed, src: 'file:///another-source.png' },
+        {
+          ...confirmed,
+          cropSource: { ...attestedSnapshot.cropSource!, origin: 'reopen' as const }
+        },
+        { ...confirmed, id: 'another-item' }
+      ]) {
+        expect(attest(other as CanvasItem)).toBe(other)
+      }
+    })
+
+    it('attaches no record when the evidence cannot be related to the crop space', async () => {
+      // A 200x120 image in memory over a 400x400 source: another aspect, so the
+      // in-memory image is not a thumbnail of these bytes.
+      const target = createImageItem('unrelated-target')
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 400)))
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(cropSourceEvidenceMock.read).toHaveBeenCalledTimes(1)
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    it('measures the source of a thumbnail-hydrated image and records the crop in source space (F2 part 4)', async () => {
+      // A 200x120 thumbnail in memory, no stored source size, a 400x240 source:
+      // the crop numbers are in thumbnail space and are scaled by 2.
+      const target = createImageItem('thumbnail-target')
+      expect(target.sourceWidth).toBeUndefined()
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+      await waitFor(() => expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1))
+
+      expect(cropSourceEvidenceMock.read).toHaveBeenCalledTimes(1)
+      const confirmed = applyConfirm(setItemsWithHistory, [target])
+      const [attested] = applyRecord(setItemsWithoutHistory, confirmed) as CanvasImageItem[]
+      expect(attested).toEqual(
+        expect.objectContaining({
+          src: target.src,
+          sourceWidth: 400,
+          sourceHeight: 240,
+          crop: { x: 40, y: 20, width: 160, height: 120 },
+          cropSource: expect.objectContaining({ origin: 'confirm', width: 400, height: 240 })
+        })
+      )
+      // The display reads the crop against the stored size: the same region of the thumbnail.
+      expect(resolveCanvasImageDisplayCrop(attested, attested.image)).toEqual(confirmedCrop)
+      expect(resolveCanvasImageDisplayCrop(confirmed[0] as CanvasImageItem, target.image)).toEqual(
+        confirmedCrop
+      )
+    })
+
+    it('never scales a crop measured in an explicit source size', async () => {
+      const explicit = {
+        ...createImageItem('explicit-mismatch'),
+        sourceWidth: 200,
+        sourceHeight: 120
+      }
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithoutHistory } = renderCropTarget(explicit)
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    it('measures an explicit source size against the evidence, not the in-memory image', async () => {
+      const target = {
+        ...createImageItem('explicit-size-target'),
+        sourceWidth: 400,
+        sourceHeight: 240
+      }
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(400, 240)))
+
+      await waitFor(() => expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1))
+      const confirmed = (
+        setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      )([target])
+      const attach = setItemsWithoutHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      const [attested] = attach(confirmed) as CanvasImageItem[]
+      expect(attested.cropSource).toEqual(expect.objectContaining({ width: 400, height: 240 }))
+      expect(attested).toEqual(expect.objectContaining({ sourceWidth: 400, sourceHeight: 240 }))
+    })
+
+    it('writes nothing for a stale read: src or crop changed before the record lands', async () => {
+      const target = createImageItem('stale-target')
+      const evidence = deferEvidence()
+      const { confirm, setItemsWithHistory, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+      await waitFor(() => expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1))
+
+      const [confirmed] = (
+        setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      )([target]) as CanvasImageItem[]
+      const attach = setItemsWithoutHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      for (const changed of [
+        { ...confirmed, src: 'file:///replaced-source.png' },
+        { ...confirmed, crop: { ...confirmedCrop, x: 21 } },
+        { ...confirmed, crop: undefined },
+        { ...confirmed, sourceWidth: 400, sourceHeight: 240 }
+      ]) {
+        const prev = [changed]
+        expect(attach(prev)).toBe(prev)
+      }
+    })
+
+    it('stops the read when the source changes meanwhile and writes nothing', async () => {
+      const target = createImageItem('replaced-target')
+      const evidence = deferEvidence()
+      const { view, props, confirm, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      expect(evidence.isCurrent()).toBe(true)
+      const replaced = { ...target, src: 'file:///replaced-target-other.png' }
+      view.rerender(
+        <ProjectCanvasPageStageScene
+          {...props}
+          visibleItems={[replaced]}
+          itemIdSet={new Set([replaced.id])}
+        />
+      )
+      expect(evidence.isCurrent()).toBe(false)
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    it('stops the read after unmount and writes nothing', async () => {
+      const target = createImageItem('unmounted-target')
+      const evidence = deferEvidence()
+      const { view, confirm, setItemsWithoutHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      view.unmount()
+      expect(evidence.isCurrent()).toBe(false)
+      await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+      await Promise.resolve()
+
+      expect(setItemsWithoutHistory).not.toHaveBeenCalled()
+    })
+
+    describe('drag registry of proven crops', () => {
+      function setupRegistry() {
+        const kept: Blob[] = []
+        const revoke = vi.fn()
+        const registry = createCanvasProvenCropRegistry(
+          {},
+          {
+            create: (blob) => {
+              kept.push(blob)
+              return `blob:proven-crop-${kept.length}`
+            },
+            revoke
+          }
+        )
+        const drawImage = vi.fn()
+        const getContext = vi
+          .spyOn(HTMLCanvasElement.prototype, 'getContext')
+          .mockReturnValue({ drawImage } as never)
+        let encode: ((blob: Blob | null) => void) | null = null
+        const toBlob = vi
+          .spyOn(HTMLCanvasElement.prototype, 'toBlob')
+          .mockImplementation((callback: BlobCallback) => {
+            encode = callback
+          })
+        return {
+          registry,
+          kept,
+          revoke,
+          drawImage,
+          toBlob,
+          finishEncode: (blob: Blob | null) => encode?.(blob),
+          restore: () => {
+            getContext.mockRestore()
+            toBlob.mockRestore()
+          }
+        }
+      }
+
+      it('keeps the crop drawn from the verified decode once the confirm record lands', async () => {
+        const target = createImageItem('registry-target')
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory } =
+            renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          show(view, props, applyConfirm(setItemsWithHistory, [target]))
+          const read = syntheticEvidence(200, 120)
+          await act(async () => evidence.resolve(read))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          expect(proven.drawImage).toHaveBeenCalledExactlyOnceWith(
+            read.image,
+            20,
+            10,
+            80,
+            60,
+            0,
+            0,
+            80,
+            60
+          )
+          expect(proven.toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/png')
+          const png = new Blob(['proven-crop'], { type: 'image/png' })
+          await act(async () => proven.finishEncode(png))
+
+          const confirmed = (
+            setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+          )([target])
+          const attach = setItemsWithoutHistory.mock.calls[0][0] as (
+            prev: CanvasItem[]
+          ) => CanvasItem[]
+          const [attested] = attach(confirmed) as CanvasImageItem[]
+          await waitFor(() => expect(proven.registry.lookup(attested)).not.toBeNull())
+          expect(proven.registry.lookup(attested)).toEqual(
+            expect.objectContaining({ url: 'blob:proven-crop-1', width: 80, height: 60 })
+          )
+          expect(proven.kept).toEqual([png])
+          // The pixels are kept only for the record they were drawn under.
+          expect(proven.registry.lookup(confirmed[0] as CanvasImageItem)).toBeNull()
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('keeps nothing and draws nothing when the evidence differs from the crop space', async () => {
+        const target = createImageItem('registry-mismatch')
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { confirm } = renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          await act(async () => evidence.resolve(syntheticEvidence(400, 400)))
+          await act(async () => {
+            await Promise.resolve()
+          })
+          expect(proven.drawImage).not.toHaveBeenCalled()
+          expect(proven.toBlob).not.toHaveBeenCalled()
+          expect(proven.registry.entryCount).toBe(0)
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('keeps nothing when the scene unmounts while the crop is encoded', async () => {
+        const target = createImageItem('registry-unmount')
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { view, props, confirm, setItemsWithHistory } = renderCropTarget(target, [], {
+            provenCropRegistry: proven.registry
+          })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          show(view, props, applyConfirm(setItemsWithHistory, [target]))
+          await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          view.unmount()
+          await act(async () => proven.finishEncode(new Blob(['late'], { type: 'image/png' })))
+          expect(proven.registry.entryCount).toBe(0)
+          expect(proven.kept).toHaveLength(0)
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('registers the crop of an item without a stored source size once the record writes it (F2)', async () => {
+        // The record update writes sourceWidth/Height = record size; the fence
+        // after the encode must accept that, or the proven crop is never draggable.
+        const target = createImageItem('registry-no-source-size')
+        expect(target.sourceWidth).toBeUndefined()
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory } =
+            renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          const confirmed = applyConfirm(setItemsWithHistory, [target])
+          show(view, props, confirmed)
+          await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          const attested = applyRecord(setItemsWithoutHistory, confirmed)
+          expect(attested[0]).toEqual(
+            expect.objectContaining({ sourceWidth: 200, sourceHeight: 120 })
+          )
+          // React commits the record before the encode resolves.
+          show(view, props, attested)
+          await act(async () => proven.finishEncode(new Blob(['crop'], { type: 'image/png' })))
+
+          expect({
+            sourceWidth: (attested[0] as CanvasImageItem).sourceWidth,
+            entryCount: proven.registry.entryCount
+          }).toEqual({ sourceWidth: 200, entryCount: 1 })
+          expect(proven.registry.lookup(attested[0] as CanvasImageItem)).not.toBeNull()
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('does not let a late read of an undone crop replace the entry of the crop on the canvas (F2)', async () => {
+        const proven = setupRegistry()
+        const recordA = {
+          version: 1 as const,
+          origin: 'confirm' as const,
+          width: 200,
+          height: 120,
+          sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+          sha256: SYNTHETIC_SOURCE_SHA256
+        }
+        const cropA = { x: 0, y: 0, width: 100, height: 100 }
+        const itemA: CanvasImageItem = {
+          ...createImageItem('registry-undo'),
+          sourceWidth: 200,
+          sourceHeight: 120,
+          crop: cropA,
+          cropSource: recordA
+        }
+        try {
+          const entryA = proven.registry.register(
+            itemA,
+            new Blob(['crop-a'], { type: 'image/png' }),
+            { width: 100, height: 100 }
+          )
+          expect(entryA).not.toBeNull()
+          const evidence = deferEvidence()
+          const { view, props, confirm, setItemsWithHistory } = renderCropTarget(itemA, [], {
+            provenCropRegistry: proven.registry
+          })
+          // Crop B is confirmed, then undone before its read lands.
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          show(view, props, applyConfirm(setItemsWithHistory, [itemA]))
+          show(view, props, [itemA])
+          await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+          await act(async () => {
+            await Promise.resolve()
+          })
+
+          expect(proven.drawImage).not.toHaveBeenCalled()
+          expect(proven.toBlob).not.toHaveBeenCalled()
+          expect(proven.registry.lookup(itemA)).toEqual(entryA)
+          expect(proven.revoke).not.toHaveBeenCalled()
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('keeps nothing when the crop is undone while its PNG is still being encoded (review of F2)', async () => {
+        const target = {
+          ...createImageItem('registry-undo-encode'),
+          sourceWidth: 200,
+          sourceHeight: 120
+        }
+        const evidence = deferEvidence()
+        const proven = setupRegistry()
+        try {
+          const { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory } =
+            renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          const confirmed = applyConfirm(setItemsWithHistory, [target])
+          show(view, props, confirmed)
+          await act(async () => evidence.resolve(syntheticEvidence(200, 120)))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          show(view, props, applyRecord(setItemsWithoutHistory, confirmed))
+          // Undo while the encode runs: same item, source and size, no crop.
+          show(view, props, [target])
+          await act(async () => proven.finishEncode(new Blob(['crop'], { type: 'image/png' })))
+          await act(async () => {
+            await Promise.resolve()
+          })
+
+          expect(proven.kept).toEqual([])
+          expect(proven.registry.entryCount).toBe(0)
+        } finally {
+          proven.restore()
+        }
+      })
+
+      it('keeps the newer crop when two confirm reads of one item resolve in reverse order (F2)', async () => {
+        const target = { ...createImageItem('registry-reorder'), sourceWidth: 200, sourceHeight: 120 }
+        const proven = setupRegistry()
+        try {
+          const first = deferEvidence()
+          const { view, props, confirm, setItemsWithHistory, setItemsWithoutHistory } =
+            renderCropTarget(target, [], { provenCropRegistry: proven.registry })
+          act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+          const second = deferEvidence()
+          const cropB = { x: 40, y: 20, width: 60, height: 50 }
+          act(() => confirm({ width: 60, height: 50, crop: cropB }))
+          const shownB = applyConfirm(setItemsWithHistory, [target], 1)
+          show(view, props, shownB)
+
+          await act(async () => second.resolve(syntheticEvidence(200, 120)))
+          await waitFor(() => expect(proven.toBlob).toHaveBeenCalledTimes(1))
+          const attestedB = applyRecord(setItemsWithoutHistory, shownB)
+          show(view, props, attestedB)
+          await act(async () => proven.finishEncode(new Blob(['crop-b'], { type: 'image/png' })))
+          // The older read for the first crop lands last: it is no longer current.
+          await act(async () => first.resolve(syntheticEvidence(200, 120)))
+          await act(async () => {
+            await Promise.resolve()
+          })
+
+          expect(setItemsWithoutHistory).toHaveBeenCalledTimes(1)
+          expect(proven.toBlob).toHaveBeenCalledTimes(1)
+          expect(proven.registry.entryCount).toBe(1)
+          expect(proven.registry.lookup(attestedB[0] as CanvasImageItem)).toEqual(
+            expect.objectContaining({ width: 60, height: 50 })
+          )
+        } finally {
+          proven.restore()
+        }
+      })
+    })
+
+    it('drops the old record of a re-cropped item until the source is attested again', () => {
+      const target: CanvasImageItem = {
+        ...createImageItem('recrop-target'),
+        sourceWidth: 200,
+        sourceHeight: 120,
+        crop: { x: 0, y: 0, width: 100, height: 100 },
+        cropSource: {
+          version: 1,
+          origin: 'confirm',
+          width: 200,
+          height: 120,
+          sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+          sha256: SYNTHETIC_SOURCE_SHA256
+        }
+      }
+      deferEvidence()
+      const { confirm, setItemsWithHistory } = renderCropTarget(target)
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      const [next] = (setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[])(
+        [target]
+      ) as CanvasImageItem[]
+      expect(next.crop).toEqual(confirmedCrop)
+      expect(next).not.toHaveProperty('cropSource')
+      expect(target.cropSource).toBeDefined()
+    })
+
+    it('never strips a sibling identity crop from a reopen record or without an explicit source size', () => {
+      const record = {
+        version: 1 as const,
+        width: 200,
+        height: 200,
+        sizeBytes: SYNTHETIC_SOURCE_SIZE_BYTES,
+        sha256: SYNTHETIC_SOURCE_SHA256
+      }
+      const fullCrop = { x: 0, y: 0, width: 200, height: 200 }
+      const reopened: CanvasImageItem = {
+        ...createImageItem('sibling-reopen'),
+        image: undefined,
+        sourceWidth: 200,
+        sourceHeight: 200,
+        crop: fullCrop,
+        cropSource: { ...record, origin: 'reopen' }
+      }
+      const noSourceSize: CanvasImageItem = {
+        ...createImageItem('sibling-no-source-size'),
+        image: undefined,
+        crop: fullCrop,
+        cropSource: { ...record, origin: 'confirm' }
+      }
+      const proven: CanvasImageItem = {
+        ...createImageItem('sibling-proven'),
+        image: undefined,
+        sourceWidth: 200,
+        sourceHeight: 200,
+        crop: fullCrop,
+        cropSource: { ...record, origin: 'confirm' }
+      }
+      const target = createImageItem('identity-strip-target')
+      deferEvidence()
+      const { confirm, setItemsWithHistory } = renderCropTarget(target, [
+        reopened,
+        noSourceSize,
+        proven
+      ])
+
+      act(() => confirm({ width: 80, height: 60, crop: confirmedCrop }))
+      const update = setItemsWithHistory.mock.calls[0][0] as (prev: CanvasItem[]) => CanvasItem[]
+      const [nextReopened, nextNoSourceSize, nextProven] = update([
+        reopened,
+        noSourceSize,
+        proven,
+        target
+      ]) as CanvasImageItem[]
+      expect(nextReopened).toBe(reopened)
+      expect(nextNoSourceSize).toBe(noSourceSize)
+      expect(nextProven).not.toHaveProperty('crop')
+      expect(nextProven).not.toHaveProperty('cropSource')
+      expect(proven.crop).toEqual(fullCrop)
+    })
+  })
+
+  it('keeps the source and the confirmed crop instead of flattening into the canvas item source data', async () => {
+    // Owner contract: crop-confirm keeps the original picture plus the crop; the
+    // crop source record is attached afterwards by the background read.
     const cropItem = {
       ...createImageItem('crop-target'),
       sourceWidth: 200,
@@ -3726,6 +5327,8 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
     const toDataURLSpy = vi
       .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
       .mockReturnValue('data:image/png;base64,cropped-canvas-source')
+    cropSourceEvidenceMock.read.mockClear()
+    cropSourceEvidenceMock.read.mockImplementationOnce(() => new Promise(() => undefined))
 
     try {
       render(
@@ -3759,25 +5362,31 @@ describe('ProjectCanvasPageStageScene WebGL integration seam', () => {
       const updateItems = setItemsWithHistory.mock.calls[0][0] as (
         prev: CanvasImageItem[]
       ) => CanvasImageItem[]
-      const [flattenedItem] = updateItems([cropItem])
+      const [croppedItem] = updateItems([cropItem])
 
-      expect(flattenedItem).toEqual(
+      expect(croppedItem).toEqual(
         expect.objectContaining({
           id: cropItem.id,
           x: 132,
           y: 156,
-          src: 'data:image/png;base64,cropped-canvas-source',
+          src: cropItem.src,
           fileName: 'crop-target.png',
-          sourceWidth: 80,
-          sourceHeight: 60,
+          sourceWidth: 200,
+          sourceHeight: 120,
           width: 80,
-          height: 60
+          height: 60,
+          crop: { x: 20, y: 10, width: 80, height: 60 }
         })
       )
-      expect(flattenedItem).not.toHaveProperty('crop')
-      expect(flattenedItem).not.toHaveProperty('image')
-      expect(drawImage).toHaveBeenCalledWith(cropItem.image, 20, 10, 80, 60, 0, 0, 80, 60)
-      expect(toDataURLSpy).toHaveBeenCalledWith('image/png')
+      expect(croppedItem.image).toBe(cropItem.image)
+      expect(croppedItem).not.toHaveProperty('cropSource')
+      expect(cropSourceEvidenceMock.read).toHaveBeenCalledWith(
+        cropItem.src,
+        expect.any(Function),
+        expect.objectContaining({ maxBytes: expect.any(Number) })
+      )
+      expect(drawImage).not.toHaveBeenCalled()
+      expect(toDataURLSpy).not.toHaveBeenCalled()
     } finally {
       getContextSpy.mockRestore()
       toDataURLSpy.mockRestore()

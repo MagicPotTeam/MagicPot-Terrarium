@@ -126,6 +126,9 @@ const config = {
   },
   files: [
     'out',
+    // Retired SQLite preview worker: a stale build of it may still sit in
+    // out/ on a machine that built before its removal; never package it.
+    '!out/sqlite-preview-worker/**',
     'README.md',
     'LICENSE',
     '!**/*.map',
@@ -138,7 +141,15 @@ const config = {
   ],
   extraFiles: bundledContentExtraFiles,
   asar: true,
-  asarUnpack: ['**/*.safetensors', '**/*.ckpt', '**/*.pt', '**/*.pth', '**/models/**/*'],
+  asarUnpack: [
+    '**/node_modules/@img/**/*',
+    '**/node_modules/sharp/**/*',
+    '**/*.safetensors',
+    '**/*.ckpt',
+    '**/*.pt',
+    '**/*.pth',
+    '**/models/**/*'
+  ],
   win: {
     icon: `${buildResourcesDir}/icon.png`,
     artifactName: `${releaseArtifactName}-win.\${ext}`,

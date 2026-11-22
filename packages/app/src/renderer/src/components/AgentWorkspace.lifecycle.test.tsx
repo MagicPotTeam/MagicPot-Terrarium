@@ -4,12 +4,12 @@ import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AgentWorkspace from './AgentWorkspace'
+import { forgetPaneTitles } from './agentPaneTitleMemory'
 import {
   clearScopedActiveLoadingSessionIds,
   clearScopedChatPageRunLifecycles,
   clearScopedExternalLoadingSessionIds,
   dispatchScopedChatRunEvent,
-  markScopedChatRunRead,
   readScopedChatRun,
   startScopedChatRun
 } from '@renderer/pages/ChatPage/chatPageShared'
@@ -20,7 +20,8 @@ const SESSION_ID = 'same-session-id'
 
 const fixture = vi.hoisted(() => ({
   chatPageMock: vi.fn(),
-  loadAllSessionsMock: vi.fn()
+  loadAllSessionsMock: vi.fn(),
+  scopeRevision: 0
 }))
 
 vi.mock('react-i18next', () => ({
@@ -47,7 +48,9 @@ vi.mock('@renderer/pages/ChatPage/ChatPage', () => ({
 }))
 
 vi.mock('@renderer/pages/ChatPage/chatStorage', () => ({
-  loadAllSessions: (...args: unknown[]) => fixture.loadAllSessionsMock(...args)
+  // The thread list reads summaries; a new revision on every call means every refresh reads.
+  loadSessionPreviewSummaries: (...args: unknown[]) => fixture.loadAllSessionsMock(...args),
+  getChatScopeRevision: () => ++fixture.scopeRevision
 }))
 
 vi.mock('@renderer/hooks/useMessage', () => ({
@@ -68,12 +71,21 @@ vi.mock('@renderer/features/projectTrace/ProjectTraceManagerPanel', () => ({
   default: () => <div data-testid="lifecycle-trace-panel" />
 }))
 
+const lifecycleTheme = createTheme()
+
 const renderWorkspace = () =>
   render(
-    <ThemeProvider theme={createTheme()}>
+    <ThemeProvider theme={lifecycleTheme}>
       <AgentWorkspace projectId="project-lifecycle" />
     </ThemeProvider>
   )
+
+/** Normalizes a CSS colour the way jsdom reports computed colours. */
+const cssColor = (value: string): string => {
+  const probe = document.createElement('span')
+  probe.style.backgroundColor = value
+  return probe.style.backgroundColor
+}
 
 const getPaneRow = (): HTMLElement => {
   const row = document.querySelector(`[data-agent-workspace-scope="${SCOPE}"][role="button"]`)
@@ -102,7 +114,10 @@ const dispatchStatus = (
 ) => dispatchScopedChatRunEvent(SCOPE, SESSION_ID, { runId, status })
 
 beforeEach(() => {
+  forgetPaneTitles()
   localStorage.clear()
+  // The thread list starts collapsed; these tests read the status dot of a list row.
+  localStorage.setItem('agent.workspace.threadsCollapsed.project-lifecycle', '0')
   clearScopedChatPageRunLifecycles()
   clearScopedActiveLoadingSessionIds()
   clearScopedExternalLoadingSessionIds()
@@ -132,7 +147,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
     ['cancelled', 'cancelled'],
     ['interrupted', 'interrupted']
   ] as const)(
-    'renders the %s state without manufacturing unread output',
+    'renders the %s state',
     async (_label, status) => {
       renderWorkspace()
       await waitForPane()
@@ -146,16 +161,41 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
         expect(getPaneStatus()).toHaveAttribute('data-run-status', status)
         expect(getPaneStatus()).toHaveAttribute('data-status', status)
       })
-      expect(getPaneStatus()).not.toHaveAttribute('data-status', 'unread')
       expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
         runId: `run-${status}`,
-        status,
-        unread: false
+        status
       })
     }
   )
 
-  it('keeps completed in data-run-status while mark-read changes only unread presentation', async () => {
+  it.each([
+    ['running', 'success', 'progressbar', 'agent_workspace.status_running'],
+    ['waiting-tool', 'warning', 'img', 'agent_workspace.status_waiting_tool'],
+    ['failed', 'error', 'img', 'agent_workspace.status_failed'],
+    ['cancelled', 'muted', 'img', 'agent_workspace.status_cancelled'],
+    ['interrupted', 'muted', 'img', 'agent_workspace.status_interrupted']
+  ] as const)(
+    'colours the %s dot with the %s tone and names it for assistive technology',
+    async (status, tone, role, label) => {
+      renderWorkspace()
+      await waitForPane()
+
+      await act(async () => {
+        startScopedChatRun(SCOPE, SESSION_ID, `tone-${status}`)
+        if (status !== 'running') dispatchStatus(`tone-${status}`, status)
+      })
+
+      await waitFor(() => expect(getPaneStatus()).toHaveAttribute('data-run-status', status))
+      const expected =
+        tone === 'muted' ? lifecycleTheme.palette.text.secondary : lifecycleTheme.palette[tone].main
+      expect(getComputedStyle(getPaneStatus()).backgroundColor).toBe(cssColor(expected))
+      expect(getComputedStyle(getPaneStatus()).width).toBe('7px')
+      expect(getPaneStatus()).toHaveAttribute('role', role)
+      expect(getPaneStatus()).toHaveAttribute('aria-label', label)
+    }
+  )
+
+  it('shows a completed run as idle and keeps completed in data-run-status', async () => {
     renderWorkspace()
     await waitForPane()
 
@@ -166,25 +206,17 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
 
     await waitFor(() => {
       expect(getPaneStatus()).toHaveAttribute('data-run-status', 'completed')
-      expect(getPaneStatus()).toHaveAttribute('data-status', 'unread')
+      expect(getPaneStatus()).toHaveAttribute('data-status', 'idle')
     })
-    expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
-      status: 'completed',
-      unread: true
-    })
-
-    await act(async () => {
-      markScopedChatRunRead(SCOPE, SESSION_ID, 'completed-run')
-    })
-
-    await waitFor(() => {
-      expect(getPaneStatus()).toHaveAttribute('data-run-status', 'completed')
-      expect(getPaneStatus()).toHaveAttribute('data-status', 'read')
-    })
+    // The thread list has no unread marker: a finished reply looks like any idle thread.
+    expect(getPaneStatus()).toHaveAttribute('aria-label', 'agent_workspace.status_idle')
+    expect(getPaneStatus()).toHaveAttribute('role', 'img')
+    expect(
+      getComputedStyle(getPaneRow().querySelector('[data-testid="agent-thread-title"]')!).fontWeight
+    ).toBe('400')
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: 'completed-run',
-      status: 'completed',
-      unread: false
+      status: 'completed'
     })
   })
 
@@ -209,8 +241,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
     expect(staleTerminal).toBeNull()
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: 'new-run',
-      status: 'running',
-      unread: false
+      status: 'running'
     })
     expect(getPaneStatus()).toHaveAttribute('data-run-status', 'running')
 
@@ -227,12 +258,11 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
       duplicateRunning = dispatchStatus('new-run', 'running')
     })
     expect(duplicateRunning).toEqual(
-      expect.objectContaining({ runId: 'new-run', status: 'failed', unread: false })
+      expect.objectContaining({ runId: 'new-run', status: 'failed' })
     )
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: 'new-run',
-      status: 'failed',
-      unread: false
+      status: 'failed'
     })
     expect(getPaneStatus()).toHaveAttribute('data-run-status', 'failed')
     expect(getPaneStatus()).toHaveAttribute('data-status', 'failed')
@@ -244,8 +274,7 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
 
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: null,
-      status: 'idle',
-      unread: false
+      status: 'idle'
     })
 
     await act(async () => {
@@ -258,16 +287,14 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
 
     expect(readScopedChatRun(OTHER_SCOPE, SESSION_ID)).toMatchObject({
       runId: 'other-scope-run',
-      status: 'completed',
-      unread: true
+      status: 'completed'
     })
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: null,
-      status: 'idle',
-      unread: false
+      status: 'idle'
     })
     expect(getPaneStatus()).toHaveAttribute('data-run-status', 'idle')
-    expect(getPaneStatus()).toHaveAttribute('data-status', 'read')
+    expect(getPaneStatus()).toHaveAttribute('data-status', 'idle')
     expect(fixture.loadAllSessionsMock).not.toHaveBeenCalledWith(OTHER_SCOPE)
   })
 })

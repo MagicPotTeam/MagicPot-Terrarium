@@ -7,6 +7,11 @@ type StartupPolicyLike = {
   windowMode: string | undefined
 }
 
+const ownerShutdown = vi.hoisted(() => vi.fn<() => Promise<void>>(async () => undefined))
+const confirmQuit = vi.hoisted(() => vi.fn(async () => true))
+vi.mock('./winControls', () => ({ winController: { confirmAppQuit: confirmQuit } }))
+vi.mock('./llmProxy/providerDispatchOwner', () => ({ shutdownProviderDispatchOwner: ownerShutdown }))
+
 const {
   appMock,
   browserWindowMock,
@@ -130,6 +135,11 @@ vi.mock('./subprocess/subprocess', () => ({
 }))
 
 vi.mock('./utils/loggingOverride', () => ({}))
+const processDiagnosticsMock = vi.hoisted(() => ({
+  startLocalCrashDumps: vi.fn(),
+  startProcessDiagnostics: vi.fn<(options: { getMainWindow: () => unknown }) => void>()
+}))
+vi.mock('./processDiagnostics', () => processDiagnosticsMock)
 
 function createWindow(id: string) {
   const windowListeners = new Map<string, (...args: unknown[]) => void>()
@@ -167,6 +177,8 @@ async function loadModule() {
 describe('main process startup window opening', () => {
   beforeEach(async () => {
     await settle()
+    ownerShutdown.mockReset().mockResolvedValue(undefined)
+    confirmQuit.mockReset().mockResolvedValue(true)
     createMainWindowMock.mockReset()
     createMainWindowMock
       .mockReturnValueOnce({ id: 'fallback-window' })
@@ -286,6 +298,33 @@ describe('main process startup window opening', () => {
     expect(startQAppWatcherMock).toHaveBeenCalledWith(initialWindow)
   })
 
+  it('starts local crash dumps before the app is ready and gives the diagnostics the created window', async () => {
+    let ready!: () => void
+    appMock.whenReady.mockImplementationOnce(() => new Promise<void>((resolve) => (ready = resolve)))
+    const initialWindow = { id: 'diagnosed-window' }
+    createMainWindowMock.mockReset()
+    createMainWindowMock.mockReturnValue(initialWindow)
+
+    await loadModule()
+
+    // Crash dumps must be set up before Electron is ready, or early native crashes are not dumped.
+    expect(processDiagnosticsMock.startLocalCrashDumps).toHaveBeenCalledOnce()
+    expect(processDiagnosticsMock.startLocalCrashDumps.mock.invocationCallOrder[0]).toBeLessThan(
+      appMock.whenReady.mock.invocationCallOrder[0]
+    )
+    expect(processDiagnosticsMock.startProcessDiagnostics).not.toHaveBeenCalled()
+
+    ready()
+    await settle()
+    await settle()
+
+    expect(createMainWindowMock).toHaveBeenCalledTimes(1)
+    expect(processDiagnosticsMock.startProcessDiagnostics).toHaveBeenCalledOnce()
+    // Without the window, no breadcrumb is accepted and every death record has no send stage.
+    const [{ getMainWindow }] = processDiagnosticsMock.startProcessDiagnostics.mock.calls[0]
+    expect(getMainWindow()).toBe(initialWindow)
+  })
+
   it('creates window with automated startup mode', async () => {
     getAppStartupTestWindowPolicyMock.mockReturnValue({
       automatedRun: true,
@@ -390,6 +429,7 @@ describe('main process startup window opening', () => {
 
     const firstQuit = beforeQuitHandler?.(firstEvent)
     const repeatedQuit = beforeQuitHandler?.(repeatedEvent)
+    await settle()
 
     expect(firstEvent.preventDefault).toHaveBeenCalledTimes(1)
     expect(repeatedEvent.preventDefault).toHaveBeenCalledTimes(1)
@@ -407,6 +447,41 @@ describe('main process startup window opening', () => {
     expect(cleanupSubProcessesMock).toHaveBeenCalledTimes(1)
   })
 
+  it('does not retire dispatch ownership when a normal quit is declined', async () => {
+    confirmQuit.mockResolvedValueOnce(false); await loadModule()
+    const handler = appMock.on.mock.calls.find(([event]) => event === 'before-quit')?.[1] as (event: { preventDefault(): void }) => Promise<void>
+    await handler({ preventDefault: vi.fn() })
+    expect(confirmQuit).toHaveBeenCalledOnce(); expect(ownerShutdown).not.toHaveBeenCalled(); expect(beforeQuitMock).not.toHaveBeenCalled(); expect(appMock.exit).not.toHaveBeenCalled()
+  })
+  it('tells renderer recovery that the app is quitting only once the quit is confirmed', async () => {
+    confirmQuit.mockResolvedValueOnce(false); await loadModule()
+    const quitState = await import('./appQuitState')
+    const handler = appMock.on.mock.calls.find(([event]) => event === 'before-quit')?.[1] as (event: { preventDefault(): void }) => Promise<void>
+    await handler({ preventDefault: vi.fn() })
+    expect(quitState.isAppQuitting()).toBe(false)
+    await handler({ preventDefault: vi.fn() })
+    expect(quitState.isAppQuitting()).toBe(true)
+  })
+  it('retires dispatch ownership before normal quit cleanup, even if native closure remains quarantined', async () => {
+    ownerShutdown.mockRejectedValueOnce(new Error('Closure remains quarantined'))
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    await loadModule()
+    const handler = appMock.on.mock.calls.find(([event]) => event === 'before-quit')?.[1] as (event: { preventDefault(): void }) => Promise<void>
+    await handler({ preventDefault: vi.fn() })
+    expect(ownerShutdown).toHaveBeenCalledOnce(); expect(beforeQuitMock).toHaveBeenCalledOnce(); expect(appMock.exit).toHaveBeenCalledWith(0)
+    expect(ownerShutdown.mock.invocationCallOrder[0]).toBeLessThan(beforeQuitMock.mock.invocationCallOrder[0]); expect(error).toHaveBeenCalled()
+  })
+  it('waits for dispatch owner retirement before update subprocess cleanup', async () => {
+    isAppUpdateInstallInProgressMock.mockReturnValue(true)
+    let retire!: () => void
+    ownerShutdown.mockImplementationOnce(() => new Promise<void>(resolve => { retire = resolve }))
+    await loadModule()
+    const handler = appMock.on.mock.calls.find(([event]) => event === 'before-quit')?.[1] as (event: { preventDefault(): void }) => Promise<void>
+    const pending = handler({ preventDefault: vi.fn() })
+    expect(ownerShutdown).toHaveBeenCalledOnce(); expect(cleanupSubProcessesMock).not.toHaveBeenCalled()
+    retire(); await pending
+    expect(cleanupSubProcessesMock).toHaveBeenCalledOnce(); expect(appMock.quit).toHaveBeenCalledOnce()
+  })
   it('intercepts update quit until subprocess cleanup completes', async () => {
     isAppUpdateInstallInProgressMock.mockReturnValue(true)
     await loadModule()

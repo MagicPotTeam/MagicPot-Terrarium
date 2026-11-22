@@ -45,8 +45,10 @@ const buildBoundToolCatalogLines = (runtime: SkillRuntimeSpec): string[] =>
     )
     .sort((left, right) => left.localeCompare(right))
 
+// A skill names its resource files itself: main reads them only in the custom skill folder or
+// where the user granted, never the app's config, grants or chats.
 const readTextFileViaApi = async (fullPath: string): Promise<string> => {
-  const response = await api().svcFs.readTextFile({ fullPath })
+  const response = await api().svcFs.readSkillResourceFile({ fullPath })
   return response.content
 }
 

@@ -163,11 +163,14 @@ import { useCanvasCustomAddEvents } from './useCanvasCustomAddEvents'
 import { useCanvasKeyboardShortcuts } from './useCanvasKeyboardShortcuts'
 import { useCanvasBridgeActions } from './useCanvasBridgeActions'
 import { useCanvasViewportPersistence } from './useCanvasViewportPersistence'
+import { useCanvasLegacyCropUpgrade } from './useCanvasLegacyCropUpgrade'
+import { useCanvasProvenCropRegistryFill } from './useCanvasProvenCropRegistryFill'
 import { useCanvasLayerRuntime } from './useCanvasLayerRuntime'
 import { useCanvasInlineTextEffects } from './useCanvasInlineTextEffects'
 import { useCanvasMediaRuntime } from './useCanvasMediaRuntime'
 import { useCanvasStageResize } from './useCanvasStageResize'
 import { buildProjectCanvasPageShellProps } from './buildProjectCanvasPageShellProps'
+import { createCanvasProvenCropRegistry } from './canvasProvenCropRegistry'
 import { useProjectCanvasPageRuntimeState } from './useProjectCanvasPageRuntimeState'
 import { useProjectCanvasPageShellState } from './useProjectCanvasPageShellState'
 import { useCanvasViewportPlacement } from './useCanvasViewportPlacement'
@@ -235,6 +238,9 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   )
   const { imageBatchImportProgress, isImageBatchImportActive, handleImageBatchImportProgress } =
     useCanvasImageBatchImportProgress()
+  // Pixels of proven crops for drags; owned by this board and released with it.
+  const [provenCropRegistry] = useState(createCanvasProvenCropRegistry)
+  useEffect(() => () => provenCropRegistry.release(), [provenCropRegistry])
 
   const projectName = useSelector((state: any) => {
     const tab = state.layout.openTabs.find((t: any) => t.id === canvasId)
@@ -246,6 +252,8 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     activeOcrHover,
     annoTool,
     drawingState,
+    attestItems,
+    getUndoRedoItemLists,
     groups,
     groupBranches,
     handleRedo,
@@ -400,6 +408,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
   const lastViewportPointRef = useCanvasLastViewportPoint()
   const stageSizeRef = useRef(stageSize)
   const nextZIndex = useRef(1)
+  const restoreGenerationRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelInputRef = useRef<HTMLInputElement>(null)
   const videoInputRef = useRef<HTMLInputElement>(null)
@@ -462,12 +471,14 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     addOcrResultToCanvas,
     addTextToCanvas,
     addVideoToCanvas,
+    isCanvasSceneImporting,
     handleImportCanvasSceneFile,
     handleImportPsdFile,
     hydrateCanvasImageItemForCanvas,
     loadImageFromSrc
   } = useCanvasAssetIntake({
     canvasId,
+    restoreGenerationRef,
     dispatch,
     fitImageToCanvasSize,
     getBatchGridLayout,
@@ -597,7 +608,8 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     notifySuccess,
     notifyError,
     notifyInfo,
-    closeMessage
+    closeMessage,
+    provenCropRegistry
   })
 
   const handleOpenTargetSchemeManager = useCallback(() => {
@@ -714,6 +726,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     notifySuccess,
     notifyError,
     extractPromptTextFromCanvasItems,
+    provenCropRegistry,
     renderCanvasItemsImageDataUrl,
     renderCanvasItemsSvgMarkup
   })
@@ -829,6 +842,16 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     setExtractingImageId
   })
 
+  // Owner decision 2: old crops are re-measured once per board open.
+  const { handleCanvasItemsLoaded } = useCanvasLegacyCropUpgrade({
+    canvasId,
+    items,
+    setItemsWithoutHistory: setItems,
+    attestItems
+  })
+  // Proven crops stay draggable after a board open or a registry eviction.
+  useCanvasProvenCropRegistryFill({ items, selectedIds, registry: provenCropRegistry })
+
   const {
     clearConfirmOpen,
     closeClearConfirmDialog,
@@ -868,7 +891,11 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     handleImportFiles,
     addModel3DToCanvas,
     addVideoToCanvas,
-    suspendAutoSave: isImageBatchImportActive
+    suspendAutoSave: isImageBatchImportActive,
+    restoreGenerationRef,
+    isCanvasSceneImporting,
+    getUndoRedoItemLists,
+    onCanvasItemsLoaded: handleCanvasItemsLoaded
   })
 
   useEffect(() => {
@@ -1252,6 +1279,7 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     nextZIndex,
     notifyError,
     notifySuccess,
+    provenCropRegistry,
     selectedIds,
     setAnnotationFillOpacity,
     setContextMenuTarget,
@@ -1581,6 +1609,9 @@ const ProjectCanvasPageContent: React.FC<{ canvasId: string }> = ({ canvasId }) 
     setInlineTextEdit,
     setItems,
     setItemsWithHistory,
+    setItemsWithoutHistory: setItems,
+    attestCanvasItems: attestItems,
+    provenCropRegistry,
     setLabelDialogItemId,
     setSelectedHistoryRevision,
     setLabelDialogOpen,
