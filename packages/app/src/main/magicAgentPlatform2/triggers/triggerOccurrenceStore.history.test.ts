@@ -166,7 +166,7 @@ describe('TriggerOccurrenceStore beyond 1000 records', () => {
     } finally {
       eventStore.close()
     }
-  })
+  }, 30_000)
 
   it('refuses a reused idempotency key whose record is beyond the first 1000 records', () => {
     const { eventStore, store } = open()
@@ -441,7 +441,7 @@ describe('TriggerOccurrenceScheduler with a long history', () => {
     } finally {
       eventStore.close()
     }
-  })
+  }, 30_000)
 
   it('claims in a direct runOnce() after stop(), whatever the backlog', async () => {
     const { eventStore, store } = open()

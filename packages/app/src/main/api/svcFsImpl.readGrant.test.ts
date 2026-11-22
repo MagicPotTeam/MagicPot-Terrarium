@@ -99,50 +99,54 @@ describe('readImageFromPath of a read-granted file (a mapped network drive)', ()
     fs.rmSync(roots.base, { recursive: true, force: true })
   })
 
-  it('finds the grant by the dropped path and reads it with no synchronous filesystem call', async () => {
-    // Granted as main grants a mapped drive: its realpath gives a network (UNC-like) form.
-    await expect(
-      grantLocalMediaImportFile(dropped, 'image/png', {
-        realpath: async () => `/${canonical}`,
-        stat: (value) => fsPromises.stat(value)
-      })
-    ).resolves.toEqual({ refused: 'network', sizeBytes: PNG.length })
-    const syncCalls = [
-      vi.spyOn(fs.realpathSync, 'native'),
-      vi.spyOn(fs, 'realpathSync'),
-      vi.spyOn(fs, 'statSync'),
-      vi.spyOn(fs, 'lstatSync'),
-      vi.spyOn(fs, 'existsSync'),
-      vi.spyOn(fs, 'accessSync'),
-      vi.spyOn(fs, 'openSync'),
-      vi.spyOn(fs, 'readFileSync')
-    ]
-    await expect(
-      new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: IMAGE_LIMIT })
-    ).resolves.toEqual({ image: new Uint8Array(PNG), filename: 'a.png' })
-    // Nothing on main's event loop waits for the share.
-    for (const spy of syncCalls) expect(spy).not.toHaveBeenCalled()
-    // Spent once. Without a live grant the request falls through to the policy, which does
-    // not touch the dropped path on main's event loop either (only the app's own temp folder
-    // may be checked there), nor does the drop flow's scoped-path check.
-    await expect(
-      new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: IMAGE_LIMIT })
-    ).rejects.toThrow('not authorized')
-    const webContents = { isDestroyed: () => false }
-    resetLocalMediaFileIntakeIpcForTest()
-    registerLocalMediaFileIntakeIpc(
-      () => ({ isDestroyed: () => false, webContents }) as unknown as Electron.BrowserWindow
-    )
-    const resolveScopedPath = vi
-      .mocked(ipcMain.handle)
-      .mock.calls.filter(([channel]) => channel === 'local-media:resolve-scoped-path')
-      .at(-1)?.[1] as (event: unknown, filePath: string) => Promise<string>
-    await expect(resolveScopedPath({ sender: webContents }, dropped)).resolves.toBe('')
-    resetLocalMediaFileIntakeIpcForTest()
-    for (const spy of syncCalls) {
-      expect(spy.mock.calls.filter(([target]) => String(target).includes('Z-drive'))).toEqual([])
+  // A mapped drive is simulated by a POSIX share spelling (//host/...); Windows has its own case.
+  it.skipIf(process.platform === 'win32')(
+    'finds the grant by the dropped path and reads it with no synchronous filesystem call',
+    async () => {
+      // Granted as main grants a mapped drive: its realpath gives a network (UNC-like) form.
+      await expect(
+        grantLocalMediaImportFile(dropped, 'image/png', {
+          realpath: async () => `/${canonical}`,
+          stat: (value) => fsPromises.stat(value)
+        })
+      ).resolves.toEqual({ refused: 'network', sizeBytes: PNG.length })
+      const syncCalls = [
+        vi.spyOn(fs.realpathSync, 'native'),
+        vi.spyOn(fs, 'realpathSync'),
+        vi.spyOn(fs, 'statSync'),
+        vi.spyOn(fs, 'lstatSync'),
+        vi.spyOn(fs, 'existsSync'),
+        vi.spyOn(fs, 'accessSync'),
+        vi.spyOn(fs, 'openSync'),
+        vi.spyOn(fs, 'readFileSync')
+      ]
+      await expect(
+        new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: IMAGE_LIMIT })
+      ).resolves.toEqual({ image: new Uint8Array(PNG), filename: 'a.png' })
+      // Nothing on main's event loop waits for the share.
+      for (const spy of syncCalls) expect(spy).not.toHaveBeenCalled()
+      // Spent once. Without a live grant the request falls through to the policy, which does
+      // not touch the dropped path on main's event loop either (only the app's own temp folder
+      // may be checked there), nor does the drop flow's scoped-path check.
+      await expect(
+        new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: IMAGE_LIMIT })
+      ).rejects.toThrow('not authorized')
+      const webContents = { isDestroyed: () => false }
+      resetLocalMediaFileIntakeIpcForTest()
+      registerLocalMediaFileIntakeIpc(
+        () => ({ isDestroyed: () => false, webContents }) as unknown as Electron.BrowserWindow
+      )
+      const resolveScopedPath = vi
+        .mocked(ipcMain.handle)
+        .mock.calls.filter(([channel]) => channel === 'local-media:resolve-scoped-path')
+        .at(-1)?.[1] as (event: unknown, filePath: string) => Promise<string>
+      await expect(resolveScopedPath({ sender: webContents }, dropped)).resolves.toBe('')
+      resetLocalMediaFileIntakeIpcForTest()
+      for (const spy of syncCalls) {
+        expect(spy.mock.calls.filter(([target]) => String(target).includes('Z-drive'))).toEqual([])
+      }
     }
-  })
+  )
 
   it('cuts a read that stalls at its deadline, counted by the import-source gate', async () => {
     const gate = createImportSourceGate({ onSaturated: () => undefined })
@@ -208,27 +212,30 @@ describe('readImageFromPath of a read-granted file (a mapped network drive)', ()
     expect(response.image.byteLength).toBe(IMAGE_LIMIT)
   })
 
-  it('reads no more than the size main measured when it granted the read', async () => {
-    await expect(
-      grantLocalMediaImportFile(dropped, 'image/png', {
-        realpath: async () => `/${canonical}`,
-        stat: (value) => fsPromises.stat(value)
+  it.skipIf(process.platform === 'win32')(
+    'reads no more than the size main measured when it granted the read',
+    async () => {
+      await expect(
+        grantLocalMediaImportFile(dropped, 'image/png', {
+          realpath: async () => `/${canonical}`,
+          stat: (value) => fsPromises.stat(value)
+        })
+      ).resolves.toEqual({ refused: 'network', sizeBytes: PNG.length })
+      // The file at that path grows after the grant (still well below the image limit).
+      fs.writeFileSync(canonical, Buffer.concat([PNG, Buffer.alloc(1_000, 0x41)]))
+      await expect(
+        new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: IMAGE_LIMIT })
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
+      // A page limit below the size is kept too.
+      recordLocalMediaImportGrant(canonical, undefined, 'read', {
+        requestedPath: dropped,
+        sizeBytes: PNG.length + 1_000
       })
-    ).resolves.toEqual({ refused: 'network', sizeBytes: PNG.length })
-    // The file at that path grows after the grant (still well below the image limit).
-    fs.writeFileSync(canonical, Buffer.concat([PNG, Buffer.alloc(1_000, 0x41)]))
-    await expect(
-      new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: IMAGE_LIMIT })
-    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
-    // A page limit below the size is kept too.
-    recordLocalMediaImportGrant(canonical, undefined, 'read', {
-      requestedPath: dropped,
-      sizeBytes: PNG.length + 1_000
-    })
-    await expect(
-      new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: PNG.length })
-    ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
-  })
+      await expect(
+        new FsSvcImpl().readImageFromPath({ fullPath: dropped, maxBytes: PNG.length })
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_TOO_LARGE' })
+    }
+  )
 
   it('closes a handle whose open answers only after the deadline', async () => {
     const gate = createImportSourceGate({ onSaturated: () => undefined })

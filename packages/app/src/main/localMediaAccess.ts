@@ -360,7 +360,8 @@ export function isWindowsNetworkLocalMediaPath(value: string): boolean {
  * followed by that prefix, would otherwise sit inside a picked drive root).
  */
 function isWindowsNtNamespaceLocalMediaPath(value: string): boolean {
-  return /^[\\/][?]{2}[\\/]/.test(value)
+  // Also once resolved onto a drive (C: then the prefix), the form a caller may pass on.
+  return /^(?:[a-zA-Z]:)?[\\/][?]{2}[\\/]/.test(value)
 }
 
 /**

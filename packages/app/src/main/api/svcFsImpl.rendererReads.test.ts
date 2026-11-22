@@ -154,8 +154,13 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
     await expect(service.readFileFromPath({ fullPath: managed })).resolves.toMatchObject({
       filename: 'a.png'
     })
-    // The page names a file the way local-media URLs spell it on POSIX: //dir/file.
-    await expect(service.readFileFromPath({ fullPath: `/${dropped}` })).resolves.toEqual({
+    // The page names a file the way local-media URLs spell it on POSIX: //dir/file (on Windows
+    // that spelling is a network path, and the drive form is the one the page sends).
+    await expect(
+      service.readFileFromPath({
+        fullPath: process.platform === 'win32' ? dropped : `/${dropped}`
+      })
+    ).resolves.toEqual({
       data: new Uint8Array(Buffer.from('<svg/>')),
       filename: 'dropped.svg'
     })
@@ -212,7 +217,7 @@ describe('svcFs reads of paths the renderer names (SEC-3)', () => {
         })
         await expect(
           authorizeLocalMediaImportSourcePathAsync(file, getLocalMediaAllowedRoots())
-        ).resolves.toMatchObject({ canonicalPath: fs.realpathSync(file) })
+        ).resolves.toMatchObject({ canonicalPath: path.resolve(fs.realpathSync(file)) })
       }
     }
     await refusesSecrets()
