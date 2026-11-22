@@ -324,7 +324,7 @@ describe('TriggerOccurrenceScheduler settlement failures', () => {
       let clock = 0
       let failure: Error | undefined
       const failWith = (name: string) => {
-        failure = new Error('/home/user/private/events.db: synthetic record content')
+        failure = new Error('/home/user/hidden/events.db: synthetic record content')
         failure.name = name
       }
       const store = stores()

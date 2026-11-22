@@ -156,7 +156,7 @@ describe('external agent continuity fixture', () => {
       image_count: 1,
       edited_images: 2,
       output_format: 'gif',
-      images: [{ type: 'image', url: '/private/output.gif' }]
+      images: [{ type: 'image', url: '/hidden/output.gif' }]
     })
     const known = {
       runId: 'r:1',

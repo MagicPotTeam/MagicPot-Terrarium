@@ -337,7 +337,7 @@ describe('TriggerOccurrenceStore archiving', () => {
       // More terminal records than one page, then a due manual fire past that page.
       seedTerminal(eventStore, 600)
       enqueue(store, 'behind', 1_000)
-      const failure = new Error('/home/user/private/events.db: disk I/O error')
+      const failure = new Error('/home/user/hidden/events.db: disk I/O error')
       failure.name = 'SqliteError'
       const writeBatch = eventStore.mutateResourcesBatch.bind(eventStore)
       // Every archive transaction fails; a claim, a single write, still commits.
@@ -482,7 +482,7 @@ describe('TriggerOccurrenceScheduler with a long history', () => {
     try {
       seedTerminal(eventStore, 200)
       enqueue(store, 'fresh', 5_000)
-      const failure = new Error('/home/user/private/events.db: record text')
+      const failure = new Error('/home/user/hidden/events.db: record text')
       failure.name = 'SqliteError'
       // The first batch of the poll is its archive transaction; the claim after it still runs.
       vi.spyOn(eventStore, 'mutateResourcesBatch').mockImplementationOnce(() => {

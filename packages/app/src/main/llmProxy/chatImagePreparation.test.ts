@@ -161,7 +161,7 @@ describe('MAIN chat image preparation factory', () => {
       const deps = dependencies()
       if (kind === 'missing') deps.resolveWorker.mockResolvedValue(undefined)
       if (kind === 'resolver rejection') {
-        deps.resolveWorker.mockRejectedValue(new Error('C:/private/path'))
+        deps.resolveWorker.mockRejectedValue(new Error('C:/hidden/path'))
       }
       if (kind === 'unsupported') {
         deps.runWorker.mockRejectedValue(

@@ -4,7 +4,10 @@ import { dialog } from 'electron'
 vi.mock('electron', () => ({ dialog: { showMessageBox: vi.fn() } }))
 
 import { markAppQuitting, markSessionEnding, resetAppQuittingForTests } from './appQuitState'
-import { resetExpectedRendererExitsForTests, takeExpectedRendererExit } from './expectedRendererExits'
+import {
+  resetExpectedRendererExitsForTests,
+  takeExpectedRendererExit
+} from './expectedRendererExits'
 import {
   attachRendererDiagnostics,
   HANG_LATE_END_GRACE_MS,
@@ -133,7 +136,10 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const details = { reason: 'memory-eviction', exitCode: 0 }
 
-    handleRendererProcessGone(window as never, details as never, { recoverRenderer, promptRenderer })
+    handleRendererProcessGone(window as never, details as never, {
+      recoverRenderer,
+      promptRenderer
+    })
 
     expect(recoverRenderer).not.toHaveBeenCalled()
     expect(window.webContents.reload).not.toHaveBeenCalled()
@@ -217,27 +223,31 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     expect(window.webContents.reload).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['oom', 'crashed', 'abnormal-exit', 'killed', 'launch-failed', 'memory-eviction'] as const)(
-    'never reloads or asks while the app is quitting: %s',
-    (reason) => {
-      const window = createWindow()
-      const recoverRenderer = vi.fn()
-      vi.spyOn(console, 'error').mockImplementation(() => undefined)
-      vi.spyOn(console, 'info').mockImplementation(() => undefined)
-      vi.mocked(dialog.showMessageBox).mockReset()
-      attachRendererDiagnostics(window as never, { recoverRenderer, monotonicNow: () => 1000 })
-      const listener = window.webContents.on.mock.calls.find(
-        ([event]) => event === 'render-process-gone'
-      )?.[1]
+  it.each([
+    'oom',
+    'crashed',
+    'abnormal-exit',
+    'killed',
+    'launch-failed',
+    'memory-eviction'
+  ] as const)('never reloads or asks while the app is quitting: %s', (reason) => {
+    const window = createWindow()
+    const recoverRenderer = vi.fn()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    vi.mocked(dialog.showMessageBox).mockReset()
+    attachRendererDiagnostics(window as never, { recoverRenderer, monotonicNow: () => 1000 })
+    const listener = window.webContents.on.mock.calls.find(
+      ([event]) => event === 'render-process-gone'
+    )?.[1]
 
-      markAppQuitting()
-      listener({}, { reason, exitCode: 9 })
+    markAppQuitting()
+    listener({}, { reason, exitCode: 9 })
 
-      expect(recoverRenderer).not.toHaveBeenCalled()
-      expect(window.webContents.reload).not.toHaveBeenCalled()
-      expect(dialog.showMessageBox).not.toHaveBeenCalled()
-    }
-  )
+    expect(recoverRenderer).not.toHaveBeenCalled()
+    expect(window.webContents.reload).not.toHaveBeenCalled()
+    expect(dialog.showMessageBox).not.toHaveBeenCalled()
+  })
 
   it.each(['crashed', 'killed'] as const)(
     'never reloads or asks once the Windows session is ending: %s',
@@ -606,7 +616,7 @@ describe('rendererDiagnostics render-process-gone recovery', () => {
     const listener = window.webContents.on.mock.calls.find(
       ([event]) => event === 'console-message'
     )?.[1]
-    listener({}, 3, 'x'.repeat(2001), 9, 'file:///private/path/index.js')
+    listener({}, 3, 'x'.repeat(2001), 9, 'file:///hidden/path/index.js')
     expect(error).toHaveBeenCalledWith(
       `[Renderer] ${'x'.repeat(2000)}… [truncated 1 chars] (index.js:9)`
     )
@@ -646,7 +656,10 @@ describe('rendererDiagnostics recovery notice', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     vi.spyOn(console, 'info').mockImplementation(() => undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    attachRendererDiagnostics(window as never, { monotonicNow: () => 1000, wallClockNow: () => 1_700_000_000_000 })
+    attachRendererDiagnostics(window as never, {
+      monotonicNow: () => 1000,
+      wallClockNow: () => 1_700_000_000_000
+    })
 
     // An ordinary load (first start, or a reload the user asked for) says nothing.
     listenerOf(window, 'did-finish-load')()
@@ -673,8 +686,13 @@ describe('rendererDiagnostics recovery notice', () => {
       vi.spyOn(console, 'error').mockImplementation(() => undefined)
       vi.spyOn(console, 'info').mockImplementation(() => undefined)
       vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-      vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response, checkboxChecked: false })
-      attachRendererDiagnostics(window as never, { monotonicNow: () => 1000, wallClockNow: () => 42 })
+      vi.mocked(dialog.showMessageBox)
+        .mockReset()
+        .mockResolvedValue({ response, checkboxChecked: false })
+      attachRendererDiagnostics(window as never, {
+        monotonicNow: () => 1000,
+        wallClockNow: () => 42
+      })
 
       listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
       await Promise.resolve()
@@ -699,9 +717,14 @@ describe('rendererDiagnostics recovery notice', () => {
     window.webContents.isCrashed.mockReturnValue(true)
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     let answer!: (response: number) => void
-    vi.mocked(dialog.showMessageBox).mockReset().mockImplementation(
-      () => new Promise((resolve) => (answer = (response) => resolve({ response, checkboxChecked: false })))
-    )
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockImplementation(
+        () =>
+          new Promise(
+            (resolve) => (answer = (response) => resolve({ response, checkboxChecked: false }))
+          )
+      )
     attachRendererDiagnostics(window as never)
     listenerOf(window, 'render-process-gone')({}, { reason: 'killed', exitCode: 9 })
     window.webContents.isCrashed.mockReturnValue(false)
@@ -716,7 +739,9 @@ describe('rendererDiagnostics recovery notice', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     vi.spyOn(console, 'info').mockImplementation(() => undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    vi.mocked(dialog.showMessageBox).mockReset().mockReturnValue(new Promise(() => undefined))
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockReturnValue(new Promise(() => undefined))
     let now = 0
     attachRendererDiagnostics(window as never, { monotonicNow: () => now })
     for (let death = 1; death <= 4; death += 1) {
@@ -734,7 +759,9 @@ describe('rendererDiagnostics recovery notice', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     vi.spyOn(console, 'info').mockImplementation(() => undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 1, checkboxChecked: false })
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 1, checkboxChecked: false })
     let now = 0
     attachRendererDiagnostics(window as never, { monotonicNow: () => now })
     // One death every 25 s never has three deaths inside 60 s.
@@ -764,7 +791,9 @@ describe('rendererDiagnostics recovery reload check', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     vi.spyOn(console, 'info').mockImplementation(() => undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    vi.mocked(dialog.showMessageBox).mockReset().mockReturnValue(new Promise(() => undefined))
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockReturnValue(new Promise(() => undefined))
   })
   afterEach(() => {
     vi.useRealTimers()
@@ -786,7 +815,11 @@ describe('rendererDiagnostics recovery reload check', () => {
 
     expect(dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(
       window,
-      expect.objectContaining({ message: '窗口重新加载后仍未恢复。', buttons: ['重新加载', '取消'], defaultId: 0 })
+      expect.objectContaining({
+        message: '窗口重新加载后仍未恢复。',
+        buttons: ['重新加载', '取消'],
+        defaultId: 0
+      })
     )
     expect(window.webContents.reload).toHaveBeenCalledTimes(1)
     vi.advanceTimersByTime(120_000)
@@ -811,7 +844,9 @@ describe('rendererDiagnostics recovery reload check', () => {
 
     // A later exit that the user answered with Cancel is not asked about a second time.
     const declined = createWindow()
-    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 1, checkboxChecked: false })
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 1, checkboxChecked: false })
     attachRendererDiagnostics(declined as never)
     listenerOf(declined, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
     vi.advanceTimersByTime(2_000)
@@ -863,7 +898,9 @@ describe('rendererDiagnostics unresponsive renderer', () => {
 
   it('waits 15 s, then offers wait / reload with Wait as the default', () => {
     const window = createWindow()
-    vi.mocked(dialog.showMessageBox).mockReset().mockReturnValue(new Promise(() => undefined))
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockReturnValue(new Promise(() => undefined))
     attachRendererDiagnostics(window as never)
 
     listenerOf(window, 'unresponsive')()
@@ -881,10 +918,12 @@ describe('rendererDiagnostics unresponsive renderer', () => {
   it('asks nothing when the renderer recovers within 15 s, and closes an open question when it recovers later', async () => {
     const window = createWindow()
     let signal: AbortSignal | undefined
-    vi.mocked(dialog.showMessageBox).mockReset().mockImplementation(((_window: unknown, options: { signal?: AbortSignal }) => {
-      signal = options.signal
-      return new Promise(() => undefined)
-    }) as never)
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockImplementation(((_window: unknown, options: { signal?: AbortSignal }) => {
+        signal = options.signal
+        return new Promise(() => undefined)
+      }) as never)
     attachRendererDiagnostics(window as never)
 
     listenerOf(window, 'unresponsive')()
@@ -904,7 +943,9 @@ describe('rendererDiagnostics unresponsive renderer', () => {
   // that reload is cancelled by the exit of the old process and the window stays dead.
   it('on Reload ends the hung renderer and loads the page again only when its exit is reported', async () => {
     const window = createWindow()
-    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 1, checkboxChecked: false })
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 1, checkboxChecked: false })
     attachRendererDiagnostics(window as never, { wallClockNow: () => 77 })
 
     listenerOf(window, 'unresponsive')()
@@ -935,9 +976,11 @@ describe('rendererDiagnostics unresponsive renderer', () => {
     expect(window.webContents.reload).toHaveBeenCalledTimes(1)
   })
 
-  it('announces the forced end to the death recorder as the user\'s reload', async () => {
+  it("announces the forced end to the death recorder as the user's reload", async () => {
     const window = createWindow()
-    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 1, checkboxChecked: false })
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 1, checkboxChecked: false })
     attachRendererDiagnostics(window as never)
     expect(takeExpectedRendererExit(window.webContents.id)).toBeUndefined()
 
@@ -950,7 +993,9 @@ describe('rendererDiagnostics unresponsive renderer', () => {
 
   it('does not spend the crash budget on the hang reload and answers a real crash of the reloaded page', async () => {
     const window = createWindow()
-    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 1, checkboxChecked: false })
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 1, checkboxChecked: false })
     let now = 1000
     attachRendererDiagnostics(window as never, { monotonicNow: () => now })
 
@@ -995,7 +1040,11 @@ describe('rendererDiagnostics unresponsive renderer', () => {
     expect(dialog.showMessageBox).toHaveBeenCalledTimes(2)
     expect(dialog.showMessageBox).toHaveBeenLastCalledWith(
       window,
-      expect.objectContaining({ message: '未能结束没有响应的窗口进程。', buttons: ['重新加载', '取消'], defaultId: 0 })
+      expect.objectContaining({
+        message: '未能结束没有响应的窗口进程。',
+        buttons: ['重新加载', '取消'],
+        defaultId: 0
+      })
     )
 
     // The user confirms: the hung renderer is ended again and its exit awaited; no reload() on it.
@@ -1146,7 +1195,10 @@ describe('rendererDiagnostics unresponsive renderer', () => {
 
   it('drops the hang reload request and its announcement when the window closes', async () => {
     const window = createWindow()
-    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValueOnce({ response: 1, checkboxChecked: false }).mockReturnValue(new Promise(() => undefined))
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValueOnce({ response: 1, checkboxChecked: false })
+      .mockReturnValue(new Promise(() => undefined))
     attachRendererDiagnostics(window as never)
     listenerOf(window, 'unresponsive')()
     vi.advanceTimersByTime(15_000)
@@ -1174,7 +1226,9 @@ describe('rendererDiagnostics unresponsive renderer', () => {
     expect(window.webContents.reload).not.toHaveBeenCalled()
 
     const quitting = createWindow()
-    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 1, checkboxChecked: false })
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 1, checkboxChecked: false })
     attachRendererDiagnostics(quitting as never)
     listenerOf(quitting, 'unresponsive')()
     vi.advanceTimersByTime(15_000)
@@ -1189,7 +1243,9 @@ describe('rendererDiagnostics unresponsive renderer', () => {
 
   it('asks again after another 15 s when the user chose to wait and it is still hung', async () => {
     const window = createWindow()
-    vi.mocked(dialog.showMessageBox).mockReset().mockResolvedValue({ response: 0, checkboxChecked: false })
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockResolvedValue({ response: 0, checkboxChecked: false })
     attachRendererDiagnostics(window as never)
 
     listenerOf(window, 'unresponsive')()
@@ -1221,20 +1277,21 @@ describe('rendererDiagnostics dead window after a declined recovery dialog', () 
     vi.spyOn(console, 'info').mockImplementation(() => undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     answers = []
-    vi.mocked(dialog.showMessageBox).mockReset().mockImplementation(((
-      _window: unknown,
-      options: { signal?: AbortSignal; message?: string }
-    ) =>
-      new Promise((resolve) => {
-        const answer: Answer = {
-          resolve: (response) => resolve({ response, checkboxChecked: false }),
-          signal: options.signal,
-          message: options.message
-        }
-        answers.push(answer)
-        // Like Electron: an aborted dialog closes as if cancelled (cancelId 1 for recovery dialogs).
-        options.signal?.addEventListener('abort', () => answer.resolve(1))
-      })) as never)
+    vi.mocked(dialog.showMessageBox)
+      .mockReset()
+      .mockImplementation(
+        ((_window: unknown, options: { signal?: AbortSignal; message?: string }) =>
+          new Promise((resolve) => {
+            const answer: Answer = {
+              resolve: (response) => resolve({ response, checkboxChecked: false }),
+              signal: options.signal,
+              message: options.message
+            }
+            answers.push(answer)
+            // Like Electron: an aborted dialog closes as if cancelled (cancelId 1 for recovery dialogs).
+            options.signal?.addEventListener('abort', () => answer.resolve(1))
+          })) as never
+      )
   })
   afterEach(() => {
     vi.useRealTimers()
@@ -1607,7 +1664,10 @@ describe('rendererDiagnostics hung renderer that dies after its reload request e
     // A clock that goes back once: the three automatic reloads below stay in the budget while the
     // hang reload request, read from the raw clock, has already expired.
     const clock = { now: 1_000_000 }
-    attachRendererDiagnostics(window as never, { monotonicNow: () => clock.now, wallClockNow: () => 42 })
+    attachRendererDiagnostics(window as never, {
+      monotonicNow: () => clock.now,
+      wallClockNow: () => 42
+    })
     for (let crash = 0; crash < 3; crash += 1) {
       listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
       listenerOf(window, 'did-finish-load')()
@@ -1665,7 +1725,10 @@ describe('rendererDiagnostics hung renderer that answers again while its forced 
     vi.mocked(dialog.showMessageBox)
       .mockReset()
       .mockImplementation(
-        ((_window: unknown, options: { signal?: AbortSignal; message?: string; cancelId?: number }) =>
+        ((
+          _window: unknown,
+          options: { signal?: AbortSignal; message?: string; cancelId?: number }
+        ) =>
           new Promise((resolve) => {
             const answer: Answer = {
               resolve: (response) => resolve({ response, checkboxChecked: false }),
@@ -1691,7 +1754,10 @@ describe('rendererDiagnostics hung renderer that answers again while its forced 
   const answersWhileEnding = async () => {
     const window = createWindow()
     const clock = { now: 1_000 }
-    attachRendererDiagnostics(window as never, { monotonicNow: () => clock.now, wallClockNow: () => 42 })
+    attachRendererDiagnostics(window as never, {
+      monotonicNow: () => clock.now,
+      wallClockNow: () => 42
+    })
     listenerOf(window, 'unresponsive')()
     vi.advanceTimersByTime(15_000)
     expect(answers[0].message).toBe('窗口已超过 15 秒没有响应。')
@@ -1749,7 +1815,7 @@ describe('rendererDiagnostics hung renderer that answers again while its forced 
     expect(answers.at(-1)?.message).toBe('窗口多次意外退出，自动恢复已暂停。')
   })
 
-  it('still treats the forced end as the user\'s reload when it lands after the renderer answered', async () => {
+  it("still treats the forced end as the user's reload when it lands after the renderer answered", async () => {
     const window = createWindow()
     attachRendererDiagnostics(window as never, { wallClockNow: () => 42 })
     listenerOf(window, 'unresponsive')()
@@ -1797,7 +1863,7 @@ describe('rendererDiagnostics hung renderer that answers again while its forced 
   // Reviewer probe C: the renderer answered during the 5 s wait, the request was dropped, and then
   // our own forced end landed. It used to be answered as an unexpected 'killed': the dialog
   // '窗口的显示进程已意外停止。' although the user had asked for the reload, and an untagged death record.
-  it('takes a forced end that lands inside the grace as the user\'s reload: no dialog, tagged record (probe C)', async () => {
+  it("takes a forced end that lands inside the grace as the user's reload: no dialog, tagged record (probe C)", async () => {
     const { window, clock } = await answersWhileEnding()
     vi.advanceTimersByTime(HANG_LATE_END_GRACE_MS - 1)
     clock.now += HANG_LATE_END_GRACE_MS - 1
@@ -1918,7 +1984,10 @@ describe('rendererDiagnostics recovery reload that is dropped after a clean exit
     vi.mocked(dialog.showMessageBox)
       .mockReset()
       .mockImplementation(
-        ((_window: unknown, options: { signal?: AbortSignal; message?: string; cancelId?: number }) =>
+        ((
+          _window: unknown,
+          options: { signal?: AbortSignal; message?: string; cancelId?: number }
+        ) =>
           new Promise((resolve) => {
             const answer: Answer = {
               resolve: (response) => resolve({ response, checkboxChecked: false }),
@@ -1944,7 +2013,10 @@ describe('rendererDiagnostics recovery reload that is dropped after a clean exit
   /** Hang -> Reload chosen: the forced end is in flight (isCrashed() stays false throughout). */
   const hangReloadChosen = async (clock = { now: 1_000 }) => {
     const window = createWindow()
-    attachRendererDiagnostics(window as never, { monotonicNow: () => clock.now, wallClockNow: () => 42 })
+    attachRendererDiagnostics(window as never, {
+      monotonicNow: () => clock.now,
+      wallClockNow: () => 42
+    })
     listenerOf(window, 'unresponsive')()
     vi.advanceTimersByTime(15_000)
     answers[0].resolve(1) // 重新加载
@@ -2040,7 +2112,10 @@ describe('rendererDiagnostics recovery reload that is dropped after a clean exit
     // A clock that goes back once: the three automatic reloads stay in the budget while the hang
     // reload request, read from the raw clock, has already expired.
     const clock = { now: 1_000_000 }
-    attachRendererDiagnostics(window as never, { monotonicNow: () => clock.now, wallClockNow: () => 42 })
+    attachRendererDiagnostics(window as never, {
+      monotonicNow: () => clock.now,
+      wallClockNow: () => 42
+    })
     for (let crash = 0; crash < 3; crash += 1) {
       listenerOf(window, 'render-process-gone')({}, { reason: 'crashed', exitCode: 5 })
       listenerOf(window, 'did-finish-load')()

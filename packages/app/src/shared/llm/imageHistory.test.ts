@@ -16,7 +16,7 @@ describe('collectThreadImageHistory', () => {
       sha256: digit.repeat(64),
       mimeType: 'image/png',
       sizeBytes: 7,
-      relativePath: 'private/original.png',
+      relativePath: 'hidden/original.png',
       originalUrl: 'https://private.invalid',
       ...overrides
     }

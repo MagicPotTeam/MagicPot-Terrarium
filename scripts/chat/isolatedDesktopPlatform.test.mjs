@@ -53,7 +53,7 @@ test('worker path: win32 keeps the original .exe location, linux uses the cargo 
 test('worker argument: win32 resolves it exactly as before, linux refuses any worker path', () => {
   assert.equal(isolatedWorkerSourceArgument('relative/worker.exe', 'win32'), path.resolve('relative/worker.exe'))
   assert.equal(isolatedWorkerSourceArgument(undefined, 'linux'), undefined)
-  assert.throws(() => isolatedWorkerSourceArgument('/private/worker.exe', 'linux'), /built from packages\/canvas-thumbnail-sidecar/)
+  assert.throws(() => isolatedWorkerSourceArgument('/hidden/worker.exe', 'linux'), /built from packages\/canvas-thumbnail-sidecar/)
 })
 
 test('electron args: win32 returns the same array, linux appends --no-sandbox only', () => {
@@ -351,9 +351,9 @@ test('relaunch refuses a used root, a passed worker and non-linux before spawnin
   const options = { privateRoot: used.privateRoot, spawn: xvfb.spawn, platform: 'linux', log: () => {} }
   await assert.rejects(relaunchIsolatedRunnerUnderXvfb('/repo/runner.mjs', [used.runRoot], options), /never-run root/)
   const fresh = await freshRoot(t)
-  await assert.rejects(relaunchIsolatedRunnerUnderXvfb('/repo/runner.mjs', [fresh.runRoot, '/private/worker.exe'], { ...options, privateRoot: fresh.privateRoot }), /do not pass a worker path/)
+  await assert.rejects(relaunchIsolatedRunnerUnderXvfb('/repo/runner.mjs', [fresh.runRoot, '/hidden/worker.exe'], { ...options, privateRoot: fresh.privateRoot }), /do not pass a worker path/)
   await assert.rejects(relaunchIsolatedRunnerUnderXvfb('/repo/runner.mjs', [fresh.runRoot], { ...options, privateRoot: fresh.privateRoot, platform: 'win32' }), /Linux only/)
-  await assert.rejects(relaunchIsolatedRunnerUnderXvfb('/repo/runner.mjs', [fresh.runRoot, '--no-crash-recovery', '/private/worker.exe'], { ...options, privateRoot: fresh.privateRoot }), /do not pass a worker path/)
+  await assert.rejects(relaunchIsolatedRunnerUnderXvfb('/repo/runner.mjs', [fresh.runRoot, '--no-crash-recovery', '/hidden/worker.exe'], { ...options, privateRoot: fresh.privateRoot }), /do not pass a worker path/)
   await assert.rejects(relaunchIsolatedRunnerUnderXvfb('/repo/runner.mjs', [], { ...options, privateRoot: fresh.privateRoot }), /new private run root/)
   await assert.rejects(relaunchIsolatedRunnerUnderXvfb('/repo/runner.mjs', ['--no-crash-recovery'], { ...options, privateRoot: fresh.privateRoot }), /new private run root/)
   assert.equal(xvfb.calls.length, 0)
