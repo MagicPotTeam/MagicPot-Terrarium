@@ -439,7 +439,8 @@ it.each(['direct', 'channel', 'snapshot'] as const)(
       cleanup.push(() => view.unmount())
       await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
       const openManagement = async () => {
-        fireEvent.click(screen.getByTestId('chat-composer-menu-team'))
+        // Team management opens from the conversation header (the composer has no team menu).
+        fireEvent.click(await screen.findByTestId('agent-header-team'))
         return screen.findByRole('dialog', { name: '团队管理' })
       }
       if (scenario === 'snapshot') {

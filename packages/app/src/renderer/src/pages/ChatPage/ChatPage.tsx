@@ -1501,6 +1501,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const imageRepairScanPendingRef = useRef(false)
   const autoSaveScanInitializedRef = useRef(false)
   const autoSaveScanCursorBySessionIdRef = useRef<Map<string, number>>(new Map())
+  // Attachment slots (session, message, attachment) whose auto-save is still running. While one
+  // runs, its image can come back under another identity (an imported managed reference), which
+  // the saved-key check cannot match yet; such a pass must not save the same image again.
+  const autoSaveInFlightSlotsRef = useRef<Set<string>>(new Set())
   const teamAuthorityEpochsRef = useRef(new Map<string, number>())
   const [, setTeamAuthorityRevision] = useState(0)
   const teamEndPendingRef = useRef(new Set<string>())
@@ -5433,7 +5437,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   ? keyFor(`sha256:${managedSha256}`)
                   : keyFor(attachment.url)
                 if (hasAutoSavedChatImageKey(trackerKey)) continue
+                const slotKey = `${session.id}\u0000${messageIndex}\u0000${attachmentIndex}`
+                const inFlightSlots = autoSaveInFlightSlotsRef.current
+                if (inFlightSlots.has(slotKey)) continue
                 recordAutoSavedChatImageKey(trackerKey)
+                inFlightSlots.add(slotKey)
 
                 try {
                   const targetDir = resolveAssistantImageAutoSaveDir({
@@ -5473,6 +5481,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   console.log(`[自动保存] Agent 图片已保存到 ${res.savedPath}`)
                 } catch (error) {
                   console.error('[自动保存] Agent 图片保存失败:', error)
+                } finally {
+                  inFlightSlots.delete(slotKey)
                 }
               }
             }

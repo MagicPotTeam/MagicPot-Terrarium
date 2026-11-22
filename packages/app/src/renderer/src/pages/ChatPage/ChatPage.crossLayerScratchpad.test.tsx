@@ -440,7 +440,8 @@ it.each(['approve', 'end', 'deny'] as const)(
         return
       }
       if (endWhilePending) {
-        fireEvent.click(screen.getByTestId('chat-composer-menu-team'))
+        // Team management opens from the conversation header (the composer has no team menu).
+        fireEvent.click(await screen.findByTestId('agent-header-team'))
         const management = await screen.findByRole('dialog', { name: '团队管理' })
         fireEvent.click(within(management).getByRole('button', { name: '结束团队' }))
         await waitFor(() =>
@@ -452,6 +453,19 @@ it.each(['approve', 'end', 'deny'] as const)(
         )
         expect(await screen.findByRole('dialog')).toBeVisible()
         fireEvent.click(screen.getByRole('button', { name: '允许这次操作' }))
+        // End cut the writer's turn: MAIN refuses the approval's continuation, so the
+        // note is never saved and the writer writes no result (teamEndCutTurn.test.ts).
+        await waitFor(() =>
+          expect(screen.queryByRole('button', { name: '允许这次操作' })).not.toBeInTheDocument()
+        )
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        expect(store.get(scope)).toMatchObject({ revision: 0, notes: [] })
+        expect(
+          h.sessions.value
+            .find((s) => s.id === 'writer')
+            ?.messages.some((m: any) => m.content === '文案结果')
+        ).toBe(false)
+        return
       } else fireEvent.click(screen.getByRole('button', { name: '批准' }))
       await waitFor(() =>
         expect(store.get(scope)).toMatchObject({
@@ -466,7 +480,6 @@ it.each(['approve', 'end', 'deny'] as const)(
             ?.messages.some((m: any) => m.content === '文案结果')
         ).toBe(true)
       )
-      if (endWhilePending) return
       send('汇总团队结果')
       await waitFor(() =>
         expect(model.mock.calls.some(([call]) => call.conversationId === 'lead')).toBe(true)
