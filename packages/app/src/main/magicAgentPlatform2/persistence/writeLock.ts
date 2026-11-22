@@ -34,6 +34,11 @@ type LockOwner = Readonly<{ pid: number; token: string; createdAt: number }>
 
 const STALE_MS = 30_000
 const UPDATE_MS = 10_000
+/**
+ * A running holder refreshes its lease's lock every UPDATE_MS. A lock seen with one mtime for
+ * this long (the time after which proper-lockfile itself takes a lock as stale) is overdue.
+ */
+const LEASE_OVERDUE_MS = STALE_MS
 const LEASE_NAME =
   /^(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.lease$/i
 
@@ -124,29 +129,103 @@ export function assertNoActiveInstanceLeases(databasePath: string): void {
 }
 
 /**
- * Read-only view of the instance leases next to a database: the PID of every lease whose process
- * is alive, or cannot be shown dead (-1 for an unreadable PID). It creates, cleans and deletes
- * nothing; a missing directory means no lease. A reused PID can report a dead holder as alive,
- * which errs towards "another holder exists" (fail closed), like assertNoActiveInstanceLeases.
+ * Read-only view of the instance leases next to a database: the PID of every lease that a live
+ * process holds (-1 for an unreadable PID). It creates, cleans and deletes nothing; a missing
+ * directory means no lease. It remembers, in memory only, what it saw of each lease's lock: one
+ * call can only report a lock as held, and a later one finds it abandoned.
+ *
+ * A holder keeps the proper-lockfile lock of its lease (`<lease>.lock`, a directory whose mtime it
+ * refreshes every UPDATE_MS) for as long as the lease is held. Leases are never cleaned up outside a
+ * restore: a process that exits leaves its lease file behind (its exit handler removes only the
+ * lock), and a killed one leaves both. Such a PID is later reused by unrelated processes, so the
+ * PID alone would turn every leftover into a live holder for good. A lease therefore counts only
+ * while its lock exists and is not abandoned (see leaseLockAbandoned), and its PID is alive. A
+ * lock that is not a plain directory, or a lease whose PID cannot be read, counts (fail closed).
+ * A holder announces its lease (file, then lock) before it checks for others, so two processes
+ * that open the same file at once never both see "no other holder".
  */
 export function activeInstanceLeasePids(databasePath: string): number[] {
   const database = resolve(databasePath)
+  let directory: string
   let names: string[]
   try {
-    names = readdirSync(join(realpathSync(dirname(database)), `${basename(database)}.magicagent.instances`))
+    directory = join(realpathSync(dirname(database)), `${basename(database)}.magicagent.instances`)
+    names = readdirSync(directory)
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') return []
     throw error
   }
+  const now = performance.now()
+  const previous = leaseLockSightings.get(directory)
+  const seen = new Map<string, LeaseLockSighting>()
   const pids: number[] = []
   for (const name of names) {
     const match = LEASE_NAME.exec(name)
     if (!match) continue
+    let lock: Stats
+    try {
+      lock = lstatSync(join(directory, `${name}.lock`))
+    } catch (error) {
+      // Released, or its holder exited: the lease file is a leftover.
+      if (isNodeError(error) && error.code === 'ENOENT') continue
+      throw error
+    }
+    if (lock.isDirectory() && !lock.isSymbolicLink()) {
+      const sighting = sightLeaseLock(previous?.get(name), lock, now)
+      seen.set(name, sighting)
+      // Not refreshed for that long: its holder was killed, and the PID may belong to anyone now.
+      if (leaseLockAbandoned(sighting, now)) continue
+    }
     const pid = Number(match[1])
     if (!Number.isSafeInteger(pid) || pid <= 0) pids.push(-1)
     else if (isPidAlive(pid)) pids.push(pid)
   }
+  if (seen.size) leaseLockSightings.set(directory, seen)
+  else leaseLockSightings.delete(directory)
   return pids
+}
+
+/** What this process saw of one lease lock, on its monotonic clock (performance.now()). */
+type LeaseLockSighting = {
+  readonly dev: number
+  readonly ino: number
+  readonly mtimeMs: number
+  /** When this process first saw the lock with this mtime. */
+  readonly since: number
+  /** When this process first saw that mtime LEASE_OVERDUE_MS old. */
+  overdueAt?: number
+}
+/** Lease directory -> lease name -> the lock as last seen. Memory only, for the leases last listed. */
+const leaseLockSightings = new Map<string, Map<string, LeaseLockSighting>>()
+
+function sightLeaseLock(
+  previous: LeaseLockSighting | undefined,
+  lock: Stats,
+  now: number
+): LeaseLockSighting {
+  if (
+    previous &&
+    previous.dev === lock.dev &&
+    previous.ino === lock.ino &&
+    previous.mtimeMs === lock.mtimeMs
+  )
+    return previous
+  return { dev: lock.dev, ino: lock.ino, mtimeMs: lock.mtimeMs, since: now }
+}
+
+/**
+ * A lease lock is abandoned once this process has seen it keep one mtime for LEASE_OVERDUE_MS,
+ * and then for UPDATE_MS more, on its own monotonic clock: a running holder refreshes it every
+ * UPDATE_MS. It is never judged on one sample or by the wall-clock age of its mtime: after a
+ * system sleep, or a step of the clock, every live holder's lock looks old until its next refresh
+ * (a timer on the holder's monotonic clock, up to UPDATE_MS after it wakes up). The second wait
+ * is for a monotonic clock that counts a sleep (Windows): a check made just after waking up
+ * finds the lock overdue, and its holder refreshes it moments later.
+ */
+function leaseLockAbandoned(sighting: LeaseLockSighting, now: number): boolean {
+  if (now - sighting.since < LEASE_OVERDUE_MS) return false
+  sighting.overdueAt ??= now
+  return now - sighting.overdueAt >= UPDATE_MS
 }
 
 function scanAndCleanInstanceLeases(directory: string): void {

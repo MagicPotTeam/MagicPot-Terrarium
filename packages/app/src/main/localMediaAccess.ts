@@ -7,6 +7,15 @@ const LOCAL_MEDIA_GRANTS_VERSION = 1
 const LOCAL_MEDIA_GRANTS_FLUSH_DELAY_MS = 250
 const scopedLocalMediaPaths = new Map<string, string>()
 const scopedLocalMediaDirectories = new Map<string, string>()
+/**
+ * Windows only. A network grant whose canonical form is spelled differently from the path the
+ * user picked or dropped (a DFS namespace path resolves to its target server, a folder on a
+ * share may be a link): resolved spelling key -> [resolved spelling, canonical grant]. The
+ * refusal of network paths before any filesystem call compares spellings, and requests keep
+ * the spelling the user dropped (a canvas item keeps it), so the spelling is remembered too.
+ */
+const scopedNetworkFileSpellings = new Map<string, [string, string]>()
+const scopedNetworkDirectorySpellings = new Map<string, [string, string]>()
 let localMediaGrantsPath: string | null = null
 let localMediaGrantsDirty = false
 let localMediaGrantsFlushTimer: ReturnType<typeof setTimeout> | null = null
@@ -15,6 +24,9 @@ type PersistedLocalMediaGrants = {
   version: typeof LOCAL_MEDIA_GRANTS_VERSION
   files: string[]
   directories: string[]
+  /** [spelling, canonical] pairs of scopedNetworkFileSpellings / scopedNetworkDirectorySpellings. */
+  networkFileSpellings?: [string, string][]
+  networkDirectorySpellings?: [string, string][]
 }
 
 function comparisonKey(filePath: string): string {
@@ -56,7 +68,13 @@ function persistScopedLocalMediaGrants(): void {
   const payload: PersistedLocalMediaGrants = {
     version: LOCAL_MEDIA_GRANTS_VERSION,
     files: Array.from(scopedLocalMediaPaths.values()),
-    directories: Array.from(scopedLocalMediaDirectories.values())
+    directories: Array.from(scopedLocalMediaDirectories.values()),
+    ...(scopedNetworkFileSpellings.size
+      ? { networkFileSpellings: Array.from(scopedNetworkFileSpellings.values()) }
+      : {}),
+    ...(scopedNetworkDirectorySpellings.size
+      ? { networkDirectorySpellings: Array.from(scopedNetworkDirectorySpellings.values()) }
+      : {})
   }
   const tempPath = `${localMediaGrantsPath}.${process.pid}.tmp`
   try {
@@ -108,6 +126,26 @@ function loadPersistedPaths(
   }
 }
 
+/**
+ * Keeps a persisted spelling only while its canonical grant was loaded too; no filesystem call
+ * (the spelling is a network path).
+ */
+function loadPersistedNetworkSpellings(
+  values: unknown,
+  store: Map<string, [string, string]>,
+  grants: Map<string, string>,
+  limit: number
+): void {
+  if (process.platform !== 'win32' || !Array.isArray(values)) return
+  for (const value of values.slice(-limit)) {
+    if (!Array.isArray(value) || value.length !== 2) continue
+    const [spelling, canonical] = value as unknown[]
+    if (typeof spelling !== 'string' || typeof canonical !== 'string') continue
+    if (!grants.has(comparisonKey(canonical))) continue
+    rememberNetworkSpelling(store, spelling, canonical, limit)
+  }
+}
+
 /** Loads durable grants after Electron's userData path is finalized. */
 export function initializeLocalMediaAccess(grantsPath: string): void {
   if (localMediaGrantsFlushTimer) {
@@ -118,6 +156,8 @@ export function initializeLocalMediaAccess(grantsPath: string): void {
   localMediaGrantsDirty = false
   scopedLocalMediaPaths.clear()
   scopedLocalMediaDirectories.clear()
+  scopedNetworkFileSpellings.clear()
+  scopedNetworkDirectorySpellings.clear()
 
   try {
     const parsed = JSON.parse(
@@ -135,6 +175,18 @@ export function initializeLocalMediaAccess(grantsPath: string): void {
         scopedLocalMediaDirectories,
         MAX_SCOPED_LOCAL_MEDIA_DIRECTORIES,
         isExistingDirectory
+      )
+      loadPersistedNetworkSpellings(
+        parsed.networkFileSpellings,
+        scopedNetworkFileSpellings,
+        scopedLocalMediaPaths,
+        MAX_SCOPED_LOCAL_MEDIA_PATHS
+      )
+      loadPersistedNetworkSpellings(
+        parsed.networkDirectorySpellings,
+        scopedNetworkDirectorySpellings,
+        scopedLocalMediaDirectories,
+        MAX_SCOPED_LOCAL_MEDIA_DIRECTORIES
       )
     }
   } catch (error) {
@@ -162,6 +214,30 @@ function rememberBoundedPath(
   }
 }
 
+/**
+ * Remembers the spelling of a Windows network grant when its canonical form differs (see
+ * scopedNetworkFileSpellings). Pure string work.
+ */
+function rememberNetworkSpelling(
+  store: Map<string, [string, string]>,
+  spelling: string,
+  canonical: string,
+  limit: number
+): void {
+  if (process.platform !== 'win32' || spelling.includes('\0')) return
+  if (!isWindowsNetworkLocalMediaPath(spelling)) return
+  const resolved = path.resolve(spelling)
+  const key = comparisonKey(resolved)
+  if (key === comparisonKey(canonical)) return
+  store.delete(key)
+  store.set(key, [resolved, canonical])
+  while (store.size > limit) {
+    const oldest = store.keys().next().value
+    if (!oldest) break
+    store.delete(oldest)
+  }
+}
+
 /** Authorizes one file obtained from an OS file picker or Electron File object. */
 export function authorizeScopedLocalMediaPath(filePath: string): boolean {
   const trimmed = String(filePath || '').trim()
@@ -172,6 +248,12 @@ export function authorizeScopedLocalMediaPath(filePath: string): boolean {
 
   const key = comparisonKey(canonical)
   rememberBoundedPath(scopedLocalMediaPaths, key, canonical, MAX_SCOPED_LOCAL_MEDIA_PATHS)
+  rememberNetworkSpelling(
+    scopedNetworkFileSpellings,
+    trimmed,
+    canonical,
+    MAX_SCOPED_LOCAL_MEDIA_PATHS
+  )
   scheduleScopedLocalMediaGrantsPersistence()
   return true
 }
@@ -188,6 +270,12 @@ export function authorizeScopedLocalMediaDirectory(directoryPath: string): boole
   rememberBoundedPath(
     scopedLocalMediaDirectories,
     key,
+    canonical,
+    MAX_SCOPED_LOCAL_MEDIA_DIRECTORIES
+  )
+  rememberNetworkSpelling(
+    scopedNetworkDirectorySpellings,
+    trimmed,
     canonical,
     MAX_SCOPED_LOCAL_MEDIA_DIRECTORIES
   )
@@ -212,23 +300,48 @@ export function hasLocalMediaTraversal(url: string): boolean {
 
 /**
  * A Windows network (UNC) spelling: two leading separators of either kind (`\\server`,
- * `//server`, `/\server`, `\/server`; device paths such as `\\?\` included). Checked on the
- * raw string: on Windows any filesystem call on such a path contacts the host (SMB, with the
- * user's NTLM credentials), and a host that does not answer blocks the caller.
+ * `//server`, `/\server`, `\/server`; device paths such as `\\?\` included), or the NT
+ * object-namespace prefix (see isWindowsNtNamespaceLocalMediaPath). Checked on the raw string:
+ * on Windows any filesystem call on such a path contacts the host (SMB, with the user's NTLM
+ * credentials), and a host that does not answer blocks the caller.
  */
 export function isWindowsNetworkLocalMediaPath(value: string): boolean {
-  return /^[\\/]{2}/.test(value)
+  return /^[\\/]{2}/.test(value) || isWindowsNtNamespaceLocalMediaPath(value)
+}
+
+/**
+ * The NT object-namespace prefix ('\' + '??' + '\', separators of either kind): Windows file
+ * APIs hand such a path to the object manager as it is, so '\??\UNC\host\share' contacts the
+ * host as a UNC path does. No grant is ever for such a spelling, so it is refused whatever is
+ * scoped (its resolved form, C:\??\..., would otherwise sit inside a picked C:\).
+ */
+function isWindowsNtNamespaceLocalMediaPath(value: string): boolean {
+  return /^[\\/][?]{2}[\\/]/.test(value)
 }
 
 /**
  * A network path the user granted (an exact picked file or a picked directory), decided on the
  * resolved spelling alone: no filesystem call. Only such a path is canonicalized afterwards.
+ * Both the canonical spelling of a grant and the spelling it was made with count (they differ
+ * for a DFS namespace path); a remembered spelling counts only while its grant is alive.
  */
 function isWindowsNetworkPathScoped(filePath: string): boolean {
   const resolved = path.resolve(filePath)
-  if (scopedLocalMediaPaths.has(comparisonKey(resolved))) return true
-  return Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
-    isSameOrInside(directory, resolved)
+  const key = comparisonKey(resolved)
+  if (scopedLocalMediaPaths.has(key)) return true
+  const spelled = scopedNetworkFileSpellings.get(key)
+  if (spelled && scopedLocalMediaPaths.has(comparisonKey(spelled[1]))) return true
+  if (
+    Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
+      isSameOrInside(directory, resolved)
+    )
+  ) {
+    return true
+  }
+  return Array.from(scopedNetworkDirectorySpellings.values()).some(
+    ([spelling, canonical]) =>
+      scopedLocalMediaDirectories.has(comparisonKey(canonical)) &&
+      isSameOrInside(spelling, resolved)
   )
 }
 
@@ -239,11 +352,26 @@ function isWindowsNetworkPathScoped(filePath: string): boolean {
 export type PinnedLocalMediaRoot = { readonly pinnedCanonicalPath: string }
 export type LocalMediaRoot = string | PinnedLocalMediaRoot
 
-/** Returns a canonical path only when it is under an application root or explicitly scoped. */
-export function resolveAuthorizedLocalMediaPath(
+type LocalMediaPathPrecheck = {
+  trimmed: string
+  /** A Windows network spelling (see isWindowsNetworkLocalMediaPath). */
+  isNetworkPath: boolean
+  /** A network spelling admitted only because it lies inside a network root (async policy). */
+  viaNetworkRoot: boolean
+}
+
+/**
+ * Everything decided before any filesystem call: null when the path is refused outright.
+ * On Windows an unscoped network spelling never reaches the filesystem, so main never contacts
+ * a host the user did not grant. `networkRoots` are roots whose own spelling is a Windows
+ * network path (a share the user configured): a request lexically inside one of them may go on
+ * to the filesystem, which contacts that host only.
+ */
+function precheckLocalMediaPath(
   filePath: string,
-  allowedRoots: readonly LocalMediaRoot[]
-): string | null {
+  networkRoots: readonly string[] = [],
+  grants = true
+): LocalMediaPathPrecheck | null {
   const trimmed = String(filePath || '').trim()
   // Only Windows has network (UNC) paths. On POSIX `//dir/file` is the local file `/dir/file`,
   // and that is the form every application-root file arrives in there: `local-media` is a
@@ -256,20 +384,44 @@ export function resolveAuthorizedLocalMediaPath(
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) {
     return null
   }
-  // Before any filesystem call: an unsolicited network path never makes main contact its host.
-  if (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) return null
+  // Before any filesystem call: an unsolicited network path never makes main contact its host
+  // (an NT namespace spelling never counts as scoped).
+  if (process.platform === 'win32' && isWindowsNtNamespaceLocalMediaPath(trimmed)) return null
+  if (!isNetworkPath || (grants && isWindowsNetworkPathScoped(trimmed))) {
+    return { trimmed, isNetworkPath, viaNetworkRoot: false }
+  }
+  const resolved = path.resolve(trimmed)
+  const viaNetworkRoot = networkRoots.some(
+    (root) =>
+      isWindowsNetworkLocalMediaPath(root) &&
+      !isWindowsNtNamespaceLocalMediaPath(root) &&
+      isSameOrInside(path.resolve(root), resolved)
+  )
+  return viaNetworkRoot ? { trimmed, isNetworkPath, viaNetworkRoot } : null
+}
 
-  const canonical = canonicalizeExistingPath(trimmed)
-  if (!canonical) return null
-  if (scopedLocalMediaPaths.has(comparisonKey(canonical))) return canonical
-  if (
+/** A canonical path the user granted: an exact picked file, or inside a picked directory. */
+function isScopedCanonicalLocalMediaPath(canonical: string): boolean {
+  return (
+    scopedLocalMediaPaths.has(comparisonKey(canonical)) ||
     Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
       isSameOrInside(directory, canonical)
     )
-  ) {
-    return canonical
-  }
-  if (isNetworkPath) return null
+  )
+}
+
+/** Returns a canonical path only when it is under an application root or explicitly scoped. */
+export function resolveAuthorizedLocalMediaPath(
+  filePath: string,
+  allowedRoots: readonly LocalMediaRoot[]
+): string | null {
+  const checked = precheckLocalMediaPath(filePath)
+  if (!checked) return null
+
+  const canonical = canonicalizeExistingPath(checked.trimmed)
+  if (!canonical) return null
+  if (isScopedCanonicalLocalMediaPath(canonical)) return canonical
+  if (checked.isNetworkPath) return null
 
   return allowedRoots.some((root) => {
     const canonicalRoot =
@@ -278,6 +430,143 @@ export function resolveAuthorizedLocalMediaPath(
   })
     ? canonical
     : null
+}
+
+export type LocalMediaPathAuthorizationOptions = {
+  realpath?: (value: string) => Promise<string>
+  /**
+   * Let a Windows network spelling through when it lies inside a root whose own spelling is a
+   * network path (a share the user configured as a storage or model folder). Off by default:
+   * the local-media protocol never serves an unscoped network path.
+   */
+  allowNetworkRoots?: boolean
+  /**
+   * Whether the user's grants (picked or dropped files and folders) count besides the roots
+   * (default true). Off for a read that only ever names files under the roots.
+   */
+  grants?: boolean
+}
+
+/**
+ * Why a path was not authorized. 'missing': it does not exist (ENOENT or ENOTDIR). 'refused':
+ * refused before any filesystem call, or it resolves outside every root and grant (a stable
+ * answer). 'unavailable': the filesystem gave no answer (an error other than a missing path;
+ * callers that run this under a deadline also use it for no answer in time): the file may well
+ * be there, so nobody may treat it as absent.
+ */
+export type LocalMediaPathRefusalReason = 'missing' | 'refused' | 'unavailable'
+
+export type LocalMediaPathAuthorization =
+  | { canonicalPath: string; reason?: undefined }
+  | { canonicalPath: null; reason: LocalMediaPathRefusalReason }
+
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/**
+ * resolveAuthorizedLocalMediaPath off main's event loop, with the reason of a refusal: the same
+ * decision, but every realpath (of the path and of each root) is fs.promises.realpath, on the
+ * threadpool. For a path the renderer names: a synchronous realpath of a path on a share that
+ * stopped answering would block main.
+ */
+export async function authorizeLocalMediaPathAsync(
+  filePath: string,
+  allowedRoots: readonly LocalMediaRoot[],
+  {
+    realpath = (value: string) => fs.promises.realpath(value),
+    allowNetworkRoots = false,
+    grants = true
+  }: LocalMediaPathAuthorizationOptions = {}
+): Promise<LocalMediaPathAuthorization> {
+  const refused = (reason: LocalMediaPathRefusalReason): LocalMediaPathAuthorization => ({
+    canonicalPath: null,
+    reason
+  })
+  const checked = precheckLocalMediaPath(
+    filePath,
+    allowNetworkRoots
+      ? allowedRoots.filter((root): root is string => typeof root === 'string')
+      : [],
+    grants
+  )
+  if (!checked) return refused('refused')
+
+  let canonical: string
+  try {
+    canonical = path.resolve(await realpath(checked.trimmed))
+  } catch (error) {
+    return refused(isMissingPathError(error) ? 'missing' : 'unavailable')
+  }
+  if (grants && isScopedCanonicalLocalMediaPath(canonical)) return { canonicalPath: canonical }
+  if (checked.isNetworkPath && !checked.viaNetworkRoot) return refused('refused')
+
+  const resolved = path.resolve(checked.trimmed)
+  // A root that gave no answer may hold the path: then the path is not known to be outside.
+  let rootUnanswered = false
+  for (const root of allowedRoots) {
+    // A network root is canonicalized only for a request inside it by its text (that host is
+    // contacted for the request anyway): any other request never makes main contact a share.
+    if (
+      typeof root === 'string' &&
+      process.platform === 'win32' &&
+      isWindowsNetworkLocalMediaPath(root) &&
+      !isSameOrInside(path.resolve(root), resolved)
+    ) {
+      continue
+    }
+    let canonicalRoot: string
+    if (typeof root === 'string') {
+      try {
+        canonicalRoot = path.resolve(await realpath(root))
+      } catch (error) {
+        if (!isMissingPathError(error)) rootUnanswered = true
+        continue
+      }
+    } else {
+      canonicalRoot = root.pinnedCanonicalPath
+    }
+    if (isSameOrInside(canonicalRoot, canonical)) return { canonicalPath: canonical }
+  }
+  return refused(rootUnanswered ? 'unavailable' : 'refused')
+}
+
+/** authorizeLocalMediaPathAsync without the reason: the canonical path, or null. */
+export async function resolveAuthorizedLocalMediaPathAsync(
+  filePath: string,
+  allowedRoots: readonly LocalMediaRoot[],
+  options: LocalMediaPathAuthorizationOptions = {}
+): Promise<string | null> {
+  return (await authorizeLocalMediaPathAsync(filePath, allowedRoots, options)).canonicalPath
+}
+
+/**
+ * Whether a path lies, by its text alone, where the policy above could authorize it: inside an
+ * allowed root or a granted directory, or a granted file. No filesystem call. Callers use it to
+ * tell "missing" from "not authorized" without revealing whether a file outside exists.
+ */
+export function isLexicallyCoveredLocalMediaPath(
+  filePath: string,
+  allowedRoots: readonly LocalMediaRoot[],
+  { grants = true }: { grants?: boolean } = {}
+): boolean {
+  const trimmed = String(filePath || '').trim()
+  if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return false
+  const resolved = path.resolve(trimmed)
+  return (
+    (grants &&
+      (scopedLocalMediaPaths.has(comparisonKey(resolved)) ||
+        Array.from(scopedLocalMediaDirectories.values()).some((directory) =>
+          isSameOrInside(directory, resolved)
+        ))) ||
+    allowedRoots.some((root) =>
+      isSameOrInside(
+        typeof root === 'string' ? path.resolve(root) : root.pinnedCanonicalPath,
+        resolved
+      )
+    )
+  )
 }
 
 /**
@@ -306,8 +595,15 @@ type LocalMediaImportGrantEntry = {
   batch?: string
   batchDeadline?: number
   batchWallDeadline?: number
+  /** A read grant: the canonical path main resolved when it granted the read, and reads. */
+  readPath?: string
+  /** A read grant: the file's size main measured then (the read takes no more). */
+  sizeBytes?: number
 }
-/** Canonical-path key -> each grant for that path, oldest first. */
+/**
+ * Path key -> each grant for that path, oldest first: the canonical path of an import grant,
+ * the path the user dropped or picked for a read grant.
+ */
 const localMediaImportGrants = new Map<string, LocalMediaImportGrantEntry[]>()
 /** Drops with an import running now -> how many. */
 const localMediaImportBatchesInUse = new Map<string, number>()
@@ -345,15 +641,24 @@ function pruneLocalMediaImportGrants(now: number, wallNow: number): number {
 /**
  * Records one grant for a canonical path (the caller has canonicalised it and checked that
  * main would import, or read, it). The oldest grants go first when the bound is reached.
- * `batch` names the drop it belongs to.
+ * `batch` names the drop it belongs to. A read grant is found by `requestedPath`, the path the
+ * user dropped or picked (default: the canonical path), as the page names it when it spends
+ * the grant: no filesystem call is needed to find it. `sizeBytes` is the size main measured.
  */
 export function recordLocalMediaImportGrant(
   canonicalPath: string,
   now = localMediaImportGrantClock(),
   kind: LocalMediaImportGrantKind = 'import',
-  { wallNow = localMediaImportGrantWallClock(), batch }: { wallNow?: number; batch?: string } = {}
+  {
+    wallNow = localMediaImportGrantWallClock(),
+    batch,
+    requestedPath,
+    sizeBytes
+  }: { wallNow?: number; batch?: string; requestedPath?: string; sizeBytes?: number } = {}
 ): void {
-  const key = comparisonKey(canonicalPath)
+  const key = comparisonKey(
+    kind === 'read' && requestedPath !== undefined ? path.resolve(requestedPath) : canonicalPath
+  )
   let total = pruneLocalMediaImportGrants(now, wallNow)
   const entries = localMediaImportGrants.get(key) ?? []
   localMediaImportGrants.delete(key)
@@ -369,6 +674,9 @@ export function recordLocalMediaImportGrant(
             batchDeadline: now + LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS,
             batchWallDeadline: wallNow + LOCAL_MEDIA_IMPORT_GRANT_BATCH_MAX_MS
           }
+        : {}),
+      ...(kind === 'read'
+        ? { readPath: canonicalPath, ...(sizeBytes !== undefined ? { sizeBytes } : {}) }
         : {})
     }
   ])
@@ -410,14 +718,27 @@ export function spendLocalMediaImportGrant(
   now = localMediaImportGrantClock(),
   wallNow = localMediaImportGrantWallClock()
 ): LocalMediaImportGrantUse | null {
+  return spendLocalMediaGrantEntry(canonicalPath, kind, now, wallNow)?.use ?? null
+}
+
+function spendLocalMediaGrantEntry(
+  keyPath: string,
+  kind: LocalMediaImportGrantKind,
+  now: number,
+  wallNow: number
+): { spent: LocalMediaImportGrantEntry; use: LocalMediaImportGrantUse } | null {
   pruneLocalMediaImportGrants(now, wallNow)
-  const key = comparisonKey(canonicalPath)
+  const key = comparisonKey(keyPath)
   const entries = localMediaImportGrants.get(key)
   const index = entries?.findIndex((entry) => entry.kind === kind) ?? -1
   if (!entries || index < 0) return null
   const [spent] = entries.splice(index, 1)
   if (!entries.length) localMediaImportGrants.delete(key)
-  const batch = spent.batch
+  return { spent, use: batchGrantUse(spent.batch) }
+}
+
+/** The use of a spent grant: its drop's other grants wait while it runs (see above). */
+function batchGrantUse(batch: string | undefined): LocalMediaImportGrantUse {
   if (batch === undefined) return { finished: () => undefined }
   localMediaImportBatchesInUse.set(batch, (localMediaImportBatchesInUse.get(batch) ?? 0) + 1)
   let done = false
@@ -458,22 +779,38 @@ export function consumeLocalMediaImportGrant(
 }
 
 /**
- * The canonical path of `filePath` when a one-use read grant covers it, spending that grant:
- * readImageFromPath may then hand the renderer its bytes once (a file the user dropped from
- * a mapped network drive, within the caller's byte limit). A UNC or device path named by the
- * renderer is refused before any filesystem access.
+ * Spends the one-use read grant of `filePath`, the path the user dropped or picked (a file on
+ * a mapped network drive): readImageFromPath may then hand the renderer its bytes once,
+ * reading `canonicalPath`, which main resolved when it granted the read, and no more than the
+ * `sizeBytes` it measured then. Found by the path's text alone, so nothing touches the
+ * filesystem here (on main's event loop): a share that stopped answering cannot block it. A
+ * UNC or device path named by the renderer is refused.
  */
 export function consumeLocalMediaReadGrant(
   filePath: string,
-  now = localMediaImportGrantClock()
-): (LocalMediaImportGrantUse & { canonicalPath: string }) | null {
+  now = localMediaImportGrantClock(),
+  wallNow = localMediaImportGrantWallClock()
+):
+  | (LocalMediaImportGrantUse & {
+      canonicalPath: string
+      requestedPath: string
+      sizeBytes?: number
+    })
+  | null {
   const trimmed = String(filePath || '').trim()
   if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) return null
-  if (trimmed.startsWith('\\\\') || trimmed.startsWith('//')) return null
-  const canonical = canonicalizeExistingPath(trimmed)
-  if (!canonical) return null
-  const use = spendLocalMediaImportGrant(canonical, 'read', now)
-  return use ? { canonicalPath: canonical, finished: use.finished } : null
+  // A read grant is only ever for a plain local path the user dropped or picked.
+  if (isWindowsNetworkLocalMediaPath(trimmed)) return null
+  const requestedPath = path.resolve(trimmed)
+  const granted = spendLocalMediaGrantEntry(requestedPath, 'read', now, wallNow)
+  if (!granted) return null
+  const { readPath, sizeBytes } = granted.spent
+  return {
+    canonicalPath: readPath ?? requestedPath,
+    requestedPath,
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    finished: granted.use.finished
+  }
 }
 
 async function canonicalizeExistingPathAsync(
@@ -518,7 +855,11 @@ export async function authorizeLocalMediaImportSourcePathAsync(
       ? isWindowsNetworkLocalMediaPath(trimmed)
       : trimmed.startsWith('\\\\') || trimmed.startsWith('//')
   // Before any filesystem call on Windows: see resolveAuthorizedLocalMediaPath.
-  if (process.platform === 'win32' && isNetworkPath && !isWindowsNetworkPathScoped(trimmed)) {
+  if (
+    process.platform === 'win32' &&
+    (isWindowsNtNamespaceLocalMediaPath(trimmed) ||
+      (isNetworkPath && !isWindowsNetworkPathScoped(trimmed)))
+  ) {
     return null
   }
   const canonical = await canonicalizeExistingPathAsync(trimmed, realpath)
@@ -566,6 +907,8 @@ export function clearScopedLocalMediaPathsForTest(): void {
   }
   scopedLocalMediaPaths.clear()
   scopedLocalMediaDirectories.clear()
+  scopedNetworkFileSpellings.clear()
+  scopedNetworkDirectorySpellings.clear()
   localMediaImportGrants.clear()
   localMediaImportBatchesInUse.clear()
   localMediaGrantsPath = null

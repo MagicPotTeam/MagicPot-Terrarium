@@ -3,8 +3,12 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'path'
 import { pathToFileURL } from 'node:url'
-import { resolveAuthorizedLocalMediaPath } from '../localMediaAccess'
-import { getVerifiedLocalMediaTempRoots } from '../localMediaAllowedRoots'
+import { isWindowsNetworkLocalMediaPath, type LocalMediaRoot } from '../localMediaAccess'
+import {
+  getLocalMediaAllowedRoots,
+  getVerifiedLocalMediaTempRoots
+} from '../localMediaAllowedRoots'
+import { authorizeRendererLocalPath } from '../rendererLocalPathAccess'
 import type {
   CanvasThumbnailManifest,
   CanvasThumbnailCacheRootReq,
@@ -36,6 +40,22 @@ const SUPPORTED_THUMBNAIL_MIME_TYPES = new Set(['image/png', 'image/webp'])
 const DEFAULT_GENERATED_THUMBNAIL_LEVELS = [128, 256, 512, 1024, 2048]
 const DEFAULT_SIDECAR_MAX_DECODED_PIXELS = 64 * 1024 * 1024
 const NATIVE_REGION_MAX_SOURCE_BYTES = 512 * 1024 * 1024
+/** The OS thumbnailer decodes the source in main: the same byte budget as a native region. */
+const NATIVE_THUMBNAIL_MAX_SOURCE_BYTES = NATIVE_REGION_MAX_SOURCE_BYTES
+/**
+ * The OS thumbnailer only ever gets the image types a board shows (not SVG: it can reference
+ * other files). Other types have shell handlers that resolve targets or icons (.lnk, .url,
+ * .library-ms), possibly on another host.
+ */
+const NATIVE_THUMBNAIL_SOURCE_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+  '.ico'
+])
 const NATIVE_REGION_MAX_OUTPUT_PIXELS = 4 * 1024 * 1024
 const NATIVE_REGION_MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 const REPO_TEST_CACHE_ROOT_DIRNAMES = ['.magicpot-trash', '.tmp', 'tmp', 'temp', 'test-results']
@@ -57,8 +77,16 @@ type CacheEntryResolution = {
 
 type CanvasThumbnailSidecarRunner = typeof generateCanvasThumbnailsViaSidecar
 
+/** Canonical path of an authorized source, or null; never throws. */
+type AuthorizeThumbnailSource = (fullPath: string) => Promise<string | null>
+
 export type CanvasThumbnailSvcImplOptions = {
   generateViaSidecar?: CanvasThumbnailSidecarRunner
+  /**
+   * The application roots a source may lie in besides the user's grants (default: the roots of
+   * the local-media protocol, so a thumbnail is made only of what a board could display).
+   */
+  getSourceRoots?: () => LocalMediaRoot[]
 }
 
 function getDefaultCacheRoot(): string {
@@ -121,11 +149,18 @@ async function findNearestAncestorDir(startPath: string, dirname: string): Promi
   }
 }
 
-async function getAllowedExplicitCacheRootBases(defaultCacheRoot: string): Promise<string[]> {
+/**
+ * The bases of an explicit cache root as configured (app and test paths, never the request).
+ * The repository's test folders only in a development build: a packaged app's working folder
+ * is wherever it was started from (`/` on macOS, so `/tmp`, shared by every user, would count).
+ */
+function getExplicitCacheRootBaseSpellings(defaultCacheRoot: string): string[] {
   const roots = [
     defaultCacheRoot,
     path.dirname(defaultCacheRoot),
-    ...REPO_TEST_CACHE_ROOT_DIRNAMES.map((dirname) => path.join(process.cwd(), dirname))
+    ...(app.isPackaged
+      ? []
+      : REPO_TEST_CACHE_ROOT_DIRNAMES.map((dirname) => path.join(process.cwd(), dirname)))
   ]
   const envTestRoot = process.env.MAGICPOT_TEST_TRASH_ROOT?.trim()
   if (envTestRoot) {
@@ -136,7 +171,11 @@ async function getAllowedExplicitCacheRootBases(defaultCacheRoot: string): Promi
   if (envArtifactRoot) {
     roots.push(envArtifactRoot)
   }
+  return roots
+}
 
+async function getAllowedExplicitCacheRootBases(defaultCacheRoot: string): Promise<string[]> {
+  const roots = getExplicitCacheRootBaseSpellings(defaultCacheRoot)
   const desktopTrashRoot = await findNearestAncestorDir(
     defaultCacheRoot,
     TEST_ARTIFACT_ROOT_DIRNAME
@@ -148,15 +187,18 @@ async function getAllowedExplicitCacheRootBases(defaultCacheRoot: string): Promi
   return Promise.all(roots.map((root) => canonicalizeExistingOrParent(root)))
 }
 
-async function isAllowedTempCacheRoot(canonicalRoot: string): Promise<boolean> {
-  const tempRoot = await canonicalizeExistingOrParent(os.tmpdir())
-  if (!isPathInsideOrEqual(tempRoot, canonicalRoot) || canonicalRoot === tempRoot) {
+function isAllowedTempCacheRootUnder(tempRoot: string, root: string): boolean {
+  if (!isPathInsideOrEqual(tempRoot, root) || root === tempRoot) {
     return false
   }
 
-  const relative = path.relative(tempRoot, canonicalRoot)
+  const relative = path.relative(tempRoot, root)
   const firstSegment = relative.split(/[\\/]+/)[0]
   return TEMP_TEST_CACHE_ROOT_PATTERN.test(firstSegment)
+}
+
+async function isAllowedTempCacheRoot(canonicalRoot: string): Promise<boolean> {
+  return isAllowedTempCacheRootUnder(await canonicalizeExistingOrParent(os.tmpdir()), canonicalRoot)
 }
 
 async function assertAllowedExplicitCacheRoot(
@@ -176,6 +218,41 @@ async function assertAllowedExplicitCacheRoot(
   throw new Error(`Unsafe canvas thumbnail cache root: ${requestedRoot}`)
 }
 
+/**
+ * The explicit-root check on the requested spelling alone, before the requested root is ever
+ * canonicalized: a root the renderer (or a board file's source identity) names may be a share
+ * on another host, and canonicalizing it would contact that host. The bases are the app's own
+ * (both as spelled and canonical); a Windows network spelling passes only inside a base that
+ * is itself on a share.
+ */
+async function assertLexicallyAllowedExplicitCacheRoot(
+  explicitRoot: string,
+  requestedRoot: string,
+  defaultCacheRoot: string
+): Promise<void> {
+  const refuse = (): never => {
+    throw new Error(`Unsafe canvas thumbnail cache root: ${explicitRoot}`)
+  }
+  if (explicitRoot.includes('\0')) refuse()
+  const isNetworkSpelling =
+    process.platform === 'win32' && isWindowsNetworkLocalMediaPath(explicitRoot)
+  const spelledBases = getExplicitCacheRootBaseSpellings(getDefaultCacheRoot())
+  const bases = [
+    ...spelledBases,
+    ...(await getAllowedExplicitCacheRootBases(defaultCacheRoot))
+  ].filter((base) => !isNetworkSpelling || isWindowsNetworkLocalMediaPath(base))
+  if (bases.some((base) => isPathInsideOrEqual(path.resolve(base), requestedRoot))) {
+    return
+  }
+  if (!isNetworkSpelling) {
+    const tempRoots = [path.resolve(os.tmpdir()), await canonicalizeExistingOrParent(os.tmpdir())]
+    if (tempRoots.some((tempRoot) => isAllowedTempCacheRootUnder(tempRoot, requestedRoot))) {
+      return
+    }
+  }
+  refuse()
+}
+
 async function resolveCacheRoot(cacheRootDir?: string): Promise<string> {
   const explicitRoot = cacheRootDir?.trim()
   const defaultCacheRoot = await canonicalizeExistingOrParent(getDefaultCacheRoot())
@@ -184,6 +261,7 @@ async function resolveCacheRoot(cacheRootDir?: string): Promise<string> {
   }
 
   const requestedRoot = path.resolve(explicitRoot)
+  await assertLexicallyAllowedExplicitCacheRoot(explicitRoot, requestedRoot, defaultCacheRoot)
   const canonicalRoot = await canonicalizeExistingOrParent(requestedRoot)
   await assertAllowedExplicitCacheRoot(canonicalRoot, requestedRoot, defaultCacheRoot)
   return canonicalRoot
@@ -293,10 +371,15 @@ function buildCanvasThumbnailCacheKey(input: {
 }
 
 async function getSourceIdentityForManifest(
-  manifest: CanvasThumbnailManifest
+  manifest: CanvasThumbnailManifest,
+  authorizeSource: AuthorizeThumbnailSource
 ): Promise<SourceIdentity> {
-  const requestedPath = path.resolve(manifest.canonicalPath)
-  const canonicalSourcePath = await fs.realpath(requestedPath)
+  // The manifest's source path comes from the renderer (writeThumbnailSet) or from a cache
+  // entry it wrote: it is authorized like any source before anything touches it.
+  const canonicalSourcePath = await authorizeSource(manifest.canonicalPath)
+  if (!canonicalSourcePath) {
+    throw new Error('Canvas thumbnail manifest source is not authorized.')
+  }
   const stats = await fs.stat(canonicalSourcePath)
   if (!stats.isFile()) {
     throw new Error('Canvas thumbnail manifest source is not a file.')
@@ -334,7 +417,8 @@ async function getSourceIdentityForManifest(
 
 async function validateManifest(
   manifest: CanvasThumbnailManifest,
-  cacheKey: string
+  cacheKey: string,
+  authorizeSource: AuthorizeThumbnailSource
 ): Promise<CanvasThumbnailManifest> {
   if (!manifest || manifest.version !== 1 || manifest.cacheKey !== cacheKey) {
     throw new Error('Invalid canvas thumbnail manifest identity.')
@@ -369,7 +453,7 @@ async function validateManifest(
     }
   }
 
-  const sourceIdentity = await getSourceIdentityForManifest(manifest)
+  const sourceIdentity = await getSourceIdentityForManifest(manifest, authorizeSource)
   return {
     ...manifest,
     cacheKey: sourceIdentity.cacheKey,
@@ -449,43 +533,60 @@ function getSidecarResultMessage(
 
 export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
   private readonly generateViaSidecar: CanvasThumbnailSidecarRunner
+  private readonly getSourceRoots: () => LocalMediaRoot[]
 
   constructor(options: CanvasThumbnailSvcImplOptions = {}) {
     this.generateViaSidecar = options.generateViaSidecar ?? generateCanvasThumbnailsViaSidecar
+    this.getSourceRoots = options.getSourceRoots ?? getLocalMediaAllowedRoots
   }
 
-  getSourceFileMetadata = async (
-    req: CanvasThumbnailSourceFileMetadataReq
+  /**
+   * Every source path here is named by the renderer, and a board file can carry it (an item's
+   * saved source identity), so it is authorized as the local-media protocol authorizes it: a
+   * file the user granted or one under an application root. Off main's event loop, with the
+   * import-source deadline (no gate: a board asks once per image); a Windows network spelling
+   * the user did not grant never reaches the filesystem. A board item whose grant was evicted
+   * gets no thumbnail (main never contacts its host); the board cannot display it either.
+   */
+  private authorizeSource: AuthorizeThumbnailSource = (fullPath) =>
+    authorizeRendererLocalPath(fullPath, this.getSourceRoots(), { gate: null })
+
+  /** Metadata of an authorized canonical source path. */
+  private statAuthorizedSource = async (
+    canonicalPath: string
   ): Promise<CanvasThumbnailSourceFileMetadataResp> => {
-    const requestedPath = path.resolve(req.fullPath)
-    let canonicalPath = requestedPath
     let stats
     try {
-      canonicalPath = await fs.realpath(requestedPath)
       stats = await fs.stat(canonicalPath)
     } catch {
-      return {
-        exists: false,
-        canonicalPath,
-        sizeBytes: 0,
-        lastModifiedMs: 0
-      }
+      return { exists: false, canonicalPath, sizeBytes: 0, lastModifiedMs: 0 }
     }
     if (!stats.isFile()) {
-      return {
-        exists: false,
-        canonicalPath,
-        sizeBytes: 0,
-        lastModifiedMs: 0
-      }
+      return { exists: false, canonicalPath, sizeBytes: 0, lastModifiedMs: 0 }
     }
-
     return {
       exists: true,
       canonicalPath,
       sizeBytes: stats.size,
       lastModifiedMs: stats.mtimeMs
     }
+  }
+
+  getSourceFileMetadata = async (
+    req: CanvasThumbnailSourceFileMetadataReq
+  ): Promise<CanvasThumbnailSourceFileMetadataResp> => {
+    const requestedPath = typeof req?.fullPath === 'string' ? req.fullPath : ''
+    const canonicalPath = await this.authorizeSource(requestedPath)
+    if (!canonicalPath) {
+      // Missing or not authorized alike; the path is only resolved as text.
+      return {
+        exists: false,
+        canonicalPath: path.resolve(requestedPath),
+        sizeBytes: 0,
+        lastModifiedMs: 0
+      }
+    }
+    return this.statAuthorizedSource(canonicalPath)
   }
 
   getThumbnailCacheRoot = async (
@@ -510,7 +611,7 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
 
     let validated: CanvasThumbnailManifest
     try {
-      validated = await validateManifest(manifest, req.cacheKey)
+      validated = await validateManifest(manifest, req.cacheKey, this.authorizeSource)
     } catch {
       return { manifest: null }
     }
@@ -530,7 +631,7 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
     const { entryDir } = await resolveCacheEntryDir(req.cacheKey, req.cacheRootDir, {
       create: true
     })
-    const manifest = await validateManifest(req.manifest, req.cacheKey)
+    const manifest = await validateManifest(req.manifest, req.cacheKey, this.authorizeSource)
     const expectedFilenames = new Set(manifest.levels.map((level) => level.filename))
     const writtenFilenames = new Set<string>()
 
@@ -571,7 +672,7 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
     req: CanvasThumbnailGenerateSetReq
   ): Promise<CanvasThumbnailGenerateSetResp> => {
     const requestedPath = path.resolve(req.fullPath)
-    const metadata = await this.getSourceFileMetadata({ fullPath: requestedPath })
+    const metadata = await this.getSourceFileMetadata({ fullPath: req.fullPath })
     if (!metadata.exists) {
       return {
         manifest: null,
@@ -702,9 +803,21 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
   ): Promise<CanvasThumbnailNativeResp> => {
     const maxSide = Math.max(1, Math.min(8192, Math.floor(req.maxSide)))
     const requestedPath = path.resolve(req.fullPath)
-    const metadata = await this.getSourceFileMetadata({ fullPath: requestedPath })
+    const isImageType = (value: string): boolean =>
+      NATIVE_THUMBNAIL_SOURCE_EXTENSIONS.has(path.extname(value).toLowerCase())
+    if (!isImageType(requestedPath)) {
+      throw new Error('Native thumbnails are made only of image files.')
+    }
+    const metadata = await this.getSourceFileMetadata({ fullPath: req.fullPath })
     if (!metadata.exists) {
       throw new Error(`Cannot create native thumbnail for missing file: ${requestedPath}`)
+    }
+    // The file the thumbnailer opens: a link named like an image cannot hand it another type.
+    if (!isImageType(metadata.canonicalPath)) {
+      throw new Error('Native thumbnails are made only of image files.')
+    }
+    if (metadata.sizeBytes > NATIVE_THUMBNAIL_MAX_SOURCE_BYTES) {
+      throw new Error('Native thumbnail source exceeds the byte budget.')
     }
 
     const thumbnail = await nativeImage.createThumbnailFromPath(metadata.canonicalPath, {
@@ -728,15 +841,17 @@ export class CanvasThumbnailSvcImpl implements CanvasThumbnailSvc {
     req: CanvasThumbnailNativeRegionReq
   ): Promise<CanvasThumbnailNativeRegionResp> => {
     const requestedPath = path.resolve(req.fullPath)
-    // The temp media folder only once verified as main's own private directory.
-    const authorizedPath = resolveAuthorizedLocalMediaPath(requestedPath, [
-      app.getPath('userData'),
-      ...getVerifiedLocalMediaTempRoots()
-    ])
+    // The temp media folder only once verified as main's own private directory. Off main's
+    // event loop, with the import-source deadline (no gate: one call per spatial tile).
+    const authorizedPath = await authorizeRendererLocalPath(
+      requestedPath,
+      [app.getPath('userData'), ...getVerifiedLocalMediaTempRoots()],
+      { gate: null }
+    )
     if (!authorizedPath) {
       throw new Error('Local image path is not authorized for native region decoding.')
     }
-    const metadata = await this.getSourceFileMetadata({ fullPath: authorizedPath })
+    const metadata = await this.statAuthorizedSource(authorizedPath)
     if (!metadata.exists) {
       throw new Error(`Cannot create native region for missing file: ${requestedPath}`)
     }

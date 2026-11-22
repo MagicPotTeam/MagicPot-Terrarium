@@ -1,7 +1,11 @@
 import { constants as fsConstants } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { isPathInsideRoot } from './managedMediaStore'
+import {
+  isPathInsideRoot,
+  lastManagedMediaImportAt,
+  withManagedMediaIdLock
+} from './managedMediaStore'
 import { parseManagedMediaDerivativeManifest } from './managedMediaDerivativeManifest'
 
 const MEDIA_ID = /^[a-f0-9]{64}$/u
@@ -88,6 +92,11 @@ export type ManagedMediaCleanupPlan = {
   skipped: Skipped[]
   retention: ManagedMediaRetentionPolicy
   audit: ManagedMediaCleanupAudit
+  /**
+   * The wall-clock time the plan judged retention by. Before each delete the executor checks the
+   * record again against it: a record imported or touched since then is kept.
+   */
+  plannedAt?: number
 }
 export type PlanManagedMediaCleanupInput = {
   chatMediaRoot: string
@@ -759,6 +768,63 @@ export async function cleanupManagedMediaStagingOnShutdown(
   return Object.freeze(audit)
 }
 
+type MediaCleanupAction = Extract<
+  ManagedMediaCleanupAction,
+  { kind: 'derivative-file' | 'original-file' | 'metadata-file' }
+>
+
+const isMediaCleanupAction = (action: ManagedMediaCleanupAction): action is MediaCleanupAction =>
+  action.kind === 'derivative-file' ||
+  action.kind === 'original-file' ||
+  action.kind === 'metadata-file'
+
+const recordKey = (prefix: string, mediaId: string): string => `${prefix}\u0000${mediaId}`
+
+/** The metadata and original of each planned orphan record, by store prefix and media ID. */
+function plannedRecordFiles(plan: ManagedMediaCleanupPlan): Map<string, string[]> {
+  const files = new Map<string, string[]>()
+  for (const action of plan.actions) {
+    if (action.kind !== 'metadata-file' && action.kind !== 'original-file') continue
+    try {
+      const { prefix, localPath } = splitCleanupRelativePath(action.relativePath)
+      const root = prefix ? path.join(plan.root, ...prefix.split('/')) : plan.root
+      const key = recordKey(prefix, action.mediaId)
+      files.set(key, [...(files.get(key) ?? []), absoluteFromRelative(root, localPath)])
+    } catch {
+      // The action itself is refused when it runs.
+    }
+  }
+  return files
+}
+
+/**
+ * Why an orphan record must be kept although it was planned for deletion, or null. Checked under
+ * the record's media ID lock just before each delete: an import may have handed the files out
+ * again since the plan was made (it refreshes their timestamps and is recorded in this process).
+ */
+async function retainedSincePlan(
+  files: readonly string[],
+  mediaId: string,
+  staleBefore: number
+): Promise<string | null> {
+  const importedAt = lastManagedMediaImportAt(mediaId)
+  if (importedAt !== undefined && importedAt > staleBefore)
+    return 'orphan media was imported again within the retention TTL'
+  for (const file of files) {
+    let stat: Awaited<ReturnType<typeof fs.lstat>>
+    try {
+      stat = await fs.lstat(file)
+    } catch (error) {
+      // A file of the record this run has already deleted.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      return 'orphan media timestamp is unavailable'
+    }
+    if (!Number.isFinite(stat.mtimeMs)) return 'orphan media timestamp is unavailable'
+    if (stat.mtimeMs > staleBefore) return 'orphan media record is within retention TTL'
+  }
+  return null
+}
+
 /** Execute only planner-confirmed files; dry-run is the safe default. */
 export async function executeManagedMediaCleanup(
   plan: ManagedMediaCleanupPlan,
@@ -767,6 +833,13 @@ export async function executeManagedMediaCleanup(
   const dryRun = options.dryRun !== false
   const deleted: string[] = []
   const skipped: Skipped[] = []
+  const staleBefore =
+    (typeof plan.plannedAt === 'number' && Number.isFinite(plan.plannedAt)
+      ? plan.plannedAt
+      : Date.now()) - plan.retention.orphanTtlMs
+  let recordFiles: Map<string, string[]> | undefined
+  // Records found in use again: none of their remaining files is deleted.
+  const retainedRecords = new Set<string>()
   for (const action of plan.actions) {
     if (options.shouldContinue && !options.shouldContinue()) {
       skipped.push({ relativePath: action.relativePath, reason: 'reference snapshot changed' })
@@ -805,12 +878,38 @@ export async function executeManagedMediaCleanup(
       if (!(await safeDirectory(plan.root, actionRoot)))
         throw new Error('cleanup root is no longer safe')
       if (!(await safeFile(actionRoot, target))) throw new Error('cleanup target is no longer safe')
-      if (options.shouldContinue && !options.shouldContinue()) {
+      if (!isMediaCleanupAction(action)) {
+        if (options.shouldContinue && !options.shouldContinue()) {
+          skipped.push({ relativePath: action.relativePath, reason: 'reference snapshot changed' })
+          break
+        }
+        if (!dryRun) await fs.unlink(target)
+        deleted.push(action.relativePath)
+        continue
+      }
+      const key = recordKey(scopedPath.prefix, action.mediaId)
+      recordFiles ??= plannedRecordFiles(plan)
+      const files = [target, ...(recordFiles.get(key) ?? [])]
+      const outcome = await withManagedMediaIdLock(
+        action.mediaId,
+        async (): Promise<'deleted' | 'stop' | string> => {
+          if (retainedRecords.has(key)) return 'orphan media record is in use again'
+          const reason = await retainedSincePlan(files, action.mediaId, staleBefore)
+          if (reason) {
+            retainedRecords.add(key)
+            return reason
+          }
+          if (options.shouldContinue && !options.shouldContinue()) return 'stop'
+          if (!dryRun) await fs.unlink(target)
+          return 'deleted'
+        }
+      )
+      if (outcome === 'stop') {
         skipped.push({ relativePath: action.relativePath, reason: 'reference snapshot changed' })
         break
       }
-      if (!dryRun) await fs.unlink(target)
-      deleted.push(action.relativePath)
+      if (outcome === 'deleted') deleted.push(action.relativePath)
+      else skipped.push({ relativePath: action.relativePath, reason: outcome })
     } catch (error) {
       skipped.push({ relativePath: action.relativePath, reason: (error as Error).message })
     }
@@ -929,6 +1028,7 @@ export async function planManagedMediaCleanup(
     actions,
     skipped,
     retention,
-    audit
+    audit,
+    plannedAt: now
   }
 }

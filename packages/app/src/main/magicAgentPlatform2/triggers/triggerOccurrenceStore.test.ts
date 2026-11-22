@@ -11,6 +11,7 @@ import {
   TriggerOccurrenceFencingError,
   TriggerOccurrenceStore
 } from './triggerOccurrenceStore'
+import { TriggerOccurrenceScheduler } from './triggerOccurrenceScheduler'
 
 const make = (
   store: TriggerOccurrenceStore,
@@ -88,17 +89,32 @@ describe('TriggerOccurrenceStore', () => {
     try {
       make(store, { occurrenceId: 'isolated', triggerId: 'isolated', idempotencyKey: 'isolated' })
       store.claimNext(100, 'first', 5, 1)
-      make(store, { occurrenceId: 'ordinary', triggerId: 'disabled-ordinary', idempotencyKey: 'ordinary' })
+      make(store, {
+        occurrenceId: 'ordinary',
+        triggerId: 'disabled-ordinary',
+        idempotencyKey: 'ordinary'
+      })
       store.claimNext(100, 'second', 5, 1)
       make(store, { occurrenceId: 'pending', triggerId: 'eligible', idempotencyKey: 'pending' })
       const before = store.get('isolated')
       const history = eventStore.listResourceMutations('trigger-occurrence', 'isolated', 100)
-      const result = store.claimNext(106, 'third', 5, 1, (state) => state.triggerId === 'eligible', (state) => state.triggerId !== 'isolated')
+      const result = store.claimNext(
+        106,
+        'third',
+        5,
+        1,
+        (state) => state.triggerId === 'eligible',
+        (state) => state.triggerId !== 'isolated'
+      )
       expect(result?.id).toBe('pending')
       expect(store.get('ordinary')?.state.status).toBe('dead-letter')
       expect(store.get('isolated')).toEqual(before)
-      expect(eventStore.listResourceMutations('trigger-occurrence', 'isolated', 100)).toEqual(history)
-    } finally { eventStore.close() }
+      expect(eventStore.listResourceMutations('trigger-occurrence', 'isolated', 100)).toEqual(
+        history
+      )
+    } finally {
+      eventStore.close()
+    }
   })
   it('defaults to dead-lettering expired claims even when eligible rejects them', () => {
     const { eventStore, store } = setup()
@@ -107,16 +123,29 @@ describe('TriggerOccurrenceStore', () => {
       store.claimNext(100, 'first', 5, 1)
       expect(store.claimNext(106, 'next', 5, 1, () => false)).toBeUndefined()
       expect(store.get('occ-1')?.state.status).toBe('dead-letter')
-    } finally { eventStore.close() }
+    } finally {
+      eventStore.close()
+    }
   })
   it('mutable is independent of eligible and does not filter ordinary pending claims', () => {
     const { eventStore, store } = setup()
     try {
       make(store, { occurrenceId: 'skipped', triggerId: 'not-eligible', idempotencyKey: 'skipped' })
       make(store, { occurrenceId: 'selected', triggerId: 'eligible', idempotencyKey: 'selected' })
-      expect(store.claimNext(100, 'worker', 5, 3, (state) => state.triggerId === 'eligible', () => false)?.id).toBe('selected')
+      expect(
+        store.claimNext(
+          100,
+          'worker',
+          5,
+          3,
+          (state) => state.triggerId === 'eligible',
+          () => false
+        )?.id
+      ).toBe('selected')
       expect(store.get('skipped')?.state.status).toBe('pending')
-    } finally { eventStore.close() }
+    } finally {
+      eventStore.close()
+    }
   })
   it('reopens durable occurrence state', () => {
     const { eventStore, store } = setup(true)
@@ -489,6 +518,83 @@ describe('TriggerOccurrenceStore execution permit marker', () => {
         TriggerOccurrenceFencingError
       )
       expect(second.get('occ-1')?.state.status).toBe('unknown')
+    } finally {
+      eventStore.close()
+    }
+  })
+})
+
+describe('TriggerOccurrenceStore with a clock that steps back', () => {
+  const scheduler = (store: TriggerOccurrenceStore, clock: { now: number }, execute: () => void) =>
+    new TriggerOccurrenceScheduler({
+      occurrences: store,
+      triggers: {
+        get: () => ({ id: 'trigger-1', revision: 0, state: { enabled: true } })
+      } as never,
+      execute: async () => execute(),
+      now: () => clock.now,
+      leaseMs: 30_000
+    })
+
+  it('settles an occurrence once when the clock steps back during its dispatch', async () => {
+    const { eventStore, store } = setup()
+    try {
+      make(store, { scheduledAt: 1_000, requestedAt: 1_000 })
+      const clock = { now: 100_000 }
+      let dispatches = 0
+      const run = scheduler(store, clock, () => {
+        dispatches += 1
+        clock.now -= 60_000
+      })
+      await expect(run.runOnce()).resolves.toBe(true)
+      expect(store.get('occ-1')?.state).toMatchObject({ status: 'completed', attempt: 1 })
+      // Resource timestamps never go back, so the settlement is stamped at the claim's time.
+      expect(store.get('occ-1')?.updatedAt).toBe(100_000)
+      clock.now = 200_000
+      await expect(run.runOnce()).resolves.toBe(false)
+      expect(dispatches).toBe(1)
+    } finally {
+      eventStore.close()
+    }
+  })
+
+  it('records a failure and a permit marker written after the clock stepped back', () => {
+    const { eventStore, store } = setup()
+    try {
+      make(store, { scheduledAt: 1_000, requestedAt: 1_000 })
+      make(store, {
+        occurrenceId: 'marked',
+        scheduledAt: 1_001,
+        requestedAt: 1_000,
+        idempotencyKey: 'marked'
+      })
+      store.claimNext(100_000, 'worker', 30_000)
+      expect(store.fail('occ-1', 'worker', 40_000, new Error('x'), 500_000).state).toMatchObject({
+        status: 'failed',
+        nextRetryAt: 540_000
+      })
+      store.claimNext(100_001, 'marker', 30_000)
+      expect(store.markPermit('marked', 'marker', 50_000, permit).state.permit).toMatchObject({
+        markedAt: 50_000
+      })
+      expect(store.complete('marked', 'marker', 50_001).state.status).toBe('completed')
+    } finally {
+      eventStore.close()
+    }
+  })
+
+  it('claims a due occurrence whose record is stamped ahead of the clock', () => {
+    const { eventStore, store } = setup()
+    try {
+      // requestedAt is the caller's clock, which may run ahead of this one.
+      make(store, { scheduledAt: 1_000, requestedAt: 500_000 })
+      const claimed = store.claimNext(100_000, 'worker', 30_000)
+      expect(claimed?.state).toMatchObject({
+        status: 'claimed',
+        claim: { claimedAt: 100_000, expiresAt: 130_000 }
+      })
+      expect(claimed?.updatedAt).toBe(500_000)
+      expect(store.complete('occ-1', 'worker', 100_001).state.status).toBe('completed')
     } finally {
       eventStore.close()
     }

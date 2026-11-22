@@ -67,9 +67,21 @@ export interface ChatSession {
   /** A finished team cannot accept new members or start new member requests. */
   teamEnded?: boolean
   /** Legacy defaultModel is historical; versioned member selection is reserved but unavailable. */
-  teamSettings?: { maxMembers: number; defaultModel: string | null; autoCleanup: boolean; memberModelSelection?: { version: 1; profileId: string } }
+  teamSettings?: {
+    maxMembers: number
+    defaultModel: string | null
+    autoCleanup: boolean
+    memberModelSelection?: { version: 1; profileId: string }
+  }
   /** lastOutcome: why the last run ended without a result (absent on records written before it existed). */
-  teamTasks?: { id: string; title: string; ownerId: string; status: 'pending' | 'running' | 'done'; dependsOn: string[]; lastOutcome?: 'failed' | 'cancelled' | 'interrupted' }[]
+  teamTasks?: {
+    id: string
+    title: string
+    ownerId: string
+    status: 'pending' | 'running' | 'done'
+    dependsOn: string[]
+    lastOutcome?: 'failed' | 'cancelled' | 'interrupted'
+  }[]
   teamChannel?: { id: string; senderId: string; text: string; createdAt: number }[]
   /** Durable user-channel intent snapshots. Queued means persisted pending, never delivery proof. */
   teamMessageReceipts?: import('./teamMessageReceipt').TeamMessageReceipt[]
@@ -158,7 +170,11 @@ export async function readExistingSessionSummaries(
     const close = () => {
       if (!db || closed) return
       closed = true
-      try { db.close() } catch { /* A failed close cannot revive a settled result. */ }
+      try {
+        db.close()
+      } catch {
+        /* A failed close cannot revive a settled result. */
+      }
     }
     const settle = (result: ExistingSessionSummaryResult) => {
       if (settled) return
@@ -166,17 +182,25 @@ export async function readExistingSessionSummaries(
       clearTimeout(timer)
       signal?.removeEventListener('abort', cancel)
       if (result.status === 'unavailable') {
-        try { tx?.abort() } catch { /* Already complete/aborted. */ }
+        try {
+          tx?.abort()
+        } catch {
+          /* Already complete/aborted. */
+        }
       }
       close()
       resolve(result)
     }
-    const fail = (reason: Extract<ExistingSessionSummaryResult, { status: 'unavailable' }>['reason']) =>
-      settle({ status: 'unavailable', reason })
+    const fail = (
+      reason: Extract<ExistingSessionSummaryResult, { status: 'unavailable' }>['reason']
+    ) => settle({ status: 'unavailable', reason })
     const cancel = () => fail('cancelled')
     const timer = setTimeout(() => fail('read-failed'), DB_OPEN_TIMEOUT_MS)
     signal?.addEventListener('abort', cancel, { once: true })
-    if (signal?.aborted) { cancel(); return }
+    if (signal?.aborted) {
+      cancel()
+      return
+    }
     const deleted = (item: ExistingSessionSummary): boolean =>
       // Any non-null value is a tombstone, including an empty string. Errors propagate.
       localStorage.getItem(getDeleteTombstoneStorageKey(item.sessionId, item.storageScope)) !== null
@@ -187,97 +211,143 @@ export async function readExistingSessionSummaries(
         return
       }
       const factory = indexedDB
-      factory.databases().then((inventory) => {
-        if (settled) return
-        const entries = inventory.filter((entry) => entry.name === DB_NAME)
-        if (!entries.length) { fail('database-unavailable'); return }
-        if (entries.length !== 1 || entries[0].version !== DB_VERSION) {
-          fail('migration-required')
-          return
-        }
-        let request: IDBOpenDBRequest
-        try { request = factory.open(DB_NAME) } catch { fail('read-failed'); return }
-        // Open requests cannot be cancelled. Always abort a late upgrade, even after
-        // timeout/blocked/cancel settled, to prevent a committed absent-DB creation.
-        request.onupgradeneeded = () => {
-          try { request.transaction?.abort() } catch { /* Report unavailable below. */ }
-          fail('migration-required')
-        }
-        request.onerror = () => fail('read-failed')
-        request.onblocked = () => fail('read-failed')
-        request.onsuccess = () => {
-          if (settled) { request.result.close(); return }
-          db = request.result
-          db.onversionchange = () => fail('changed')
-          db.onclose = () => fail('read-failed')
+      factory
+        .databases()
+        .then((inventory) => {
+          if (settled) return
+          const entries = inventory.filter((entry) => entry.name === DB_NAME)
+          if (!entries.length) {
+            fail('database-unavailable')
+            return
+          }
+          if (entries.length !== 1 || entries[0].version !== DB_VERSION) {
+            fail('migration-required')
+            return
+          }
+          let request: IDBOpenDBRequest
           try {
-            if (db.version !== DB_VERSION || !db.objectStoreNames.contains(STORE_NAME)) {
-              fail('migration-required')
+            request = factory.open(DB_NAME)
+          } catch {
+            fail('read-failed')
+            return
+          }
+          // Open requests cannot be cancelled. Always abort a late upgrade, even after
+          // timeout/blocked/cancel settled, to prevent a committed absent-DB creation.
+          request.onupgradeneeded = () => {
+            try {
+              request.transaction?.abort()
+            } catch {
+              /* Report unavailable below. */
+            }
+            fail('migration-required')
+          }
+          request.onerror = () => fail('read-failed')
+          request.onblocked = () => fail('read-failed')
+          request.onsuccess = () => {
+            if (settled) {
+              request.result.close()
               return
             }
-            tx = db.transaction(STORE_NAME, 'readonly')
-            tx.onerror = () => fail('read-failed')
-            tx.onabort = () => fail('read-failed')
-            tx.oncomplete = () => {
-              if (settled) return
-              if (!exhausted) { fail('read-failed'); return }
-              try {
-                if (summaries.some(deleted)) { fail('changed'); return }
-                settle({ status: 'ready', sessions: summaries })
-              } catch { fail('read-failed') }
-            }
-            const store = tx.objectStore(STORE_NAME)
-            if (store.keyPath !== 'storageKey') { fail('migration-required'); return }
-            const cursorRequest = store.openCursor()
-            cursorRequest.onerror = () => fail('read-failed')
-            cursorRequest.onsuccess = () => {
-              if (settled) return
-              try {
-                const cursor = cursorRequest.result
-                if (!cursor) { exhausted = true; return }
-                if (++visited > 4096) { fail('limit-exceeded'); return }
-                const value: unknown = cursor.value
-                if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            db = request.result
+            db.onversionchange = () => fail('changed')
+            db.onclose = () => fail('read-failed')
+            try {
+              if (db.version !== DB_VERSION || !db.objectStoreNames.contains(STORE_NAME)) {
+                fail('migration-required')
+                return
+              }
+              tx = db.transaction(STORE_NAME, 'readonly')
+              tx.onerror = () => fail('read-failed')
+              tx.onabort = () => fail('read-failed')
+              tx.oncomplete = () => {
+                if (settled) return
+                if (!exhausted) {
                   fail('read-failed')
                   return
                 }
-                const item = value as Record<string, unknown>
-                // Ignore other scopes without traversing their messages/drafts/URLs.
-                if (typeof item.storageScope !== 'string' || !wanted.has(item.storageScope)) {
+                try {
+                  if (summaries.some(deleted)) {
+                    fail('changed')
+                    return
+                  }
+                  settle({ status: 'ready', sessions: summaries })
+                } catch {
+                  fail('read-failed')
+                }
+              }
+              const store = tx.objectStore(STORE_NAME)
+              if (store.keyPath !== 'storageKey') {
+                fail('migration-required')
+                return
+              }
+              const cursorRequest = store.openCursor()
+              cursorRequest.onerror = () => fail('read-failed')
+              cursorRequest.onsuccess = () => {
+                if (settled) return
+                try {
+                  const cursor = cursorRequest.result
+                  if (!cursor) {
+                    exhausted = true
+                    return
+                  }
+                  if (++visited > 4096) {
+                    fail('limit-exceeded')
+                    return
+                  }
+                  const value: unknown = cursor.value
+                  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+                    fail('read-failed')
+                    return
+                  }
+                  const item = value as Record<string, unknown>
+                  // Ignore other scopes without traversing their messages/drafts/URLs.
+                  if (typeof item.storageScope !== 'string' || !wanted.has(item.storageScope)) {
+                    cursor.continue()
+                    return
+                  }
+                  if (
+                    !validIdentifier(item.id, 512) ||
+                    typeof item.title !== 'string' ||
+                    (item.createdAt !== undefined &&
+                      (typeof item.createdAt !== 'number' ||
+                        !Number.isFinite(item.createdAt) ||
+                        item.createdAt < 0))
+                  ) {
+                    fail('read-failed')
+                    return
+                  }
+                  const key = createSessionStorageKey(item.id, item.storageScope)
+                  if (item.storageKey !== key || cursor.primaryKey !== key || seen.has(key)) {
+                    fail('read-failed')
+                    return
+                  }
+                  seen.add(key)
+                  const summary: ExistingSessionSummary = {
+                    storageScope: item.storageScope,
+                    sessionId: item.id,
+                    title: item.title.slice(0, 256),
+                    titleTruncated: item.title.length > 256,
+                    ...(item.createdAt !== undefined ? { createdAt: item.createdAt as number } : {})
+                  }
+                  if (!deleted(summary)) summaries.push(summary)
+                  if (summaries.length > 512) {
+                    fail('limit-exceeded')
+                    return
+                  }
                   cursor.continue()
-                  return
-                }
-                if (
-                  !validIdentifier(item.id, 512) ||
-                  typeof item.title !== 'string' ||
-                  (item.createdAt !== undefined &&
-                    (typeof item.createdAt !== 'number' || !Number.isFinite(item.createdAt) || item.createdAt < 0))
-                ) {
+                } catch {
                   fail('read-failed')
-                  return
                 }
-                const key = createSessionStorageKey(item.id, item.storageScope)
-                if (item.storageKey !== key || cursor.primaryKey !== key || seen.has(key)) {
-                  fail('read-failed')
-                  return
-                }
-                seen.add(key)
-                const summary: ExistingSessionSummary = {
-                  storageScope: item.storageScope,
-                  sessionId: item.id,
-                  title: item.title.slice(0, 256),
-                  titleTruncated: item.title.length > 256,
-                  ...(item.createdAt !== undefined ? { createdAt: item.createdAt as number } : {})
-                }
-                if (!deleted(summary)) summaries.push(summary)
-                if (summaries.length > 512) { fail('limit-exceeded'); return }
-                cursor.continue()
-              } catch { fail('read-failed') }
+              }
+            } catch {
+              fail('read-failed')
             }
-          } catch { fail('read-failed') }
-        }
-      }).catch(() => fail('read-failed'))
-    } catch { fail('read-failed') }
+          }
+        })
+        .catch(() => fail('read-failed'))
+    } catch {
+      fail('read-failed')
+    }
   })
 }
 const DRAFT_BACKUP_STORAGE_KEY_PREFIX = 'magicpot-chat-draft'
@@ -288,12 +358,40 @@ let dbInitPromise: Promise<IDBDatabase> | null = null
 const sessionMutationQueues = new Map<string, Promise<void>>()
 const legacyMigrationFlights = new Map<string, Promise<ChatSession>>()
 
+/**
+ * The inline image formats main's legacy migration imports (the managed store's formats), with
+ * `image/jpg`, a common misspelling of `image/jpeg`. Any other inline image stays as it is.
+ */
+const LEGACY_IMPORTABLE_IMAGE_HEADER = /^data:image\/(png|jpeg|jpg|webp|gif);base64,/i
+const STRICT_BASE64_PAYLOAD = /^[A-Za-z0-9+/]+={0,2}$/
+
 function attachmentNeedsLegacyMigration(attachment: ChatAttachment): boolean {
+  // The url test first: it is the cheap one, and most attachments are not inline. Only the
+  // header is read here (this runs over whole conversations); the payload is checked when the
+  // image is about to be imported.
   return (
     attachment.type === 'image' &&
-    !normalizeMediaReference(attachment.media) &&
-    /^data:image\/[a-z0-9!#$&^_.+-]+;base64,/i.test(attachment.url)
+    LEGACY_IMPORTABLE_IMAGE_HEADER.test(attachment.url) &&
+    !normalizeMediaReference(attachment.media)
   )
+}
+
+/**
+ * The data: URL to hand to main's legacy migration for this inline image, or null when main would
+ * refuse it (a payload that is not strict base64, an empty image): such an image stays inline and
+ * is never sent. `image/jpg` is spelled `image/jpeg`; the store checks the bytes anyway.
+ */
+function importableLegacyDataUrl(url: string): string | null {
+  const header = LEGACY_IMPORTABLE_IMAGE_HEADER.exec(url)
+  if (!header) return null
+  const payloadStart = header[0].length
+  const payloadLength = url.length - payloadStart
+  if (payloadLength === 0 || payloadLength % 4 !== 0) return null
+  const payload = url.slice(payloadStart)
+  if (!STRICT_BASE64_PAYLOAD.test(payload)) return null
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  if ((payloadLength / 4) * 3 - padding <= 0) return null
+  return header[1].toLowerCase() === 'jpg' ? `data:image/jpeg;base64,${payload}` : url
 }
 
 async function reclaimLegacyImports(
@@ -306,39 +404,69 @@ async function reclaimLegacyImports(
   )
 }
 
-async function migrateLegacyAttachmentsInSession(
-  original: ChatSession,
-  scope: string,
-  retryRemaining = 1,
-  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][] = []
-): Promise<ChatSession> {
-  const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc } | undefined)
-    ?.svcManagedMedia
-  if (!service?.migrateLegacyDataUrl) return original
+/** What one image of a migrated record was replaced with, by its old data: URL. */
+export type LegacyAttachmentReplacement = Pick<ChatAttachment, 'url' | 'media'>
 
-  let changed = false
+type LegacyAttachmentMigrationPlan = {
+  /** The record with every imported legacy inline image replaced; null when none was imported. */
+  replacement: ChatSession | null
+  replacements: Map<string, LegacyAttachmentReplacement>
+}
+
+/**
+ * Imports the legacy inline images of `original` into managed media (one at a time) and builds
+ * the record that references them. Nothing is written here. An image main cannot import (another
+ * format, a payload that is not strict base64) is not sent and stays inline; one whose import
+ * fails stays inline too, and the others are still migrated. Rejects only when images were tried
+ * and none could be imported. The imports made are listed in `pendingReclaims`.
+ */
+async function planLegacyAttachmentMigration(
+  original: ChatSession,
+  service: ManagedMediaSvc,
+  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][]
+): Promise<LegacyAttachmentMigrationPlan> {
+  const replacements = new Map<string, LegacyAttachmentReplacement>()
+  // Images left inline in this pass: not importable, or their import failed.
+  const keptInline = new Set<string>()
+  let failure: { error: unknown } | undefined
   const migrate = async (attachment: ChatAttachment): Promise<ChatAttachment> => {
     if (!attachmentNeedsLegacyMigration(attachment)) return attachment
-    const migrated = await service.migrateLegacyDataUrl({
-      dataUrl: attachment.url,
-      metadata: {
-        originalFileName: attachment.fileName || 'legacy-image',
-        sourceWidth: attachment.sourceWidth,
-        sourceHeight: attachment.sourceHeight
-      },
-      // Legacy chat images become durable user-owned media rather than task
-      // scratch data. The explicit namespace keeps old requests compatible
-      // while allowing the physical lifecycle policy to apply on migration.
-      storage: CHAT_ATTACHMENT_STORAGE
-    })
+    // The same image held twice (a message and its compacted copy) is imported once.
+    const known = replacements.get(attachment.url)
+    if (known) return { ...attachment, ...known }
+    if (keptInline.has(attachment.url)) return attachment
+    const dataUrl = importableLegacyDataUrl(attachment.url)
+    if (!dataUrl) {
+      keptInline.add(attachment.url)
+      return attachment
+    }
+    let migrated: MigrateLegacyManagedMediaResp
+    try {
+      migrated = await service.migrateLegacyDataUrl({
+        dataUrl,
+        metadata: {
+          originalFileName: attachment.fileName || 'legacy-image',
+          sourceWidth: attachment.sourceWidth,
+          sourceHeight: attachment.sourceHeight
+        },
+        // Legacy chat images become durable user-owned media rather than task
+        // scratch data. The explicit namespace keeps old requests compatible
+        // while allowing the physical lifecycle policy to apply on migration.
+        storage: CHAT_ATTACHMENT_STORAGE
+      })
+    } catch (error) {
+      keptInline.add(attachment.url)
+      failure ??= { error }
+      return attachment
+    }
     pendingReclaims.push(migrated.checkpoint)
-    changed = true
-    return { ...attachment, url: migrated.localMediaUrl, media: migrated.reference }
+    const replacement = { url: migrated.localMediaUrl, media: migrated.reference }
+    replacements.set(attachment.url, replacement)
+    return { ...attachment, ...replacement }
   }
-
-  try {
+  const migrateMessages = async (source: ChatMessage[]): Promise<ChatMessage[]> => {
     const messages: ChatMessage[] = []
-    for (const message of original.messages) {
+    for (const message of source) {
       if (!message.attachments) {
         messages.push(message)
         continue
@@ -347,51 +475,68 @@ async function migrateLegacyAttachmentsInSession(
       for (const attachment of message.attachments) attachments.push(await migrate(attachment))
       messages.push({ ...message, attachments })
     }
-    const compactedMessages: ChatMessage[] = []
-    for (const message of original.compactedMessages || []) {
-      if (!message.attachments) {
-        compactedMessages.push(message)
-        continue
+    return messages
+  }
+
+  const messages = await migrateMessages(original.messages)
+  const compactedMessages = await migrateMessages(original.compactedMessages || [])
+  const replayImageMessages = await migrateMessages(
+    original.contextCompression?.replayImageMessages || []
+  )
+  const draft = original.draft
+    ? {
+        ...original.draft,
+        pendingAttachments: [] as ChatAttachment[]
       }
-      const attachments: ChatAttachment[] = []
-      for (const attachment of message.attachments) attachments.push(await migrate(attachment))
-      compactedMessages.push({ ...message, attachments })
+    : undefined
+  if (draft) {
+    for (const attachment of original.draft!.pendingAttachments) {
+      draft.pendingAttachments.push(await migrate(attachment))
     }
-    const replayImageMessages: ChatMessage[] = []
-    for (const message of original.contextCompression?.replayImageMessages || []) {
-      if (!message.attachments) {
-        replayImageMessages.push(message)
-        continue
+  }
+  if (replacements.size === 0) {
+    if (failure) throw failure.error
+    return { replacement: null, replacements }
+  }
+  if (failure) {
+    console.warn(
+      '[ChatStorage] Kept some inline images of a conversation; their migration failed:',
+      failure.error
+    )
+  }
+  const contextCompression = original.contextCompression
+    ? {
+        ...original.contextCompression,
+        ...(replayImageMessages.length > 0 ? { replayImageMessages } : {})
       }
-      const attachments: ChatAttachment[] = []
-      for (const attachment of message.attachments) attachments.push(await migrate(attachment))
-      replayImageMessages.push({ ...message, attachments })
-    }
-    const draft = original.draft
-      ? {
-          ...original.draft,
-          pendingAttachments: [] as ChatAttachment[]
-        }
-      : undefined
-    if (draft) {
-      for (const attachment of original.draft!.pendingAttachments) {
-        draft.pendingAttachments.push(await migrate(attachment))
-      }
-    }
-    if (!changed) return original
-    const contextCompression = original.contextCompression
-      ? {
-          ...original.contextCompression,
-          ...(replayImageMessages.length > 0 ? { replayImageMessages } : {})
-        }
-      : undefined
-    const replacement = {
+    : undefined
+  return {
+    replacement: {
       ...original,
       messages,
       ...(original.compactedMessages ? { compactedMessages } : {}),
       ...(draft ? { draft } : {}),
       ...(contextCompression ? { contextCompression } : {})
-    }
+    },
+    replacements
+  }
+}
+
+const managedMediaService = (): ManagedMediaSvc | undefined =>
+  (api() as unknown as { svcManagedMedia?: ManagedMediaSvc } | undefined)?.svcManagedMedia
+
+async function migrateLegacyAttachmentsInSession(
+  original: ChatSession,
+  scope: string,
+  retryRemaining = 1,
+  pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][] = []
+): Promise<ChatSession> {
+  const service = managedMediaService()
+  if (!service?.migrateLegacyDataUrl) return original
+
+  try {
+    const { replacement } = await planLegacyAttachmentMigration(original, service, pendingReclaims)
+    if (!replacement) return original
     const persisted = await compareAndUpdateSessionInDB(original.id, scope, {
       expectedSession: original,
       update: () => replacement
@@ -423,6 +568,97 @@ function migrateLegacyAttachmentsSingleFlight(
     if (legacyMigrationFlights.get(key) === flight) legacyMigrationFlights.delete(key)
   })
   legacyMigrationFlights.set(key, flight)
+  return flight
+}
+
+/**
+ * Whether a conversation still holds a legacy inline image in a format the migration imports (a
+ * base64 data: URL, no reference). Other inline images (BMP, SVG) stay inline by design.
+ */
+export function sessionNeedsLegacyAttachmentMigration(session: ChatSession): boolean {
+  const holds = (attachments?: readonly ChatAttachment[]): boolean =>
+    Array.isArray(attachments) &&
+    attachments.some(
+      (attachment) =>
+        Boolean(attachment) &&
+        typeof attachment.url === 'string' &&
+        attachmentNeedsLegacyMigration(attachment)
+    )
+  const messagesHold = (messages?: readonly ChatMessage[]): boolean =>
+    Array.isArray(messages) && messages.some((message) => holds(message?.attachments))
+  return (
+    messagesHold(session.messages) ||
+    messagesHold(session.compactedMessages) ||
+    messagesHold(session.contextCompression?.replayImageMessages) ||
+    holds(session.draft?.pendingAttachments)
+  )
+}
+
+export type StoredSessionImageMigrationResult =
+  /** Nothing to migrate, or no managed media service. */
+  | { status: 'unchanged' }
+  /** Written: `session` is the stored record now; `replacements` maps each old data: URL. */
+  | {
+      status: 'migrated'
+      session: ChatSession
+      replacements: ReadonlyMap<string, LegacyAttachmentReplacement>
+    }
+  /** Not written: the stored record is not `expected`, or `shouldUpdate` said no. Untouched. */
+  | { status: 'not-written' }
+  /** Another migration of this conversation is running in this window. */
+  | { status: 'busy' }
+  /** An import or the write failed. The stored record is untouched. */
+  | { status: 'failed' }
+
+const storedImageMigrationFlights = new Map<string, Promise<StoredSessionImageMigrationResult>>()
+
+/**
+ * The open page's migration of one stored conversation's legacy inline images (FIX-PLAN item 4,
+ * part 2): the same imports as migrateLegacyAttachmentsSingleFlight, written by one
+ * compare-and-update against `expected` (the record the caller's save baseline expects), never
+ * retried against a different record. `shouldUpdate` runs inside the write's transaction. On any
+ * failure the stored record is untouched and the imports are handed back for reclaim.
+ */
+export function migrateStoredSessionImages(
+  expected: ChatSession,
+  scope: string,
+  options: { shouldUpdate?: () => boolean } = {}
+): Promise<StoredSessionImageMigrationResult> {
+  const targetScope = normalizeScope(scope)
+  const key = createSessionStorageKey(expected.id, targetScope)
+  if (legacyMigrationFlights.has(key) || storedImageMigrationFlights.has(key)) {
+    return Promise.resolve({ status: 'busy' })
+  }
+  const flight = (async (): Promise<StoredSessionImageMigrationResult> => {
+    const service = managedMediaService()
+    if (!service?.migrateLegacyDataUrl || !sessionNeedsLegacyAttachmentMigration(expected)) {
+      return { status: 'unchanged' }
+    }
+    const pendingReclaims: MigrateLegacyManagedMediaResp['checkpoint'][] = []
+    try {
+      const { replacement, replacements } = await planLegacyAttachmentMigration(
+        expected,
+        service,
+        pendingReclaims
+      )
+      if (!replacement) return { status: 'unchanged' }
+      const persisted = await compareAndUpdateSessionInDB(expected.id, targetScope, {
+        expectedSession: expected,
+        ...(options.shouldUpdate ? { shouldUpdate: () => options.shouldUpdate!() } : {}),
+        update: () => replacement
+      })
+      if (persisted) return { status: 'migrated', session: persisted, replacements }
+      await reclaimLegacyImports(service, pendingReclaims)
+      return { status: 'not-written' }
+    } catch (error) {
+      await reclaimLegacyImports(service, pendingReclaims)
+      console.warn('[ChatStorage] Kept a conversation with inline images; migration failed:', error)
+      return { status: 'failed' }
+    }
+  })().finally(() => {
+    if (storedImageMigrationFlights.get(key) === flight) storedImageMigrationFlights.delete(key)
+  })
+  storedImageMigrationFlights.set(key, flight)
   return flight
 }
 
@@ -508,9 +744,7 @@ function summarizeStoredSession(record: StoredChatSession): ChatSessionPreviewSu
 function listScopeSummaries(
   index: ReadonlyMap<IDBValidKey, ChatSessionPreviewSummary>
 ): ChatSessionPreviewSummary[] {
-  const summaries = [...index]
-    .sort(([a], [b]) => indexedDB.cmp(a, b))
-    .map(([, summary]) => summary)
+  const summaries = [...index].sort(([a], [b]) => indexedDB.cmp(a, b)).map(([, summary]) => summary)
   summaries.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
   return summaries
 }
@@ -599,6 +833,76 @@ const normalizeSessionDraft = (value: unknown): ChatSessionDraft | undefined => 
   }
 }
 
+/**
+ * A draft backup whose inline attachments (base64 data: URLs) are longer than this together is not
+ * written to localStorage (FIX-PLAN item 4): images belong in managed media, and the session
+ * record keeps the whole draft. Text does not count here: the backup is the synchronous safety net
+ * of the composer (written on beforeunload, pagehide and blur), and a long pasted text must keep
+ * it.
+ */
+export const CHAT_DRAFT_BACKUP_MAX_INLINE_ATTACHMENT_CHARS = 256 * 1024
+
+/**
+ * A draft backup record longer than this (in JSON characters) is not written at all. localStorage
+ * holds about 5 M characters for the whole app, and a write above its quota fails only after the
+ * whole string was built; this leaves room for the other drafts and the app's other keys.
+ */
+export const CHAT_DRAFT_BACKUP_MAX_CHARS = 1536 * 1024
+
+const inlineAttachmentsChars = (attachments: readonly ChatAttachment[] | undefined): number =>
+  (attachments ?? []).reduce(
+    (total, attachment) =>
+      total +
+      (typeof attachment?.url === 'string' && attachment.url.startsWith('data:')
+        ? attachment.url.length
+        : 0),
+    0
+  )
+
+const attachmentsChars = (attachments: readonly ChatAttachment[] | undefined): number =>
+  (attachments ?? []).reduce(
+    (total, attachment) =>
+      total + (typeof attachment?.url === 'string' ? attachment.url.length : 0),
+    0
+  )
+
+/**
+ * Lower bounds of a backup record's inline attachment characters and of its JSON length, from its
+ * strings: no JSON is built for them.
+ */
+const estimateDraftBackupChars = (
+  record: ChatSessionDraftBackupRecord
+): { inline: number; total: number } => {
+  const draft = record.draft
+  let inline = draft ? inlineAttachmentsChars(draft.pendingAttachments) : 0
+  let total = draft
+    ? draft.inputValue.length +
+      draft.pendingHiddenContext.length +
+      attachmentsChars(draft.pendingAttachments)
+    : 0
+  for (const item of record.queuedSends ?? []) {
+    inline += inlineAttachmentsChars(item.attachments)
+    total +=
+      item.content.length +
+      (item.originalComposerHiddenContext?.length ?? 0) +
+      attachmentsChars(item.attachments)
+  }
+  return { inline, total }
+}
+
+/** The record as JSON, or null when it is over one of the draft backup caps. */
+const serializeDraftBackupWithinCap = (record: ChatSessionDraftBackupRecord): string | null => {
+  const estimate = estimateDraftBackupChars(record)
+  if (
+    estimate.inline > CHAT_DRAFT_BACKUP_MAX_INLINE_ATTACHMENT_CHARS ||
+    estimate.total > CHAT_DRAFT_BACKUP_MAX_CHARS
+  ) {
+    return null
+  }
+  const json = JSON.stringify(record)
+  return json.length > CHAT_DRAFT_BACKUP_MAX_CHARS ? null : json
+}
+
 const getDraftBackupStorageKey = (sessionId: string, scope?: string): string =>
   `${DRAFT_BACKUP_STORAGE_KEY_PREFIX}:${normalizeScope(scope)}:${sessionId}`
 
@@ -671,11 +975,12 @@ const normalizeDraftBackupRecord = (value: unknown): ChatSessionDraftBackupRecor
       : 0
   // The backup's composer draft never carries the queue: the queue is a record-level field.
   const normalizedDraft = normalizeSessionDraft(candidate.draft)
-  const { queuedSends: _draftQueue, queuedSendsUpdatedAt: _draftQueueAt, ...composerDraft } =
-    normalizedDraft ?? ({} as ChatSessionDraft)
-  const draft = normalizedDraft
-    ? normalizeSessionDraft(composerDraft)
-    : undefined
+  const {
+    queuedSends: _draftQueue,
+    queuedSendsUpdatedAt: _draftQueueAt,
+    ...composerDraft
+  } = normalizedDraft ?? ({} as ChatSessionDraft)
+  const draft = normalizedDraft ? normalizeSessionDraft(composerDraft) : undefined
   const queuedSendsUpdatedAt = readFiniteTimestamp(candidate.queuedSendsUpdatedAt)
   const queuedSends =
     queuedSendsUpdatedAt > 0
@@ -739,7 +1044,11 @@ export function writeSessionDraftBackup(
       return
     }
 
-    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), JSON.stringify(nextRecord))
+    // Over the cap the older backup stays as it is: the session record keeps the whole draft, and
+    // the newer draft must not be replaced by part of it.
+    const json = serializeDraftBackupWithinCap(nextRecord)
+    if (json === null) return
+    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), json)
   } catch (error) {
     console.warn('[ChatStorage] Failed to write session draft backup:', error)
   }
@@ -768,7 +1077,11 @@ export function writeSessionQueuedSendsBackup(
       queuedSendsUpdatedAt
     })
     if (!nextRecord) return false
-    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), JSON.stringify(nextRecord))
+    const json = serializeDraftBackupWithinCap(nextRecord)
+    // Over the cap the queue is handled as a failed write: the session record carries it, and an
+    // emptied queue still takes the older one out of the backup.
+    if (json === null) throw new Error('The queued sends backup is over its size cap')
+    localStorage.setItem(getDraftBackupStorageKey(sessionId, scope), json)
     return true
   } catch (error) {
     console.warn('[ChatStorage] Failed to write the queued sends backup:', error)
@@ -787,7 +1100,11 @@ export function writeSessionQueuedSendsBackup(
  * back as it was: the composer draft must not be lost, and the session record's newer removal
  * marker still outranks its queue.
  */
-function dropStaleQueuedSendsBackup(sessionId: string, queuedSendsUpdatedAt: number, scope: string): void {
+function dropStaleQueuedSendsBackup(
+  sessionId: string,
+  queuedSendsUpdatedAt: number,
+  scope: string
+): void {
   try {
     const key = getDraftBackupStorageKey(sessionId, scope)
     const raw = localStorage.getItem(key)
@@ -864,7 +1181,11 @@ function recoverQueuedTeamMessageReceipts(session: ChatSession): ChatSession {
   const receipts = session.teamMessageReceipts
   if (!receipts?.some((receipt) => receipt.state === 'queued')) return session
 
-  const teamKeys = [...new Set(receipts.filter((receipt) => receipt.state === 'queued').map((receipt) => receipt.teamKey))]
+  const teamKeys = [
+    ...new Set(
+      receipts.filter((receipt) => receipt.state === 'queued').map((receipt) => receipt.teamKey)
+    )
+  ]
   const now = Date.now()
   const recoveredReceipts = teamKeys.reduce(
     (current, teamKey) => markTeamMessageReceiptsUnknown(current, teamKey, now),
@@ -884,8 +1205,13 @@ async function persistRecoveredTeamMessageReceipts(
     await saveSessionToDB(recovered, scope, { expectedSession: session })
     return recovered
   } catch (error) {
-    if (error instanceof ChatSessionSaveConflictError || error instanceof ChatSessionSaveSupersededError) {
-      console.warn('[ChatStorage] Skipped stale team receipt recovery after a concurrent session update.')
+    if (
+      error instanceof ChatSessionSaveConflictError ||
+      error instanceof ChatSessionSaveSupersededError
+    ) {
+      console.warn(
+        '[ChatStorage] Skipped stale team receipt recovery after a concurrent session update.'
+      )
       return session
     }
     throw error
@@ -950,26 +1276,52 @@ function strictMarkerValueEqual(a: unknown, b: unknown): boolean {
   if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false
   if (Array.isArray(a) || Array.isArray(b)) {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
-    const leftKeys = Object.keys(a), rightKeys = Object.keys(b)
-    return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.hasOwn(b, key) && strictMarkerValueEqual((a as unknown as Record<string, unknown>)[key], (b as unknown as Record<string, unknown>)[key]))
+    const leftKeys = Object.keys(a),
+      rightKeys = Object.keys(b)
+    return (
+      leftKeys.length === rightKeys.length &&
+      leftKeys.every(
+        (key) =>
+          Object.hasOwn(b, key) &&
+          strictMarkerValueEqual(
+            (a as unknown as Record<string, unknown>)[key],
+            (b as unknown as Record<string, unknown>)[key]
+          )
+      )
+    )
   }
-  if (Object.getPrototypeOf(a) !== Object.prototype || Object.getPrototypeOf(b) !== Object.prototype) return false
-  const left = a as Record<string, unknown>, right = b as Record<string, unknown>
+  if (
+    Object.getPrototypeOf(a) !== Object.prototype ||
+    Object.getPrototypeOf(b) !== Object.prototype
+  )
+    return false
+  const left = a as Record<string, unknown>,
+    right = b as Record<string, unknown>
   const keys = Object.keys(left)
-  return keys.length === Object.keys(right).length && keys.every(key => Object.hasOwn(right, key) && strictMarkerValueEqual(left[key], right[key]))
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => Object.hasOwn(right, key) && strictMarkerValueEqual(left[key], right[key]))
+  )
 }
 
 function sameMemberModelMarker(a: ChatSession, b: ChatSession): boolean {
   const leftChoice = Object.hasOwn(a, 'memberModelChoice')
   const rightChoice = Object.hasOwn(b, 'memberModelChoice')
-  if (leftChoice !== rightChoice || (leftChoice && !strictMarkerValueEqual(a.memberModelChoice, b.memberModelChoice))) return false
+  if (
+    leftChoice !== rightChoice ||
+    (leftChoice && !strictMarkerValueEqual(a.memberModelChoice, b.memberModelChoice))
+  )
+    return false
   const left = a.teamSettings
   const right = b.teamSettings
   const leftHasMarker = !!left && Object.hasOwn(left, 'memberModelSelection')
   const rightHasMarker = !!right && Object.hasOwn(right, 'memberModelSelection')
   if (leftHasMarker !== rightHasMarker) return false
   // Generic compare-and-update may neither remove a marker nor normalize unknown fields.
-  return !leftHasMarker || strictMarkerValueEqual(left!.memberModelSelection, right!.memberModelSelection)
+  return (
+    !leftHasMarker ||
+    strictMarkerValueEqual(left!.memberModelSelection, right!.memberModelSelection)
+  )
 }
 
 export function normalizedSessionsEqual(a: ChatSession, b: ChatSession, scope: string): boolean {
@@ -977,38 +1329,97 @@ export function normalizedSessionsEqual(a: ChatSession, b: ChatSession, scope: s
   const normalizedB = normalizeSession(b, scope)
   // Undefined fields normally normalize away for legacy compatibility. This marker is
   // different: presence (including undefined nested fields) is a security signal.
-  return sameMemberModelMarker(normalizedA, normalizedB) && stableDeepEqual(normalizedA, normalizedB)
+  return (
+    sameMemberModelMarker(normalizedA, normalizedB) && stableDeepEqual(normalizedA, normalizedB)
+  )
 }
 
 /** Ordinary whole-session saves must never change team membership or lifecycle fences. */
 export function sameTeamLifecycle(a: ChatSession, b: ChatSession): boolean {
-  const managed = (session: ChatSession): boolean => session.teamLeadId !== undefined || session.teamMemberName !== undefined ||
-    session.teamGeneration !== undefined || session.teamMemberGeneration !== undefined || session.teamLifecycleRevision !== undefined || session.teamEnded !== undefined
+  const managed = (session: ChatSession): boolean =>
+    session.teamLeadId !== undefined ||
+    session.teamMemberName !== undefined ||
+    session.teamGeneration !== undefined ||
+    session.teamMemberGeneration !== undefined ||
+    session.teamLifecycleRevision !== undefined ||
+    session.teamEnded !== undefined
   if (!managed(a) && !managed(b)) return true
-  const valid = (value: number | undefined): boolean => value === undefined || (Number.isSafeInteger(value) && value >= 0)
-  if (![a.teamGeneration,b.teamGeneration,a.teamMemberGeneration,b.teamMemberGeneration,a.teamLifecycleRevision,b.teamLifecycleRevision].every(valid)) return false
-  return (a.teamLeadId ?? null) === (b.teamLeadId ?? null) && (a.teamMemberName ?? null) === (b.teamMemberName ?? null) &&
-    (a.teamGeneration ?? 0) === (b.teamGeneration ?? 0) && (a.teamMemberGeneration ?? 0) === (b.teamMemberGeneration ?? 0) &&
-    (a.teamLifecycleRevision ?? 0) === (b.teamLifecycleRevision ?? 0) && Boolean(a.teamEnded) === Boolean(b.teamEnded) && Boolean(a.archived) === Boolean(b.archived)
+  const valid = (value: number | undefined): boolean =>
+    value === undefined || (Number.isSafeInteger(value) && value >= 0)
+  if (
+    ![
+      a.teamGeneration,
+      b.teamGeneration,
+      a.teamMemberGeneration,
+      b.teamMemberGeneration,
+      a.teamLifecycleRevision,
+      b.teamLifecycleRevision
+    ].every(valid)
+  )
+    return false
+  return (
+    (a.teamLeadId ?? null) === (b.teamLeadId ?? null) &&
+    (a.teamMemberName ?? null) === (b.teamMemberName ?? null) &&
+    (a.teamGeneration ?? 0) === (b.teamGeneration ?? 0) &&
+    (a.teamMemberGeneration ?? 0) === (b.teamMemberGeneration ?? 0) &&
+    (a.teamLifecycleRevision ?? 0) === (b.teamLifecycleRevision ?? 0) &&
+    Boolean(a.teamEnded) === Boolean(b.teamEnded) &&
+    Boolean(a.archived) === Boolean(b.archived)
+  )
 }
 
 /** Prove the stored record differs from the original baseline only by one End transition. */
-export function matchesTeamEndBaseline(before: ChatSession, after: ChatSession, scope: string): boolean {
-  if (before.id !== after.id || (before.teamLeadId ?? null) !== (after.teamLeadId ?? null) ||
-      (before.teamMemberName ?? null) !== (after.teamMemberName ?? null) ||
-      (before.teamMemberGeneration ?? 0) !== (after.teamMemberGeneration ?? 0)) return false
+export function matchesTeamEndBaseline(
+  before: ChatSession,
+  after: ChatSession,
+  scope: string
+): boolean {
+  if (
+    before.id !== after.id ||
+    (before.teamLeadId ?? null) !== (after.teamLeadId ?? null) ||
+    (before.teamMemberName ?? null) !== (after.teamMemberName ?? null) ||
+    (before.teamMemberGeneration ?? 0) !== (after.teamMemberGeneration ?? 0)
+  )
+    return false
   const beforeRevision = before.teamLifecycleRevision ?? 0
   const afterRevision = after.teamLifecycleRevision ?? 0
-  if (!Number.isSafeInteger(beforeRevision) || beforeRevision < 0 || afterRevision !== beforeRevision + 1) return false
+  if (
+    !Number.isSafeInteger(beforeRevision) ||
+    beforeRevision < 0 ||
+    afterRevision !== beforeRevision + 1
+  )
+    return false
   if (before.teamLeadId) {
-    if (before.archived || (before.teamGeneration ?? 0) !== (after.teamGeneration ?? 0) ||
-        (after.archived !== undefined && typeof after.archived !== 'boolean')) return false
-    return normalizedSessionsEqual(before, {...after, teamLifecycleRevision: before.teamLifecycleRevision, archived: before.archived}, scope)
+    if (
+      before.archived ||
+      (before.teamGeneration ?? 0) !== (after.teamGeneration ?? 0) ||
+      (after.archived !== undefined && typeof after.archived !== 'boolean')
+    )
+      return false
+    return normalizedSessionsEqual(
+      before,
+      { ...after, teamLifecycleRevision: before.teamLifecycleRevision, archived: before.archived },
+      scope
+    )
   }
   const beforeGeneration = before.teamGeneration ?? 0
-  if (!Number.isSafeInteger(beforeGeneration) || beforeGeneration < 0 || (after.teamGeneration ?? 0) !== beforeGeneration + 1) return false
+  if (
+    !Number.isSafeInteger(beforeGeneration) ||
+    beforeGeneration < 0 ||
+    (after.teamGeneration ?? 0) !== beforeGeneration + 1
+  )
+    return false
   if (before.teamEnded || !after.teamEnded) return false
-  return normalizedSessionsEqual(before, {...after, teamEnded: before.teamEnded, teamLifecycleRevision: before.teamLifecycleRevision, teamGeneration: before.teamGeneration}, scope)
+  return normalizedSessionsEqual(
+    before,
+    {
+      ...after,
+      teamEnded: before.teamEnded,
+      teamLifecycleRevision: before.teamLifecycleRevision,
+      teamGeneration: before.teamGeneration
+    },
+    scope
+  )
 }
 
 function describeStorageError(error: unknown): string {
@@ -1166,9 +1577,7 @@ function loadStrayKeys(db: IDBDatabase): Promise<IDBValidKey[]> {
     const request = tx.objectStore(STORE_NAME).getAllKeys()
     request.onsuccess = () =>
       resolve(
-        (request.result || []).filter(
-          (key) => typeof key !== 'string' || !key.includes('\u0000')
-        )
+        (request.result || []).filter((key) => typeof key !== 'string' || !key.includes('\u0000'))
       )
     request.onerror = () =>
       reject(createStorageError(request.error, 'IndexedDB failed to list chat session keys.'))
@@ -1257,7 +1666,9 @@ export async function loadAllSessions(scope = 'default'): Promise<ChatSession[]>
 
   // A process restart cannot prove whether a queued channel intent was sent. Mark it unknown
   // and persist that review state before exposing the recovered snapshot to the UI.
-  return Promise.all(sessions.map((session) => persistRecoveredTeamMessageReceipts(session, targetScope)))
+  return Promise.all(
+    sessions.map((session) => persistRecoveredTeamMessageReceipts(session, targetScope))
+  )
 }
 
 /**
@@ -1438,7 +1849,10 @@ async function loadSessionRawFromDB(
           return
         }
 
-        void persistRecoveredTeamMessageReceipts(normalizeSession(session, targetScope), targetScope).then(resolve, reject)
+        void persistRecoveredTeamMessageReceipts(
+          normalizeSession(session, targetScope),
+          targetScope
+        ).then(resolve, reject)
       }
       request.onerror = () =>
         reject(createStorageError(request.error, 'IndexedDB failed to load the chat session.'))
@@ -1501,13 +1915,19 @@ export async function compareAndUpdateSessionInDB(
             if (!stored || normalizeScope(stored.storageScope) !== targetScope) return
 
             const currentSession = normalizeSession(stored, targetScope)
-            if (!normalizedSessionsEqual(currentSession, options.expectedSession, targetScope)) return
+            if (!normalizedSessionsEqual(currentSession, options.expectedSession, targetScope))
+              return
             // Never hand the predicate the canonical updater input: a predicate is not a write.
             // Its mutations must not leak into an otherwise identity updater.
-            if (options.shouldUpdate && !options.shouldUpdate(structuredClone(currentSession))) return
+            if (options.shouldUpdate && !options.shouldUpdate(structuredClone(currentSession)))
+              return
             const beforeUpdate = structuredClone(currentSession)
             updatedSession = options.update(currentSession)
-            if (updatedSession.id !== beforeUpdate.id || !sameTeamLifecycle(beforeUpdate, updatedSession) || !sameMemberModelMarker(beforeUpdate, updatedSession)) {
+            if (
+              updatedSession.id !== beforeUpdate.id ||
+              !sameTeamLifecycle(beforeUpdate, updatedSession) ||
+              !sameMemberModelMarker(beforeUpdate, updatedSession)
+            ) {
               updatedSession = null
               return
             }
@@ -1593,7 +2013,10 @@ export async function saveSessionToDB(
     options && Object.prototype.hasOwnProperty.call(options, 'expectedSession')
       ? options.expectedSession
       : undefined
-  if ((!options || !Object.prototype.hasOwnProperty.call(options, 'expectedSession')) && options?.pendingSaveOwner !== null) {
+  if (
+    (!options || !Object.prototype.hasOwnProperty.call(options, 'expectedSession')) &&
+    options?.pendingSaveOwner !== null
+  ) {
     cancelDebouncedSessionSave(session.id, scope, options?.pendingSaveOwner ?? defaultSaveOwner)
   }
   const guarded = guard === null || (guard !== undefined && typeof guard === 'object')
@@ -1629,58 +2052,72 @@ export async function saveSessionToDB(
 
         const request = store.get(createSessionStorageKey(session.id, targetScope))
         request.onsuccess = () => {
-            try {
-              const stored = request.result as StoredChatSession | undefined
-              // Deletion can begin while the open/read is pending. Never acknowledge a guarded
-              // payload that the tombstone causes us to skip.
-              if (hasSessionDeleteTombstone(session.id, targetScope)) {
-                if (guarded) conflict = new ChatSessionSaveConflictError(session.id, targetScope)
-                return
-              }
-              const exists = !!stored && normalizeScope(stored.storageScope) === targetScope
-              if (!exists && Object.hasOwn(session, 'memberModelChoice')) {
-                conflict = new ChatSessionSaveConflictError(session.id, targetScope)
-                return
-              }
-              if (!guarded) {
-                if (exists && (!sameTeamLifecycle(stored as StoredChatSession, session) || !sameMemberModelMarker(stored as StoredChatSession, session))) {
-                  conflict = new ChatSessionSaveConflictError(session.id, targetScope)
-                  return
-                }
-                if (options?.shouldUpdate && !options.shouldUpdate()) {
-                  conflict = new ChatSessionSaveConflictError(session.id, targetScope)
-                  return
-                }
-                write()
-                return
-              }
-              // Idempotent retry: a previous save already persisted exactly this snapshot but its
-              // acknowledgement was lost. Treat as success without adding another put. Uses a stable
-              // (key-order-insensitive, array-order-strict) deep compare, not JSON.stringify order.
-              const alreadyPersisted =
-                exists && normalizedSessionsEqual(stored as StoredChatSession, session, targetScope)
-              const expectedMatches = guard === null
-                ? !exists
-                : exists && normalizedSessionsEqual(stored as StoredChatSession, guard as ChatSession, targetScope)
-              if (!expectedMatches && !alreadyPersisted) {
-                conflict = new ChatSessionSaveConflictError(session.id, targetScope)
-                return
-              }
-              if (exists && (!sameTeamLifecycle(stored as StoredChatSession, session) || !sameMemberModelMarker(stored as StoredChatSession, session))) {
+          try {
+            const stored = request.result as StoredChatSession | undefined
+            // Deletion can begin while the open/read is pending. Never acknowledge a guarded
+            // payload that the tombstone causes us to skip.
+            if (hasSessionDeleteTombstone(session.id, targetScope)) {
+              if (guarded) conflict = new ChatSessionSaveConflictError(session.id, targetScope)
+              return
+            }
+            const exists = !!stored && normalizeScope(stored.storageScope) === targetScope
+            if (!exists && Object.hasOwn(session, 'memberModelChoice')) {
+              conflict = new ChatSessionSaveConflictError(session.id, targetScope)
+              return
+            }
+            if (!guarded) {
+              if (
+                exists &&
+                (!sameTeamLifecycle(stored as StoredChatSession, session) ||
+                  !sameMemberModelMarker(stored as StoredChatSession, session))
+              ) {
                 conflict = new ChatSessionSaveConflictError(session.id, targetScope)
                 return
               }
               if (options?.shouldUpdate && !options.shouldUpdate()) {
-                conflict = expectedMatches
-                  ? new ChatSessionSaveSupersededError()
-                  : new ChatSessionSaveConflictError(session.id, targetScope)
+                conflict = new ChatSessionSaveConflictError(session.id, targetScope)
                 return
               }
-              if (!alreadyPersisted) write()
-            } catch (error) {
-              fail(createStorageError(error, 'IndexedDB failed to compare the chat session.'))
+              write()
+              return
             }
+            // Idempotent retry: a previous save already persisted exactly this snapshot but its
+            // acknowledgement was lost. Treat as success without adding another put. Uses a stable
+            // (key-order-insensitive, array-order-strict) deep compare, not JSON.stringify order.
+            const alreadyPersisted =
+              exists && normalizedSessionsEqual(stored as StoredChatSession, session, targetScope)
+            const expectedMatches =
+              guard === null
+                ? !exists
+                : exists &&
+                  normalizedSessionsEqual(
+                    stored as StoredChatSession,
+                    guard as ChatSession,
+                    targetScope
+                  )
+            if (!expectedMatches && !alreadyPersisted) {
+              conflict = new ChatSessionSaveConflictError(session.id, targetScope)
+              return
+            }
+            if (
+              exists &&
+              (!sameTeamLifecycle(stored as StoredChatSession, session) ||
+                !sameMemberModelMarker(stored as StoredChatSession, session))
+            ) {
+              conflict = new ChatSessionSaveConflictError(session.id, targetScope)
+              return
+            }
+            if (options?.shouldUpdate && !options.shouldUpdate()) {
+              conflict = expectedMatches
+                ? new ChatSessionSaveSupersededError()
+                : new ChatSessionSaveConflictError(session.id, targetScope)
+              return
+            }
+            if (!alreadyPersisted) write()
+          } catch (error) {
+            fail(createStorageError(error, 'IndexedDB failed to compare the chat session.'))
           }
+        }
         request.onerror = () =>
           fail(createStorageError(request.error, 'IndexedDB failed to compare the chat session.'))
 
@@ -1701,7 +2138,10 @@ export async function saveSessionToDB(
           )
       })
     } catch (error) {
-      if (error instanceof ChatSessionSaveConflictError || error instanceof ChatSessionSaveSupersededError) {
+      if (
+        error instanceof ChatSessionSaveConflictError ||
+        error instanceof ChatSessionSaveSupersededError
+      ) {
         throw error
       }
       const storageError = createStorageError(error, 'IndexedDB failed to save the chat session.')
@@ -1720,24 +2160,37 @@ export async function saveAllSessions(sessions: ChatSession[], scope = 'default'
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite')
       const store = tx.objectStore(STORE_NAME)
-      requestScopeRecords(store, targetScope, strayKeys, (scoped) => {
-        const teamManaged = (session: ChatSession): boolean => session.teamLeadId !== undefined || session.teamMemberName !== undefined ||
-          session.teamGeneration !== undefined || session.teamMemberGeneration !== undefined || session.teamLifecycleRevision !== undefined || session.teamEnded !== undefined || session.teamSettings !== undefined
-        if (scoped.some(teamManaged) || sessions.some(teamManaged)) {
-          try { tx.abort() } catch { /* Already closed. */ }
-          reject(new Error('Bulk replacement of team sessions is unavailable.'))
-          return
-        }
-        for (const existing of scoped) {
-          store.delete(existing.storageKey)
-        }
-        for (const session of sessions.map((item) => createStoredSession(item, targetScope))) {
-          store.put(session)
-        }
-      }, (error) =>
-        reject(
-          createStorageError(error, 'IndexedDB failed to read existing chat sessions.')
-        )
+      requestScopeRecords(
+        store,
+        targetScope,
+        strayKeys,
+        (scoped) => {
+          const teamManaged = (session: ChatSession): boolean =>
+            session.teamLeadId !== undefined ||
+            session.teamMemberName !== undefined ||
+            session.teamGeneration !== undefined ||
+            session.teamMemberGeneration !== undefined ||
+            session.teamLifecycleRevision !== undefined ||
+            session.teamEnded !== undefined ||
+            session.teamSettings !== undefined
+          if (scoped.some(teamManaged) || sessions.some(teamManaged)) {
+            try {
+              tx.abort()
+            } catch {
+              /* Already closed. */
+            }
+            reject(new Error('Bulk replacement of team sessions is unavailable.'))
+            return
+          }
+          for (const existing of scoped) {
+            store.delete(existing.storageKey)
+          }
+          for (const session of sessions.map((item) => createStoredSession(item, targetScope))) {
+            store.put(session)
+          }
+        },
+        (error) =>
+          reject(createStorageError(error, 'IndexedDB failed to read existing chat sessions.'))
       )
       tx.oncomplete = () => {
         noteScopeWritten(targetScope)
@@ -1759,14 +2212,22 @@ interface TeamMutationInput {
   shouldUpdate?: () => boolean
 }
 
-/** Explicit user-initiated choice only. No profile availability check or execution authority. */
-export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { expectedMember: ChatSession; profileId: string }): Promise<{ lead: ChatSession; member: ChatSession }> {
+/**
+ * Explicit user-initiated choice only. No profile availability check or execution authority.
+ * `profileId: null` clears the member's choice (it inherits the lead's model again) under the
+ * same checks; a marker this build cannot read is never cleared or replaced.
+ */
+export async function setTeamMemberModelChoiceInDB(
+  input: TeamMutationInput & { expectedMember: ChatSession; profileId: string | null }
+): Promise<{ lead: ChatSession; member: ChatSession }> {
   const expectedLead = structuredClone(input.expectedLead)
   const expectedMember = structuredClone(input.expectedMember)
   const targetScope = normalizeScope(input.scope)
-  const choice = { version: 1 as const, profileId: input.profileId }
-  readMemberModelChoice({ ...expectedMember, memberModelChoice: choice })
-  if (!expectedLead.id || !expectedMember.id || expectedLead.id === expectedMember.id) throw new Error('Invalid team member')
+  const choice =
+    input.profileId === null ? null : { version: 1 as const, profileId: input.profileId }
+  if (choice) readMemberModelChoice({ ...expectedMember, memberModelChoice: choice })
+  if (!expectedLead.id || !expectedMember.id || expectedLead.id === expectedMember.id)
+    throw new Error('Invalid team member')
   return queueSessionMutation(expectedMember.id, targetScope, async () => {
     const db = await openDB()
     const strayKeys = await loadStrayKeys(db)
@@ -1774,73 +2235,176 @@ export async function setTeamMemberModelChoiceInDB(input: TeamMutationInput & { 
       const tx = db.transaction(STORE_NAME, 'readwrite')
       const store = tx.objectStore(STORE_NAME)
       let result: { lead: ChatSession; member: ChatSession } | undefined
+      let wrote = false
       let failure: Error | undefined
-      const abort = (error: Error) => { failure = error; try { tx.abort() } catch { reject(error) } }
+      const abort = (error: Error) => {
+        failure = error
+        try {
+          tx.abort()
+        } catch {
+          reject(error)
+        }
+      }
       const onRecords = (records: StoredChatSession[]) => {
         try {
-          const lead = records.find(record => record.id === expectedLead.id)
-          const member = records.find(record => record.id === expectedMember.id)
-          if (!lead || !member || !normalizedSessionsEqual(lead, expectedLead, targetScope) || !normalizedSessionsEqual(member, expectedMember, targetScope) ||
-              lead.teamLeadId || lead.archived || lead.teamEnded || member.teamLeadId !== lead.id || member.archived || member.teamEnded ||
-              !Number.isSafeInteger(lead.teamGeneration ?? 0) || (lead.teamGeneration ?? 0) < 0 ||
-              !Number.isSafeInteger(member.teamMemberGeneration ?? 0) || (member.teamMemberGeneration ?? 0) !== (lead.teamGeneration ?? 0) ||
-              hasSessionDeleteTombstone(lead.id, targetScope) || hasSessionDeleteTombstone(member.id, targetScope) || input.shouldUpdate?.() === false) throw new Error('Team changed')
-          if (resolveMemberModelSelection(lead)) throw new Error('Legacy team model selection unavailable')
-          readMemberModelChoice(member)
-          const updated = { ...normalizeSession(member, targetScope), memberModelChoice: choice, sessionUrl: undefined, sessionProfileId: undefined, sessionRouteFingerprint: undefined }
+          const lead = records.find((record) => record.id === expectedLead.id)
+          const member = records.find((record) => record.id === expectedMember.id)
+          if (
+            !lead ||
+            !member ||
+            !normalizedSessionsEqual(lead, expectedLead, targetScope) ||
+            !normalizedSessionsEqual(member, expectedMember, targetScope) ||
+            lead.teamLeadId ||
+            lead.archived ||
+            lead.teamEnded ||
+            member.teamLeadId !== lead.id ||
+            member.archived ||
+            member.teamEnded ||
+            !Number.isSafeInteger(lead.teamGeneration ?? 0) ||
+            (lead.teamGeneration ?? 0) < 0 ||
+            !Number.isSafeInteger(member.teamMemberGeneration ?? 0) ||
+            (member.teamMemberGeneration ?? 0) !== (lead.teamGeneration ?? 0) ||
+            hasSessionDeleteTombstone(lead.id, targetScope) ||
+            hasSessionDeleteTombstone(member.id, targetScope) ||
+            input.shouldUpdate?.() === false
+          )
+            throw new Error('Team changed')
+          if (resolveMemberModelSelection(lead))
+            throw new Error('Legacy team model selection unavailable')
+          const storedChoice = readMemberModelChoice(member)
+          const { memberModelChoice: _replaced, ...current } = normalizeSession(member, targetScope)
+          if (!choice && storedChoice === null) {
+            // Nothing to clear: the stored records stay exactly as they are.
+            result = {
+              lead: normalizeSession(lead, targetScope),
+              member: normalizeSession(member, targetScope)
+            }
+            return
+          }
+          // A clear leaves no own property at all: an own `memberModelChoice: undefined` would be
+          // an unreadable marker. Everything else is the stored record, read in this transaction.
+          const updated: ChatSession = {
+            ...current,
+            ...(choice ? { memberModelChoice: choice } : {}),
+            sessionUrl: undefined,
+            sessionProfileId: undefined,
+            sessionRouteFingerprint: undefined
+          }
           store.put(createStoredSession(updated, targetScope))
+          wrote = true
           result = { lead: normalizeSession(lead, targetScope), member: updated }
-        } catch (error) { abort(createStorageError(error, 'Member model choice failed')) }
+        } catch (error) {
+          abort(createStorageError(error, 'Member model choice failed'))
+        }
       }
-      requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Member model choice failed')))
-      tx.oncomplete = () => { noteScopeWritten(targetScope); if (result) resolve(result); else reject(new Error('Member model choice failed')) }
-      tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Member model choice failed'))
-      tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Member model choice aborted'))
+      requestScopeRecords(store, targetScope, strayKeys, onRecords, (error) =>
+        abort(createStorageError(error, 'Member model choice failed'))
+      )
+      tx.oncomplete = () => {
+        if (wrote) noteScopeWritten(targetScope)
+        if (result) resolve(result)
+        else reject(new Error('Member model choice failed'))
+      }
+      tx.onerror = () =>
+        reject(failure ?? createStorageError(tx.error, 'Member model choice failed'))
+      tx.onabort = () =>
+        reject(failure ?? createStorageError(tx.error, 'Member model choice aborted'))
     })
   })
 }
 
 /** Atomically admit a new member against the stored lead, limits and all stored team members. */
-export async function createTeamMemberInDB(input: TeamMutationInput & { member: ChatSession }): Promise<{lead: ChatSession; member: ChatSession}> {
+export async function createTeamMemberInDB(
+  input: TeamMutationInput & { member: ChatSession }
+): Promise<{ lead: ChatSession; member: ChatSession }> {
   const { scope, expectedLead, member } = input
-  if (Object.hasOwn(member, 'memberModelChoice')) throw new Error('Member model choice requires explicit selection')
+  if (Object.hasOwn(member, 'memberModelChoice'))
+    throw new Error('Member model choice requires explicit selection')
   const targetScope = normalizeScope(scope)
-  if (!member.id || member.id === expectedLead.id || member.teamLeadId !== expectedLead.id || member.archived ||
-      !member.teamMemberName || !/^[\p{L}\p{N}_-]{1,32}$/u.test(member.teamMemberName)) throw new Error('Invalid team member')
+  if (
+    !member.id ||
+    member.id === expectedLead.id ||
+    member.teamLeadId !== expectedLead.id ||
+    member.archived ||
+    !member.teamMemberName ||
+    !/^[\p{L}\p{N}_-]{1,32}$/u.test(member.teamMemberName)
+  )
+    throw new Error('Invalid team member')
   const db = await openDB()
   const strayKeys = await loadStrayKeys(db)
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
-    let result: {lead: ChatSession; member: ChatSession} | undefined
+    let result: { lead: ChatSession; member: ChatSession } | undefined
     let failure: Error | undefined
-    const abort = (error: Error) => { failure = error; try { tx.abort() } catch { reject(error) } }
+    const abort = (error: Error) => {
+      failure = error
+      try {
+        tx.abort()
+      } catch {
+        reject(error)
+      }
+    }
     const onRecords = (records: StoredChatSession[]) => {
       try {
-        const rawLead = records.find(record => record.id === expectedLead.id)
-        if (!rawLead || !normalizedSessionsEqual(rawLead, expectedLead, targetScope) || rawLead.teamLeadId || rawLead.archived || rawLead.teamEnded ||
-            hasSessionDeleteTombstone(expectedLead.id, targetScope) || hasSessionDeleteTombstone(member.id, targetScope) || input.shouldUpdate?.() === false) throw new Error('Team changed')
-        if (records.some(record => record.id === member.id)) throw new Error('Member already exists')
+        const rawLead = records.find((record) => record.id === expectedLead.id)
+        if (
+          !rawLead ||
+          !normalizedSessionsEqual(rawLead, expectedLead, targetScope) ||
+          rawLead.teamLeadId ||
+          rawLead.archived ||
+          rawLead.teamEnded ||
+          hasSessionDeleteTombstone(expectedLead.id, targetScope) ||
+          hasSessionDeleteTombstone(member.id, targetScope) ||
+          input.shouldUpdate?.() === false
+        )
+          throw new Error('Team changed')
+        if (records.some((record) => record.id === member.id))
+          throw new Error('Member already exists')
         const limit = rawLead.teamSettings?.maxMembers ?? 6
-        if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('Invalid team member limit')
-        const members = records.filter(record => record.teamLeadId === expectedLead.id && !record.archived && (record.teamMemberGeneration ?? 0) === (rawLead.teamGeneration ?? 0))
-        if (members.length >= limit || members.some(record => record.teamMemberName === member.teamMemberName)) throw new Error('Team is full or name is already used')
+        if (!Number.isInteger(limit) || limit < 1 || limit > 6)
+          throw new Error('Invalid team member limit')
+        const members = records.filter(
+          (record) =>
+            record.teamLeadId === expectedLead.id &&
+            !record.archived &&
+            (record.teamMemberGeneration ?? 0) === (rawLead.teamGeneration ?? 0)
+        )
+        if (
+          members.length >= limit ||
+          members.some((record) => record.teamMemberName === member.teamMemberName)
+        )
+          throw new Error('Team is full or name is already used')
         const generation = rawLead.teamGeneration ?? 0
-        if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('Invalid team generation')
-        const admitted = {...member, teamMemberGeneration: generation}
+        if (!Number.isSafeInteger(generation) || generation < 0)
+          throw new Error('Invalid team generation')
+        const admitted = { ...member, teamMemberGeneration: generation }
         store.put(createStoredSession(admitted, targetScope))
-        result = { lead: normalizeSession(rawLead, targetScope), member: normalizeSession(admitted, targetScope) }
-      } catch (error) { abort(createStorageError(error, 'Team creation failed')) }
+        result = {
+          lead: normalizeSession(rawLead, targetScope),
+          member: normalizeSession(admitted, targetScope)
+        }
+      } catch (error) {
+        abort(createStorageError(error, 'Team creation failed'))
+      }
     }
-    requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Team creation failed')))
-    tx.oncomplete = () => { noteScopeWritten(targetScope); if (result) resolve(result); else reject(new Error('Team creation failed')) }
+    requestScopeRecords(store, targetScope, strayKeys, onRecords, (error) =>
+      abort(createStorageError(error, 'Team creation failed'))
+    )
+    tx.oncomplete = () => {
+      noteScopeWritten(targetScope)
+      if (result) resolve(result)
+      else reject(new Error('Team creation failed'))
+    }
     tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Team creation failed'))
     tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Team creation aborted'))
   })
 }
 
 /** End and optional archive commit atomically against the latest records in this scope. */
-export async function endTeamInDB(input: TeamMutationInput): Promise<{lead: ChatSession; members: ChatSession[]}> {
+export async function endTeamInDB(
+  input: TeamMutationInput
+): Promise<{ lead: ChatSession; members: ChatSession[] }> {
   const { scope, expectedLead } = input
   const targetScope = normalizeScope(scope)
   const db = await openDB()
@@ -1848,32 +2412,81 @@ export async function endTeamInDB(input: TeamMutationInput): Promise<{lead: Chat
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite')
     const store = tx.objectStore(STORE_NAME)
-    let result: {lead: ChatSession; members: ChatSession[]} | undefined
+    let result: { lead: ChatSession; members: ChatSession[] } | undefined
     let failure: Error | undefined
-    const abort = (error: Error) => { failure = error; try { tx.abort() } catch { reject(error) } }
+    const abort = (error: Error) => {
+      failure = error
+      try {
+        tx.abort()
+      } catch {
+        reject(error)
+      }
+    }
     const onRecords = (records: StoredChatSession[]) => {
       try {
-        const rawLead = records.find(record => record.id === expectedLead.id)
-        if (!rawLead || !normalizedSessionsEqual(rawLead, expectedLead, targetScope) || rawLead.teamLeadId || rawLead.archived || rawLead.teamEnded ||
-            hasSessionDeleteTombstone(expectedLead.id, targetScope) || input.shouldUpdate?.() === false) throw new Error('Team changed')
+        const rawLead = records.find((record) => record.id === expectedLead.id)
+        if (
+          !rawLead ||
+          !normalizedSessionsEqual(rawLead, expectedLead, targetScope) ||
+          rawLead.teamLeadId ||
+          rawLead.archived ||
+          rawLead.teamEnded ||
+          hasSessionDeleteTombstone(expectedLead.id, targetScope) ||
+          input.shouldUpdate?.() === false
+        )
+          throw new Error('Team changed')
         const generation = rawLead.teamGeneration ?? 0
-        if (!Number.isSafeInteger(generation) || generation < 0 || generation === Number.MAX_SAFE_INTEGER) throw new Error('Invalid team generation')
+        if (
+          !Number.isSafeInteger(generation) ||
+          generation < 0 ||
+          generation === Number.MAX_SAFE_INTEGER
+        )
+          throw new Error('Invalid team generation')
         const leadRevision = rawLead.teamLifecycleRevision ?? 0
-        if (!Number.isSafeInteger(leadRevision) || leadRevision < 0 || leadRevision === Number.MAX_SAFE_INTEGER) throw new Error('Invalid lifecycle revision')
-        const lead = {...normalizeSession(rawLead, targetScope), teamEnded: true, teamGeneration: generation + 1, teamLifecycleRevision: leadRevision + 1}
-        const members = records.filter(record => record.teamLeadId === rawLead.id && !record.archived).map(record => {
-          const current = normalizeSession(record, targetScope)
-          const revision = current.teamLifecycleRevision ?? 0
-          if (!Number.isSafeInteger(revision) || revision < 0 || revision === Number.MAX_SAFE_INTEGER) throw new Error('Invalid lifecycle revision')
-          return {...current, teamLifecycleRevision:revision + 1, ...(rawLead.teamSettings?.autoCleanup ? {archived:true} : {})}
-        })
+        if (
+          !Number.isSafeInteger(leadRevision) ||
+          leadRevision < 0 ||
+          leadRevision === Number.MAX_SAFE_INTEGER
+        )
+          throw new Error('Invalid lifecycle revision')
+        const lead = {
+          ...normalizeSession(rawLead, targetScope),
+          teamEnded: true,
+          teamGeneration: generation + 1,
+          teamLifecycleRevision: leadRevision + 1
+        }
+        const members = records
+          .filter((record) => record.teamLeadId === rawLead.id && !record.archived)
+          .map((record) => {
+            const current = normalizeSession(record, targetScope)
+            const revision = current.teamLifecycleRevision ?? 0
+            if (
+              !Number.isSafeInteger(revision) ||
+              revision < 0 ||
+              revision === Number.MAX_SAFE_INTEGER
+            )
+              throw new Error('Invalid lifecycle revision')
+            return {
+              ...current,
+              teamLifecycleRevision: revision + 1,
+              ...(rawLead.teamSettings?.autoCleanup ? { archived: true } : {})
+            }
+          })
         store.put(createStoredSession(lead, targetScope))
         for (const member of members) store.put(createStoredSession(member, targetScope))
-        result = {lead, members}
-      } catch (error) { abort(createStorageError(error, 'Team end failed')) }
+        result = { lead, members }
+      } catch (error) {
+        abort(createStorageError(error, 'Team end failed'))
+      }
     }
-    requestScopeRecords(store, targetScope, strayKeys, onRecords, error => abort(createStorageError(error, 'Team end failed')))
-    tx.oncomplete = () => { noteScopeWritten(targetScope); if (result) resolve(result); else reject(new Error('Team end failed')) }
+    requestScopeRecords(store, targetScope, strayKeys, onRecords, (error) =>
+      abort(createStorageError(error, 'Team end failed'))
+    )
+    tx.oncomplete = () => {
+      noteScopeWritten(targetScope)
+      if (result) resolve(result)
+      else reject(new Error('Team end failed'))
+    }
     tx.onerror = () => reject(failure ?? createStorageError(tx.error, 'Team end failed'))
     tx.onabort = () => reject(failure ?? createStorageError(tx.error, 'Team end aborted'))
   })
@@ -1987,7 +2600,11 @@ export interface DebouncedSessionSaveOptions {
   onDiscard?: (session: ChatSession) => void
 }
 
-export function cancelDebouncedSessionSave(sessionId: string, scope = 'default', owner?: object): void {
+export function cancelDebouncedSessionSave(
+  sessionId: string,
+  scope = 'default',
+  owner?: object
+): void {
   const targetScope = normalizeScope(scope)
   const owners = pendingSessionSaves.get(targetScope)
   if (!owners) return
@@ -2047,28 +2664,32 @@ export function debouncedSaveSessions(
     const snapshots = [...batch.sessions.values()]
     // Capture synchronous throws too; one failed item must not prevent the rest from settling.
     for (const registered of snapshots) {
-      void Promise.resolve().then(async () => {
-        if (batch.options.saveLatest) return batch.options.saveLatest(registered.id, targetScope)
-        const session = batch.options.resolveLatest
-          ? batch.options.resolveLatest(registered.id, targetScope)
-          : registered
-        if (!session) return null
-        if (session.id !== registered.id) throw new Error('Resolved session ID changed')
-        if (session !== registered) batch.options.onDiscard?.(registered)
-        if (batch.options.saveOne) await batch.options.saveOne(session, targetScope)
-        else await saveSessionToDB(session, targetScope, {pendingSaveOwner: null})
-        return session
-      }).then(
-        session => session ? batch.options.onSuccess?.([session]) : batch.options.onDiscard?.(registered),
-        error => {
-          batch.options.onError?.(error, [registered])
-          console.error(
-            `[ChatStorage] debouncedSave failed: ${describeStorageError(createStorageError(error, 'IndexedDB debounced save failed.'))}`
-          )
-        }
-      ).catch(error => console.error('[ChatStorage] debouncedSave callback failed:', error))
+      void Promise.resolve()
+        .then(async () => {
+          if (batch.options.saveLatest) return batch.options.saveLatest(registered.id, targetScope)
+          const session = batch.options.resolveLatest
+            ? batch.options.resolveLatest(registered.id, targetScope)
+            : registered
+          if (!session) return null
+          if (session.id !== registered.id) throw new Error('Resolved session ID changed')
+          if (session !== registered) batch.options.onDiscard?.(registered)
+          if (batch.options.saveOne) await batch.options.saveOne(session, targetScope)
+          else await saveSessionToDB(session, targetScope, { pendingSaveOwner: null })
+          return session
+        })
+        .then(
+          (session) =>
+            session ? batch.options.onSuccess?.([session]) : batch.options.onDiscard?.(registered),
+          (error) => {
+            batch.options.onError?.(error, [registered])
+            console.error(
+              `[ChatStorage] debouncedSave failed: ${describeStorageError(createStorageError(error, 'IndexedDB debounced save failed.'))}`
+            )
+          }
+        )
+        .catch((error) => console.error('[ChatStorage] debouncedSave callback failed:', error))
     }
   }, delayMs)
-  owners.set(owner, {sessions: entries, options, timer})
+  owners.set(owner, { sessions: entries, options, timer })
   pendingSessionSaves.set(targetScope, owners)
 }

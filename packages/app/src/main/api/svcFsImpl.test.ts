@@ -221,6 +221,12 @@ describe('FsSvcImpl', () => {
   })
 
   describe('readFileFromPath', () => {
+    // The user picked the folder (a scoped grant): readFileFromPath reads only granted files
+    // and application-owned ones (see svcFsImpl.rendererReads.test.ts).
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+    })
+
     it('reads a normal file and returns its filename', async () => {
       const fullPath = path.join(testRoot, 'image.png')
       fs.writeFileSync(fullPath, Buffer.from([10, 20, 30]))
@@ -241,8 +247,17 @@ describe('FsSvcImpl', () => {
   })
 
   describe('bounded reads and writes', () => {
+    // Media reads through the user's grant; text and slices only where they are read: the
+    // canvas project folder (project files) and the LoRA folder (safetensors headers).
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+      service = new FsSvcImpl({
+        getConfiguredReadRoots: async () => ({ projectDirs: [testRoot], loraDirs: [testRoot] })
+      })
+    })
+
     it('rejects full-file reads over the limit while the slice API remains usable', async () => {
-      const fullPath = path.join(testRoot, 'large.bin')
+      const fullPath = path.join(testRoot, 'large.safetensors')
       fs.writeFileSync(fullPath, Buffer.alloc(1))
       fs.truncateSync(fullPath, MAX_FULL_FILE_BYTES + 1)
 
@@ -253,8 +268,31 @@ describe('FsSvcImpl', () => {
       })
     })
 
+    it('refuses a whole-file read of a file that grows while it is read', async () => {
+      const fullPath = path.join(testRoot, 'growing.mpcanvas')
+      fs.writeFileSync(fullPath, 'abc')
+      for (const read of [
+        () => service.readTextFile({ fullPath }),
+        () => service.readFileFromPath({ fullPath })
+      ]) {
+        fs.writeFileSync(fullPath, 'abc')
+        const handle = await fsPromises.open(fullPath, 'r')
+        const originalStat = handle.stat.bind(handle)
+        vi.spyOn(handle, 'stat').mockImplementationOnce(async () => {
+          const stats = await originalStat()
+          fs.writeFileSync(fullPath, 'x'.repeat(4096))
+          return stats
+        })
+        const close = vi.spyOn(handle, 'close')
+        vi.spyOn(fsPromises, 'open').mockResolvedValueOnce(handle)
+
+        await expect(read()).rejects.toThrow(`File changed while it was read: ${fullPath}`)
+        expect(close).toHaveBeenCalledOnce()
+      }
+    })
+
     it('rejects oversized text reads and writes', async () => {
-      const fullPath = path.join(testRoot, 'large.txt')
+      const fullPath = path.join(testRoot, 'large.mpcanvas')
       fs.writeFileSync(fullPath, Buffer.alloc(1))
       fs.truncateSync(fullPath, MAX_TEXT_FILE_BYTES + 1)
 
@@ -316,6 +354,13 @@ describe('FsSvcImpl', () => {
   })
 
   describe('readFileSlice', () => {
+    // Slices are the safetensors headers of the LoRA folder.
+    beforeEach(() => {
+      service = new FsSvcImpl({
+        getConfiguredReadRoots: async () => ({ projectDirs: [], loraDirs: [testRoot] })
+      })
+    })
+
     it('reads only the requested file slice and reports file size', async () => {
       const fullPath = path.join(testRoot, 'model.safetensors')
       fs.writeFileSync(fullPath, Buffer.from([1, 2, 3, 4, 5]))
@@ -354,9 +399,11 @@ describe('FsSvcImpl', () => {
     })
 
     it('rejects directories instead of reading them as files', async () => {
+      const folder = path.join(testRoot, 'folder.safetensors')
+      fs.mkdirSync(folder)
       await expect(
-        service.readFileSlice({ fullPath: testRoot, offset: 0, length: 1 })
-      ).rejects.toThrow(`Path is not a file: ${testRoot}`)
+        service.readFileSlice({ fullPath: folder, offset: 0, length: 1 })
+      ).rejects.toThrow(`Path is not a file: ${folder}`)
     })
   })
 
@@ -387,6 +434,10 @@ describe('FsSvcImpl', () => {
   })
 
   describe('listFilesInFolder', () => {
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+    })
+
     it('scans directories with extension filtering and recursive traversal', async () => {
       const nestedDir = path.join(testRoot, 'nested')
       fs.mkdirSync(nestedDir)
@@ -443,6 +494,10 @@ describe('FsSvcImpl', () => {
   })
 
   describe('listImagesInFolder', () => {
+    beforeEach(() => {
+      expect(authorizeScopedLocalMediaDirectory(testRoot)).toBe(true)
+    })
+
     it('propagates directory scan errors for invalid folder paths', async () => {
       const fullPath = path.join(testRoot, 'not-a-directory')
       fs.writeFileSync(fullPath, 'content')

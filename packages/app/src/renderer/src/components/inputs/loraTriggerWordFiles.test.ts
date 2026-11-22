@@ -374,13 +374,18 @@ describe('loraTriggerWordFiles', () => {
 
   it('reads local civitai metadata sidecars for Windows-style extensionless LoRA names', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false })
-    const fileExistsBatchMock = vi.fn(async (paths: string[]) =>
-      paths.map((candidatePath) =>
-        candidatePath.endsWith('HHCT_qwen_image_lora_complete-000022.civitai.info')
-      )
-    )
-    const readTextFileMock = vi.fn().mockResolvedValue({
-      content: JSON.stringify({ modelVersions: [{ trainedWords: ['hhct_style', 'dining_room'] }] })
+    // Main stats every path given to this on its event loop: the lookup must not use it.
+    const fileExistsBatchMock = vi.fn(async (paths: string[]) => paths.map(() => true))
+    // Main reports a missing sidecar as missing; the lookup tries the next naming convention.
+    const readTextFileMock = vi.fn(async ({ fullPath }: { fullPath: string }) => {
+      if (!fullPath.endsWith('HHCT_qwen_image_lora_complete-000022.civitai.info')) {
+        throw new Error(`File not found: ${fullPath}`)
+      }
+      return {
+        content: JSON.stringify({
+          modelVersions: [{ trainedWords: ['hhct_style', 'dining_room'] }]
+        })
+      }
     })
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('path', path.win32)
@@ -397,9 +402,8 @@ describe('loraTriggerWordFiles', () => {
       } as never)
     ).resolves.toBe('hhct_style, dining_room')
 
-    expect(fileExistsBatchMock).toHaveBeenCalled()
-    expect(readTextFileMock).toHaveBeenCalledTimes(1)
-    expect(readTextFileMock).toHaveBeenCalledWith({
+    expect(fileExistsBatchMock).not.toHaveBeenCalled()
+    expect(readTextFileMock).toHaveBeenLastCalledWith({
       fullPath:
         'C:\\ComfyUI\\models\\loras\\马上用\\20260615\\Qwen\\HHCT_qwen_image_lora_complete-000022.civitai.info'
     })

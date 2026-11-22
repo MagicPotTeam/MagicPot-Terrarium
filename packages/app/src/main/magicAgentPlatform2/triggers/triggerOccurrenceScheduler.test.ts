@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { PersistentTriggerState } from './persistentTriggerStore'
-import type { TriggerOccurrenceState } from './triggerOccurrenceStore'
+import type { TriggerOccurrencePollInput, TriggerOccurrenceState } from './triggerOccurrenceStore'
 import { TriggerOccurrenceScheduler } from './triggerOccurrenceScheduler'
 
 const occurrence = {
@@ -17,19 +17,42 @@ const occurrence = {
   updatedAt: 0,
   schemaVersion: 1 as const
 }
-const stores = (claimed = occurrence) => ({
-  claimNext: vi.fn(() => ({
-    id: claimed.occurrenceId,
-    revision: 0,
-    state: {
-      ...claimed,
-      status: 'claimed' as const,
-      claim: { owner: 'c', claimedAt: 0, expiresAt: 100 }
-    }
-  })),
-  complete: vi.fn(),
-  fail: vi.fn()
-})
+const stores = (claimed = occurrence) => {
+  // The scheduler calls poll(); the tests count and steer claims through claimNext.
+  const claimNext = vi.fn(
+    (
+      _now: number,
+      _owner: string,
+      _leaseMs: number,
+      _maxAttempts: number,
+      _eligible: ((state: TriggerOccurrenceState) => boolean) | undefined
+    ) => ({
+      id: claimed.occurrenceId,
+      revision: 0,
+      state: {
+        ...claimed,
+        status: 'claimed' as const,
+        claim: { owner: 'c', claimedAt: 0, expiresAt: 100 }
+      }
+    })
+  )
+  return {
+    claimNext,
+    poll: vi.fn((input: TriggerOccurrencePollInput) => ({
+      claimed: claimNext(
+        input.now,
+        input.owner,
+        input.leaseMs,
+        input.maxAttempts ?? 3,
+        input.eligible
+      ),
+      backlog: false,
+      deadLettered: 0
+    })),
+    complete: vi.fn(),
+    fail: vi.fn()
+  }
+}
 const triggers = (state: unknown = { enabled: true }) => ({
   get: vi.fn(() => ({ id: 't', revision: 0, state }))
 })
@@ -223,6 +246,76 @@ describe('TriggerOccurrenceScheduler settlement failures', () => {
       expect(store.claimNext).toHaveBeenCalledTimes(4)
       expect(unhandled).toEqual([])
     })
+  })
+
+  it('polls again at once while a backlog drains, then at the interval', async () => {
+    await withPollTimer(async (unhandled) => {
+      const store = stores()
+      store.claimNext.mockImplementation(() => undefined as never)
+      // Three polls archive with more left; the fourth finds the backlog gone.
+      let draining = 3
+      store.poll.mockImplementation((input: TriggerOccurrencePollInput) => {
+        store.claimNext(input.now, input.owner, input.leaseMs, 3, input.eligible)
+        return { claimed: undefined as never, backlog: draining-- > 0, deadLettered: 0 }
+      })
+      const scheduler = new TriggerOccurrenceScheduler({
+        occurrences: store as never,
+        triggers: triggers() as never,
+        execute: vi.fn(async () => undefined),
+        pollIntervalMs: 1_000
+      })
+      scheduler.start()
+      // A 0 ms timer set while timers run fires 1 ms later on the fake clock.
+      for (let poll = 1; poll <= 4; poll += 1) {
+        await vi.advanceTimersByTimeAsync(poll === 1 ? 0 : 1)
+        await settle()
+        expect(store.claimNext).toHaveBeenCalledTimes(poll)
+      }
+      await vi.advanceTimersByTimeAsync(999)
+      expect(store.claimNext).toHaveBeenCalledTimes(4)
+      await vi.advanceTimersByTimeAsync(1)
+      await settle()
+      expect(store.claimNext).toHaveBeenCalledTimes(5)
+      await scheduler.stop()
+      expect(unhandled).toEqual([])
+    })
+  })
+
+  it('logs how many occurrences polls dead-lettered, once a drain ends or the scheduler stops', async () => {
+    const store = stores()
+    store.claimNext.mockImplementation(() => undefined as never)
+    // Each entry is what one poll reports: [dead-lettered, backlog].
+    const polls: Array<[number, boolean]> = [
+      [40, true],
+      [50, true],
+      [9, false],
+      [0, false],
+      [2, false],
+      [5, true]
+    ]
+    store.poll.mockImplementation(() => {
+      const [deadLettered, backlog] = polls.shift()!
+      return { claimed: undefined as never, backlog, deadLettered }
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const scheduler = new TriggerOccurrenceScheduler({
+      occurrences: store as never,
+      triggers: triggers() as never,
+      execute: vi.fn(async () => undefined)
+    })
+    try {
+      const lines: number[] = []
+      for (let poll = 0; poll < 6; poll += 1) {
+        await scheduler.runOnce()
+        lines.push(warn.mock.calls.length)
+      }
+      expect(lines).toEqual([0, 0, 1, 1, 2, 2])
+      await scheduler.stop()
+      const counts = warn.mock.calls.map(([line]) => /Dead-lettered (\d+) /.exec(String(line))?.[1])
+      expect(counts).toEqual(['99', '2', '5'])
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('logs only the error name of failing polls, rate-limited, and once on recovery', async () => {

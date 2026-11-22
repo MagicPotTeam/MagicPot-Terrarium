@@ -1282,6 +1282,81 @@ describe('useCanvasFileIntake', () => {
     )
   })
 
+  it('grants a dropped file to main before it asks main for the file identity', async () => {
+    // Main tells a source identity only for a file the user granted (SEC-3): the drop's grant
+    // (through the source URL) has to come first, or every dropped file would lose its
+    // persistent thumbnail-cache identity.
+    const addTextToCanvas = vi.fn()
+    const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)
+    const imageFile = new File([buildPngHeader(64, 32, 6)], 'granted.png', { type: 'image/png' })
+    Object.defineProperty(imageFile, 'path', {
+      configurable: true,
+      value: 'C:\\assets\\granted.png'
+    })
+    const steps: string[] = []
+    const granted = new Set<string>()
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: {
+        getPathForFile: (file: File) => (file as File & { path?: string }).path ?? '',
+        authorizeLocalMediaFile: async (file: File) => {
+          const filePath = (file as File & { path?: string }).path ?? ''
+          steps.push('grant')
+          granted.add(filePath)
+          return filePath
+        },
+        resolveAuthorizedLocalMediaPath: async (filePath: string) => filePath
+      }
+    })
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: {
+        svcHyper: window.api.svcHyper,
+        svcCanvasThumbnail: {
+          // As main answers: a file without a grant does not exist for the page.
+          getSourceFileMetadata: vi.fn(async ({ fullPath }: { fullPath: string }) => {
+            steps.push('metadata')
+            return granted.has(fullPath)
+              ? {
+                  exists: true,
+                  canonicalPath: fullPath,
+                  sizeBytes: imageFile.size,
+                  lastModifiedMs: 1
+                }
+              : { exists: false, canonicalPath: fullPath, sizeBytes: 0, lastModifiedMs: 0 }
+          })
+        }
+      }
+    })
+
+    render(
+      <FileIntakeHarness addTextToCanvas={addTextToCanvas} addImageToCanvas={addImageToCanvas} />
+    )
+
+    fireEvent.drop(screen.getByTestId('canvas-paste-surface'), {
+      dataTransfer: {
+        files: [imageFile],
+        items: [],
+        getData: vi.fn(() => '')
+      }
+    })
+
+    await waitFor(() => {
+      expect(addImageToCanvas).toHaveBeenCalledTimes(1)
+    })
+
+    expect(steps).toEqual(['grant', 'metadata'])
+    expect(addImageToCanvas.mock.calls[0]?.[0]).toBe('local-media:///C:/assets/granted.png')
+    expect(addImageToCanvas.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        sourceIdentity: expect.objectContaining({
+          kind: 'local-file',
+          canonicalPath: 'c:/assets/granted.png'
+        })
+      })
+    )
+  })
+
   it('decodes non-PNG local image metadata without retaining the original source file', async () => {
     const addTextToCanvas = vi.fn()
     const addImageToCanvas = vi.fn<TestAddImageToCanvas>().mockResolvedValue(undefined)

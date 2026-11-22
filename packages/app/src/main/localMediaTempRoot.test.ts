@@ -291,4 +291,42 @@ describe('the verified temp root, remembered once accepted', () => {
       expect(subject.get(root)).toBeNull()
     }
   )
+
+  posixOnly('checks again after a system sleep, when only the wall clock moved', () => {
+    const root = path.join(sharedTemp(), 'magicpot-local-media')
+    // The monotonic clock stops while the system sleeps; the wall clock does not.
+    const mono = 0
+    let wall = 1_700_000_000_000
+    let otherOwner = false
+    const subject = verifier({
+      now: () => mono,
+      wallNow: () => wall,
+      lstatSync: (target: string) => {
+        const stat = fs.lstatSync(target)
+        return otherOwner
+          ? Object.assign(Object.create(stat) as fs.Stats, { uid: process.getuid!() + 1 })
+          : stat
+      }
+    })
+    const canonical = subject.get(root)!
+    expect(canonical).toBe(fs.realpathSync(root))
+    const statsAfterAccept = subject.lstatSync.mock.calls.length
+    // Within the minute on both clocks: no check.
+    wall += LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS - 1
+    expect(subject.get(root)).toBe(canonical)
+    expect(subject.lstatSync).toHaveBeenCalledTimes(statsAfterAccept)
+    // Eleven days asleep; on resume a temp cleaner removed the folder and another user made
+    // one at its name. The first read checks again and refuses it.
+    otherOwner = true
+    wall += 11 * 24 * 3_600_000
+    expect(subject.get(root)).toBeNull()
+    expect(subject.warn.mock.calls.at(-1)?.[0]).toContain('changed')
+    // A wall clock set back a minute or more counts too.
+    otherOwner = false
+    expect(subject.get(root)).toBe(canonical)
+    const statsBeforeSetBack = subject.lstatSync.mock.calls.length
+    wall -= LOCAL_MEDIA_TEMP_ROOT_RECHECK_MS
+    expect(subject.get(root)).toBe(canonical)
+    expect(subject.lstatSync).toHaveBeenCalledTimes(statsBeforeSetBack + 1)
+  })
 })

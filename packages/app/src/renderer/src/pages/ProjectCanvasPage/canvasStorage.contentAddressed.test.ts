@@ -17,6 +17,7 @@ import {
 import type { CanvasItem } from './types'
 import { createCanvasHistorySnapshot } from './canvasHistory'
 import { buildProjectStorageDirName } from '@shared/projectStorage'
+import { formatLocalFileUnavailableMessage } from '@shared/api/svcFs'
 import type { ChatAttachment } from '@shared/api/svcLLMProxy'
 import {
   importIncomingChatImageAttachment,
@@ -1932,6 +1933,46 @@ describe('mirror prune with assets that cannot be staged', () => {
     await saveCanvasItems(loaded.items, 'undo-first', [], [], null, { getProtectedItems: () => [rest] })
     expect(mirror.files.has(copyPath)).toBe(true)
     expect(mirror.project().items.find((item) => item.id === 'remote')!.src).toBe(copyRef)
+  })
+
+  it('prunes nothing while main cannot tell whether the previous project file is there', async () => {
+    // Its autosave folder spells "File not found": only the mark of the error may decide.
+    const mirror = createFakeMirror('/home/u/File not found/AutoSave')
+    mirror.state.applyPrune = true
+    const { copyRef, copyPath } = seedRemoteBoardOfEarlierVersion(mirror, 'undo-unavailable')
+    const loaded = await loadCanvasItems('undo-unavailable')
+    // Every slot of main's renderer path gate is held by reads of a share that stopped answering:
+    // main answers that it cannot read the previous project file now, as it does over IPC.
+    const svcFs = (window as unknown as { api: { svcFs: Record<string, unknown> } }).api.svcFs
+    const readTextFile = svcFs.readTextFile as (req: { fullPath: string }) => Promise<unknown>
+    svcFs.readTextFile = async (req: { fullPath: string }) => {
+      if (req.fullPath.endsWith('project.mpcanvas')) {
+        const message = formatLocalFileUnavailableMessage(req.fullPath)
+        throw new Error(`Error invoking remote method 'svcFs.readTextFile': Error: ${message}`)
+      }
+      return readTextFile(req)
+    }
+
+    // The remote image is deleted before the first save of the session: only the previous
+    // project file names its offline copy, which undo can still need.
+    const rest = loaded.items.filter((item) => item.id !== 'remote')
+    mirror.resetCalls()
+    await saveCanvasItems(rest, 'undo-unavailable', [], [], null, {
+      getProtectedItems: () => [loaded.items]
+    })
+    expect(mirror.calls.prune).toEqual([])
+    expect(mirror.files.has(copyPath)).toBe(true)
+    // The previous project file stays as it is: it still names the copy.
+    expect(mirror.events).not.toContain('project-file')
+    expect(mirror.text.get(mirror.projectFilePath())).toContain(copyRef)
+
+    // Main answers again: the copy is carried, and undo finds it.
+    svcFs.readTextFile = readTextFile
+    await saveCanvasItems(rest, 'undo-unavailable', [], [], null, {
+      getProtectedItems: () => [loaded.items]
+    })
+    expect(mirror.files.has(copyPath)).toBe(true)
+    expect(mirror.calls.prune.at(-1)!.keepEntryNames).toContain(copyRef.split('/')[1])
   })
 
   it('never mirrors the per-item blob of another version under the key of an unreachable remote image', async () => {

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeIDBKeyRange, installFakeIDBKeyRange } from '../../testUtils/fakeIdbKeyRange'
+import { createFakeChatIndexedDb, type FakeChatIndexedDb } from '../../testUtils/fakeChatIndexedDb'
+import { readMemberModelChoice } from './agentTeam'
 
 // chatStorage reads one scope through a key range; jsdom has no IDBKeyRange of its own.
 installFakeIDBKeyRange()
@@ -1964,5 +1966,308 @@ describe('chatStorage queued sends kept with the draft', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+describe('chatStorage member model choice clear', () => {
+  const SCOPE = 'clear-scope'
+  const STORE = 'sessions-v2'
+  let db: FakeChatIndexedDb
+  beforeEach(() => {
+    vi.resetModules()
+    vi.unstubAllGlobals()
+    localStorage.clear()
+    db = createFakeChatIndexedDb()
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    localStorage.clear()
+  })
+  const openStorage = async () => {
+    db.install(vi.stubGlobal)
+    return import('./chatStorage')
+  }
+  type Storage = Awaited<ReturnType<typeof openStorage>>
+  type Session = import('./chatStorage').ChatSession
+  const key = (id: string) => `${SCOPE}\u0000${id}`
+  const raw = (id: string) =>
+    db.values(STORE).find((value) => (value as { storageKey?: string }).storageKey === key(id)) as
+      Record<string, unknown> | undefined
+  const rewrite = (id: string, change: (row: Record<string, unknown>) => void) => {
+    const row = structuredClone(raw(id)!)
+    change(row)
+    db.seedRows(STORE, [{ key: key(id), value: row }])
+  }
+  const draft = {
+    inputValue: 'kept text',
+    pendingAttachments: [],
+    pendingHiddenContext: '',
+    updatedAt: 5,
+    queuedSends: [{ id: 'queued-1', content: 'queued text', queuedAt: 6 }],
+    queuedSendsUpdatedAt: 6
+  }
+  /** A lead, a member with work, a draft, a provider session and an own choice, and a second member. */
+  const setup = async (storage: Storage, choose = true) => {
+    const lead: Session = { id: 'lead', title: 'Lead', messages: [], profileId: 'leader' }
+    await storage.saveSessionToDB(lead, SCOPE)
+    const admitted = (
+      await storage.createTeamMemberInDB({
+        scope: SCOPE,
+        expectedLead: lead,
+        member: {
+          id: 'member',
+          title: 'Member',
+          messages: [],
+          teamLeadId: 'lead',
+          teamMemberName: 'writer'
+        }
+      })
+    ).member
+    await storage.createTeamMemberInDB({
+      scope: SCOPE,
+      expectedLead: lead,
+      member: {
+        id: 'other',
+        title: 'Other',
+        messages: [],
+        teamLeadId: 'lead',
+        teamMemberName: 'designer'
+      }
+    })
+    await storage.saveSessionToDB(
+      {
+        ...admitted,
+        messages: [
+          { role: 'user', content: 'task' },
+          { role: 'assistant', content: 'done' }
+        ] as Session['messages'],
+        draft,
+        teamMessageReceipts: [],
+        sessionUrl: 'provider-session',
+        sessionProfileId: 'leader',
+        sessionRouteFingerprint: 'route'
+      },
+      SCOPE,
+      { expectedSession: admitted }
+    )
+    let member = (await storage.loadSessionFromDB('member', SCOPE))!
+    if (choose) {
+      member = (
+        await storage.setTeamMemberModelChoiceInDB({
+          scope: SCOPE,
+          expectedLead: lead,
+          expectedMember: member,
+          profileId: 'explicit'
+        })
+      ).member
+      // Provider-session fields may come back later through ordinary use: the clear drops them too.
+      await storage.saveSessionToDB(
+        {
+          ...member,
+          sessionUrl: 'later-session',
+          sessionProfileId: 'explicit',
+          sessionRouteFingerprint: 'later'
+        },
+        SCOPE,
+        { expectedSession: member }
+      )
+    }
+    return {
+      lead: (await storage.loadSessionFromDB('lead', SCOPE))!,
+      member: (await storage.loadSessionFromDB('member', SCOPE))!
+    }
+  }
+  const clear = (
+    storage: Storage,
+    expectedLead: Session,
+    expectedMember: Session,
+    shouldUpdate?: () => boolean
+  ) =>
+    storage.setTeamMemberModelChoiceInDB({
+      scope: SCOPE,
+      expectedLead,
+      expectedMember,
+      profileId: null,
+      shouldUpdate
+    })
+
+  it('removes the own choice and the provider session, and keeps everything else of the stored member', async () => {
+    const storage = await openStorage()
+    const { lead, member } = await setup(storage)
+    expect(member.memberModelChoice).toEqual({ version: 1, profileId: 'explicit' })
+    expect(member.sessionUrl).toBe('later-session')
+    const leadRow = raw('lead')
+    const otherRow = raw('other')
+    const putsBefore = db.stats.calls.put
+    const cleared = await clear(storage, lead, member)
+    expect(db.stats.calls.put - putsBefore).toBe(1)
+    expect(raw('lead')).toBe(leadRow)
+    expect(raw('other')).toBe(otherRow)
+    expect(Object.hasOwn(cleared.member, 'memberModelChoice')).toBe(false)
+    expect(Object.hasOwn(raw('member')!, 'memberModelChoice')).toBe(false)
+    const loaded = (await storage.loadSessionFromDB('member', SCOPE))!
+    expect(Object.hasOwn(loaded, 'memberModelChoice')).toBe(false)
+    expect(readMemberModelChoice(loaded)).toBeNull()
+    expect(readMemberModelChoice(cleared.member)).toBeNull()
+    for (const field of ['sessionUrl', 'sessionProfileId', 'sessionRouteFingerprint'] as const) {
+      expect(loaded[field]).toBeUndefined()
+      expect(Object.hasOwn(raw('member')!, field)).toBe(false)
+    }
+    const {
+      memberModelChoice: _choice,
+      sessionUrl: _url,
+      sessionProfileId: _profile,
+      sessionRouteFingerprint: _route,
+      ...kept
+    } = member
+    expect(loaded).toEqual(kept)
+    expect(loaded.messages).toEqual(member.messages)
+    expect(loaded.draft).toEqual(member.draft)
+    expect(loaded.draft?.queuedSends).toHaveLength(1)
+    expect(cleared.lead).toEqual(lead)
+  })
+
+  it('lets a guarded ordinary save follow a clear, and keeps a stale marked snapshot from bringing the choice back', async () => {
+    const storage = await openStorage()
+    const { lead, member } = await setup(storage)
+    const cleared = (await clear(storage, lead, member)).member
+    await storage.saveSessionToDB({ ...cleared, title: 'Renamed' }, SCOPE, {
+      expectedSession: cleared
+    })
+    const renamed = (await storage.loadSessionFromDB('member', SCOPE))!
+    expect(renamed.title).toBe('Renamed')
+    expect(Object.hasOwn(renamed, 'memberModelChoice')).toBe(false)
+    await expect(
+      storage.saveSessionToDB({ ...member, title: 'stale' }, SCOPE, { expectedSession: member })
+    ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+    await expect(
+      storage.saveSessionToDB({ ...member, title: 'stale' }, SCOPE)
+    ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+    await expect(
+      storage.saveSessionToDB({ ...renamed, memberModelChoice: member.memberModelChoice }, SCOPE, {
+        expectedSession: renamed
+      })
+    ).rejects.toMatchObject({ code: 'CHAT_SESSION_SAVE_CONFLICT' })
+    await expect(
+      storage.compareAndUpdateSessionInDB('member', SCOPE, {
+        expectedSession: renamed,
+        update: (current) => ({
+          ...current,
+          memberModelChoice: { version: 1, profileId: 'explicit' }
+        })
+      })
+    ).resolves.toBeNull()
+    await expect(clear(storage, lead, member)).rejects.toThrow()
+    const after = (await storage.loadSessionFromDB('member', SCOPE))!
+    expect(after).toEqual(renamed)
+    expect(Object.hasOwn(after, 'memberModelChoice')).toBe(false)
+  })
+
+  it('refuses a clear that a stale record, a changed team, a tombstone or an unreadable marker fences', async () => {
+    const storage = await openStorage()
+    const { lead, member } = await setup(storage)
+    const memberRow = structuredClone(raw('member'))
+    const unchanged = () => expect(raw('member')).toEqual(memberRow)
+    await expect(clear(storage, lead, { ...member, title: 'stale' })).rejects.toThrow()
+    unchanged()
+    await expect(clear(storage, { ...lead, title: 'stale' }, member)).rejects.toThrow()
+    unchanged()
+    await expect(clear(storage, lead, member, () => false)).rejects.toThrow()
+    unchanged()
+    for (const id of ['lead', 'member']) {
+      storage.setSessionDeleteTombstone(id, SCOPE)
+      await expect(clear(storage, lead, member)).rejects.toThrow()
+      unchanged()
+      storage.setSessionDeleteTombstone(id, SCOPE, false)
+    }
+    // Records changed under the page (another window, a newer build): the expected ones are what
+    // is stored, and the clear still refuses.
+    const fenced = async (
+      id: 'lead' | 'member',
+      change: (row: Record<string, unknown>) => void
+    ) => {
+      const before = { lead: structuredClone(raw('lead')), member: structuredClone(raw('member')) }
+      rewrite(id, change)
+      const changedRow = structuredClone(raw(id))
+      const storedLead = (await storage.loadSessionFromDB('lead', SCOPE))!
+      const storedMember = (await storage.loadSessionFromDB('member', SCOPE))!
+      const puts = db.stats.calls.put
+      await expect(clear(storage, storedLead, storedMember)).rejects.toThrow()
+      expect(db.stats.calls.put).toBe(puts)
+      expect(raw(id)).toEqual(changedRow)
+      db.seedRows(STORE, [
+        { key: key('lead'), value: before.lead },
+        { key: key('member'), value: before.member }
+      ])
+    }
+    await fenced('member', (row) => {
+      row.archived = true
+    })
+    await fenced('lead', (row) => {
+      row.teamGeneration = 1
+    })
+    await fenced('lead', (row) => {
+      row.teamSettings = {
+        maxMembers: 6,
+        defaultModel: null,
+        autoCleanup: false,
+        memberModelSelection: { version: 1, profileId: 'legacy' }
+      }
+    })
+    await fenced('member', (row) => {
+      row.memberModelChoice = { version: 2, profileId: 'explicit' }
+    })
+    await fenced('member', (row) => {
+      row.memberModelChoice = { version: 1, profileId: 'explicit', scope: 'all' }
+    })
+    await fenced('member', (row) => {
+      row.memberModelChoice = undefined
+    })
+    unchanged()
+    const ended = await storage.endTeamInDB({ scope: SCOPE, expectedLead: lead })
+    const endedMember = ended.members.find((item) => item.id === 'member')!
+    const endedRow = structuredClone(raw('member'))
+    await expect(clear(storage, ended.lead, endedMember)).rejects.toThrow()
+    expect(raw('member')).toEqual(endedRow)
+    expect((await storage.loadSessionFromDB('member', SCOPE))?.memberModelChoice).toEqual({
+      version: 1,
+      profileId: 'explicit'
+    })
+  })
+
+  it('sets a choice again from the cleared member and keeps the clear across a restart', async () => {
+    let storage = await openStorage()
+    const { lead, member } = await setup(storage)
+    const cleared = (await clear(storage, lead, member)).member
+    const again = (
+      await storage.setTeamMemberModelChoiceInDB({
+        scope: SCOPE,
+        expectedLead: lead,
+        expectedMember: cleared,
+        profileId: 'second'
+      })
+    ).member
+    expect(again.memberModelChoice).toEqual({ version: 1, profileId: 'second' })
+    expect((await clear(storage, lead, again)).member).not.toHaveProperty('memberModelChoice')
+    // The storage layer's restart: a fresh copy of the module on the same database.
+    vi.resetModules()
+    storage = await openStorage()
+    const reloaded = (await storage.loadSessionFromDB('member', SCOPE))!
+    expect(Object.hasOwn(reloaded, 'memberModelChoice')).toBe(false)
+    expect(reloaded.messages).toEqual(member.messages)
+  })
+
+  it('writes nothing for a member that never had a choice (a record of an earlier build)', async () => {
+    const storage = await openStorage()
+    const { lead, member } = await setup(storage, false)
+    expect(Object.hasOwn(raw('member')!, 'memberModelChoice')).toBe(false)
+    const memberRow = raw('member')
+    const puts = db.stats.calls.put
+    const result = await clear(storage, lead, member)
+    expect(db.stats.calls.put).toBe(puts)
+    expect(raw('member')).toBe(memberRow)
+    expect(result.member).toEqual(member)
+    expect(Object.hasOwn(result.member, 'memberModelChoice')).toBe(false)
+    expect(result.member.sessionUrl).toBe('provider-session')
   })
 })

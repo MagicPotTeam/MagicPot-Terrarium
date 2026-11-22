@@ -201,21 +201,41 @@ class FakeTeamMain {
 
   /** A message MAIN carried over (queued by a member before this page's document or process). */
   carryOver(input: Omit<AgentTeamMessageIntent, 'id'>): string {
-    const view: AgentTeamMessageIntent = { id: `fixture-carried-${++this.nextId}`, ...structuredClone(input) }
-    this.queue.set(view.id, { routeKey: getAgentSessionKey(normalizeAgentRoute(ROUTE)), view, status: 'queued', carriedOver: true, starts: [] })
+    const view: AgentTeamMessageIntent = {
+      id: `fixture-carried-${++this.nextId}`,
+      ...structuredClone(input)
+    }
+    this.queue.set(view.id, {
+      routeKey: getAgentSessionKey(normalizeAgentRoute(ROUTE)),
+      view,
+      status: 'queued',
+      carriedOver: true,
+      starts: []
+    })
     return view.id
   }
 
   /** MAIN's admission of a delivery request (agentTeamMessageQueue.ts admitDelivery). */
   private admitDelivery(request: LLMChatReq): void {
     if (!Object.hasOwn(request, 'teamMessageDelivery')) return
-    const delivery = request.teamMessageDelivery, member = request.teamMember
+    const delivery = request.teamMessageDelivery,
+      member = request.teamMember
     const entry = delivery ? this.queue.get(delivery.id) : undefined
     const source = entry?.view.source
     const admitted =
-      !!entry && !!delivery && !!member && !!source && entry.status !== 'queued' && entry.lease === delivery.lease &&
-      request.teamMessageHop === entry.view.hop && member.scope === source.scope && member.thread === source.thread && member.lead === source.lead &&
-      (entry.view.kind === 'message' ? member.member === entry.view.recipient : member.member !== source.member) &&
+      !!entry &&
+      !!delivery &&
+      !!member &&
+      !!source &&
+      entry.status !== 'queued' &&
+      entry.lease === delivery.lease &&
+      request.teamMessageHop === entry.view.hop &&
+      member.scope === source.scope &&
+      member.thread === source.thread &&
+      member.lead === source.lead &&
+      (entry.view.kind === 'message'
+        ? member.member === entry.view.recipient
+        : member.member !== source.member) &&
       (entry.status === 'claimed' || entry.starts.includes(member.member))
     if (!admitted) {
       this.refusedDeliveries.push(structuredClone(request))
@@ -242,7 +262,8 @@ class FakeTeamMain {
     ) {
       throw new Error('Invalid team message arguments.')
     }
-    if ([...this.queue.values()].filter((entry) => entry.status === 'queued').length >= 128) throw new Error('Team queue capacity reached.')
+    if ([...this.queue.values()].filter((entry) => entry.status === 'queued').length >= 128)
+      throw new Error('Team queue capacity reached.')
     const view: AgentTeamMessageIntent = {
       id: `fixture-intent-${++this.nextId}`,
       source: { ...source },
@@ -363,7 +384,10 @@ class FakeTeamMain {
           async (req: AgentTeamMessageQueueScope) => ({
             intents: [...this.queue.values()]
               .filter((entry) => entry.status === 'queued' && this.queueMatches(req, entry))
-              .map((entry) => ({ ...structuredClone(entry.view), ...(entry.carriedOver ? { carriedOver: true as const } : {}) }))
+              .map((entry) => ({
+                ...structuredClone(entry.view),
+                ...(entry.carriedOver ? { carriedOver: true as const } : {})
+              }))
           })
         ),
         claimAgentTeamMessage: this.track(
@@ -374,7 +398,13 @@ class FakeTeamMain {
             if (!entry || entry.status !== 'queued' || !this.queueMatches(req, entry)) return {}
             entry.status = 'claimed'
             entry.lease = `fixture-lease-${++this.nextId}`
-            return { intent: { ...structuredClone(entry.view), ...(entry.carriedOver ? { carriedOver: true as const } : {}), lease: entry.lease } }
+            return {
+              intent: {
+                ...structuredClone(entry.view),
+                ...(entry.carriedOver ? { carriedOver: true as const } : {}),
+                lease: entry.lease
+              }
+            }
           }
         ),
         // The thread has no background jobs or processes, and a running request asks nothing.
@@ -484,6 +514,10 @@ async function mountChannelPage(input: {
   secondPane?: boolean
   /** Prepares the fake MAIN before the page's first poll (for example carried-over messages). */
   beforeMount?: (main: FakeTeamMain) => void
+  /** The chat models of the configuration (default: the one fixture model, `PROFILE_ID`). */
+  profiles?: readonly { id: string; model_name: string }[]
+  /** Runs on the storage after the seed, before the page mounts (raw rows of other builds). */
+  beforePage?: (idb: FakeChatIndexedDb) => void
 }): Promise<ChannelPage> {
   if (mountedPage)
     throw new Error('mountChannelPage: finish() the earlier page of this test first.')
@@ -496,28 +530,30 @@ async function mountChannelPage(input: {
 
   const config = structuredClone(DEFAULT_CONFIG) as Config
   config.use_remote_llm = false
-  config.llm_config.api_profiles = [
-    {
-      id: PROFILE_ID,
-      model_name: 'fixture-model',
-      model_use: 'chat',
-      api_mode: 'chat-completions',
-      // Never resolved: MAIN is the in-memory fake, and the guards refuse every connection.
-      base_url: 'http://channel-fixture.invalid/v1/chat/completions',
-      api_key: 'fixture-only'
-    }
-  ] as Config['llm_config']['api_profiles']
+  config.llm_config.api_profiles = (
+    input.profiles ?? [{ id: PROFILE_ID, model_name: 'fixture-model' }]
+  ).map((profile) => ({
+    id: profile.id,
+    model_name: profile.model_name,
+    model_use: 'chat',
+    api_mode: 'chat-completions',
+    // Never resolved: MAIN is the in-memory fake, and the guards refuse every connection.
+    base_url: 'http://channel-fixture.invalid/v1/chat/completions',
+    api_key: 'fixture-only'
+  })) as Config['llm_config']['api_profiles']
   h.config.value = config
 
   const expectedKeys = ['lead', ...input.members.map((session) => session.id)]
     .map(storageKey)
     .sort()
   if (!input.storage) {
-    for (const session of [{ ...lead(), ...input.lead }, ...input.members]) await storage.saveSessionToDB(session, SCOPE)
+    for (const session of [{ ...lead(), ...input.lead }, ...input.members])
+      await storage.saveSessionToDB(session, SCOPE)
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'lead')
     // The seed went into THIS fake, one record per session, and nothing else is in it.
     expect(idb.stats.calls.put).toBe(expectedKeys.length)
   }
+  input.beforePage?.(idb)
   // This storage holds exactly the conversations of this case: nothing of an earlier mount or test.
   expect(idb.keys(SESSION_STORE)).toEqual(expectedKeys)
   const handedOutBeforeMount = idb.stats.handedOut.length
@@ -529,7 +565,14 @@ async function mountChannelPage(input: {
   const element = (props: ChannelPageProps = {}): React.ReactElement => (
     <MemoryRouter>
       <ThemeProvider theme={theme}>
-        <ChatPage compact storageScope={SCOPE} route={ROUTE} threadSubRowsHost={rowsHost} {...input.props} {...props} />
+        <ChatPage
+          compact
+          storageScope={SCOPE}
+          route={ROUTE}
+          threadSubRowsHost={rowsHost}
+          {...input.props}
+          {...props}
+        />
       </ThemeProvider>
     </MemoryRouter>
   )
@@ -587,11 +630,18 @@ async function mountChannelPage(input: {
     secondView = render(
       <MemoryRouter>
         <ThemeProvider theme={theme}>
-          <ChatPage compact storageScope={SCOPE} route={ROUTE} threadSubRowsHost={secondRowsHost} {...input.props} />
+          <ChatPage
+            compact
+            storageScope={SCOPE}
+            route={ROUTE}
+            threadSubRowsHost={secondRowsHost}
+            {...input.props}
+          />
         </ThemeProvider>
       </MemoryRouter>
     )
-    for (const session of input.members) await within(secondRowsHost).findByRole('button', { name: session.id })
+    for (const session of input.members)
+      await within(secondRowsHost).findByRole('button', { name: session.id })
   }
   // With a second pane the composer of the first one is meant.
   const firstPage = input.secondPane ? within(view.container) : screen
@@ -607,8 +657,8 @@ async function mountChannelPage(input: {
       fireEvent.click(firstPage.getByRole('button', { name: 'chat.send_message' }))
     },
     openTeamManagement: async () => {
-      fireEvent.click(screen.getByTestId('chat-composer-add-menu-button'))
-      fireEvent.click(await screen.findByTestId('chat-composer-menu-team'))
+      // Team management opens from the conversation header (the composer has no "+" menu).
+      fireEvent.click(await screen.findByTestId('agent-header-team'))
       return screen.findByRole('dialog', { name: '团队管理' })
     },
     memberNames,
@@ -1184,18 +1234,26 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     // The column lists no message activity: each message is seen as a request to its recipient.
     expect(
       main.chatRequests.filter(
-        (request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
+        (request) =>
+          request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
       )
     ).toHaveLength(1)
     expect(
       main.chatRequests.filter(
-        (request) => request.conversationId === 'designer' && requestText(request).includes('文案回复设计')
+        (request) =>
+          request.conversationId === 'designer' && requestText(request).includes('文案回复设计')
       )
     ).toHaveLength(1)
 
     // Each delivery presented its claim and MAIN recorded exactly one start, for its recipient.
-    expect(firstHop!.teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
-    expect(secondHop!.teamMessageDelivery).toEqual({ id: main.enqueued[1].id, lease: expect.stringMatching(/^fixture-lease-/) })
+    expect(firstHop!.teamMessageDelivery).toEqual({
+      id: main.enqueued[0].id,
+      lease: expect.stringMatching(/^fixture-lease-/)
+    })
+    expect(secondHop!.teamMessageDelivery).toEqual({
+      id: main.enqueued[1].id,
+      lease: expect.stringMatching(/^fixture-lease-/)
+    })
     expect(main.chatRequests[0]).not.toHaveProperty('teamMessageDelivery')
     expect(main.starts).toEqual([
       { id: main.enqueued[0].id, recipient: 'writer' },
@@ -1282,8 +1340,13 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     ])
     expect(main.enqueued[0]).not.toHaveProperty('recipient')
     // One claim, one lease for both recipients; MAIN recorded one start per recipient.
-    expect(byRecipient('writer')[0].teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
-    expect(byRecipient('reviewer')[0].teamMessageDelivery).toEqual(byRecipient('writer')[0].teamMessageDelivery)
+    expect(byRecipient('writer')[0].teamMessageDelivery).toEqual({
+      id: main.enqueued[0].id,
+      lease: expect.stringMatching(/^fixture-lease-/)
+    })
+    expect(byRecipient('reviewer')[0].teamMessageDelivery).toEqual(
+      byRecipient('writer')[0].teamMessageDelivery
+    )
     expect(main.starts.map((start) => start.recipient).sort()).toEqual(['reviewer', 'writer'])
     expect(main.refusedDeliveries).toEqual([])
 
@@ -1379,7 +1442,9 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     // A user broadcast never goes through the MAIN queue and presents no lease.
     expect(main.enqueued).toEqual([])
     expect(main.claimRequests).toEqual([])
-    expect(main.chatRequests.filter((request) => Object.hasOwn(request, 'teamMessageDelivery'))).toEqual([])
+    expect(
+      main.chatRequests.filter((request) => Object.hasOwn(request, 'teamMessageDelivery'))
+    ).toEqual([])
     expect(main.starts).toEqual([])
     await page.finish()
   }, 20000)
@@ -1395,10 +1460,14 @@ describe('real ChatPage team messages on in-memory fakes', () => {
             releaseBusy = () => resolve({ text: 'writer busy reply fixture' })
           })
         }
-        if (lastUserText.includes('来自成员的测试消息') || lastUserText.includes('隐藏时的第二条消息')) {
+        if (
+          lastUserText.includes('来自成员的测试消息') ||
+          lastUserText.includes('隐藏时的第二条消息')
+        ) {
           return { text: '文案已收到 fixture' }
         }
-        if (toolResults.length || !teamTools.includes('send_message')) return { text: '发送成员完成 fixture' }
+        if (toolResults.length || !teamTools.includes('send_message'))
+          return { text: '发送成员完成 fixture' }
         if (lastUserText.includes('hidden pane send')) {
           return new Promise<ModelStep>((resolve) => {
             releaseSender = () =>
@@ -1482,23 +1551,37 @@ describe('real ChatPage member message leases on in-memory fakes', () => {
       model: ({ lastUserText, teamTools, toolResults }) => {
         if (lastUserText.includes('来自成员的测试消息')) return { text: '文案已收到 fixture' }
         if (!toolResults.length && teamTools.includes('send_message')) {
-          return { tool: 'send_message', callId: 'fixture-two-panes', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+          return {
+            tool: 'send_message',
+            callId: 'fixture-two-panes',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
         }
         return { text: '发送成员完成 fixture' }
       }
     })
     const { main } = page
-    const toWriter = () => main.chatRequests.filter((request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息'))
+    const toWriter = () =>
+      main.chatRequests.filter(
+        (request) =>
+          request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
+      )
 
     page.send('@designer 请联系文案')
     await waitFor(() => expect(toWriter()).toHaveLength(1), { timeout: 10000 })
-    await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+    await waitFor(async () =>
+      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+        '文案已收到 fixture'
+      )
+    )
     // Both panes poll the same lead every 500 ms: give the other one time to deliver it again.
     await pause(2000)
     expect(toWriter()).toHaveLength(1)
     expect(main.starts).toEqual([{ id: main.enqueued[0].id, recipient: 'writer' }])
     expect(main.refusedDeliveries).toEqual([])
-    expect(main.calls.filter((call) => call.method === 'listAgentTeamMessages').length).toBeGreaterThan(2)
+    expect(
+      main.calls.filter((call) => call.method === 'listAgentTeamMessages').length
+    ).toBeGreaterThan(2)
     await page.finish()
   }, 30000)
 
@@ -1514,7 +1597,11 @@ describe('real ChatPage member message leases on in-memory fakes', () => {
         }
         if (lastUserText.includes('来自成员的测试消息')) return { text: '文案已收到 fixture' }
         if (!toolResults.length && teamTools.includes('send_message')) {
-          return { tool: 'send_message', callId: 'fixture-busy-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+          return {
+            tool: 'send_message',
+            callId: 'fixture-busy-send',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
         }
         return { text: '发送成员完成 fixture' }
       }
@@ -1525,24 +1612,40 @@ describe('real ChatPage member message leases on in-memory fakes', () => {
     // wrapper, which still sees the busy writer, queues the team message behind the writer's run.
     const { TeamMessageDispatcher } = await import('./teamMessageDispatcher')
     const pump = TeamMessageDispatcher.prototype.pump
-    const blinded = vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (this: InstanceType<typeof TeamMessageDispatcher>, recipient: string) {
+    const blinded = vi.spyOn(TeamMessageDispatcher.prototype, 'pump').mockImplementation(function (
+      this: InstanceType<typeof TeamMessageDispatcher>,
+      recipient: string
+    ) {
       Object.assign(this as object, { isRecipientBusy: () => false })
       return pump.call(this, recipient)
     })
-    const toWriter = () => main.chatRequests.filter((request) => request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息'))
+    const toWriter = () =>
+      main.chatRequests.filter(
+        (request) =>
+          request.conversationId === 'writer' && requestText(request).includes('来自成员的测试消息')
+      )
     try {
       page.send('@writer hold writer busy')
       await waitFor(() => expect(releaseBusy).toBeDefined())
-      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+      fireEvent.change(screen.getByTestId('chat-composer-input'), {
+        target: { value: '@designer 请联系文案' }
+      })
       fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
       await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
       await pause(1500)
       expect(toWriter()).toHaveLength(0)
       releaseBusy?.()
       await waitFor(() => expect(toWriter()).toHaveLength(1), { timeout: 5000 })
-      expect(toWriter()[0].teamMessageDelivery).toEqual({ id: main.enqueued[0].id, lease: expect.stringMatching(/^fixture-lease-/) })
+      expect(toWriter()[0].teamMessageDelivery).toEqual({
+        id: main.enqueued[0].id,
+        lease: expect.stringMatching(/^fixture-lease-/)
+      })
       expect(main.starts).toEqual([{ id: main.enqueued[0].id, recipient: 'writer' }])
-      await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+      await waitFor(async () =>
+        expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+          '文案已收到 fixture'
+        )
+      )
       await pause(1000)
       expect(toWriter()).toHaveLength(1)
       expect(main.refusedDeliveries).toEqual([])
@@ -1613,26 +1716,45 @@ describe('real ChatPage restart on in-memory fakes', () => {
     storageErrors.mockRestore()
   }, 20000)
 
-  const carriedTeam = (id: string) => ({ scope: SCOPE, thread: ROUTE.threadId, lead: 'lead', member: id })
-  const earlierWork = (task: string): ChatSession['messages'] => [
-    { role: 'user', content: task },
-    { role: 'assistant', content: `${task} done fixture` }
-  ] as ChatSession['messages']
+  const carriedTeam = (id: string) => ({
+    scope: SCOPE,
+    thread: ROUTE.threadId,
+    lead: 'lead',
+    member: id
+  })
+  const earlierWork = (task: string): ChatSession['messages'] =>
+    [
+      { role: 'user', content: task },
+      { role: 'assistant', content: `${task} done fixture` }
+    ] as ChatSession['messages']
   const heldNote = 'chat.delegated.member_label — chat.delegated.held'
   const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
   it('holds a carried-over member message until the user sends to its recipient, then delivers it once', async () => {
     let carried = ''
     const page = await mountChannelPage({
-      members: [member('designer', '设计师'), member('writer', '文案', earlierWork('earlier writer task'))],
+      members: [
+        member('designer', '设计师'),
+        member('writer', '文案', earlierWork('earlier writer task'))
+      ],
       beforeMount: (main) => {
-        carried = main.carryOver({ source: carriedTeam('designer'), kind: 'message', hop: 1, recipient: 'writer', text: '重启前的成员消息' })
+        carried = main.carryOver({
+          source: carriedTeam('designer'),
+          kind: 'message',
+          hop: 1,
+          recipient: 'writer',
+          text: '重启前的成员消息'
+        })
       },
-      model: ({ lastUserText }) => ({ text: lastUserText.includes('重启前的成员消息') ? '文案已收到 fixture' : '文案继续 fixture' })
+      model: ({ lastUserText }) => ({
+        text: lastUserText.includes('重启前的成员消息') ? '文案已收到 fixture' : '文案继续 fixture'
+      })
     })
     const { main } = page
     const toWriter = () =>
-      main.chatRequests.filter((request) => request.conversationId === 'writer').map((request) => textOf(request.messages.at(-1)?.content))
+      main.chatRequests
+        .filter((request) => request.conversationId === 'writer')
+        .map((request) => textOf(request.messages.at(-1)?.content))
 
     // Claimed at the first poll, but never delivered by itself: the writer is held, its row says so.
     await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
@@ -1646,10 +1768,17 @@ describe('real ChatPage restart on in-memory fakes', () => {
     await waitFor(() => expect(toWriter()).toHaveLength(2), { timeout: 5000 })
     expect(toWriter()[0]).toContain('请继续')
     expect(toWriter()[1]).toContain('重启前的成员消息')
-    expect(main.chatRequests.find((request) => textOf(request.messages.at(-1)?.content).includes('重启前的成员消息'))?.teamMessageDelivery)
-      .toEqual({ id: carried, lease: expect.stringMatching(/^fixture-lease-/) })
+    expect(
+      main.chatRequests.find((request) =>
+        textOf(request.messages.at(-1)?.content).includes('重启前的成员消息')
+      )?.teamMessageDelivery
+    ).toEqual({ id: carried, lease: expect.stringMatching(/^fixture-lease-/) })
     expect(main.starts).toEqual([{ id: carried, recipient: 'writer' }])
-    await waitFor(async () => expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture'))
+    await waitFor(async () =>
+      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+        '文案已收到 fixture'
+      )
+    )
     await pause(1500)
     expect(toWriter()).toHaveLength(2)
     expect(screen.queryByRole('button', { name: heldNote })).toBeNull()
@@ -1666,13 +1795,22 @@ describe('real ChatPage restart on in-memory fakes', () => {
         member('reviewer', 'reviewer', earlierWork('earlier reviewer task'))
       ],
       beforeMount: (main) => {
-        carried = main.carryOver({ source: carriedTeam('designer'), kind: 'channel', hop: 1, text: '重启前的频道消息' })
+        carried = main.carryOver({
+          source: carriedTeam('designer'),
+          kind: 'channel',
+          hop: 1,
+          text: '重启前的频道消息'
+        })
       },
-      model: ({ lastUserText }) => ({ text: lastUserText.includes('重启前的频道消息') ? '频道收到 fixture' : '继续 fixture' })
+      model: ({ lastUserText }) => ({
+        text: lastUserText.includes('重启前的频道消息') ? '频道收到 fixture' : '继续 fixture'
+      })
     })
     const { main } = page
     const to = (id: string) =>
-      main.chatRequests.filter((request) => request.conversationId === id).map((request) => textOf(request.messages.at(-1)?.content))
+      main.chatRequests
+        .filter((request) => request.conversationId === id)
+        .map((request) => textOf(request.messages.at(-1)?.content))
 
     await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
     await waitFor(() => expect(screen.getAllByRole('button', { name: heldNote })).toHaveLength(2))
@@ -1696,7 +1834,10 @@ describe('real ChatPage restart on in-memory fakes', () => {
       { id: carried, recipient: 'reviewer' }
     ])
     await waitFor(async () => {
-      for (const id of ['writer', 'reviewer']) expect((await page.stored(id))?.messages.map((message) => message.content)).toContain('频道收到 fixture')
+      for (const id of ['writer', 'reviewer'])
+        expect((await page.stored(id))?.messages.map((message) => message.content)).toContain(
+          '频道收到 fixture'
+        )
     })
     await pause(1000)
     expect([to('writer').length, to('reviewer').length, to('designer').length]).toEqual([2, 2, 0])
@@ -1744,8 +1885,13 @@ describe('real ChatPage stop on in-memory fakes', () => {
       model: ({ request, lastUserText, teamTools, toolResults }) => {
         if (request.conversationId === 'writer') {
           // Never answers: only the stop ends the writer's first run.
-          if (lastUserText.includes('hold writer busy')) return new Promise<ModelStep>(() => undefined)
-          return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+          if (lastUserText.includes('hold writer busy'))
+            return new Promise<ModelStep>(() => undefined)
+          return {
+            text: lastUserText.includes('来自成员的测试消息')
+              ? '文案已收到 fixture'
+              : '文案继续 fixture'
+          }
         }
         if (!toolResults.length && teamTools.includes('send_message')) {
           return {
@@ -1766,7 +1912,9 @@ describe('real ChatPage stop on in-memory fakes', () => {
     page.send('@writer hold writer busy')
     await waitFor(() => expect(toWriter()).toHaveLength(1))
     // Enter sends while a member runs (the lead's composer shows Stop).
-    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+    fireEvent.change(screen.getByTestId('chat-composer-input'), {
+      target: { value: '@designer 请联系文案' }
+    })
     fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
     await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
     await waitFor(async () =>
@@ -1798,21 +1946,42 @@ describe('real ChatPage stop on in-memory fakes', () => {
     await new Promise((resolve) => setTimeout(resolve, 1500))
     expect(toWriter()).toHaveLength(3)
     expect(main.claimRequests).toHaveLength(1)
-    expect(screen.queryByRole('button', { name: 'chat.delegated.member_label — chat.delegated.held' })).toBeNull()
+    expect(
+      screen.queryByRole('button', { name: 'chat.delegated.member_label — chat.delegated.held' })
+    ).toBeNull()
     await page.finish()
   }, 30000)
   it('releases a stopped member when the user dispatches a task to it: its held team message follows the task once', async () => {
     const page = await mountChannelPage({
       members: [member('designer', '设计师'), member('writer', '文案')],
-      lead: { teamTasks: [{ id: 'task-writer', title: '写文案', ownerId: 'writer', status: 'pending', dependsOn: [] }] },
+      lead: {
+        teamTasks: [
+          {
+            id: 'task-writer',
+            title: '写文案',
+            ownerId: 'writer',
+            status: 'pending',
+            dependsOn: []
+          }
+        ]
+      },
       model: ({ request, lastUserText, teamTools, toolResults }) => {
         if (request.conversationId === 'writer') {
-          if (lastUserText.includes('hold writer busy')) return new Promise<ModelStep>(() => undefined)
+          if (lastUserText.includes('hold writer busy'))
+            return new Promise<ModelStep>(() => undefined)
           if (lastUserText.includes('团队任务：写文案')) return { text: '文案任务完成 fixture' }
-          return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+          return {
+            text: lastUserText.includes('来自成员的测试消息')
+              ? '文案已收到 fixture'
+              : '文案继续 fixture'
+          }
         }
         if (!toolResults.length && teamTools.includes('send_message')) {
-          return { tool: 'send_message', callId: 'fixture-task-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+          return {
+            tool: 'send_message',
+            callId: 'fixture-task-send',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
         }
         return { text: '发送成员完成 fixture' }
       }
@@ -1825,11 +1994,15 @@ describe('real ChatPage stop on in-memory fakes', () => {
 
     page.send('@writer hold writer busy')
     await waitFor(() => expect(toWriter()).toHaveLength(1))
-    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '@designer 请联系文案' } })
+    fireEvent.change(screen.getByTestId('chat-composer-input'), {
+      target: { value: '@designer 请联系文案' }
+    })
     fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
     await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
     await waitFor(async () =>
-      expect((await page.stored('designer'))?.messages.map((message) => message.content)).toContain('发送成员完成 fixture')
+      expect((await page.stored('designer'))?.messages.map((message) => message.content)).toContain(
+        '发送成员完成 fixture'
+      )
     )
     fireEvent.click(await screen.findByRole('button', { name: 'chat.stop_generating' }))
     await waitFor(() => expect(main.cancelledRuns).toEqual(['writer']))
@@ -1845,10 +2018,18 @@ describe('real ChatPage stop on in-memory fakes', () => {
     expect(toWriter()[2]).toContain('来自成员的测试消息')
     await waitFor(async () => {
       const stored = await page.stored('lead')
-      expect(stored?.teamTasks?.[0]).toEqual({ id: 'task-writer', title: '写文案', ownerId: 'writer', status: 'done', dependsOn: [] })
+      expect(stored?.teamTasks?.[0]).toEqual({
+        id: 'task-writer',
+        title: '写文案',
+        ownerId: 'writer',
+        status: 'done',
+        dependsOn: []
+      })
     })
     await waitFor(async () =>
-      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain('文案已收到 fixture')
+      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
+        '文案已收到 fixture'
+      )
     )
     await new Promise((resolve) => setTimeout(resolve, 1500))
     expect(toWriter()).toHaveLength(3)
@@ -1860,9 +2041,18 @@ describe('real ChatPage stop on in-memory fakes', () => {
     const page = await mountChannelPage({
       members: [member('designer', '设计师'), member('writer', '文案')],
       model: ({ request, lastUserText, teamTools, toolResults }) => {
-        if (request.conversationId === 'writer') return { text: lastUserText.includes('来自成员的测试消息') ? '文案已收到 fixture' : '文案继续 fixture' }
+        if (request.conversationId === 'writer')
+          return {
+            text: lastUserText.includes('来自成员的测试消息')
+              ? '文案已收到 fixture'
+              : '文案继续 fixture'
+          }
         if (!toolResults.length && teamTools.includes('send_message')) {
-          return { tool: 'send_message', callId: 'fixture-ended-send', args: { recipient: 'writer', text: '来自成员的测试消息' } }
+          return {
+            tool: 'send_message',
+            callId: 'fixture-ended-send',
+            args: { recipient: 'writer', text: '来自成员的测试消息' }
+          }
         }
         // The designer keeps running after its message: the lead's composer offers Stop.
         return new Promise<ModelStep>(() => undefined)
@@ -1874,7 +2064,11 @@ describe('real ChatPage stop on in-memory fakes', () => {
         .filter((request) => request.conversationId === 'writer')
         .map((request) => textOf(request.messages.at(-1)?.content))
     const writerExternalRun = (loading: boolean): void => {
-      window.dispatchEvent(new CustomEvent('chat:set-external-loading', { detail: { scope: SCOPE, sessionId: 'writer', loading } }))
+      window.dispatchEvent(
+        new CustomEvent('chat:set-external-loading', {
+          detail: { scope: SCOPE, sessionId: 'writer', loading }
+        })
+      )
     }
     try {
       // The writer is busy with a Canvas Target run, so the designer's message waits for it, queued.
@@ -1908,7 +2102,9 @@ describe('real ChatPage stop on in-memory fakes', () => {
   it('queues a user send to a session with a Canvas Target run and sends it exactly once after that run ends', async () => {
     const page = await mountChannelPage({
       members: [member('writer', '文案')],
-      model: ({ request }) => ({ text: request.conversationId === 'lead' ? '组长回复 fixture' : '文案回复 fixture' })
+      model: ({ request }) => ({
+        text: request.conversationId === 'lead' ? '组长回复 fixture' : '文案回复 fixture'
+      })
     })
     const { main } = page
     const toLead = () =>
@@ -1916,12 +2112,18 @@ describe('real ChatPage stop on in-memory fakes', () => {
         .filter((request) => request.conversationId === 'lead')
         .map((request) => textOf(request.messages.at(-1)?.content))
     const leadExternalRun = (loading: boolean): void => {
-      window.dispatchEvent(new CustomEvent('chat:set-external-loading', { detail: { scope: SCOPE, sessionId: 'lead', loading } }))
+      window.dispatchEvent(
+        new CustomEvent('chat:set-external-loading', {
+          detail: { scope: SCOPE, sessionId: 'lead', loading }
+        })
+      )
     }
     try {
       act(() => leadExternalRun(true))
       // Enter sends while the lead is busy (as a person would): the send waits behind the external run.
-      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: '外部运行期间的消息' } })
+      fireEvent.change(screen.getByTestId('chat-composer-input'), {
+        target: { value: '外部运行期间的消息' }
+      })
       fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
       await new Promise((resolve) => setTimeout(resolve, 1500))
       expect(toLead()).toEqual([])
@@ -1929,7 +2131,10 @@ describe('real ChatPage stop on in-memory fakes', () => {
       await waitFor(() => expect(toLead()).toHaveLength(1), { timeout: 5000 })
       expect(toLead()[0]).toContain('外部运行期间的消息')
       await waitFor(async () =>
-        expect((await page.stored('lead'))?.messages.map((message) => message.content)).toEqual(['外部运行期间的消息', '组长回复 fixture'])
+        expect((await page.stored('lead'))?.messages.map((message) => message.content)).toEqual([
+          '外部运行期间的消息',
+          '组长回复 fixture'
+        ])
       )
       await new Promise((resolve) => setTimeout(resolve, 1500))
       expect(toLead()).toHaveLength(1)
@@ -1938,4 +2143,500 @@ describe('real ChatPage stop on in-memory fakes', () => {
     }
     await page.finish()
   }, 30000)
+})
+
+describe('real ChatPage member model on the real composer selector', () => {
+  // The Agent column passes these hosts (AgentWorkspace); the model selector itself stays in the
+  // composer (owner's request), the header host holds the team actions.
+  const A = { id: PROFILE_ID, model_name: 'fixture-model' }
+  const B = { id: 'fixture-profile-b', model_name: 'fixture-model-b' }
+  const INHERITED = 'Inherits lead: {{model}}'
+  // The first row of a member's menu while the lead's model can be used: label and that model.
+  const inheritRow = (model: string): string => `Inherit lead${model}`
+  const SELECTED = 'Member model: {{model}}'
+  let pillHost: HTMLElement
+  let overlayHost: HTMLElement
+  beforeEach(() => {
+    pillHost = document.createElement('div')
+    overlayHost = document.createElement('div')
+    document.body.append(pillHost, overlayHost)
+  })
+  afterEach(() => {
+    pillHost.remove()
+    overlayHost.remove()
+  })
+  const team = () => [member('designer', '设计师'), member('writer', '文案')]
+  const mountTeam = (input: Partial<Parameters<typeof mountChannelPage>[0]> = {}) =>
+    mountChannelPage({
+      members: team(),
+      model: ({ request }) => ({ text: `${request.conversationId} reply fixture` }),
+      profiles: [A, B],
+      props: { modelPillHost: pillHost, overlayHost },
+      ...input
+    })
+  const slot = (): HTMLElement => screen.getByTestId('chat-composer-model-selector-slot')
+  const openConversation = async (page: ChannelPage, name: string, label: string) => {
+    fireEvent.click(within(page.rows).getByRole('button', { name }))
+    return within(slot()).findByRole('button', { name: label })
+  }
+  const openLead = async (page: ChannelPage) => {
+    fireEvent.click(within(page.rows).getAllByRole('button')[0])
+    return within(slot()).findByRole('button', { name: 'fixture-model' })
+  }
+  const openMenu = async (button: HTMLElement): Promise<HTMLElement> => {
+    fireEvent.click(button)
+    return screen.findByRole('menu')
+  }
+  // A member's menu is one radio group (the lead's menu is a plain one).
+  const rowNames = (menu: HTMLElement): string[] =>
+    within(menu)
+      .getAllByRole('menuitemradio')
+      .map((item) => item.textContent ?? '?')
+  // The row of the model in use: checked for a screen reader, and MUI's selected state on screen
+  // (the tint, and the focus on open). The two always agree.
+  const markedRows = (menu: HTMLElement): string[] => {
+    const rows = within(menu).getAllByRole('menuitemradio')
+    const checked = within(menu).queryAllByRole('menuitemradio', { checked: true })
+    expect(rows.filter((item) => item.classList.contains('Mui-selected'))).toEqual(checked)
+    expect(rows.filter((item) => item.getAttribute('aria-checked') === 'false')).toEqual(
+      rows.filter((item) => !checked.includes(item))
+    )
+    return checked.map((item) => item.textContent ?? '?')
+  }
+  const closeMenu = async () => {
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+  }
+  const requestProfiles = (page: ChannelPage, conversationId: string) =>
+    page.main.chatRequests
+      .filter((request) => request.conversationId === conversationId)
+      .map((request) => request.profileId)
+  const storedReply = async (page: ChannelPage, id: string, count: number) =>
+    waitFor(async () =>
+      expect(
+        (await page.stored(id))?.messages.filter((message) => message.role === 'assistant')
+      ).toHaveLength(count)
+    )
+  const rawRow = (idb: FakeChatIndexedDb, id: string): Record<string, unknown> | undefined =>
+    idb
+      .values(SESSION_STORE)
+      .find((value) => (value as { storageKey?: string }).storageKey === storageKey(id)) as
+      Record<string, unknown> | undefined
+  // Waits until the storage saw no put for a second (the page's debounced saves are 500 ms).
+  const quietPuts = async (page: ChannelPage): Promise<number> => {
+    let puts = page.idb.stats.calls.put
+    for (let stable = 0; stable < 10;) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      stable = page.idb.stats.calls.put === puts ? stable + 1 : 0
+      puts = page.idb.stats.calls.put
+    }
+    return puts
+  }
+
+  it('shows the lead model selector in the composer and leaves the header host to the team actions', async () => {
+    const page = await mountTeam()
+    const selector = within(slot()).getByRole('button', { name: 'fixture-model' })
+    expect(within(pillHost).getByTestId('agent-header-team-actions')).toBeInTheDocument()
+    expect(within(pillHost).queryByRole('button', { name: /fixture-model/ })).toBeNull()
+    const menu = await openMenu(selector)
+    expect(
+      within(menu)
+        .getAllByRole('menuitem')
+        .map((item) => item.textContent)
+    ).toEqual(['fixture-model', 'fixture-model-b'])
+    expect(pillHost.contains(menu)).toBe(false)
+    expect(overlayHost.childElementCount).toBe(0)
+    await closeMenu()
+    await page.finish()
+  }, 30000)
+
+  it('gives a member its re-pick and inherit row in the composer, and shows no header pill', async () => {
+    // ChatPage keeps modelInHeader off: the header pill (ChatPrimarySelection headerPill) has no
+    // re-pick for a member whose model is gone and no inherit row. Turning it on fails here.
+    const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+    const page = await mountTeam({
+      profiles: [A, C],
+      beforePage: (idb) => {
+        const row = structuredClone(rawRow(idb, 'designer')!)
+        row.memberModelChoice = { version: 1, profileId: B.id }
+        idb.seedRows(SESSION_STORE, [{ key: storageKey('designer'), value: row }])
+      }
+    })
+    const unavailable = await openConversation(page, 'designer', 'Member model unavailable')
+    expect(unavailable).toBeEnabled()
+    expect(screen.queryByTestId('chat-model-pill')).toBeNull()
+    expect(within(pillHost).getByTestId('agent-header-team-actions')).toBeInTheDocument()
+    const menu = await openMenu(unavailable)
+    expect(rowNames(menu)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-c'
+    ])
+    expect(pillHost.contains(menu)).toBe(false)
+    expect(overlayHost.childElementCount).toBe(0)
+    await closeMenu()
+    await page.finish()
+  }, 30000)
+
+  it('stores a member pick, routes that member only, and leaves the lead and the other member alone', async () => {
+    const page = await mountTeam()
+    const inherited = await openConversation(page, 'designer', INHERITED)
+    expect(inherited).toBeEnabled()
+    const leadBefore = await page.stored('lead')
+    const menu = await openMenu(inherited)
+    expect(rowNames(menu)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-b'
+    ])
+    expect(markedRows(menu)).toEqual([inheritRow('fixture-model')])
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'fixture-model-b' }))
+    await waitFor(async () =>
+      expect((await page.stored('designer'))?.memberModelChoice).toEqual({
+        version: 1,
+        profileId: B.id
+      })
+    )
+    expect(await page.stored('lead')).toEqual(leadBefore)
+    expect(Object.hasOwn((await page.stored('writer'))!, 'memberModelChoice')).toBe(false)
+    expect(Object.hasOwn(rawRow(page.idb, 'writer')!, 'memberModelChoice')).toBe(false)
+    const selected = await within(slot()).findByRole('button', { name: SELECTED })
+    const reopened = await openMenu(selected)
+    expect(rowNames(reopened)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-b'
+    ])
+    expect(markedRows(reopened)).toEqual(['fixture-model-b'])
+    await closeMenu()
+
+    page.send('designer task fixture')
+    await waitFor(() => expect(requestProfiles(page, 'designer')).toEqual([B.id]))
+    await storedReply(page, 'designer', 1)
+    await openLead(page)
+    page.send('@writer hi')
+    await waitFor(() => expect(requestProfiles(page, 'writer')).toEqual([A.id]))
+    await storedReply(page, 'writer', 1)
+    expect(requestProfiles(page, 'designer')).toEqual([B.id])
+    await page.finish()
+  }, 30000)
+
+  it('closes the member menu and writes nothing when the pane is hidden', async () => {
+    const page = await mountTeam()
+    const inherited = await openConversation(page, 'designer', INHERITED)
+    await openMenu(inherited)
+    const putsBefore = await quietPuts(page)
+    page.rerender({ active: false })
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+    expect(pillHost.childElementCount).toBe(0)
+    expect(await quietPuts(page)).toBe(putsBefore)
+    expect(Object.hasOwn((await page.stored('designer'))!, 'memberModelChoice')).toBe(false)
+    await page.finish()
+  }, 30000)
+
+  it('keeps a member pick across a restart: the picked member uses it, the lead and the other member do not', async () => {
+    const first = await mountTeam()
+    const menu = await openMenu(await openConversation(first, 'designer', INHERITED))
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'fixture-model-b' }))
+    await waitFor(async () =>
+      expect((await first.stored('designer'))?.memberModelChoice).toEqual({
+        version: 1,
+        profileId: B.id
+      })
+    )
+    await within(slot()).findByRole('button', { name: SELECTED })
+    await first.finish()
+
+    const second = await mountTeam({ members: team(), storage: first.idb })
+    await openLead(second)
+    second.send('lead task fixture')
+    await waitFor(() => expect(requestProfiles(second, 'lead')).toEqual([A.id]))
+    await storedReply(second, 'lead', 1)
+    // No click on a model: the stored pick is what the member shows and uses.
+    expect(
+      markedRows(await openMenu(await openConversation(second, 'designer', SELECTED)))
+    ).toEqual(['fixture-model-b'])
+    await closeMenu()
+    second.send('designer task fixture')
+    await waitFor(() => expect(requestProfiles(second, 'designer')).toEqual([B.id]))
+    await storedReply(second, 'designer', 1)
+    await openLead(second)
+    second.send('@writer hi')
+    await waitFor(() => expect(requestProfiles(second, 'writer')).toEqual([A.id]))
+    await storedReply(second, 'writer', 1)
+    expect((await second.stored('designer'))?.memberModelChoice).toEqual({
+      version: 1,
+      profileId: B.id
+    })
+    expect(Object.hasOwn((await second.stored('writer'))!, 'memberModelChoice')).toBe(false)
+    await second.finish()
+  }, 40000)
+
+  it('lets a member of an earlier build inherit the lead model and opens it without a write', async () => {
+    // As earlier builds wrote them: the member's own profileId and the team default never decided.
+    let before: { lead?: unknown; designer?: unknown } = {}
+    const page = await mountTeam({
+      members: [{ ...member('designer', '设计师'), profileId: B.id }, member('writer', '文案')],
+      lead: { teamSettings: { maxMembers: 6, defaultModel: B.id, autoCleanup: false } },
+      beforePage: (idb) => {
+        before = { lead: rawRow(idb, 'lead'), designer: rawRow(idb, 'designer') }
+      }
+    })
+    expect(before.designer).toMatchObject({ profileId: B.id })
+    expect(Object.hasOwn(before.designer as object, 'memberModelChoice')).toBe(false)
+    expect(before.lead).toMatchObject({ profileId: A.id, teamSettings: { defaultModel: B.id } })
+    expect(markedRows(await openMenu(await openConversation(page, 'designer', INHERITED)))).toEqual(
+      [inheritRow('fixture-model')]
+    )
+    await closeMenu()
+    await quietPuts(page)
+    expect(rawRow(page.idb, 'lead')).toBe(before.lead)
+    expect(rawRow(page.idb, 'designer')).toBe(before.designer)
+    page.send('designer task fixture')
+    await waitFor(() => expect(requestProfiles(page, 'designer')).toEqual([A.id]))
+    await storedReply(page, 'designer', 1)
+    expect(Object.hasOwn((await page.stored('designer'))!, 'memberModelChoice')).toBe(false)
+    await page.finish()
+  }, 30000)
+
+  it('keeps a member marker of a newer build closed: no pick, no request; the marker and every other field stay unchanged, only the guarded draft save adds the kept text', async () => {
+    let seeded: Record<string, unknown> | undefined
+    const page = await mountTeam({
+      beforePage: (idb) => {
+        const row = structuredClone(rawRow(idb, 'designer')!)
+        row.memberModelChoice = { version: 2, profileId: B.id }
+        idb.seedRows(SESSION_STORE, [{ key: storageKey('designer'), value: row }])
+        seeded = structuredClone(row)
+      }
+    })
+    const unavailable = await openConversation(page, 'designer', 'Member model unavailable')
+    expect(unavailable).toBeDisabled()
+    fireEvent.click(unavailable)
+    expect(screen.queryByRole('menu')).toBeNull()
+    page.send('designer task fixture')
+    await waitFor(() => expect(h.notify).toHaveBeenCalledWith('Team lead unavailable.'))
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('designer task fixture')
+    await quietPuts(page)
+    expect(page.main.chatRequests).toEqual([])
+    // The record keeps every stored field, the unknown marker included, byte for byte; the one
+    // addition is the person's own kept text, saved as the draft as for any conversation.
+    expect(rawRow(page.idb, 'designer')).toEqual({
+      ...seeded,
+      draft: {
+        inputValue: 'designer task fixture',
+        pendingAttachments: [],
+        pendingHiddenContext: '',
+        updatedAt: expect.any(Number)
+      }
+    })
+    await page.quiesce()
+    expect(h.notify.mock.calls).toEqual([['Team lead unavailable.']])
+    expect(page.main.chatRequests).toEqual([])
+    expect(channelDeniedAttempts()).toEqual([])
+  }, 30000)
+
+  it('lets a member whose picked model was removed pick again and keeps the text it kept', async () => {
+    const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+    const UNAVAILABLE = 'Member model unavailable'
+    const page = await mountTeam({
+      profiles: [A, C],
+      beforePage: (idb) => {
+        const row = structuredClone(rawRow(idb, 'designer')!)
+        row.memberModelChoice = { version: 1, profileId: B.id }
+        idb.seedRows(SESSION_STORE, [{ key: storageKey('designer'), value: row }])
+      }
+    })
+    const unavailable = await openConversation(page, 'designer', UNAVAILABLE)
+    expect(unavailable).toBeEnabled()
+    page.send('designer task fixture')
+    await waitFor(() => expect(h.notify).toHaveBeenCalledWith('Team lead unavailable.'))
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('designer task fixture')
+    // The kept text is saved as the draft; once that save has settled the member can be repaired.
+    await quietPuts(page)
+    expect(page.main.chatRequests).toEqual([])
+    const before = await page.stored('designer')
+    expect(before?.draft?.inputValue).toBe('designer task fixture')
+    const menu = await openMenu(within(slot()).getByRole('button', { name: UNAVAILABLE }))
+    expect(rowNames(menu)).toEqual([
+      inheritRow('fixture-model'),
+      'fixture-model',
+      'fixture-model-c'
+    ])
+    expect(markedRows(menu)).toEqual([])
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'fixture-model-c' }))
+    await waitFor(async () =>
+      expect((await page.stored('designer'))?.memberModelChoice).toEqual({
+        version: 1,
+        profileId: C.id
+      })
+    )
+    await within(slot()).findByRole('button', { name: SELECTED })
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('designer task fixture')
+    const after = await page.stored('designer')
+    expect(after?.draft).toEqual(before?.draft)
+    expect(after?.messages).toEqual(before?.messages)
+    expect(h.notify.mock.calls).toEqual([['Team lead unavailable.']])
+    page.send('designer task fixture')
+    await waitFor(() => expect(requestProfiles(page, 'designer')).toEqual([C.id]))
+    await storedReply(page, 'designer', 1)
+    expect(requestProfiles(page, 'designer')).toEqual([C.id])
+    await page.quiesce()
+    expect(h.notify.mock.calls).toEqual([['Team lead unavailable.']])
+    expect(channelDeniedAttempts()).toEqual([])
+  }, 30000)
+
+  it.each([
+    ['held as the restart restored it', false],
+    ['paused after a resume was refused', true]
+  ])(
+    'lets a member whose model is gone after a restart pick again while its queued text waits (%s), and sends that text with the new model',
+    async (_case, refuseFirst) => {
+      const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+      const UNAVAILABLE = 'Member model unavailable'
+      const QUEUED = 'queued designer fixture'
+      const model: FakeModel = ({ request, lastUserText }) =>
+        lastUserText.includes('hold designer busy')
+          ? // Never answers: only Stop ends this request.
+            new Promise<ModelStep>(() => undefined)
+          : { text: `${request.conversationId} reply fixture` }
+      const queueItem = (): HTMLElement =>
+        within(screen.getByRole('region', { name: 'chat.queue_region' })).getByTestId(
+          'chat-queue-item'
+        )
+      const resumeQueued = async () => {
+        fireEvent.click(within(queueItem()).getByRole('button', { name: 'chat.queue_edit' }))
+        fireEvent.click(await within(queueItem()).findByRole('button', { name: 'chat.queue_save' }))
+      }
+
+      // The designer runs on its own model; the person queues more text for it, then stops it.
+      const first = await mountTeam({ model })
+      const menu = await openMenu(await openConversation(first, 'designer', INHERITED))
+      fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'fixture-model-b' }))
+      await within(slot()).findByRole('button', { name: SELECTED })
+      first.send('hold designer busy')
+      await waitFor(() => expect(requestProfiles(first, 'designer')).toEqual([B.id]))
+      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: QUEUED } })
+      fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
+      await waitFor(() => expect(queueItem()).toHaveTextContent(QUEUED))
+      fireEvent.click(await screen.findByRole('button', { name: 'chat.stop_generating' }))
+      await waitFor(() => expect(first.main.cancelledRuns).toEqual(['designer']))
+      await waitFor(async () =>
+        expect(
+          (await first.stored('designer'))?.draft?.queuedSends?.map((item) => item.content)
+        ).toEqual([QUEUED])
+      )
+      await first.finish()
+
+      // A restart without that model: the queued text comes back held, the member's model is gone.
+      const second = await mountTeam({ model, profiles: [A, C], storage: first.idb })
+      await openConversation(second, 'designer', UNAVAILABLE)
+      await waitFor(() => expect(queueItem()).toHaveAttribute('data-status', 'held'))
+      expect(queueItem()).toHaveTextContent(QUEUED)
+      if (refuseFirst) {
+        // Resuming it now is refused (no usable model); it stays, paused.
+        await resumeQueued()
+        await waitFor(() => expect(h.notify).toHaveBeenCalledWith('Team lead unavailable.'))
+        await waitFor(() => expect(queueItem()).toHaveAttribute('data-status', 'paused'))
+      }
+      await quietPuts(second)
+      expect(requestProfiles(second, 'designer')).toEqual([])
+
+      // The pick goes through while the paused text waits for the person.
+      const repick = await openMenu(within(slot()).getByRole('button', { name: UNAVAILABLE }))
+      fireEvent.click(within(repick).getByRole('menuitemradio', { name: 'fixture-model-c' }))
+      await waitFor(async () =>
+        expect((await second.stored('designer'))?.memberModelChoice).toEqual({
+          version: 1,
+          profileId: C.id
+        })
+      )
+      await within(slot()).findByRole('button', { name: SELECTED })
+      expect(queueItem()).toHaveTextContent(QUEUED)
+      expect(requestProfiles(second, 'designer')).toEqual([])
+
+      // Resumed by the person, the text goes out once, on the model just picked.
+      await resumeQueued()
+      await waitFor(() => expect(requestProfiles(second, 'designer')).toEqual([C.id]))
+      expect(
+        textOf(
+          second.main.chatRequests
+            .find((request) => request.conversationId === 'designer')
+            ?.messages.at(-1)?.content
+        )
+      ).toContain(QUEUED)
+      await waitFor(async () =>
+        expect(
+          (await second.stored('designer'))?.messages.map((message) => [
+            message.role,
+            message.content
+          ])
+        ).toEqual(
+          expect.arrayContaining([
+            ['user', QUEUED],
+            ['assistant', 'designer reply fixture']
+          ])
+        )
+      )
+      await waitFor(() =>
+        expect(screen.queryByRole('region', { name: 'chat.queue_region' })).toBeNull()
+      )
+      await second.quiesce()
+      expect(requestProfiles(second, 'designer')).toEqual([C.id])
+      expect(h.notify.mock.calls).toEqual(refuseFirst ? [['Team lead unavailable.']] : [])
+      expect(channelDeniedAttempts()).toEqual([])
+    },
+    60000
+  )
+
+  it('lets a member inherit the lead again: it follows the lead model, across a restart too', async () => {
+    const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
+    const pick = async (page: ChannelPage, name: string, row: string, label: string) => {
+      const menu = await openMenu(await openConversation(page, name, INHERITED))
+      fireEvent.click(within(menu).getByRole('menuitemradio', { name: row }))
+      await within(slot()).findByRole('button', { name: label })
+    }
+    const first = await mountTeam({ profiles: [A, B, C] })
+    await pick(first, 'designer', 'fixture-model-b', SELECTED)
+    await pick(first, 'writer', 'fixture-model-b', SELECTED)
+    // The designer follows the lead again.
+    const menu = await openMenu(await openConversation(first, 'designer', SELECTED))
+    expect(markedRows(menu)).toEqual(['fixture-model-b'])
+    const inherit = within(menu).getAllByRole('menuitemradio')[0]
+    expect(inherit).toHaveTextContent(inheritRow('fixture-model'))
+    fireEvent.click(inherit)
+    await within(slot()).findByRole('button', { name: INHERITED })
+    const designer = await first.stored('designer')
+    expect(Object.hasOwn(designer!, 'memberModelChoice')).toBe(false)
+    expect(Object.hasOwn(rawRow(first.idb, 'designer')!, 'memberModelChoice')).toBe(false)
+    expect((await first.stored('writer'))?.memberModelChoice).toEqual({
+      version: 1,
+      profileId: B.id
+    })
+    first.send('designer task fixture')
+    await waitFor(() => expect(requestProfiles(first, 'designer')).toEqual([A.id]))
+    await storedReply(first, 'designer', 1)
+
+    // The lead changes its own model: the inheriting member follows, the one with a pick does not.
+    const leadMenu = await openMenu(await openLead(first))
+    fireEvent.click(within(leadMenu).getByRole('menuitem', { name: 'fixture-model-c' }))
+    await within(slot()).findByRole('button', { name: 'fixture-model-c' })
+    await waitFor(async () => expect((await first.stored('lead'))?.profileId).toBe(C.id))
+    first.send('@designer next task')
+    await waitFor(() => expect(requestProfiles(first, 'designer')).toEqual([A.id, C.id]))
+    await storedReply(first, 'designer', 2)
+    first.send('@writer hi')
+    await waitFor(() => expect(requestProfiles(first, 'writer')).toEqual([B.id]))
+    await storedReply(first, 'writer', 1)
+    await first.finish()
+
+    const second = await mountTeam({ profiles: [A, B, C], storage: first.idb })
+    const reopened = await openMenu(await openConversation(second, 'designer', INHERITED))
+    expect(markedRows(reopened)).toEqual([inheritRow('fixture-model-c')])
+    await closeMenu()
+    expect(Object.hasOwn((await second.stored('designer'))!, 'memberModelChoice')).toBe(false)
+    second.send('designer after restart')
+    await waitFor(() => expect(requestProfiles(second, 'designer')).toEqual([C.id]))
+    await storedReply(second, 'designer', 3)
+    await second.finish()
+  }, 60000)
 })

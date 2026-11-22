@@ -13,6 +13,7 @@ import {
   MAX_RUN_GRANTS_PER_GENERATION,
   RUN_GRANT_KIND as GRANT,
   RUN_GRANT_STATE_KIND as STATE,
+  THREAD_IDENTITY_INDEX_KIND as INDEX,
   THREAD_IDENTITY_KIND as IDENTITY,
   ThreadAuthorityStore,
   ThreadAuthorityUnavailableError,
@@ -67,13 +68,15 @@ function setup() {
     new ThreadAuthorityStore(store, { now: () => clock.now, newId, verifyApproval })
   const store = open()
   const authority = build(store)
+  /** Each request carries a new approval proof unless the test passes one. */
+  let proofs = 0
   const request = (pair: ThreadPair, over: Partial<RunGrantRequest> = {}): RunGrantRequest => ({
     threadId: pair.threadId,
     generation: pair.generation,
     subject: trigger(),
     limits: { turns: 10, toolCalls: 100, walltimeSeconds: 3600 },
     expiresAt: clock.now + DAY,
-    approval: { approvedAt: clock.now - 5, proofId: 'proof-1' },
+    approval: { approvedAt: clock.now - 5, proofId: `proof-${(proofs += 1)}` },
     ...over
   })
   const grant = (pair: ThreadPair, over: Partial<RunGrantRequest> = {}): string => {
@@ -259,6 +262,20 @@ describe('run grant: issue', () => {
     expect(store.countResources({ kind: GRANT, includeDeleted: true })).toBe(0)
   })
 
+  it('a verifier that revokes the thread while approving makes the issue throw the conflict', () => {
+    const { authority, store, verifier, request } = setup()
+    const pair = authority.issueThread(target())
+    verifier.answer = () => {
+      expect(authority.revokeThread(target())).toEqual({ status: 'revoked' })
+      return true
+    }
+    expect(() => authority.issueGrant(request(pair))).toThrow(ResourceRevisionConflictError)
+    expect(store.countResources({ kind: GRANT, includeDeleted: true })).toBe(0)
+    expect(store.countResources({ kind: STATE, includeDeleted: true })).toBe(0)
+    expect(authority.verifyThread(pair.threadId, 1)).toEqual({ ok: false, reason: 'revoked' })
+    expect(authority.issueGrant(request(pair))).toEqual({ ok: false, reason: 'thread-revoked' })
+  })
+
   it('a store built without a verifier throws in the constructor', () => {
     const { store } = setup()
     for (const options of [
@@ -364,6 +381,78 @@ describe('run grant: one active grant per subject', () => {
     expect(authority.issueGrant(request(pair, { subject: trigger('delivery-3') })).ok).toBe(true)
   })
 
+  it('records the expiry an issue relied on: a clock set back never revives the earlier grant', () => {
+    const { authority, store, clock, request, grant } = setup()
+    const pair = authority.issueThread(target())
+    const first = grant(pair, { expiresAt: T0 + 1000 })
+    const firstRevision = store.getResourceRevision(STATE, first)!
+    clock.now = T0 + 2000
+    const spy = vi.spyOn(store, 'mutateResourcesBatch')
+    const second = grant(pair, { approval: { approvedAt: T0 + 1990, proofId: 'proof-2' } })
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0][0].map((c) => [c.operation, c.kind, c.id])).toEqual([
+      ['update', IDENTITY, expect.any(String)],
+      ['update', STATE, first],
+      ['create', GRANT, second],
+      ['create', STATE, second]
+    ])
+    expect(storedStatus(store, first)).toMatchObject({ status: 'expired', endedAt: T0 + 2000 })
+    expect(store.getResourceRevision(STATE, first)).toBe(firstRevision + 1)
+    spy.mockRestore()
+    // Back inside the window of the first grant: it stays expired, and the second is not
+    // usable before its issuedAt, so the subject never has two usable grants.
+    clock.now = T0 + 500
+    const before = footprint(store)
+    expect(authority.readGrant(first)).toMatchObject({ status: 'expired', usable: false })
+    expect(authority.chargeGrant(first, pair, 'c-1', { turns: 1 })).toEqual({
+      ok: false,
+      reason: 'expired'
+    })
+    expect(authority.readGrant(second)).toMatchObject({ status: 'active', usable: false })
+    expect(
+      authority.issueGrant(request(pair, { approval: { approvedAt: 1, proofId: 'p-3' } }))
+    ).toEqual({ ok: false, reason: 'subject-has-active-grant' })
+    expect(footprint(store)).toEqual(before)
+    clock.now = T0 + 2500
+    expect(authority.listGrants(pair.threadId, 1)).toMatchObject({
+      ok: true,
+      grants: [
+        { grantId: first, status: 'expired', usable: false },
+        { grantId: second, status: 'active', usable: true }
+      ]
+    })
+  })
+
+  it('a charge recording the expiry inside that issue makes the issue throw the conflict; the retry issues', () => {
+    const { open, build, clock, request } = setup()
+    const a = open(),
+      b = open()
+    const A = build(a),
+      B = build(b)
+    const pair = A.issueThread(target())
+    const first = A.issueGrant(request(pair, { expiresAt: T0 + 1000 }))
+    if (!first.ok) throw new Error('grant refused')
+    clock.now = T0 + 2000
+    const next = request(pair, { approval: { approvedAt: T0 + 1990, proofId: 'proof-2' } })
+    const commit = a.mutateResourcesBatch.bind(a)
+    const spy = vi.spyOn(a, 'mutateResourcesBatch').mockImplementationOnce((commands) => {
+      expect(B.chargeGrant(first.grant.grantId, pair, 'b-1', { turns: 1 })).toEqual({
+        ok: false,
+        reason: 'expired'
+      })
+      return commit(commands)
+    })
+    expect(() => A.issueGrant(next)).toThrow(ResourceRevisionConflictError)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(a.countResources({ kind: GRANT, includeDeleted: true })).toBe(1)
+    const retry = A.issueGrant(next)
+    expect(retry.ok).toBe(true)
+    expect(storedStatus(a, first.grant.grantId)).toMatchObject({
+      status: 'expired',
+      endedAt: T0 + 2000
+    })
+  })
+
   it('the same goalId with another goalGeneration is another subject', () => {
     const { authority, request } = setup()
     const pair = authority.issueThread(target())
@@ -427,6 +516,57 @@ describe('run grant: revoke, pause, expiry and the thread cascade', () => {
     expect(storedStatus(reopenedStore, id)).toMatchObject({ status: 'revoked', reason: 'paused' })
   })
 
+  it('no resume: the approval of a paused, ended, exhausted or lapsed grant never issues another for its subject', () => {
+    const { authority, store, open, build, clock, verifier, request } = setup()
+    const pair = authority.issueThread(target())
+    const ends: [string, (grantId: string) => unknown][] = [
+      ['paused', (grantId) => authority.revokeGrant(grantId, 'paused')],
+      ['user', (grantId) => authority.revokeGrant(grantId, 'user')],
+      ['subject-ended', (grantId) => authority.revokeGrant(grantId, 'subject-ended')],
+      ['exhausted', (grantId) => authority.chargeGrant(grantId, pair, 'c-1', { turns: 11 })],
+      ['lapsed', () => (clock.now += DAY)]
+    ]
+    const replays: RunGrantRequest[] = []
+    for (const [name, end] of ends) {
+      const input = request(pair, { subject: trigger(`d-${name}`) })
+      const first = authority.issueGrant(input)
+      if (!first.ok) throw new Error('grant refused')
+      end(first.grant.grantId)
+      expect(authority.readGrant(first.grant.grantId)?.usable).toBe(false)
+      const replay = clock.now < input.expiresAt ? input : { ...input, expiresAt: clock.now + DAY }
+      replays.push(replay)
+      const calls = verifier.calls.length
+      const before = footprint(store)
+      expect(authority.issueGrant(replay)).toEqual({ ok: false, reason: 'approval-refused' })
+      expect(verifier.calls).toHaveLength(calls)
+      expect(footprint(store)).toEqual(before)
+    }
+    store.close()
+    const reopened = build(open())
+    for (const replay of replays)
+      expect(reopened.issueGrant({ ...replay, expiresAt: clock.now + DAY })).toEqual({
+        ok: false,
+        reason: 'approval-refused'
+      })
+    // A new approval issues a new grant; the old approval for another subject is for the
+    // verifier to judge, and so is any approval in a later generation (it is shown the new pair).
+    const subject = replays[0].subject
+    expect(reopened.issueGrant(request(pair, { subject })).ok).toBe(true)
+    expect(
+      reopened.issueGrant(
+        request(pair, { subject: trigger('other'), approval: replays[0].approval })
+      ).ok
+    ).toBe(true)
+    reopened.revokeThread(target())
+    const next = reopened.issueThread(target())
+    verifier.answer = () => false
+    expect(reopened.issueGrant({ ...replays[0], ...next, expiresAt: clock.now + DAY })).toEqual({
+      ok: false,
+      reason: 'approval-refused'
+    })
+    expect(verifier.calls.at(-1)).toMatchObject({ ...next, approval: replays[0].approval })
+  })
+
   it('expiry is computed by reading: usable at expiresAt - 1, expired at expiresAt, nothing written', () => {
     const { authority, store, clock, grant } = setup()
     const pair = authority.issueThread(target())
@@ -448,6 +588,29 @@ describe('run grant: revoke, pause, expiry and the thread cascade', () => {
     expect(authority.readGrant(id)).toMatchObject({ status: 'active', usable: true })
     clock.now = T0 - 1
     expect(authority.readGrant(id)).toMatchObject({ status: 'active', usable: false })
+  })
+
+  it('the cascade commits with the clock set back below a grant state newer than the identity', () => {
+    const { authority, store, clock, grant } = setup()
+    const pair = authority.issueThread(target())
+    clock.now = T0 + 5_000
+    const id = grant(pair)
+    clock.now = T0 + 9_000
+    expect(authority.chargeGrant(id, pair, 'c-1', { turns: 1 }).ok).toBe(true)
+    const key = store.listResources({ kind: IDENTITY })[0].id
+    expect(store.getResource(IDENTITY, key)!.updatedAt).toBe(T0 + 5_000)
+    clock.now = T0 + 100
+    expect(authority.revokeThread(target())).toEqual({ status: 'revoked' })
+    expect(storedStatus(store, id)).toMatchObject({
+      status: 'revoked',
+      reason: 'thread-revoked',
+      endedAt: T0 + 100
+    })
+    for (const [kind, rowId] of [
+      [IDENTITY, key],
+      [STATE, id]
+    ])
+      expect(store.getResource(kind, rowId)!.updatedAt).toBe(T0 + 9_000)
   })
 
   it('revokes with the clock set back below the updatedAt of the grant state', () => {
@@ -669,7 +832,21 @@ describe('run grant: unavailable rows fail closed', () => {
       'state revoked without a reason',
       change(STATE, (s) => ({ ...s, status: 'revoked', endedAt: 1 }))
     ],
-    ['state deleted', (store, id) => rawWrite(store, STATE, id, 'delete')]
+    ['state deleted', (store, id) => rawWrite(store, STATE, id, 'delete')],
+    [
+      'identity of the thread with v: 2',
+      (store) => {
+        const key = store.listResources({ kind: IDENTITY })[0].id
+        rawWrite(store, IDENTITY, key, 'update', { ...rawState(store, IDENTITY, key), v: 2 })
+      }
+    ],
+    [
+      'index of the thread deleted',
+      (store, id) => {
+        const threadId = rawState(store, GRANT, id).threadId as string
+        rawWrite(store, INDEX, threadId, 'delete')
+      }
+    ]
   ]
   const methods = (
     authority: ThreadAuthorityStore,
@@ -681,7 +858,8 @@ describe('run grant: unavailable rows fail closed', () => {
     () => authority.readGrant(grantId),
     () => authority.listGrants(pair.threadId, pair.generation),
     () => authority.revokeGrant(grantId, 'user'),
-    () => authority.revokeThread(target())
+    () => authority.revokeThread(target()),
+    () => authority.chargeGrant(grantId, pair, 'c-1', { turns: 1 })
   ]
   it.each(shapes)(
     '%s: issue, read, list, revoke and the cascade throw and write nothing',
@@ -741,7 +919,7 @@ describe('run grant: unavailable rows fail closed', () => {
     expect(authority.issueGrant(request(next)).ok).toBe(true)
   })
 
-  it('a grant its identity does not list (a partial batch) cannot be read or revoked', () => {
+  it('a grant its identity does not list (a partial batch) cannot be read, revoked or charged', () => {
     const { authority, store, request } = setup()
     const pair = authority.issueThread(target())
     const commit = store.mutateResourcesBatch.bind(store)
@@ -753,6 +931,9 @@ describe('run grant: unavailable rows fail closed', () => {
     const before = footprint(store)
     expect(() => authority.readGrant(result.grant.grantId)).toThrow(ThreadAuthorityUnavailableError)
     expect(() => authority.revokeGrant(result.grant.grantId, 'user')).toThrow(
+      ThreadAuthorityUnavailableError
+    )
+    expect(() => authority.chargeGrant(result.grant.grantId, pair, 'c-1', { turns: 1 })).toThrow(
       ThreadAuthorityUnavailableError
     )
     expect(footprint(store)).toEqual(before)
