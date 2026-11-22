@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type { ReactNode } from 'react'
@@ -26,7 +27,7 @@ const h = vi.hoisted(() => ({
 }))
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, opts?: { defaultValue?: string }) => opts?.defaultValue || key,
+    t: (key: string, opts?: { defaultValue?: string }) => opts?.defaultValue || zhLocaleText(key),
     i18n: { language: 'en', resolvedLanguage: 'en' }
   })
 }))

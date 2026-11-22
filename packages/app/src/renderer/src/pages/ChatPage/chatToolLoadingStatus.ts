@@ -12,7 +12,7 @@ export function getChatToolLoadingStatus(event: LLMToolStatus, t: TFunction): Ch
   if (event.status === 'running') {
     label =
       toolName === 'image_gen'
-        ? t('chat.loading_image_generation', { defaultValue: '出图中' })
+        ? t('chat.loading_image_generation')
         : toolName === 'web_search'
           ? t('chat.loading_web_search', { defaultValue: 'Searching the web' })
           : toolName === 'web_fetch'

@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type {
@@ -235,7 +236,9 @@ vi.mock('react-i18next', async () => {
     'zh-CN',
     ['agent_workspace.approval.'],
     (key, options) =>
-      (options?.defaultValue as string | undefined) || (options?.error as string | undefined) || key
+      (options?.defaultValue as string | undefined) ||
+      (options?.error as string | undefined) ||
+      zhLocaleText(key)
   )
   return {
     useTranslation: () => ({

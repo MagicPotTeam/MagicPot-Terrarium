@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import type { ChatAttachment, ChatMessage } from '@shared/llm'
@@ -35,7 +36,8 @@ const fixture = vi.hoisted(() => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' },
-    t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue || key
+    t: (key: string, options?: { defaultValue?: string }) =>
+      options?.defaultValue || zhLocaleText(key)
   })
 }))
 vi.mock('@renderer/hooks/useConfig', () => ({

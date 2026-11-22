@@ -1,12 +1,21 @@
 import { describe, expect, it } from 'vitest'
+import '../../testUtils/globalLocale'
 import { createTeamLiveActivity } from './teamLiveActivity'
 
 const run = (scope: string, sessionId: string, runId: number) => ({ scope, sessionId, runId })
-const event = (runId: string, toolCallId: string, status: 'running' | 'completed' | 'failed' | 'cancelled', toolName: unknown = 'files.read') => ({ runId, toolCallId, status, toolName })
+const event = (
+  runId: string,
+  toolCallId: string,
+  status: 'running' | 'completed' | 'failed' | 'cancelled',
+  toolName: unknown = 'files.read'
+) => ({ runId, toolCallId, status, toolName })
 
 describe('teamLiveActivity (ephemeral tool-event state)', () => {
   it('isolates members and scopes and rejects stale cleanup and ABA', () => {
-    const activity = createTeamLiveActivity(), a = run('A', 'same', 1), b = run('B', 'same', 2), c = run('A', 'other', 3)
+    const activity = createTeamLiveActivity(),
+      a = run('A', 'same', 1),
+      b = run('B', 'same', 2),
+      c = run('A', 'other', 3)
     expect(activity.start(a, 10)).toBe(true)
     expect(activity.start(a, 99)).toBe(true)
     expect(activity.read(a)?.startedAt).toBe(10)
@@ -27,7 +36,8 @@ describe('teamLiveActivity (ephemeral tool-event state)', () => {
   })
 
   it('tracks bounded parallel calls, exact terminal keys and retry', () => {
-    const activity = createTeamLiveActivity(), a = run('scope', 'member', 1)
+    const activity = createTeamLiveActivity(),
+      a = run('scope', 'member', 1)
     activity.start(a, 10)
     expect(activity.read(a)).toEqual({ startedAt: 10, toolName: null })
     expect(activity.tool(a, event('t1', 'x', 'running', 'first'))).toBe(true)
@@ -37,7 +47,8 @@ describe('teamLiveActivity (ephemeral tool-event state)', () => {
     expect(activity.tool(a, event('unknown', 'x', 'failed'))).toBe(false)
     expect(activity.tool(a, event('t2', 'x', 'cancelled'))).toBe(true)
     expect(activity.read(a)?.toolName).toBeNull()
-    for (let i = 0; i < 16; i++) expect(activity.tool(a, event('t', String(i), 'running'))).toBe(true)
+    for (let i = 0; i < 16; i++)
+      expect(activity.tool(a, event('t', String(i), 'running'))).toBe(true)
     expect(activity.tool(a, event('t', 'overflow', 'running'))).toBe(false)
     expect(activity.retry(a)).toBe(true)
     expect(activity.read(a)).toEqual({ startedAt: 10, toolName: null })
@@ -49,12 +60,17 @@ describe('teamLiveActivity (ephemeral tool-event state)', () => {
   })
 
   it('rejects invalid input, masks untrusted names and discards secret fields', () => {
-    const activity = createTeamLiveActivity(), a = run('scope', 'member', 1)
+    const activity = createTeamLiveActivity(),
+      a = run('scope', 'member', 1)
     expect(activity.start(a, Infinity)).toBe(false)
     expect(activity.start(run('', 'member', 1), 1)).toBe(false)
     expect(activity.start(run('scope', 'member', NaN), 1)).toBe(false)
     expect(activity.start(a, 0)).toBe(true)
-    const malicious = { ...event('r', 'id', 'running', 'secret with spaces'), args: { password: 'SECRET_VALUE' }, content: 'SECRET_OUTPUT' }
+    const malicious = {
+      ...event('r', 'id', 'running', 'secret with spaces'),
+      args: { password: 'SECRET_VALUE' },
+      content: 'SECRET_OUTPUT'
+    }
     expect(activity.tool(a, malicious)).toBe(true)
     expect(activity.read(a)).toEqual({ startedAt: 0, toolName: '未知工具' })
     expect(JSON.stringify(activity.read(a))).not.toContain('SECRET')

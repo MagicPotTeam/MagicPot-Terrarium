@@ -3,10 +3,25 @@ import { describe, expect, it, vi } from 'vitest'
 import userEvent, { PointerEventsCheckLevel } from '@testing-library/user-event'
 import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
+vi.mock('react-i18next', async () =>
+  (await import('../../../testUtils/localeTranslator')).reactI18nextMock('zh-CN')
+)
 
 const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [] }
-const designer: ChatSession = { id: 'designer-id', title: '设计师', teamMemberName: '设计师', teamLeadId: 'lead', messages: [] }
-const writer: ChatSession = { id: 'writer-id', title: '文案', teamMemberName: '文案', teamLeadId: 'lead', messages: [] }
+const designer: ChatSession = {
+  id: 'designer-id',
+  title: '设计师',
+  teamMemberName: '设计师',
+  teamLeadId: 'lead',
+  messages: []
+}
+const writer: ChatSession = {
+  id: 'writer-id',
+  title: '文案',
+  teamMemberName: '文案',
+  teamLeadId: 'lead',
+  messages: []
+}
 
 function props() {
   return {
@@ -35,8 +50,13 @@ describe('team channel subscription group semantics', () => {
       expect(writerBox).not.toBeChecked()
       fireEvent.click(writerBox)
       fireEvent.click(designerBox)
-      expect(input.onSubscriptionChange.mock.calls).toEqual([['writer-id', true], ['designer-id', false]])
-      view.rerender(<TeamMenuHarness {...input} members={[writer, designer]} subscriptions={['writer-id']} />)
+      expect(input.onSubscriptionChange.mock.calls).toEqual([
+        ['writer-id', true],
+        ['designer-id', false]
+      ])
+      view.rerender(
+        <TeamMenuHarness {...input} members={[writer, designer]} subscriptions={['writer-id']} />
+      )
       expect(within(group).getAllByRole('checkbox')).toEqual([writerBox, designerBox])
       expect(writerBox).toBeChecked()
       expect(designerBox).not.toBeChecked()
@@ -45,7 +65,9 @@ describe('team channel subscription group semantics', () => {
       expect(input.onSave).not.toHaveBeenCalled()
       expect(input.onBroadcast).not.toHaveBeenCalled()
       expect(input.onEnd).not.toHaveBeenCalled()
-    } finally { view.unmount() }
+    } finally {
+      view.unmount()
+    }
   })
 
   it('keeps subscriptions disabled after the team ends and omits the group when the callback is absent', async () => {
@@ -61,10 +83,14 @@ describe('team channel subscription group semantics', () => {
       }
       expect(input.onSubscriptionChange).not.toHaveBeenCalled()
       view.rerender(<TeamMenuHarness {...input} onSubscriptionChange={undefined} />)
-      expect(screen.queryByRole('group', { name: '成员频道订阅（本次会话）' })).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('group', { name: '成员频道订阅（本次会话）' })
+      ).not.toBeInTheDocument()
       expect(input.onSave).not.toHaveBeenCalled()
       expect(input.onBroadcast).not.toHaveBeenCalled()
       expect(input.onEnd).not.toHaveBeenCalled()
-    } finally { view.unmount() }
+    } finally {
+      view.unmount()
+    }
   })
 })

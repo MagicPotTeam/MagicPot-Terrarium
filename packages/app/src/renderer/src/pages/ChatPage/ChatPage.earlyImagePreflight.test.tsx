@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import '../../testUtils/globalLocale'
+import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import type { LLMChatReq } from '@shared/api/svcLLMProxy'
@@ -69,7 +71,7 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: 'en', resolvedLanguage: 'en' },
     t: (key: string, options?: { defaultValue?: string; error?: string }) =>
-      options?.defaultValue || options?.error || key
+      options?.defaultValue || options?.error || zhLocaleText(key)
   })
 }))
 

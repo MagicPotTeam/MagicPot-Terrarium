@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import '../../testUtils/globalLocale'
 
 import { createHash } from 'node:crypto'
 
@@ -120,49 +121,100 @@ afterEach(() => {
 })
 
 describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
-  it.each(['switch', 'unmount'] as const)('does not continue crop work after %s while source load is pending', async action => {
-    const selected = [
-      { ...image, id: 'crop-1', src: 'data:image/png;base64,YQ==', crop: { x: 0, y: 0, width: 50, height: 50 }, cropSource: cropRecord('YQ==', 100, 100) },
-      { ...image, id: 'crop-2', src: 'data:image/png;base64,Yg==', crop: { x: 0, y: 0, width: 50, height: 50 }, cropSource: cropRecord('Yg==', 100, 100) }
-    ]
-    stubObjectUrls()
-    let finish!: (value: { img: HTMLImageElement; width: number; height: number }) => void
-    mocks.loadImageFromSrc.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
-    const loaded = document.createElement('img')
-    const canvasCreation = vi.spyOn(document, 'createElement')
-    const drawImage = vi.fn()
-    const context = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never)
-    const encode = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,Yw==')
-    const { result, rerender, unmount, deliveredEvents } = renderBridge()
-    let send!: Promise<boolean>
-    await act(async () => { send = result.current.handleSendCanvasItemsToAgent(selected); await Promise.resolve() })
-    expect(mocks.loadImageFromSrc).toHaveBeenCalledTimes(1)
-    if (action === 'switch') rerender({ canvasId: 'canvas-b' })
-    else unmount()
-    await act(async () => { finish({ img: loaded, width: 100, height: 100 }); await send; await vi.runAllTimersAsync() })
-    expect(canvasCreation.mock.calls.filter(([tag]) => String(tag).toLowerCase() === 'canvas')).toHaveLength(0)
-    expect(context).not.toHaveBeenCalled()
-    expect(encode).not.toHaveBeenCalled()
-    expect(mocks.loadImageFromSrc).toHaveBeenCalledTimes(1)
-    expect(mocks.dispatch).not.toHaveBeenCalled()
-    expect(deliveredEvents()).toEqual([])
-  })
+  it.each(['switch', 'unmount'] as const)(
+    'does not continue crop work after %s while source load is pending',
+    async (action) => {
+      const selected = [
+        {
+          ...image,
+          id: 'crop-1',
+          src: 'data:image/png;base64,YQ==',
+          crop: { x: 0, y: 0, width: 50, height: 50 },
+          cropSource: cropRecord('YQ==', 100, 100)
+        },
+        {
+          ...image,
+          id: 'crop-2',
+          src: 'data:image/png;base64,Yg==',
+          crop: { x: 0, y: 0, width: 50, height: 50 },
+          cropSource: cropRecord('Yg==', 100, 100)
+        }
+      ]
+      stubObjectUrls()
+      let finish!: (value: { img: HTMLImageElement; width: number; height: number }) => void
+      mocks.loadImageFromSrc.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          })
+      )
+      const loaded = document.createElement('img')
+      const canvasCreation = vi.spyOn(document, 'createElement')
+      const drawImage = vi.fn()
+      const context = vi
+        .spyOn(HTMLCanvasElement.prototype, 'getContext')
+        .mockReturnValue({ drawImage } as never)
+      const encode = vi
+        .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+        .mockReturnValue('data:image/png;base64,Yw==')
+      const { result, rerender, unmount, deliveredEvents } = renderBridge()
+      let send!: Promise<boolean>
+      await act(async () => {
+        send = result.current.handleSendCanvasItemsToAgent(selected)
+        await Promise.resolve()
+      })
+      expect(mocks.loadImageFromSrc).toHaveBeenCalledTimes(1)
+      if (action === 'switch') rerender({ canvasId: 'canvas-b' })
+      else unmount()
+      await act(async () => {
+        finish({ img: loaded, width: 100, height: 100 })
+        await send
+        await vi.runAllTimersAsync()
+      })
+      expect(
+        canvasCreation.mock.calls.filter(([tag]) => String(tag).toLowerCase() === 'canvas')
+      ).toHaveLength(0)
+      expect(context).not.toHaveBeenCalled()
+      expect(encode).not.toHaveBeenCalled()
+      expect(mocks.loadImageFromSrc).toHaveBeenCalledTimes(1)
+      expect(mocks.dispatch).not.toHaveBeenCalled()
+      expect(deliveredEvents()).toEqual([])
+    }
+  )
 
   it('loads and exports cropped items normally while the canvas remains current', async () => {
-    const selected = [{ ...image, src: 'data:image/png;base64,YQ==', crop: { x: 0, y: 0, width: 50, height: 50 }, cropSource: cropRecord('YQ==', 100, 100) }]
+    const selected = [
+      {
+        ...image,
+        src: 'data:image/png;base64,YQ==',
+        crop: { x: 0, y: 0, width: 50, height: 50 },
+        cropSource: cropRecord('YQ==', 100, 100)
+      }
+    ]
     stubObjectUrls()
     const loaded = document.createElement('img')
     mocks.loadImageFromSrc.mockResolvedValue({ img: loaded, width: 100, height: 100 })
     const drawImage = vi.fn()
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never)
-    const encode = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,Yw==')
+    const encode = vi
+      .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      .mockReturnValue('data:image/png;base64,Yw==')
     const { result, deliveredEvents, notifyError } = renderBridge()
-    await act(async () => { await result.current.handleSendCanvasItemsToAgent(selected); await vi.runAllTimersAsync() })
+    await act(async () => {
+      await result.current.handleSendCanvasItemsToAgent(selected)
+      await vi.runAllTimersAsync()
+    })
     expect(mocks.loadImageFromSrc).toHaveBeenCalledOnce()
     expect(drawImage).toHaveBeenCalledWith(loaded, 0, 0, 50, 50, 0, 0, 50, 50)
     expect(encode).toHaveBeenCalledWith('image/png')
     expect(notifyError).not.toHaveBeenCalled()
-    expect(deliveredEvents().some(event => event.type === 'send-to-agent' && event.detail.attachment?.url === 'data:image/png;base64,Yw==')).toBe(true)
+    expect(
+      deliveredEvents().some(
+        (event) =>
+          event.type === 'send-to-agent' &&
+          event.detail.attachment?.url === 'data:image/png;base64,Yw=='
+      )
+    ).toBe(true)
   })
   it('refuses a whole mixed selection when legacy crop coordinates cannot be authenticated', async () => {
     const crop = { x: 20, y: 10, width: 50, height: 50 }
@@ -173,10 +225,17 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
     const loaded = document.createElement('img')
     mocks.loadImageFromSrc.mockResolvedValue({ img: loaded, width: 200, height: 200 })
     const draw = vi.fn()
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: draw } as never)
-    vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,Y3JvcA==')
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      drawImage: draw
+    } as never)
+    vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(
+      'data:image/png;base64,Y3JvcA=='
+    )
     const { result, notifyError, deliveredEvents } = renderBridge()
-    await act(async () => { await result.current.handleSendCanvasItemsToAgent(selected); await vi.runAllTimersAsync() })
+    await act(async () => {
+      await result.current.handleSendCanvasItemsToAgent(selected)
+      await vi.runAllTimersAsync()
+    })
     expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_cropped_image_failed')
     expect(mocks.materializeAttachment).not.toHaveBeenCalled()
     expect(mocks.dispatch).not.toHaveBeenCalled()
@@ -206,11 +265,20 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
   })
 
   it('stops a known oversized crop before image load, canvas allocation or any delivery', async () => {
-    const selected = [{ ...image, sourceWidth: 10000, sourceHeight: 10000,
-      crop: { x: 0, y: 0, width: 9000, height: 9000 } }]
+    const selected = [
+      {
+        ...image,
+        sourceWidth: 10000,
+        sourceHeight: 10000,
+        crop: { x: 0, y: 0, width: 9000, height: 9000 }
+      }
+    ]
     const { result, notifyError, deliveredEvents } = renderBridge()
     const canvasCreation = vi.spyOn(document, 'createElement')
-    await act(async () => { await result.current.handleSendCanvasItemsToAgent(selected); await vi.runAllTimersAsync() })
+    await act(async () => {
+      await result.current.handleSendCanvasItemsToAgent(selected)
+      await vi.runAllTimersAsync()
+    })
     expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.send_to_agent_failed')
     expect(mocks.loadImageFromSrc).not.toHaveBeenCalled()
     expect(canvasCreation.mock.calls.some(([tag]) => String(tag) === 'canvas')).toBe(false)
@@ -221,11 +289,20 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
   })
 
   it('rejects a known oversized identity crop before loading or allocating', async () => {
-    const selected = [{ ...image, sourceWidth: 10000, sourceHeight: 10000,
-      crop: { x: 0, y: 0, width: 10000, height: 10000 } }]
+    const selected = [
+      {
+        ...image,
+        sourceWidth: 10000,
+        sourceHeight: 10000,
+        crop: { x: 0, y: 0, width: 10000, height: 10000 }
+      }
+    ]
     const { result, notifyError, deliveredEvents } = renderBridge()
     const canvasCreation = vi.spyOn(document, 'createElement')
-    await act(async () => { await result.current.handleSendCanvasItemsToAgent(selected); await vi.runAllTimersAsync() })
+    await act(async () => {
+      await result.current.handleSendCanvasItemsToAgent(selected)
+      await vi.runAllTimersAsync()
+    })
     expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.send_to_agent_failed')
     expect(mocks.loadImageFromSrc).not.toHaveBeenCalled()
     expect(canvasCreation.mock.calls.some(([tag]) => String(tag) === 'canvas')).toBe(false)
@@ -239,13 +316,27 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
   // later crop now has a record whose pixel size the loaded source contradicts.
   // Error key changed from canvas.send_to_agent_failed.
   it('fails rather than silently dropping a later crop when the loaded source differs from its record', async () => {
-    const differing = { ...image, id: 'unknown-size', width: 0, height: 0, src: 'data:image/png;base64,Yg==',
-      crop: { x: 0, y: 0, width: 50, height: 50 }, cropSource: cropRecord('Yg==', 100, 100) }
+    const differing = {
+      ...image,
+      id: 'unknown-size',
+      width: 0,
+      height: 0,
+      src: 'data:image/png;base64,Yg==',
+      crop: { x: 0, y: 0, width: 50, height: 50 },
+      cropSource: cropRecord('Yg==', 100, 100)
+    }
     stubObjectUrls()
-    mocks.loadImageFromSrc.mockResolvedValue({ img: document.createElement('img'), width: 10000, height: 10000 })
+    mocks.loadImageFromSrc.mockResolvedValue({
+      img: document.createElement('img'),
+      width: 10000,
+      height: 10000
+    })
     const { result, notifyError, deliveredEvents } = renderBridge()
     const canvasCreation = vi.spyOn(document, 'createElement')
-    await act(async () => { await result.current.handleSendCanvasItemsToAgent([image, differing]); await vi.runAllTimersAsync() })
+    await act(async () => {
+      await result.current.handleSendCanvasItemsToAgent([image, differing])
+      await vi.runAllTimersAsync()
+    })
     expect(mocks.loadImageFromSrc).toHaveBeenCalledOnce()
     expect(canvasCreation.mock.calls.some(([tag]) => String(tag) === 'canvas')).toBe(false)
     expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.agent_send_cropped_image_failed')
@@ -263,14 +354,31 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
     })
     expect(notifyError).not.toHaveBeenCalled()
     expect(mocks.materializeAttachment).toHaveBeenCalledTimes(50)
-    expect(deliveredEvents().filter(event => event.type === 'send-to-agent' && event.detail.attachment)).toHaveLength(50)
+    expect(
+      deliveredEvents().filter((event) => event.type === 'send-to-agent' && event.detail.attachment)
+    ).toHaveLength(50)
   })
 
   it('canvas-only preflight allows 50 explicit images plus an overview (composer applies its own conservative limit)', async () => {
     const selected = Array.from({ length: 50 }, (_, index) => ({ ...image, id: `image-${index}` }))
-    const text: CanvasItem = { id: 'text', type: 'text', text: 'fixture', x: 0, y: 0, width: 10, height: 10,
-      rotation: 0, scaleX: 1, scaleY: 1, zIndex: 1, locked: false, fill: '#fff', fontSize: 12,
-      fontFamily: 'Arial', fontWeight: 'bold' }
+    const text: CanvasItem = {
+      id: 'text',
+      type: 'text',
+      text: 'fixture',
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      zIndex: 1,
+      locked: false,
+      fill: '#fff',
+      fontSize: 12,
+      fontFamily: 'Arial',
+      fontWeight: 'bold'
+    }
     const { result, notifyError, deliveredEvents } = renderBridge()
     await act(async () => {
       await result.current.handleSendCanvasItemsToAgent([...selected, text])
@@ -278,39 +386,78 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
     })
     expect(notifyError).not.toHaveBeenCalled()
     expect(mocks.materializeAttachment).toHaveBeenCalledTimes(51)
-    expect(deliveredEvents().filter(event => event.type === 'send-to-agent' && event.detail.attachment)).toHaveLength(51)
+    expect(
+      deliveredEvents().filter((event) => event.type === 'send-to-agent' && event.detail.attachment)
+    ).toHaveLength(51)
   })
 
   it('materializes three attachments sequentially and delivers in their original order', async () => {
-    const items = [image, { ...image, id: 'second', src: 'local-media:///second.png' }, { ...image, id: 'third', src: 'local-media:///third.png' }]
+    const items = [
+      image,
+      { ...image, id: 'second', src: 'local-media:///second.png' },
+      { ...image, id: 'third', src: 'local-media:///third.png' }
+    ]
     const resolvers: Array<(value: ChatAttachment | null) => void> = []
-    let active = 0, maxActive = 0
+    let active = 0,
+      maxActive = 0
     mocks.materializeAttachment.mockImplementation(() => {
       active++
       maxActive = Math.max(maxActive, active)
-      return new Promise<ChatAttachment | null>(resolve => resolvers.push(value => { active--; resolve(value) }))
+      return new Promise<ChatAttachment | null>((resolve) =>
+        resolvers.push((value) => {
+          active--
+          resolve(value)
+        })
+      )
     })
     const { result, deliveredEvents } = renderBridge()
     let send!: Promise<boolean>
-    await act(async () => { send = result.current.handleSendCanvasItemsToAgent(items, 'canvas-a.agent-explicit'); await Promise.resolve() })
+    await act(async () => {
+      send = result.current.handleSendCanvasItemsToAgent(items, 'canvas-a.agent-explicit')
+      await Promise.resolve()
+    })
     for (let index = 0; index < items.length; index++) {
       expect(mocks.materializeAttachment).toHaveBeenCalledTimes(index + 1)
       expect(active).toBe(1)
-      await act(async () => { resolvers[index]({ type: 'image', url: items[index].src }); await Promise.resolve() })
+      await act(async () => {
+        resolvers[index]({ type: 'image', url: items[index].src })
+        await Promise.resolve()
+      })
     }
-    await act(async () => { await send; await vi.runAllTimersAsync() })
+    await act(async () => {
+      await send
+      await vi.runAllTimersAsync()
+    })
     expect(maxActive).toBe(1)
-    expect(deliveredEvents().filter(event => event.type === 'send-to-agent' && event.detail.attachment).map(event => event.detail.attachment.url)).toEqual(items.map(item => item.src))
+    expect(
+      deliveredEvents()
+        .filter((event) => event.type === 'send-to-agent' && event.detail.attachment)
+        .map((event) => event.detail.attachment.url)
+    ).toEqual(items.map((item) => item.src))
   })
 
   it('does not start the next attachment after unmount during the second of three', async () => {
-    const items = [image, { ...image, id: 'second', src: 'local-media:///second.png' }, { ...image, id: 'third', src: 'local-media:///third.png' }]
+    const items = [
+      image,
+      { ...image, id: 'second', src: 'local-media:///second.png' },
+      { ...image, id: 'third', src: 'local-media:///third.png' }
+    ]
     let finish!: (value: ChatAttachment) => void
-    mocks.materializeAttachment.mockImplementationOnce(async (attachment: ChatAttachment) => attachment)
-      .mockImplementationOnce(() => new Promise<ChatAttachment>(resolve => { finish = resolve }))
+    mocks.materializeAttachment
+      .mockImplementationOnce(async (attachment: ChatAttachment) => attachment)
+      .mockImplementationOnce(
+        () =>
+          new Promise<ChatAttachment>((resolve) => {
+            finish = resolve
+          })
+      )
     const { result, unmount, deliveredEvents } = renderBridge()
     let send!: Promise<boolean>
-    await act(async () => { send = result.current.handleSendCanvasItemsToAgent(items); await Promise.resolve(); await Promise.resolve() })
+    await act(async () => {
+      send = result.current.handleSendCanvasItemsToAgent(items)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     expect(mocks.materializeAttachment).toHaveBeenCalledTimes(2)
     unmount()
     finish({ type: 'image', url: items[1].src })
@@ -322,10 +469,19 @@ describe('useCanvasBridgeActions Agent delivery lifecycle', () => {
   })
 
   it('reports a null materialization and does not deliver any part of three attachments', async () => {
-    const items = [image, { ...image, id: 'second', src: 'local-media:///second.png' }, { ...image, id: 'third', src: 'local-media:///third.png' }]
-    mocks.materializeAttachment.mockImplementationOnce(async (attachment: ChatAttachment) => attachment).mockResolvedValueOnce(null)
+    const items = [
+      image,
+      { ...image, id: 'second', src: 'local-media:///second.png' },
+      { ...image, id: 'third', src: 'local-media:///third.png' }
+    ]
+    mocks.materializeAttachment
+      .mockImplementationOnce(async (attachment: ChatAttachment) => attachment)
+      .mockResolvedValueOnce(null)
     const { result, notifyError, deliveredEvents } = renderBridge()
-    await act(async () => { await result.current.handleSendCanvasItemsToAgent(items); await vi.runAllTimersAsync() })
+    await act(async () => {
+      await result.current.handleSendCanvasItemsToAgent(items)
+      await vi.runAllTimersAsync()
+    })
     expect(mocks.materializeAttachment).toHaveBeenCalledTimes(2)
     expect(notifyError).toHaveBeenCalledExactlyOnceWith('canvas.send_to_agent_failed')
     expect(mocks.dispatch).not.toHaveBeenCalled()

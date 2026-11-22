@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import '../../testUtils/globalLocale'
 import type { ChatAttachment } from '@shared/llm'
 import { assertExplicitUserImageCount } from './chatExplicitImageCount'
 
@@ -9,7 +10,9 @@ describe('explicit user image count', () => {
     expect(() => assertExplicitUserImageCount(undefined)).not.toThrow()
     expect(() => assertExplicitUserImageCount([])).not.toThrow()
     expect(() => assertExplicitUserImageCount(Array.from({ length: 50 }, image))).not.toThrow()
-    expect(() => assertExplicitUserImageCount(Array.from({ length: 51 }, image))).toThrow('本次图片数量超过限制，请分批发送')
+    expect(() => assertExplicitUserImageCount(Array.from({ length: 51 }, image))).toThrow(
+      '本次图片数量超过限制，请分批发送'
+    )
   })
 
   it('ignores non-images and bundle metadata without changing its input', () => {
@@ -23,9 +26,18 @@ describe('explicit user image count', () => {
   })
 
   it('does not read attachment URLs even when rejecting', () => {
-    const getter = vi.fn(() => { throw new Error('URL must not be accessed') })
-    const attachments = Array.from({ length: 51 }, () => ({ type: 'image', get url() { return getter() } })) as ChatAttachment[]
-    expect(() => assertExplicitUserImageCount(attachments)).toThrow('本次图片数量超过限制，请分批发送')
+    const getter = vi.fn(() => {
+      throw new Error('URL must not be accessed')
+    })
+    const attachments = Array.from({ length: 51 }, () => ({
+      type: 'image',
+      get url() {
+        return getter()
+      }
+    })) as ChatAttachment[]
+    expect(() => assertExplicitUserImageCount(attachments)).toThrow(
+      '本次图片数量超过限制，请分批发送'
+    )
     expect(getter).not.toHaveBeenCalled()
   })
 })

@@ -1660,8 +1660,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return reconciled
       })
       if (conflict) {
-        setSessionSaveError('团队状态冲突：本地更改未覆盖已保存的会话，请保留并检查。')
-        notifyWarningRef.current('团队状态冲突，已保留本地更改')
+        setSessionSaveError(t('chat.team_notice.state_conflict_detail'))
+        notifyWarningRef.current(t('chat.team_notice.state_conflict_kept'))
       }
       return result
     },
@@ -3568,7 +3568,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           currentSessionIdRef.current === sessionId &&
           !isStaleCurrentComposerSnapshot(normalizedSnapshot.updatedAt)
         ) {
-          notifyWarningRef.current('草稿附件无法保存，请检查会话并重新添加附件')
+          notifyWarningRef.current(t('chat.draft_attachment_save_failed'))
         }
         return
       }
@@ -4655,7 +4655,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return false
       }
       if (session.teamLeadId) {
-        if (options.manual) notifyWarning('成员会话暂不支持压缩')
+        if (options.manual) notifyWarning(t('chat.team_notice.member_no_compression'))
         return false
       }
       if (session.messages.length === 0) {
@@ -5075,7 +5075,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
 
     if (currentSession.teamLeadId) {
-      notifyWarning('成员会话暂不支持压缩')
+      notifyWarning(t('chat.team_notice.member_no_compression'))
       return
     }
     startContextCompactJob({
@@ -5125,28 +5125,21 @@ const ChatPage: React.FC<ChatPageProps> = ({
         : 'text.secondary'
     const usageTitle = contextCompressionPreview.contextWindowTokens
       ? t('chat.context_window_preview_ratio', {
-          defaultValue: '预计下次请求使用上下文窗口的 {{value}}%',
           value: usagePercent
         })
       : t('chat.context_budget_preview_ratio', {
-          defaultValue: '预计下次请求使用上下文预算的 {{value}}%',
           value: usagePercent
         })
     const tokenUsageTitle = t('chat.context_window_preview_tokens', {
-      defaultValue: '估算约 {{used}} / {{total}} tokens',
       used: formatCompactTokenCount(displayTokens),
       total: formatCompactTokenCount(contextWindowTokens)
     })
     const compressionHint = contextCompressionPreview.shouldCompress
       ? t('chat.context_compression_preview_planned', {
-          defaultValue: '预计需要压缩；压缩前约 {{before}} tokens',
           before: formatCompactTokenCount(contextCompressionPreview.estimatedInputTokens)
         })
-      : t('chat.context_compression_preview_idle', {
-          defaultValue: '当前预览无需压缩'
-        })
+      : t('chat.context_compression_preview_idle')
     const triggerHint = t('chat.context_compression_preview_trigger', {
-      defaultValue: '超过 {{percent}}% 可能触发较早上下文的自动压缩',
       percent: triggerPercent
     })
     const tooltipContent = (
@@ -6178,7 +6171,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (!isDropTargetCurrent()) return
           const droppedDirectoryFiles = resolveDroppedDirectoryImageFiles(droppedEntries)
           if (droppedDirectoryFiles.length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT) {
-            notifyError('本次图片数量超过限制，请分批发送')
+            notifyError(t('chat.image_count_over_limit'))
             return
           }
           if (droppedDirectoryFiles.length !== imageOccurrences) {
@@ -6256,8 +6249,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (error instanceof DroppedDirectoryLimitError) {
             notifyError(
               error.reason === 'images'
-                ? '本次图片数量超过限制，请分批发送'
-                : '目录内容过多，请分批拖入'
+                ? t('chat.image_count_over_limit')
+                : t('chat.folder_drop_too_many')
             )
             return
           }
@@ -6280,7 +6273,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         rawDroppedFiles.filter((file) => getChatAttachmentTypeForFile(file) === 'image').length >
           DEFAULT_CHAT_IMAGE_COUNT_LIMIT
       ) {
-        notifyError('本次图片数量超过限制，请分批发送')
+        notifyError(t('chat.image_count_over_limit'))
         return
       }
       // An oversized file is known from the descriptors. Reject the full native
@@ -7595,7 +7588,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         (cs && savedLifecycle && !sameTeamLifecycle(cs, savedLifecycle)) ||
         (lead && savedLead && !sameTeamLifecycle(lead, savedLead))
       ) {
-        notifyWarning('团队状态冲突，请先处理未保存的会话')
+        notifyWarning(t('chat.team_notice.state_conflict_unsaved'))
         return
       }
 
@@ -7642,7 +7635,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return
       }
       if (cs.teamLeadId && config.use_remote_llm) {
-        notifyWarning('团队成员暂不支持远程模型')
+        notifyWarning(t('chat.team_notice.member_no_remote_model'))
         return
       }
       if (
@@ -7650,7 +7643,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         (teamEndPendingRef.current.has(`${storageScope}\u0000${cs.teamLeadId}`) ||
           teamEndedMainRef.current.has(`${storageScope}\u0000${cs.teamLeadId}`))
       ) {
-        notifyWarning('团队正在结束，请稍候')
+        notifyWarning(t('chat.team_notice.ending'))
         return
       }
       const goalProgressToken = overrides?.goalProgressToken
@@ -7693,7 +7686,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             }
           : undefined
       if (cs.teamLeadId && !teamMemberRequest) {
-        notifyWarning('团队成员只支持当前画布线程')
+        notifyWarning(t('chat.team_notice.member_canvas_thread_only'))
         return
       }
       const requestTerminationEpoch = sessionTerminationEpochRef.current.get(targetSessionId) ?? 0
@@ -7892,7 +7885,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       )
       const activeExternalAgentSkill = activeSkill?.type === 'agent' ? activeSkill : undefined
       if (inheritedTeamSettings && activeExternalAgentSkill) {
-        notifyWarning('团队成员暂不支持外部 Agent 传输，请使用组长的本地模型')
+        notifyWarning(t('chat.team_notice.member_no_external_agent'))
         return
       }
       const executionContext = resolveSkillExecutionContext({
@@ -8262,7 +8255,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }).imageHistoryPolicy
       const explicitToolCommand = parseExplicitToolCommand(requestContent)
       if (inheritedTeamSettings && explicitToolCommand) {
-        notifyWarning('成员会话暂不支持直接运行工具')
+        notifyWarning(t('chat.team_notice.member_no_direct_tool'))
         return
       }
       const shouldPreserveMultiAttachmentRequest = isImageGenerationRequest
@@ -10247,7 +10240,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         pendingAttachmentsRef.current.length ||
         pendingHiddenContextRef.current
       ) {
-        notifyWarning('请先处理当前输入，再编辑排队消息')
+        notifyWarning(t('chat.queue_edit_busy'))
         return
       }
       const editedAttachments = overrides.attachments?.map(cloneChatAttachment) ?? []
@@ -11045,7 +11038,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
             } catch {
               /* generation or bounded log changed */
             }
-            notifyWarningRef.current('团队消息无法排队，请检查成员或容量')
+            notifyWarningRef.current(t('chat.team_notice.message_not_queued'))
           }
         }
       } catch {
@@ -11138,8 +11131,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         else dirtySessionSnapshotsRef.current.delete(key)
       }
       if (conflict) {
-        setSessionSaveError('团队状态冲突：本地更改未覆盖已保存的会话，请保留并检查。')
-        notifyWarning('团队状态冲突，已保留本地更改')
+        setSessionSaveError(t('chat.team_notice.state_conflict_detail'))
+        notifyWarning(t('chat.team_notice.state_conflict_kept'))
       }
     },
     [getSessionStorageKey, notifyWarning, setDirtySessionSnapshot, setSessions, storageScope]
@@ -11174,7 +11167,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       const detail = (event as CustomEvent<{ scope: string; leadId: string }>).detail
       if (detail?.scope !== storageScope || typeof detail.leadId !== 'string') return
       if (sessionsRef.current.some((session) => session.id === detail.leadId))
-        void refreshTeamLifecycle(detail.leadId).catch(() => notifyWarning('团队状态刷新失败'))
+        void refreshTeamLifecycle(detail.leadId).catch(() =>
+          notifyWarning(t('chat.team_notice.refresh_failed'))
+        )
     }
     window.addEventListener('chat:team-lifecycle-ended', handler)
     const channel =
@@ -11694,13 +11689,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ? !sameTeamLifecycle(teamLead, persistedSessionsRef.current.get(teamLead.id)!)
         : false
     if (teamSettingsConflict) {
-      notifyWarning('团队状态冲突，请先处理未保存的会话')
+      notifyWarning(t('chat.team_notice.state_conflict_unsaved'))
       return
     }
     const input = inputValueRef.current
     const leadId = currentSession?.teamLeadId || currentSession?.id
     if (leadId && teamEndPendingRef.current.has(`${storageScope}\u0000${leadId}`)) {
-      notifyWarning('团队正在结束，请稍候')
+      notifyWarning(t('chat.team_notice.ending'))
       return
     }
     if (
@@ -11708,18 +11703,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
       teamEndedMainRef.current.has(`${storageScope}\u0000${leadId}`) &&
       (currentSession?.teamLeadId || /^@/.test(input))
     ) {
-      notifyWarning('团队已结束')
+      notifyWarning(t('chat.team_ended'))
       return
     }
     if (teamEnabled && teamLead && /^@/.test(input)) {
       if (teamLead.teamEnded || currentSession?.teamLeadId) {
-        notifyWarning('团队已结束或当前不是组长会话')
+        notifyWarning(t('chat.team_notice.ended_or_not_lead'))
         return
       }
       try {
         const recipient = resolveTeamRecipient(input.trim(), teamMembers)
         if (!recipient) {
-          notifyWarning('请输入 @成员 后接任务')
+          notifyWarning(t('chat.team_notice.mention_needs_task'))
           return
         }
         // A rejected team target must not consume the user's @ draft before preflight runs.
@@ -11732,7 +11727,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         // The team @ route is text-only; never clear a lead draft while silently
         // dropping its attachments or hidden context from the member request.
         if (pendingAttachmentsRef.current.length || pendingHiddenContextRef.current.trim()) {
-          notifyWarning('团队指派暂不支持附件或隐藏上下文，请先处理后重试。')
+          notifyWarning(t('chat.team_notice.assign_no_attachments'))
           return
         }
         const leadId = teamLead.id
@@ -11745,7 +11740,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         // Do not queue an @ draft behind an active member: a local queue is not a
         // durable receipt and the target may fail its later model preflight.
         if (isSessionBusy(recipient.session.id)) {
-          notifyWarning('成员正在处理其他请求，请稍后重试。')
+          notifyWarning(t('chat.team_notice.member_busy'))
           return
         }
         let submissionAccepted = false
@@ -11786,7 +11781,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           notifyError(error instanceof Error ? error.message : String(error))
         })
       } catch {
-        notifyWarning('请选择唯一的成员名称并输入任务')
+        notifyWarning(t('chat.team_notice.mention_unique_member'))
       }
       return
     }
@@ -13083,7 +13078,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           file.type.startsWith('image/') || /\.(?:png|jpe?g|gif|webp|bmp|avif)$/i.test(file.name)
       )
       if (imageFiles.length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT) {
-        throw new Error('本次图片数量超过限制，请分批发送')
+        throw new Error(t('chat.image_count_over_limit'))
       }
       const maxSizeMB = getChatAttachmentMaxSizeMB('image')
       for (const file of imageFiles) {
@@ -13982,7 +13977,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                       .map((member) => member.id)
                   })
                 } catch {
-                  notifyWarning('频道订阅未更改')
+                  notifyWarning(t('chat.team_notice.subscription_unchanged'))
                 }
               }}
               key={JSON.stringify([storageScope, teamLead.id, teamLead.teamGeneration ?? 0])}
@@ -14006,7 +14001,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   expectedLead.teamEnded ||
                   !route?.threadId
                 ) {
-                  notifyWarning('团队已更改')
+                  notifyWarning(t('chat.team_notice.team_changed'))
                   return
                 }
                 if (teamEndPendingRef.current.has(teamKey)) return
@@ -14070,8 +14065,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   .catch(() =>
                     notifyWarning(
                       mainEnded
-                        ? '团队已在主进程结束，但本地状态同步失败，请重试结束'
-                        : '无法结束团队，请重试'
+                        ? t('chat.team_notice.end_sync_failed')
+                        : t('chat.team_notice.end_failed')
                     )
                   )
                   .finally(() => {
@@ -14087,14 +14082,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 const visibilityEpoch = teamVisibilityRef.current.epoch
                 if (value.teamSettings?.defaultModel !== current.teamSettings?.defaultModel) {
                   if (currentSessionIdRef.current !== current.id) {
-                    notifyWarning('请在组长会话修改团队模型')
+                    notifyWarning(t('chat.team_notice.model_change_in_lead'))
                     return false
                   }
                   if (
                     value.teamSettings?.defaultModel &&
                     value.teamSettings.defaultModel !== current.profileId
                   ) {
-                    notifyWarning('成员模型须与组长一致')
+                    notifyWarning(t('chat.team_notice.member_model_matches_lead'))
                     return false
                   }
                   if (
@@ -14103,14 +14098,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
                       (profile) => profile.id === value.teamSettings?.defaultModel
                     )
                   ) {
-                    notifyWarning('模型ID不存在')
+                    notifyWarning(t('chat.team_notice.model_id_missing'))
                     return false
                   }
                 }
                 try {
                   validateTeamTasks(value.teamTasks ?? [])
                 } catch {
-                  notifyWarning('任务依赖无效')
+                  notifyWarning(t('chat.task_dependency_invalid'))
                   return false
                 }
                 const updated = {
@@ -14142,7 +14137,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     storageScopeRef.current === storageScope &&
                     sessionLoadEpochRef.current === scopeEpoch
                   )
-                    notifyWarning('无法保存团队设置')
+                    notifyWarning(t('chat.team_notice.settings_save_failed'))
                   return false
                 }
               }}
@@ -14226,7 +14221,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                     defaultValue: `Confirm /${replayView.command.kind}`
                   })}
                 </Typography>
-                <Typography>新建对话，保留原对话。</Typography>
+                <Typography>{t('chat.new_conversation_keep_original')}</Typography>
                 <Button
                   onClick={() => {
                     if (replayBusyRef.current) return
@@ -14581,9 +14576,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
                           {attachmentTypes.length}
                         </Box>
                       ) : null}
-                      {queuedSend.inFlight && <Typography variant="caption">正在准备</Typography>}
+                      {queuedSend.inFlight && (
+                        <Typography variant="caption">{t('chat.queue_item.preparing')}</Typography>
+                      )}
                       {queuedSend.paused && (
-                        <Typography variant="caption">未发送 · 已暂停</Typography>
+                        <Typography variant="caption">{t('chat.queue_item.paused')}</Typography>
                       )}
                       {showResumeNotice && (
                         <Typography
@@ -14591,7 +14588,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                           variant="caption"
                           sx={{ flexBasis: '100%' }}
                         >
-                          编辑或移除此项后，后续排队消息可能继续发送。
+                          {t('chat.queue_item.resume_notice')}
                         </Typography>
                       )}
                       {canEdit ? (

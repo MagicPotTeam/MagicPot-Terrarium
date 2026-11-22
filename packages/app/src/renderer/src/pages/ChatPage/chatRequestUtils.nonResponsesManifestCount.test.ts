@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import '../../testUtils/globalLocale'
 import { DEFAULT_CONFIG } from '@shared/config/config'
 import type { Config, CustomSkill, LLMOpenAIApiMode } from '@shared/config/config'
 import type { ChatMessage } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'

@@ -3,6 +3,9 @@ import { describe, expect, it, vi } from 'vitest'
 import AgentTeamMenu from './AgentTeamMenu'
 import { TeamMenuHarness } from './AgentTeamMenu.testHarness'
 import type { ChatSession } from '../chatStorage'
+vi.mock('react-i18next', async () =>
+  (await import('../../../testUtils/localeTranslator')).reactI18nextMock('zh-CN')
+)
 
 const lead: ChatSession = { id: 'lead', title: 'Lead', messages: [] }
 
@@ -12,7 +15,16 @@ function renderMenu() {
   const onSave = vi.fn(async () => true)
   const onBroadcast = vi.fn()
   const onEnd = vi.fn()
-  const view = render(<TeamMenuHarness lead={lead} members={[]} models={[]} onSave={onSave} onBroadcast={onBroadcast} onEnd={onEnd} />)
+  const view = render(
+    <TeamMenuHarness
+      lead={lead}
+      members={[]}
+      models={[]}
+      onSave={onSave}
+      onBroadcast={onBroadcast}
+      onEnd={onEnd}
+    />
+  )
   const trigger = screen.getByRole('button', { name: '团队管理' })
   return { ...view, host, trigger, onSave, onBroadcast, onEnd }
 }
@@ -41,7 +53,17 @@ describe('AgentTeamMenu Escape interaction', () => {
 
   it('asks the page to take the focus back when a dialog opened without a trigger closes', async () => {
     const onReturnFocus = vi.fn()
-    const view = (openRequest: number) => <AgentTeamMenu lead={lead} members={[]} models={[]} onSave={vi.fn(async () => true)} onEnd={vi.fn()} openRequest={openRequest} onReturnFocus={onReturnFocus} />
+    const view = (openRequest: number) => (
+      <AgentTeamMenu
+        lead={lead}
+        members={[]}
+        models={[]}
+        onSave={vi.fn(async () => true)}
+        onEnd={vi.fn()}
+        openRequest={openRequest}
+        onReturnFocus={onReturnFocus}
+      />
+    )
     const page = render(view(0))
     try {
       expect(screen.queryByRole('button', { name: '团队管理' })).not.toBeInTheDocument()
@@ -69,7 +91,17 @@ describe('AgentTeamMenu Escape interaction', () => {
     const onReturnFocus = vi.fn()
     const outside = document.createElement('button')
     document.body.append(outside)
-    const view = (openRequest: number) => <TeamMenuHarness lead={lead} members={[]} models={[]} onSave={vi.fn(async () => true)} onEnd={vi.fn()} openRequest={openRequest} onReturnFocus={onReturnFocus} />
+    const view = (openRequest: number) => (
+      <TeamMenuHarness
+        lead={lead}
+        members={[]}
+        models={[]}
+        onSave={vi.fn(async () => true)}
+        onEnd={vi.fn()}
+        openRequest={openRequest}
+        onReturnFocus={onReturnFocus}
+      />
+    )
     const page = render(view(0))
     try {
       page.rerender(view(1))

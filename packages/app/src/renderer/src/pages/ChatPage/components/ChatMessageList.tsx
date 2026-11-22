@@ -2243,7 +2243,7 @@ const UserMessageEditForm: React.FC<{
       event.preventDefault()
       event.stopPropagation()
       if (files.length > DEFAULT_CHAT_IMAGE_COUNT_LIMIT) {
-        setAttachmentError('本次图片数量超过限制，请分批发送')
+        setAttachmentError(t('chat.image_count_over_limit'))
         return
       }
       setAttachmentError(null)
@@ -2548,7 +2548,7 @@ const UserMessageEditForm: React.FC<{
         </Box>
         {sourceChanged ? (
           <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.25 }}>
-            消息已发生变化，请取消编辑并重新打开。
+            {t('chat.edit_message_changed')}
           </Typography>
         ) : null}
         {attachmentError ? (
@@ -2580,7 +2580,7 @@ const UserMessageEditForm: React.FC<{
               try {
                 assertExplicitUserImageCount(editingAttachments)
               } catch {
-                setAttachmentError('本次图片数量超过限制，请分批发送')
+                setAttachmentError(t('chat.image_count_over_limit'))
                 return
               }
               try {

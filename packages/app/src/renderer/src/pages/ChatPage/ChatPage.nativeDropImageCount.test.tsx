@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { createTheme, ThemeProvider } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import '../../testUtils/globalLocale'
+import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type { ChatAttachment } from '@shared/llm'
@@ -36,7 +38,7 @@ vi.mock('react-i18next', () => ({
     i18n: { language: 'en', resolvedLanguage: 'en' },
     t: (key: string, o?: { defaultValue?: string }) => {
       f.translate(key, o)
-      return o?.defaultValue || key
+      return o?.defaultValue || zhLocaleText(key)
     }
   })
 }))
@@ -67,7 +69,11 @@ vi.mock('@renderer/utils/windowUtils', () => ({
   api: () => ({
     svcFs: {},
     svcLLMProxy: { signHy3DModel: vi.fn() },
-    svcManagedMedia: { importDataUrl: f.importDataUrl, importBytes: f.importBytes, importFile: f.importFile }
+    svcManagedMedia: {
+      importDataUrl: f.importDataUrl,
+      importBytes: f.importBytes,
+      importFile: f.importFile
+    }
   })
 }))
 vi.mock('@renderer/utils/fileUtils', async (original) => ({
@@ -97,15 +103,30 @@ vi.mock('./chatStorage', async (original) => ({
         updatedAt: Date.now()
       }
     },
-    { id: 'b', title: 'b', profileId: 'fixture-profile', storageScope: 'drop-count', messages: [],
-      draft: { inputValue: 'session b', pendingAttachments: [], pendingHiddenContext: '', updatedAt: Date.now() } }
+    {
+      id: 'b',
+      title: 'b',
+      profileId: 'fixture-profile',
+      storageScope: 'drop-count',
+      messages: [],
+      draft: {
+        inputValue: 'session b',
+        pendingAttachments: [],
+        pendingHiddenContext: '',
+        updatedAt: Date.now()
+      }
+    }
   ],
   saveSessionToDB: vi.fn(),
   debouncedSaveSessions: vi.fn(),
   cancelDebouncedSessionSave: vi.fn(),
   migrateFromLocalStorage: async () => null
 }))
-vi.mock('./components/SessionSidebar', () => ({ default: ({ onSelectSession }: { onSelectSession: (id: string) => void }) => <button onClick={() => onSelectSession('b')}>switch b</button> }))
+vi.mock('./components/SessionSidebar', () => ({
+  default: ({ onSelectSession }: { onSelectSession: (id: string) => void }) => (
+    <button onClick={() => onSelectSession('b')}>switch b</button>
+  )
+}))
 vi.mock('./components/SessionHistoryDialog', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
 vi.mock('./components/ImagePreviewOverlay', () => ({ default: () => null }))
@@ -158,11 +179,17 @@ const transfer = (files: File[], text = '') => ({
   types: ['Files', 'text/plain'],
   getData: (key: string) => (key === 'text/plain' ? text : '')
 })
-const directoryTransfer = (count: number, trailing = 0, duplicatePath = false, oversizedIndex = -1) => {
+const directoryTransfer = (
+  count: number,
+  trailing = 0,
+  duplicatePath = false,
+  oversizedIndex = -1
+) => {
   const fileCallback = vi.fn()
   const files = Array.from({ length: count }, (_, i) => {
     const file = new File(['x'], `${i}.png`, { type: i === 0 ? 'text/plain' : 'image/png' })
-    if (i === oversizedIndex) Object.defineProperty(file, 'size', { value: Number.MAX_SAFE_INTEGER })
+    if (i === oversizedIndex)
+      Object.defineProperty(file, 'size', { value: Number.MAX_SAFE_INTEGER })
     return {
       name: file.name,
       fullPath: duplicatePath ? '/root/nested/shared.png' : `/root/nested/${file.name}`,
@@ -236,7 +263,9 @@ beforeEach(() => {
   f.config = structuredClone(DEFAULT_CONFIG)
   f.editImport = null
   f.materialize.mockImplementation(async (attachment: ChatAttachment) => {
-    const actual = await vi.importActual<typeof import('@renderer/utils/droppedImageUtils')>('@renderer/utils/droppedImageUtils')
+    const actual = await vi.importActual<typeof import('@renderer/utils/droppedImageUtils')>(
+      '@renderer/utils/droppedImageUtils'
+    )
     return actual.materializeInternalImageDragAttachment(attachment)
   })
   f.blob.mockReturnValue('blob:test')
@@ -277,33 +306,70 @@ afterEach(async () => {
   localStorage.clear()
 })
 describe('internal drop synthetic rejection and stale session', () => {
-  it.each([false, true])('does not fall through to plain text after a thrown materializer edit=%s', async edit => {
-    f.materialize.mockRejectedValue(new Error('synthetic failure'))
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    await setup()
-    if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const before = screen.getByTestId('attachments').textContent
-    const payload = JSON.stringify({ attachments: [{ type: 'image', url: 'local-media://first', fileName: 'first.png' }], textContent: 'internal text' })
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: { files: [], items: [], types: ['application/x-qapp-image', 'text/plain'], getData: (key: string) => key === 'application/x-qapp-image' ? payload : key === 'text/plain' ? 'fallback text' : '' } })
-    await waitFor(() => expect(f.notify).toHaveBeenCalled())
-    expect(f.materialize).toHaveBeenCalledOnce()
-    expect(f.editing).not.toHaveBeenCalled()
-    expect(screen.getByTestId('attachments').textContent).toBe(before)
-    expect(screen.getByTestId('input')).toHaveValue('keep')
-    expect(f.read).not.toHaveBeenCalled()
-  })
+  it.each([false, true])(
+    'does not fall through to plain text after a thrown materializer edit=%s',
+    async (edit) => {
+      f.materialize.mockRejectedValue(new Error('synthetic failure'))
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      await setup()
+      if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const before = screen.getByTestId('attachments').textContent
+      const payload = JSON.stringify({
+        attachments: [{ type: 'image', url: 'local-media://first', fileName: 'first.png' }],
+        textContent: 'internal text'
+      })
+      fireEvent.drop(screen.getByTestId('input'), {
+        dataTransfer: {
+          files: [],
+          items: [],
+          types: ['application/x-qapp-image', 'text/plain'],
+          getData: (key: string) =>
+            key === 'application/x-qapp-image'
+              ? payload
+              : key === 'text/plain'
+                ? 'fallback text'
+                : ''
+        }
+      })
+      await waitFor(() => expect(f.notify).toHaveBeenCalled())
+      expect(f.materialize).toHaveBeenCalledOnce()
+      expect(f.editing).not.toHaveBeenCalled()
+      expect(screen.getByTestId('attachments').textContent).toBe(before)
+      expect(screen.getByTestId('input')).toHaveValue('keep')
+      expect(f.read).not.toHaveBeenCalled()
+    }
+  )
 
   it('ignores a delayed materializer result after switching A to B', async () => {
     let release!: (value: ChatAttachment | null) => void
-    f.materialize.mockImplementation(() => new Promise(resolve => { release = resolve }))
+    f.materialize.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
     await setup()
-    const attachment: ChatAttachment = { type: 'image', url: 'local-media://first', fileName: 'first.png' }
+    const attachment: ChatAttachment = {
+      type: 'image',
+      url: 'local-media://first',
+      fileName: 'first.png'
+    }
     const payload = JSON.stringify({ attachments: [attachment], textContent: 'stale text' })
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: { files: [], items: [], types: ['application/x-qapp-image'], getData: (key: string) => key === 'application/x-qapp-image' ? payload : '' } })
+    fireEvent.drop(screen.getByTestId('input'), {
+      dataTransfer: {
+        files: [],
+        items: [],
+        types: ['application/x-qapp-image'],
+        getData: (key: string) => (key === 'application/x-qapp-image' ? payload : '')
+      }
+    })
     await waitFor(() => expect(f.materialize).toHaveBeenCalledOnce())
     fireEvent.click(screen.getByRole('button', { name: 'switch b' }))
     await waitFor(() => expect(screen.getByTestId('input')).toHaveValue('session b'))
-    await act(async () => { release(null); await Promise.resolve() })
+    await act(async () => {
+      release(null)
+      await Promise.resolve()
+    })
     expect(screen.getByTestId('input')).toHaveValue('session b')
     expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toEqual([])
     expect(f.notify).not.toHaveBeenCalled()
@@ -312,53 +378,99 @@ describe('internal drop synthetic rejection and stale session', () => {
 })
 
 describe('internal materialization sequential contract', () => {
-  const items: ChatAttachment[] = ['one', 'two', 'three'].map(name => ({ type: 'image', url: `local-media://${name}`, fileName: `${name}.png` }))
+  const items: ChatAttachment[] = ['one', 'two', 'three'].map((name) => ({
+    type: 'image',
+    url: `local-media://${name}`,
+    fileName: `${name}.png`
+  }))
   const dropItems = () => {
     const payload = JSON.stringify({ attachments: items, textContent: 'sequence text' })
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: { files: [], items: [], types: ['application/x-qapp-image'], getData: (key: string) => key === 'application/x-qapp-image' ? payload : '' } })
+    fireEvent.drop(screen.getByTestId('input'), {
+      dataTransfer: {
+        files: [],
+        items: [],
+        types: ['application/x-qapp-image'],
+        getData: (key: string) => (key === 'application/x-qapp-image' ? payload : '')
+      }
+    })
   }
-  it.each(['null', 'reject'] as const)('stops after second %s and rejects the batch', async failure => {
-    let first!: (value: ChatAttachment) => void
-    let second!: (value: ChatAttachment | null) => void
-    let rejectSecond!: (error: Error) => void
-    const firstGate = new Promise<ChatAttachment>(resolve => { first = resolve })
-    const secondGate = new Promise<ChatAttachment | null>((resolve, reject) => { second = resolve; rejectSecond = reject })
-    f.materialize.mockImplementation((item: ChatAttachment) => item.url === items[0].url ? firstGate : item.url === items[1].url ? secondGate : Promise.resolve(item))
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    await setup()
-    const before = screen.getByTestId('attachments').textContent
-    try {
-      dropItems()
-      await waitFor(() => expect(f.materialize).toHaveBeenCalled())
-      expect.soft(f.materialize).toHaveBeenCalledTimes(1)
-      await act(async () => { first(items[0]); await Promise.resolve() })
-      await waitFor(() => expect(f.materialize.mock.calls.length).toBeGreaterThanOrEqual(2))
-      expect.soft(f.materialize).toHaveBeenCalledTimes(2)
-      await act(async () => { if (failure === 'null') second(null); else rejectSecond(new Error('synthetic')); await Promise.resolve() })
-      await waitFor(() => expect(f.notify).toHaveBeenCalled())
-      expect.soft(f.materialize).toHaveBeenCalledTimes(2)
-      expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
-      expect.soft(screen.getByTestId('input')).toHaveValue('keep')
-      expect.soft(f.editing).not.toHaveBeenCalled()
-    } finally {
-      first(items[0]); second(null)
-      await act(async () => { await Promise.allSettled([firstGate, secondGate]) })
+  it.each(['null', 'reject'] as const)(
+    'stops after second %s and rejects the batch',
+    async (failure) => {
+      let first!: (value: ChatAttachment) => void
+      let second!: (value: ChatAttachment | null) => void
+      let rejectSecond!: (error: Error) => void
+      const firstGate = new Promise<ChatAttachment>((resolve) => {
+        first = resolve
+      })
+      const secondGate = new Promise<ChatAttachment | null>((resolve, reject) => {
+        second = resolve
+        rejectSecond = reject
+      })
+      f.materialize.mockImplementation((item: ChatAttachment) =>
+        item.url === items[0].url
+          ? firstGate
+          : item.url === items[1].url
+            ? secondGate
+            : Promise.resolve(item)
+      )
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      await setup()
+      const before = screen.getByTestId('attachments').textContent
+      try {
+        dropItems()
+        await waitFor(() => expect(f.materialize).toHaveBeenCalled())
+        expect.soft(f.materialize).toHaveBeenCalledTimes(1)
+        await act(async () => {
+          first(items[0])
+          await Promise.resolve()
+        })
+        await waitFor(() => expect(f.materialize.mock.calls.length).toBeGreaterThanOrEqual(2))
+        expect.soft(f.materialize).toHaveBeenCalledTimes(2)
+        await act(async () => {
+          if (failure === 'null') second(null)
+          else rejectSecond(new Error('synthetic'))
+          await Promise.resolve()
+        })
+        await waitFor(() => expect(f.notify).toHaveBeenCalled())
+        expect.soft(f.materialize).toHaveBeenCalledTimes(2)
+        expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
+        expect.soft(screen.getByTestId('input')).toHaveValue('keep')
+        expect.soft(f.editing).not.toHaveBeenCalled()
+      } finally {
+        first(items[0])
+        second(null)
+        await act(async () => {
+          await Promise.allSettled([firstGate, secondGate])
+        })
+      }
     }
-  })
+  )
   it('delivers all three in order and appends text once', async () => {
     f.materialize.mockImplementation(async (item: ChatAttachment) => item)
     await setup()
     dropItems()
     await waitFor(() => expect(screen.getByTestId('input')).toHaveValue('keep\n\nsequence text'))
-    expect(f.materialize.mock.calls.map(([item]) => item.url)).toEqual(items.map(item => item.url))
-    const attachments = JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
-    expect(attachments.map(item => item.url)).toEqual(['local-media://existing', ...items.map(item => item.url)])
+    expect(f.materialize.mock.calls.map(([item]) => item.url)).toEqual(
+      items.map((item) => item.url)
+    )
+    const attachments = JSON.parse(
+      screen.getByTestId('attachments').textContent || '[]'
+    ) as ChatAttachment[]
+    expect(attachments.map((item) => item.url)).toEqual([
+      'local-media://existing',
+      ...items.map((item) => item.url)
+    ])
     expect(f.notify).not.toHaveBeenCalled()
   })
   it('does not start later images after switching A to B while the first is pending', async () => {
     let first!: (value: ChatAttachment) => void
-    const gate = new Promise<ChatAttachment>(resolve => { first = resolve })
-    f.materialize.mockImplementation((item: ChatAttachment) => item.url === items[0].url ? gate : Promise.resolve(item))
+    const gate = new Promise<ChatAttachment>((resolve) => {
+      first = resolve
+    })
+    f.materialize.mockImplementation((item: ChatAttachment) =>
+      item.url === items[0].url ? gate : Promise.resolve(item)
+    )
     await setup()
     try {
       dropItems()
@@ -366,63 +478,106 @@ describe('internal materialization sequential contract', () => {
       expect.soft(f.materialize).toHaveBeenCalledTimes(1)
       fireEvent.click(screen.getByRole('button', { name: 'switch b' }))
       await waitFor(() => expect(screen.getByTestId('input')).toHaveValue('session b'))
-      await act(async () => { first(items[0]); await gate })
+      await act(async () => {
+        first(items[0])
+        await gate
+      })
       expect.soft(f.materialize).toHaveBeenCalledTimes(1)
       expect.soft(screen.getByTestId('input')).toHaveValue('session b')
       expect.soft(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toEqual([])
       expect.soft(f.notify).not.toHaveBeenCalled()
     } finally {
       first(items[0])
-      await act(async () => { await gate })
+      await act(async () => {
+        await gate
+      })
     }
   })
 })
 
 describe('internal materialization batch atomicity', () => {
-  it.each([false, true])('rejects a failed second image without partial delivery edit=%s', async (edit) => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404 })
-    vi.stubGlobal('fetch', fetchMock)
-    await setup()
-    if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const before = screen.getByTestId('attachments').textContent
-    const payload = JSON.stringify({ attachments: [
-      { type: 'image', url: 'local-media://first', fileName: 'first.png' },
-      { type: 'image', url: 'blob:missing', fileName: 'missing.png' }
-    ], textContent: 'dropped synthetic text' })
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: {
-      files: [], items: [], types: ['application/x-qapp-image'],
-      getData: (key: string) => key === 'application/x-qapp-image' ? payload : ''
-    } })
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    await waitFor(() => expect(f.notify.mock.calls.length > 0 || f.editing.mock.calls.length > 0 || (screen.getByTestId('input') as HTMLTextAreaElement).value !== 'keep' || screen.getByTestId('attachments').textContent !== before).toBe(true))
-    expect.soft(f.notify.mock.calls.length).toBeGreaterThan(0)
-    expect.soft(f.editing).not.toHaveBeenCalled()
-    expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
-    expect.soft(screen.getByTestId('input')).toHaveValue('keep')
-  })
-
-  it.each([false, true])('delivers two distinct local images in order with text edit=%s', async (edit) => {
-    await setup()
-    if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const payload = JSON.stringify({ attachments: [
-      { type: 'image', url: 'local-media://first', fileName: 'first.png' },
-      { type: 'image', url: 'local-media://second', fileName: 'second.png' }
-    ], textContent: 'dropped synthetic text' })
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: {
-      files: [], items: [], types: ['application/x-qapp-image'],
-      getData: (key: string) => key === 'application/x-qapp-image' ? payload : ''
-    } })
-    if (edit) {
-      await waitFor(() => expect(f.editing).toHaveBeenCalledTimes(2))
-      expect(f.editing.mock.calls.map(([item]) => item.url)).toEqual(['local-media://first', 'local-media://second'])
-      expect(screen.getByTestId('input')).toHaveValue('keep')
-    } else {
-      await waitFor(() => expect(screen.getByTestId('input')).toHaveValue('keep\n\ndropped synthetic text'))
-      const attachments = JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
-      expect(attachments.map(item => item.url)).toEqual(['local-media://existing', 'local-media://first', 'local-media://second'])
+  it.each([false, true])(
+    'rejects a failed second image without partial delivery edit=%s',
+    async (edit) => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404 })
+      vi.stubGlobal('fetch', fetchMock)
+      await setup()
+      if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const before = screen.getByTestId('attachments').textContent
+      const payload = JSON.stringify({
+        attachments: [
+          { type: 'image', url: 'local-media://first', fileName: 'first.png' },
+          { type: 'image', url: 'blob:missing', fileName: 'missing.png' }
+        ],
+        textContent: 'dropped synthetic text'
+      })
+      fireEvent.drop(screen.getByTestId('input'), {
+        dataTransfer: {
+          files: [],
+          items: [],
+          types: ['application/x-qapp-image'],
+          getData: (key: string) => (key === 'application/x-qapp-image' ? payload : '')
+        }
+      })
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+      await waitFor(() =>
+        expect(
+          f.notify.mock.calls.length > 0 ||
+            f.editing.mock.calls.length > 0 ||
+            (screen.getByTestId('input') as HTMLTextAreaElement).value !== 'keep' ||
+            screen.getByTestId('attachments').textContent !== before
+        ).toBe(true)
+      )
+      expect.soft(f.notify.mock.calls.length).toBeGreaterThan(0)
+      expect.soft(f.editing).not.toHaveBeenCalled()
+      expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
+      expect.soft(screen.getByTestId('input')).toHaveValue('keep')
     }
-    expect(f.notify).not.toHaveBeenCalled()
-  })
+  )
+
+  it.each([false, true])(
+    'delivers two distinct local images in order with text edit=%s',
+    async (edit) => {
+      await setup()
+      if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const payload = JSON.stringify({
+        attachments: [
+          { type: 'image', url: 'local-media://first', fileName: 'first.png' },
+          { type: 'image', url: 'local-media://second', fileName: 'second.png' }
+        ],
+        textContent: 'dropped synthetic text'
+      })
+      fireEvent.drop(screen.getByTestId('input'), {
+        dataTransfer: {
+          files: [],
+          items: [],
+          types: ['application/x-qapp-image'],
+          getData: (key: string) => (key === 'application/x-qapp-image' ? payload : '')
+        }
+      })
+      if (edit) {
+        await waitFor(() => expect(f.editing).toHaveBeenCalledTimes(2))
+        expect(f.editing.mock.calls.map(([item]) => item.url)).toEqual([
+          'local-media://first',
+          'local-media://second'
+        ])
+        expect(screen.getByTestId('input')).toHaveValue('keep')
+      } else {
+        await waitFor(() =>
+          expect(screen.getByTestId('input')).toHaveValue('keep\n\ndropped synthetic text')
+        )
+        const attachments = JSON.parse(
+          screen.getByTestId('attachments').textContent || '[]'
+        ) as ChatAttachment[]
+        expect(attachments.map((item) => item.url)).toEqual([
+          'local-media://existing',
+          'local-media://first',
+          'local-media://second'
+        ])
+      }
+      expect(f.notify).not.toHaveBeenCalled()
+    }
+  )
 })
 
 describe('edit-form native image import preparation', () => {
@@ -569,12 +724,16 @@ describe('native drop image count boundary', () => {
     const payload = JSON.stringify({ attachments: [same, same] })
     fireEvent.drop(screen.getByTestId('input'), {
       dataTransfer: {
-        files: [], items: [], types: ['application/x-qapp-image'],
-        getData: (key: string) => key === 'application/x-qapp-image' ? payload : ''
+        files: [],
+        items: [],
+        types: ['application/x-qapp-image'],
+        getData: (key: string) => (key === 'application/x-qapp-image' ? payload : '')
       }
     })
     await waitFor(() => {
-      const attachments = JSON.parse(screen.getByTestId('attachments').textContent || '[]') as ChatAttachment[]
+      const attachments = JSON.parse(
+        screen.getByTestId('attachments').textContent || '[]'
+      ) as ChatAttachment[]
       expect(attachments.filter((attachment) => attachment.url === same.url)).toHaveLength(2)
     })
     expect(f.notify).not.toHaveBeenCalled()
@@ -586,11 +745,16 @@ describe('native drop image count boundary', () => {
     vi.stubGlobal('fetch', fetchMock)
     const before = screen.getByTestId('attachments').textContent
     const same = { type: 'image', url: 'blob:repeated', fileName: 'repeated.png' }
-    const payload = JSON.stringify({ attachments: Array.from({ length: 51 }, () => same), textContent: 'should not append' })
+    const payload = JSON.stringify({
+      attachments: Array.from({ length: 51 }, () => same),
+      textContent: 'should not append'
+    })
     fireEvent.drop(screen.getByTestId('input'), {
       dataTransfer: {
-        files: [], items: [], types: ['application/x-qapp-image'],
-        getData: (key: string) => key === 'application/x-qapp-image' ? payload : ''
+        files: [],
+        items: [],
+        types: ['application/x-qapp-image'],
+        getData: (key: string) => (key === 'application/x-qapp-image' ? payload : '')
       }
     })
     await waitFor(() => expect(f.notify).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送'))
@@ -607,7 +771,9 @@ describe('native drop image count boundary', () => {
     await setup()
     fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
     const before = screen.getByTestId('attachments').textContent
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(images(51), 'file:///C:/test.png\nextra text') })
+    fireEvent.drop(screen.getByTestId('input'), {
+      dataTransfer: transfer(images(51), 'file:///C:/test.png\nextra text')
+    })
     await waitFor(() => expect(f.notify).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送'))
     expect(f.editing).not.toHaveBeenCalled()
     expect(f.blob).not.toHaveBeenCalled()
@@ -619,42 +785,64 @@ describe('native drop image count boundary', () => {
     expect(screen.getByTestId('input')).toHaveValue('keep')
   })
 
-  it.each([false, true])('rejects ambiguous repeated image paths without partial delivery (edit=%s)', async (edit) => {
-    await setup()
-    if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const before = screen.getByTestId('attachments').textContent
-    const drop = directoryTransfer(2, 0, true)
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
-    await waitFor(() => expect(f.notify.mock.calls.length > 0 || (edit ? f.editing.mock.calls.length : f.importBytes.mock.calls.length) > 0).toBe(true), { timeout: 5000 })
-    expect(f.notify).toHaveBeenCalledWith('Some selected images have conflicting paths. Drag them separately to avoid losing any.')
-    expect(f.editing).not.toHaveBeenCalled()
-    expect(f.blob).not.toHaveBeenCalled()
-    expect(f.imageCreated).not.toHaveBeenCalled()
-    expect(f.importBytes).not.toHaveBeenCalled()
-    expect(f.importFile).not.toHaveBeenCalled()
-    expect(screen.getByTestId('attachments').textContent).toBe(before)
-    expect(screen.getByTestId('input')).toHaveValue('keep')
-  })
+  it.each([false, true])(
+    'rejects ambiguous repeated image paths without partial delivery (edit=%s)',
+    async (edit) => {
+      await setup()
+      if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const before = screen.getByTestId('attachments').textContent
+      const drop = directoryTransfer(2, 0, true)
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
+      await waitFor(
+        () =>
+          expect(
+            f.notify.mock.calls.length > 0 ||
+              (edit ? f.editing.mock.calls.length : f.importBytes.mock.calls.length) > 0
+          ).toBe(true),
+        { timeout: 5000 }
+      )
+      expect(f.notify).toHaveBeenCalledWith(
+        'Some selected images have conflicting paths. Drag them separately to avoid losing any.'
+      )
+      expect(f.editing).not.toHaveBeenCalled()
+      expect(f.blob).not.toHaveBeenCalled()
+      expect(f.imageCreated).not.toHaveBeenCalled()
+      expect(f.importBytes).not.toHaveBeenCalled()
+      expect(f.importFile).not.toHaveBeenCalled()
+      expect(screen.getByTestId('attachments').textContent).toBe(before)
+      expect(screen.getByTestId('input')).toHaveValue('keep')
+    }
+  )
 
-  it.each([false, true])('rejects 51 same-path image occurrences before importing (edit=%s)', async (edit) => {
-    await setup()
-    if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const before = screen.getByTestId('attachments').textContent
-    const drop = directoryTransfer(51, 1, true)
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
-    // Both reject and the old first-path-only import provide a completion signal.
-    await waitFor(() => expect(f.notify.mock.calls.length > 0 || (edit ? f.editing.mock.calls.length : f.importBytes.mock.calls.length) > 0).toBe(true), { timeout: 5000 })
-    expect(f.notify).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
-    expect(drop.fileCallback).toHaveBeenCalledTimes(51)
-    expect(f.editing).not.toHaveBeenCalled()
-    expect(f.blob).not.toHaveBeenCalled()
-    expect(f.imageCreated).not.toHaveBeenCalled()
-    expect(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect(f.importBytes).not.toHaveBeenCalled()
-    expect(f.importFile).not.toHaveBeenCalled()
-    expect(screen.getByTestId('attachments').textContent).toBe(before)
-    expect(screen.getByTestId('input')).toHaveValue('keep')
-  })
+  it.each([false, true])(
+    'rejects 51 same-path image occurrences before importing (edit=%s)',
+    async (edit) => {
+      await setup()
+      if (edit) fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const before = screen.getByTestId('attachments').textContent
+      const drop = directoryTransfer(51, 1, true)
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
+      // Both reject and the old first-path-only import provide a completion signal.
+      await waitFor(
+        () =>
+          expect(
+            f.notify.mock.calls.length > 0 ||
+              (edit ? f.editing.mock.calls.length : f.importBytes.mock.calls.length) > 0
+          ).toBe(true),
+        { timeout: 5000 }
+      )
+      expect(f.notify).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
+      expect(drop.fileCallback).toHaveBeenCalledTimes(51)
+      expect(f.editing).not.toHaveBeenCalled()
+      expect(f.blob).not.toHaveBeenCalled()
+      expect(f.imageCreated).not.toHaveBeenCalled()
+      expect(f.fileReaderCreated).not.toHaveBeenCalled()
+      expect(f.importBytes).not.toHaveBeenCalled()
+      expect(f.importFile).not.toHaveBeenCalled()
+      expect(screen.getByTestId('attachments').textContent).toBe(before)
+      expect(screen.getByTestId('input')).toHaveValue('keep')
+    }
+  )
 
   it('rejects 51 directory image descriptors before materialization and preserves the draft', async () => {
     await setup()
@@ -772,7 +960,10 @@ describe('native drop image count boundary', () => {
     fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
     // Drain the old implementation as well, so failed regressions cannot keep
     // importing files into the next test's reset mocks.
-    await waitFor(() => expect(f.notify.mock.calls.length > 0 || f.editing.mock.calls.length === 51).toBe(true), { timeout: 10000 })
+    await waitFor(
+      () => expect(f.notify.mock.calls.length > 0 || f.editing.mock.calls.length === 51).toBe(true),
+      { timeout: 10000 }
+    )
     expect(f.notify).toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
     expect(f.editing).not.toHaveBeenCalled()
     expect(f.blob).not.toHaveBeenCalled()
@@ -796,7 +987,10 @@ describe('native drop image count boundary', () => {
     fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
     const drop = directoryTransfer(0, 4100)
     fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
-    await waitFor(() => expect(f.notify.mock.calls.length > 0 || f.noop.mock.calls.length > 0).toBe(true), { timeout: 10000 })
+    await waitFor(
+      () => expect(f.notify.mock.calls.length > 0 || f.noop.mock.calls.length > 0).toBe(true),
+      { timeout: 10000 }
+    )
     expect(f.notify).toHaveBeenCalledWith('目录内容过多，请分批拖入')
     expect(f.editing).not.toHaveBeenCalled()
     expect(f.importBytes).not.toHaveBeenCalled()
@@ -956,87 +1150,126 @@ describe('native drop image count boundary', () => {
     expect(f.notify).not.toHaveBeenCalledWith('本次图片数量超过限制，请分批发送')
   })
 
-  it.each(['ordinary', 'editing'] as const)('rejects oversized second native image before any reads (%s)', async (mode) => {
-    await setup()
-    if (mode === 'editing') fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const before = screen.getByTestId('attachments').textContent
-    const files = images(3)
-    Object.defineProperty(files[1], 'size', { value: Number.MAX_SAFE_INTEGER })
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(files) })
-    // The legacy per-file path also notifies; drain its outstanding imports.
-    await waitFor(() => expect(f.notify).toHaveBeenCalled(), { timeout: 5000 })
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)) })
-    expect.soft(f.blob).not.toHaveBeenCalled()
-    expect.soft(f.imageCreated).not.toHaveBeenCalled()
-    expect.soft(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect.soft(f.importBytes).not.toHaveBeenCalled()
-    expect.soft(f.importFile).not.toHaveBeenCalled()
-    expect.soft(f.editing).not.toHaveBeenCalled()
-    expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
-    expect(screen.getByTestId('input')).toHaveValue('keep')
-  })
+  it.each(['ordinary', 'editing'] as const)(
+    'rejects oversized second native image before any reads (%s)',
+    async (mode) => {
+      await setup()
+      if (mode === 'editing') fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const before = screen.getByTestId('attachments').textContent
+      const files = images(3)
+      Object.defineProperty(files[1], 'size', { value: Number.MAX_SAFE_INTEGER })
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(files) })
+      // The legacy per-file path also notifies; drain its outstanding imports.
+      await waitFor(() => expect(f.notify).toHaveBeenCalled(), { timeout: 5000 })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      })
+      expect.soft(f.blob).not.toHaveBeenCalled()
+      expect.soft(f.imageCreated).not.toHaveBeenCalled()
+      expect.soft(f.fileReaderCreated).not.toHaveBeenCalled()
+      expect.soft(f.importBytes).not.toHaveBeenCalled()
+      expect.soft(f.importFile).not.toHaveBeenCalled()
+      expect.soft(f.editing).not.toHaveBeenCalled()
+      expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
+      expect(screen.getByTestId('input')).toHaveValue('keep')
+    }
+  )
 
-  it.each(['ordinary', 'editing'] as const)('imports three valid native images in order (%s)', async (mode) => {
-    await setup()
-    if (mode === 'editing') fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const files = images(3)
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(files) })
-    await waitFor(() => {
-      if (mode === 'editing') expect(f.editing).toHaveBeenCalledTimes(3)
-      else expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(4)
-    }, { timeout: 5000 })
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
-    const actual: ChatAttachment[] = mode === 'editing'
-      ? f.editing.mock.calls.map(([attachment]) => attachment as ChatAttachment)
-      : JSON.parse(screen.getByTestId('attachments').textContent || '[]').slice(1)
-    expect(actual.map((attachment) => attachment.fileName)).toEqual(files.map((file) => file.name))
-    expect(f.notify).not.toHaveBeenCalled()
-    expect(screen.getByTestId('input')).toHaveValue('keep')
-  })
+  it.each(['ordinary', 'editing'] as const)(
+    'imports three valid native images in order (%s)',
+    async (mode) => {
+      await setup()
+      if (mode === 'editing') fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const files = images(3)
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: transfer(files) })
+      await waitFor(
+        () => {
+          if (mode === 'editing') expect(f.editing).toHaveBeenCalledTimes(3)
+          else
+            expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(
+              4
+            )
+        },
+        { timeout: 5000 }
+      )
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+      const actual: ChatAttachment[] =
+        mode === 'editing'
+          ? f.editing.mock.calls.map(([attachment]) => attachment as ChatAttachment)
+          : JSON.parse(screen.getByTestId('attachments').textContent || '[]').slice(1)
+      expect(actual.map((attachment) => attachment.fileName)).toEqual(
+        files.map((file) => file.name)
+      )
+      expect(f.notify).not.toHaveBeenCalled()
+      expect(screen.getByTestId('input')).toHaveValue('keep')
+    }
+  )
 
-  it.each(['ordinary', 'editing'] as const)('rejects oversized second directory image before reads (%s)', async (mode) => {
-    await setup()
-    if (mode === 'editing') fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const before = screen.getByTestId('attachments').textContent
-    const drop = directoryTransfer(3, 0, false, 1)
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
-    await waitFor(() => expect(f.notify).toHaveBeenCalled(), { timeout: 5000 })
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)) })
-    expect.soft(f.blob).not.toHaveBeenCalled()
-    expect.soft(f.imageCreated).not.toHaveBeenCalled()
-    expect.soft(f.fileReaderCreated).not.toHaveBeenCalled()
-    expect.soft(f.importBytes).not.toHaveBeenCalled()
-    expect.soft(f.importFile).not.toHaveBeenCalled()
-    expect.soft(f.editing).not.toHaveBeenCalled()
-    expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
-    expect(screen.getByTestId('input')).toHaveValue('keep')
-  })
+  it.each(['ordinary', 'editing'] as const)(
+    'rejects oversized second directory image before reads (%s)',
+    async (mode) => {
+      await setup()
+      if (mode === 'editing') fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const before = screen.getByTestId('attachments').textContent
+      const drop = directoryTransfer(3, 0, false, 1)
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
+      await waitFor(() => expect(f.notify).toHaveBeenCalled(), { timeout: 5000 })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      })
+      expect.soft(f.blob).not.toHaveBeenCalled()
+      expect.soft(f.imageCreated).not.toHaveBeenCalled()
+      expect.soft(f.fileReaderCreated).not.toHaveBeenCalled()
+      expect.soft(f.importBytes).not.toHaveBeenCalled()
+      expect.soft(f.importFile).not.toHaveBeenCalled()
+      expect.soft(f.editing).not.toHaveBeenCalled()
+      expect.soft(screen.getByTestId('attachments').textContent).toBe(before)
+      expect(screen.getByTestId('input')).toHaveValue('keep')
+    }
+  )
 
-  it.each(['ordinary', 'editing'] as const)('imports three small directory image-like files in order (%s)', async (mode) => {
-    await setup()
-    if (mode === 'editing') fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
-    const drop = directoryTransfer(3)
-    fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
-    await waitFor(() => {
-      if (mode === 'editing') expect(f.editing).toHaveBeenCalledTimes(3)
-      else expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(4)
-    }, { timeout: 5000 })
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
-    const actual: ChatAttachment[] = mode === 'editing'
-      ? f.editing.mock.calls.map(([attachment]) => attachment as ChatAttachment)
-      : JSON.parse(screen.getByTestId('attachments').textContent || '[]').slice(1)
-    expect(actual.map((attachment) => attachment.fileName)).toEqual(['0.png', '1.png', '2.png'])
-    // 0.png intentionally has text/plain MIME; retain the production classification.
-    expect(actual.map((attachment) => attachment.type)).toEqual(['file', 'image', 'image'])
-    expect(f.notify).not.toHaveBeenCalled()
-    expect(screen.getByTestId('input')).toHaveValue('keep')
-  })
+  it.each(['ordinary', 'editing'] as const)(
+    'imports three small directory image-like files in order (%s)',
+    async (mode) => {
+      await setup()
+      if (mode === 'editing') fireEvent.click(screen.getByRole('button', { name: 'edit fixture' }))
+      const drop = directoryTransfer(3)
+      fireEvent.drop(screen.getByTestId('input'), { dataTransfer: drop.dataTransfer })
+      await waitFor(
+        () => {
+          if (mode === 'editing') expect(f.editing).toHaveBeenCalledTimes(3)
+          else
+            expect(JSON.parse(screen.getByTestId('attachments').textContent || '[]')).toHaveLength(
+              4
+            )
+        },
+        { timeout: 5000 }
+      )
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+      const actual: ChatAttachment[] =
+        mode === 'editing'
+          ? f.editing.mock.calls.map(([attachment]) => attachment as ChatAttachment)
+          : JSON.parse(screen.getByTestId('attachments').textContent || '[]').slice(1)
+      expect(actual.map((attachment) => attachment.fileName)).toEqual(['0.png', '1.png', '2.png'])
+      // 0.png intentionally has text/plain MIME; retain the production classification.
+      expect(actual.map((attachment) => attachment.type)).toEqual(['file', 'image', 'image'])
+      expect(f.notify).not.toHaveBeenCalled()
+      expect(screen.getByTestId('input')).toHaveValue('keep')
+    }
+  )
 })
 
 describe('a picked file on a stalled mount', () => {
   const originalElectronFile = window.electronFile
   afterEach(() => {
-    Object.defineProperty(window, 'electronFile', { configurable: true, value: originalElectronFile })
+    Object.defineProperty(window, 'electronFile', {
+      configurable: true,
+      value: originalElectronFile
+    })
   })
 
   it('takes the size from the managed copy when the header read of a slow source gives up', async () => {

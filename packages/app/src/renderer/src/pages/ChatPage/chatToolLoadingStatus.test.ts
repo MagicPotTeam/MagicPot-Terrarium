@@ -1,10 +1,12 @@
 import type { TFunction } from 'i18next'
 import { describe, expect, it } from 'vitest'
 import type { LLMToolStatus } from '@shared/llm/types'
+import { localeTranslator } from '../../testUtils/localeTranslator'
 import { getChatToolLoadingStatus } from './chatToolLoadingStatus'
 
-const t = ((_key: string, options: { defaultValue: string }) =>
-  options.defaultValue) as unknown as TFunction
+const zh = localeTranslator('zh-CN')
+const t = ((key: string, options?: { defaultValue?: string }) =>
+  options?.defaultValue ?? zh(key)) as unknown as TFunction
 const event = (toolName: string, status: LLMToolStatus['status'] = 'running'): LLMToolStatus => ({
   runId: 'run',
   toolCallId: 'call',

@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import '../../testUtils/globalLocale'
+import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import type { ChatAttachment, ChatMessage } from '@shared/llm'
@@ -37,7 +39,8 @@ const fixture = vi.hoisted(() => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: 'zh-CN', resolvedLanguage: 'zh-CN' },
-    t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue || key
+    t: (key: string, options?: { defaultValue?: string }) =>
+      options?.defaultValue || zhLocaleText(key)
   })
 }))
 vi.mock('@renderer/hooks/useConfig', () => ({
@@ -272,7 +275,11 @@ const mountPage = async (currentId: string, options: PageOptions = {}) => {
   await wait(260)
   return view
 }
-const renderPage = async (sessions: ChatSession[], currentId = sessions[0].id, options: PageOptions = {}) => {
+const renderPage = async (
+  sessions: ChatSession[],
+  currentId = sessions[0].id,
+  options: PageOptions = {}
+) => {
   fixture.sessions = structuredClone(sessions)
   return mountPage(currentId, options)
 }
@@ -416,17 +423,22 @@ describe('ChatPage queued sends kept with the draft', () => {
     // removes the item from the stored queue has not landed. The stored record keeps the stale queue.
     const staleDraft = structuredClone(storedSession('accepted')!.draft!)
     fixture.beforeStore = (record) => {
-      if (userTexts(record.messages).includes('accepted item')) record.draft = structuredClone(staleDraft)
+      if (userTexts(record.messages).includes('accepted item'))
+        record.draft = structuredClone(staleDraft)
     }
     const second = pendingReply()
     fixture.request.mockImplementationOnce(second.run)
     await act(async () => first.reply.resolve({ content: 'first reply' }))
     await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(queueItems()).toHaveLength(0))
-    await waitFor(() => expect(userTexts(storedSession('accepted')?.messages)).toContain('accepted item'))
+    await waitFor(() =>
+      expect(userTexts(storedSession('accepted')?.messages)).toContain('accepted item')
+    )
     await wait(700)
     // The stored record still lists the accepted item; the backup does not.
-    expect(storedSession('accepted')?.draft?.queuedSends?.map((item) => item.content)).toEqual(['accepted item'])
+    expect(storedSession('accepted')?.draft?.queuedSends?.map((item) => item.content)).toEqual([
+      'accepted item'
+    ])
     expect(JSON.parse(localStorage.getItem(backupKey('accepted')) || '{}').queuedSends).toEqual([])
 
     view.unmount()
@@ -440,10 +452,14 @@ describe('ChatPage queued sends kept with the draft', () => {
 
   it('leaves no queue behind for a deleted session', async () => {
     // The delete request is the compact column's event.
-    const view = await renderPage([session('deleted'), session('kept')], 'deleted', { compact: true })
+    const view = await renderPage([session('deleted'), session('kept')], 'deleted', {
+      compact: true
+    })
     await queueTwoBehindRunningReply()
     await waitFor(() => expect(storedSession('deleted')?.draft?.queuedSends).toHaveLength(2))
-    expect(JSON.parse(localStorage.getItem(backupKey('deleted')) || '{}').queuedSends).toHaveLength(2)
+    expect(JSON.parse(localStorage.getItem(backupKey('deleted')) || '{}').queuedSends).toHaveLength(
+      2
+    )
 
     await act(async () => {
       window.dispatchEvent(
@@ -480,7 +496,12 @@ describe('ChatPage queued sends kept with the draft', () => {
               content: 'stored with images',
               queuedAt: 1,
               attachments: [
-                { type: 'image', url: 'blob:file:///gone', fileName: 'gone.png', mimeType: 'image/png' },
+                {
+                  type: 'image',
+                  url: 'blob:file:///gone',
+                  fileName: 'gone.png',
+                  mimeType: 'image/png'
+                },
                 { type: 'image', url: largeInline, fileName: 'large.png', mimeType: 'image/png' }
               ]
             }
@@ -494,7 +515,9 @@ describe('ChatPage queued sends kept with the draft', () => {
     expect(queueItems()[0]).toHaveTextContent('2')
     // The stored copies are healed to the unavailable form: no blob URL, no large inline image.
     await waitFor(() =>
-      expect(JSON.parse(localStorage.getItem(backupKey('unavailable')) || '{}').queuedSends).toHaveLength(1)
+      expect(
+        JSON.parse(localStorage.getItem(backupKey('unavailable')) || '{}').queuedSends
+      ).toHaveLength(1)
     )
     const backupText = localStorage.getItem(backupKey('unavailable')) || ''
     expect(backupText).not.toContain('blob:')
@@ -582,7 +605,9 @@ describe('ChatPage queued sends kept with the draft', () => {
     fireEvent.click(within(queueItems()[0]).getByRole('button', { name: 'chat.queue_edit' }))
     fireEvent.click(screen.getByTestId('composer-send'))
     // The refusal is the team-authority check for an archived member, not an unrelated warning.
-    await waitFor(() => expect(fixture.notifyWarning).toHaveBeenCalledWith('Team lead unavailable.'))
+    await waitFor(() =>
+      expect(fixture.notifyWarning).toHaveBeenCalledWith('Team lead unavailable.')
+    )
     await wait(200)
     expect(fixture.request).not.toHaveBeenCalled()
   })
@@ -601,11 +626,18 @@ describe('ChatPage queued sends kept with the draft', () => {
     const quotaError = () => new DOMException('full', 'QuotaExceededError')
     const setItem = Storage.prototype.setItem
     const removeItem = Storage.prototype.removeItem
-    const setSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+    const setSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string
+    ) {
       if (key === backupKey(id)) throw quotaError()
       return setItem.call(this, key, value)
     })
-    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (this: Storage, key: string) {
+    const removeSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (
+      this: Storage,
+      key: string
+    ) {
       if (failRemove && key === backupKey(id)) throw quotaError()
       return removeItem.call(this, key)
     })
@@ -622,7 +654,9 @@ describe('ChatPage queued sends kept with the draft', () => {
   it('does not restore an accepted item when the backup write that removes it fails', async () => {
     const view = await acceptWhileBackupWritesFail('quota', false)
     // The stale queue left the backup even though the backup could not be rewritten.
-    expect(JSON.parse(localStorage.getItem(backupKey('quota')) || '{}').queuedSends ?? []).toEqual([])
+    expect(JSON.parse(localStorage.getItem(backupKey('quota')) || '{}').queuedSends ?? []).toEqual(
+      []
+    )
 
     view.unmount()
     fixture.request.mockClear()
@@ -637,7 +671,9 @@ describe('ChatPage queued sends kept with the draft', () => {
     const view = await acceptWhileBackupWritesFail('stuck', true)
     // The backup still lists the accepted item; the session record holds the newer removal marker.
     const backup = JSON.parse(localStorage.getItem(backupKey('stuck')) || '{}')
-    expect(backup.queuedSends?.map((item: { content: string }) => item.content)).toEqual(['accepted item'])
+    expect(backup.queuedSends?.map((item: { content: string }) => item.content)).toEqual([
+      'accepted item'
+    ])
     const stored = storedSession('stuck')?.draft
     expect(stored?.queuedSends).toEqual([])
     expect(stored?.queuedSendsUpdatedAt).toBeGreaterThan(backup.queuedSendsUpdatedAt)
@@ -687,12 +723,19 @@ describe('ChatPage queued sends kept with the draft', () => {
         })
       )
     })
-    await waitFor(() => expect(screen.getByTestId('composer-input')).toHaveValue('with canvas context'))
+    await waitFor(() =>
+      expect(screen.getByTestId('composer-input')).toHaveValue('with canvas context')
+    )
     fireEvent.click(screen.getByTestId('composer-send'))
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent('send-to-agent', {
-          detail: { targetScope: scope, autoSend: true, text: 'internal auto-send', requestId: 'auto-1' }
+          detail: {
+            targetScope: scope,
+            autoSend: true,
+            text: 'internal auto-send',
+            requestId: 'auto-1'
+          }
         })
       )
     })
@@ -705,7 +748,10 @@ describe('ChatPage queued sends kept with the draft', () => {
       expect(Object.keys(record[0]).sort()).toEqual(
         ['content', 'id', 'originalComposerHiddenContext', 'queuedAt'].sort()
       )
-      expect(record[0]).toMatchObject({ content: 'with canvas context', originalComposerHiddenContext: 'CANVAS HIDDEN' })
+      expect(record[0]).toMatchObject({
+        content: 'with canvas context',
+        originalComposerHiddenContext: 'CANVAS HIDDEN'
+      })
       const text = JSON.stringify(record)
       expect(text).not.toContain('internal auto-send')
       expect(text).not.toContain('targetSessionId')
@@ -717,14 +763,20 @@ describe('ChatPage queued sends kept with the draft', () => {
 })
 
 describe('ChatPage restored queue edited in the Agent column (S5c)', () => {
-  const statuses = () => screen.queryAllByTestId('chat-queue-status').map((item) => item.textContent)
+  const statuses = () =>
+    screen.queryAllByTestId('chat-queue-status').map((item) => item.textContent)
   const requestedTexts = () =>
-    fixture.request.mock.calls.map((call) =>
-      (call[0] as { messages: ChatMessage[] }).messages.filter((message) => message.role === 'user').at(-1)?.content
+    fixture.request.mock.calls.map(
+      (call) =>
+        (call[0] as { messages: ChatMessage[] }).messages
+          .filter((message) => message.role === 'user')
+          .at(-1)?.content
     )
   const saveRowEdit = (row: HTMLElement, text: string) => {
     fireEvent.click(within(row).getByRole('button', { name: 'chat.queue_edit' }))
-    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: text } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      target: { value: text }
+    })
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
   }
 
@@ -743,11 +795,16 @@ describe('ChatPage restored queue edited in the Agent column (S5c)', () => {
     await wait(300)
     expect(fixture.request).not.toHaveBeenCalled()
     expect(statuses()).toEqual(['chat.queue_status_held', 'chat.queue_status_held'])
-    expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual(['queued one', 'queued two edited'])
+    expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual([
+      'queued one',
+      'queued two edited'
+    ])
     expect(userTexts(currentSession().messages)).toEqual(['running reply'])
     // The stored queue keeps both items under their own ids, with the edited text.
     await waitFor(() =>
-      expect(storedSession('restored-order')?.draft?.queuedSends?.map((item) => [item.id, item.content])).toEqual([
+      expect(
+        storedSession('restored-order')?.draft?.queuedSends?.map((item) => [item.id, item.content])
+      ).toEqual([
         [storedIds[0], 'queued one'],
         [storedIds[1], 'queued two edited']
       ])
@@ -779,7 +836,14 @@ describe('ChatPage restored queue edited in the Agent column (S5c)', () => {
                 id: 'stored-image-item',
                 content: 'look at this',
                 queuedAt: 1,
-                attachments: [{ type: 'image', url: 'blob:file:///gone', fileName: 'gone.png', mimeType: 'image/png' }]
+                attachments: [
+                  {
+                    type: 'image',
+                    url: 'blob:file:///gone',
+                    fileName: 'gone.png',
+                    mimeType: 'image/png'
+                  }
+                ]
               }
             ]
           }
@@ -791,18 +855,26 @@ describe('ChatPage restored queue edited in the Agent column (S5c)', () => {
     await waitFor(() => expect(queueItems()).toHaveLength(1))
     fireEvent.click(within(queueItems()[0]).getByRole('button', { name: 'chat.queue_edit' }))
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
-    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent('chat.queue_edit_drop_unavailable')
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent(
+      'chat.queue_edit_drop_unavailable'
+    )
     await wait(200)
     expect(fixture.request).not.toHaveBeenCalled()
     // Changing the text asks again.
-    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: 'look at this, no image' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      target: { value: 'look at this, no image' }
+    })
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
-    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent('chat.queue_edit_drop_unavailable')
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent(
+      'chat.queue_edit_drop_unavailable'
+    )
     await wait(200)
     expect(fixture.request).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
     await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(1))
-    const sent = (fixture.request.mock.calls[0][0] as { messages: ChatMessage[] }).messages.filter((message) => message.role === 'user').at(-1)
+    const sent = (fixture.request.mock.calls[0][0] as { messages: ChatMessage[] }).messages
+      .filter((message) => message.role === 'user')
+      .at(-1)
     expect(sent?.content).toBe('look at this, no image')
     expect(sent?.attachments ?? []).toEqual([])
     await waitFor(() => expect(queueItems()).toHaveLength(0))
@@ -823,7 +895,14 @@ describe('ChatPage restored queue edited in the Agent column (S5c)', () => {
                 id: 'stored-image-only',
                 content: '',
                 queuedAt: 1,
-                attachments: [{ type: 'image', url: 'blob:file:///gone', fileName: 'gone.png', mimeType: 'image/png' }]
+                attachments: [
+                  {
+                    type: 'image',
+                    url: 'blob:file:///gone',
+                    fileName: 'gone.png',
+                    mimeType: 'image/png'
+                  }
+                ]
               }
             ]
           }
@@ -850,14 +929,23 @@ describe('ChatPage queued edit refusals in the Agent column (S5c)', () => {
     pendingHiddenContext: '',
     updatedAt: 0,
     queuedSendsUpdatedAt: 5,
-    queuedSends: [{ id: `stored-${content.length}`, content, queuedAt: 1, ...(attachments ? { attachments } : {}) }]
+    queuedSends: [
+      {
+        id: `stored-${content.length}`,
+        content,
+        queuedAt: 1,
+        ...(attachments ? { attachments } : {})
+      }
+    ]
   })
   /** Opens the restored item's editor, saves `text`, and returns the refusal line (the item is never sent). */
   const saveRefused = async (text?: string) => {
     await waitFor(() => expect(queueItems()).toHaveLength(1))
     fireEvent.click(within(queueItems()[0]).getByRole('button', { name: 'chat.queue_edit' }))
     if (text !== undefined) {
-      fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: text } })
+      fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+        target: { value: text }
+      })
     }
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
     const error = screen.getByTestId('chat-queue-edit-error').textContent
@@ -868,51 +956,92 @@ describe('ChatPage queued edit refusals in the Agent column (S5c)', () => {
     return error
   }
   const team = (lead: Partial<ChatSession>, member: Partial<ChatSession>) => [
-    session('lead', { teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }, ...lead }),
-    session('member', { teamLeadId: 'lead', teamMemberName: 'Bob', teamRole: 'writer', teamMemberGeneration: 0, ...member })
+    session('lead', {
+      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false },
+      ...lead
+    }),
+    session('member', {
+      teamLeadId: 'lead',
+      teamMemberName: 'Bob',
+      teamRole: 'writer',
+      teamMemberGeneration: 0,
+      ...member
+    })
   ]
 
   it('refuses an archived conversation', async () => {
-    await renderPage([session('archived', { archived: true, draft: draftWith('archived text') })], 'archived', { compact: true })
+    await renderPage(
+      [session('archived', { archived: true, draft: draftWith('archived text') })],
+      'archived',
+      { compact: true }
+    )
     expect(await saveRefused()).toBe('chat.queue_edit_unavailable')
   })
 
   it('refuses a conversation deleted in another window (tombstone)', async () => {
-    await renderPage([session('tombstoned', { draft: draftWith('tombstoned text') })], 'tombstoned', { compact: true })
+    await renderPage(
+      [session('tombstoned', { draft: draftWith('tombstoned text') })],
+      'tombstoned',
+      { compact: true }
+    )
     await waitFor(() => expect(queueItems()).toHaveLength(1))
-    localStorage.setItem(`magicpot-chat-delete-tombstone:${encodeURIComponent(scope)}:tombstoned`, JSON.stringify({ sessionId: 'tombstoned' }))
+    localStorage.setItem(
+      `magicpot-chat-delete-tombstone:${encodeURIComponent(scope)}:tombstoned`,
+      JSON.stringify({ sessionId: 'tombstoned' })
+    )
     expect(await saveRefused()).toBe('chat.queue_edit_unavailable')
   })
 
   it('refuses a member whose lead is archived', async () => {
-    await renderPage(team({ archived: true }, { draft: draftWith('member text') }), 'member', { compact: true, withRoute: true })
+    await renderPage(team({ archived: true }, { draft: draftWith('member text') }), 'member', {
+      compact: true,
+      withRoute: true
+    })
     expect(await saveRefused()).toBe('chat.queue_edit_unavailable')
   })
 
   it('refuses a member of an ended team', async () => {
-    await renderPage(team({ teamEnded: true, teamGeneration: 1 }, { draft: draftWith('member text') }), 'member', { compact: true, withRoute: true })
+    await renderPage(
+      team({ teamEnded: true, teamGeneration: 1 }, { draft: draftWith('member text') }),
+      'member',
+      { compact: true, withRoute: true }
+    )
     expect(await saveRefused()).toBe('chat.queue_edit_unavailable')
   })
 
   it('refuses a member while a remote model serves the team', async () => {
     fixture.config!.use_remote_llm = true
-    await renderPage(team({}, { draft: draftWith('member text') }), 'member', { compact: true, withRoute: true })
+    await renderPage(team({}, { draft: draftWith('member text') }), 'member', {
+      compact: true,
+      withRoute: true
+    })
     expect(await saveRefused()).toBe('chat.queue_edit_unavailable')
   })
 
   it('refuses an "@member" request on a lead with members, and a command', async () => {
-    await renderPage(team({ draft: draftWith('lead text') }, {}), 'lead', { compact: true, withRoute: true })
+    await renderPage(team({ draft: draftWith('lead text') }, {}), 'lead', {
+      compact: true,
+      withRoute: true
+    })
     expect(await saveRefused('@Bob please draw')).toBe('chat.queue_edit_plain_only')
-    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: '/status' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      target: { value: '/status' }
+    })
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
-    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent('chat.queue_edit_plain_only')
+    expect(screen.getByTestId('chat-queue-edit-error')).toHaveTextContent(
+      'chat.queue_edit_plain_only'
+    )
   })
 
   it('lets "@" text through on a conversation without members', async () => {
-    await renderPage([session('solo', { draft: draftWith('solo text') })], 'solo', { compact: true })
+    await renderPage([session('solo', { draft: draftWith('solo text') })], 'solo', {
+      compact: true
+    })
     await waitFor(() => expect(queueItems()).toHaveLength(1))
     fireEvent.click(within(queueItems()[0]).getByRole('button', { name: 'chat.queue_edit' }))
-    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: '@home is fine' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      target: { value: '@home is fine' }
+    })
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
     await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(1))
   })
@@ -924,7 +1053,11 @@ describe('ChatPage queued edit refusals in the Agent column (S5c)', () => {
       fileName: `${index}.png`,
       mimeType: 'image/png'
     }))
-    await renderPage([session('many-images', { draft: draftWith('many images', images) })], 'many-images', { compact: true })
+    await renderPage(
+      [session('many-images', { draft: draftWith('many images', images) })],
+      'many-images',
+      { compact: true }
+    )
     expect(await saveRefused()).toBe('本次图片数量超过限制，请分批发送')
   })
 })
@@ -936,16 +1069,22 @@ describe('ChatPage queued item identity across an in-place save (S5c)', () => {
     await waitFor(() => expect(storedSession('identity')?.draft?.queuedSends).toHaveLength(2))
     const ids = storedSession('identity')!.draft!.queuedSends!.map((item) => item.id)
     fireEvent.click(within(queueItems()[1]).getByRole('button', { name: 'chat.queue_edit' }))
-    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), { target: { value: 'queued two edited' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'chat.queue_edit_field' }), {
+      target: { value: 'queued two edited' }
+    })
     fireEvent.click(screen.getByRole('button', { name: 'chat.queue_save' }))
     await waitFor(() =>
-      expect(storedSession('identity')?.draft?.queuedSends?.map((item) => [item.id, item.content])).toEqual([
+      expect(
+        storedSession('identity')?.draft?.queuedSends?.map((item) => [item.id, item.content])
+      ).toEqual([
         [ids[0], 'queued one'],
         [ids[1], 'queued two edited']
       ])
     )
     const backup = JSON.parse(localStorage.getItem(backupKey('identity')) || '{}')
-    expect(backup.queuedSends.map((item: { id: string; content: string }) => [item.id, item.content])).toEqual([
+    expect(
+      backup.queuedSends.map((item: { id: string; content: string }) => [item.id, item.content])
+    ).toEqual([
       [ids[0], 'queued one'],
       [ids[1], 'queued two edited']
     ])
@@ -954,7 +1093,10 @@ describe('ChatPage queued item identity across an in-place save (S5c)', () => {
     await mountPage('identity', { compact: true })
     await waitFor(() => expect(queueItems()).toHaveLength(2))
     await wait(300)
-    expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual(['queued one', 'queued two edited'])
+    expect(screen.getAllByTestId('chat-queue-text').map((item) => item.textContent)).toEqual([
+      'queued one',
+      'queued two edited'
+    ])
     expect(fixture.request).not.toHaveBeenCalled()
   })
 })
@@ -982,8 +1124,12 @@ describe('ChatPage full-page Edit of a Stop-paused head (S5c)', () => {
     expect(fixture.request).toHaveBeenCalledTimes(2)
     fireEvent.click(screen.getByTestId('composer-send'))
     await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(4))
-    const sent = fixture.request.mock.calls.map((call) =>
-      (call[0] as { messages: ChatMessage[] }).messages.filter((message) => message.role === 'user').at(-1)?.content)
+    const sent = fixture.request.mock.calls.map(
+      (call) =>
+        (call[0] as { messages: ChatMessage[] }).messages
+          .filter((message) => message.role === 'user')
+          .at(-1)?.content
+    )
     expect(sent).toEqual(['running reply', 'N newer', 'A head', 'B behind'])
   })
 })
