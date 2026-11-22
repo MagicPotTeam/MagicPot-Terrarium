@@ -80,6 +80,8 @@ export interface ChatMessage {
   modelName?: string
   /** Local display state; never add transport diagnostics to assistant prose. */
   responseInterrupted?: boolean
+  /** See ChatMessage.runState in svcLLMProxy: set while the reply is being written. */
+  runState?: 'streaming'
   /** Structured tool-loop records persisted separately from visible assistant prose. */
   toolHistory?: ToolHistoryEntry[]
 }

@@ -143,6 +143,12 @@ export type ChatMessage = {
   modelName?: string
   /** Renderer display metadata, separate from the text sent to the model. */
   responseInterrupted?: boolean
+  /**
+   * 'streaming' while the reply is being written (set on the placeholder, dropped by every
+   * ending, which writes a new message). Still set when not live: the run was cut off by a
+   * reload, a crash or quitting. Absent: finished, or stored before this field existed.
+   */
+  runState?: 'streaming'
   /** Structured tool-loop records persisted with assistant messages. */
   toolHistory?: ToolHistoryEntry[]
 }
@@ -576,9 +582,7 @@ export type LLMProxySvc = {
   readAgentProcess(req: AgentProcessReadReq): Promise<AgentProcessReadResult>
   stopAgentProcess(req: AgentProcessJobReq): Promise<{ job: AgentProcessJob }>
   listAgentJobs(req: AgentThreadInteractionScope): Promise<{ jobs: AgentThreadJob[] }>
-  readAgentJob(
-    req: AgentThreadJobReadReq
-  ): Promise<{
+  readAgentJob(req: AgentThreadJobReadReq): Promise<{
     job: AgentThreadJob
     text: string
     nextOffset: number

@@ -3106,7 +3106,9 @@ const AssistantMessageBubble: React.FC<{
           </Typography>
         )}
         {!isLoading &&
-          message.responseInterrupted &&
+          // Cut off: the stream broke, or the run ended by a reload, a crash or quitting while
+          // the reply was being written (only the exact 'streaming' value counts).
+          (message.responseInterrupted || message.runState === 'streaming') &&
           Boolean(
             message.toolHistory?.length || (message.content !== undefined && message.content !== '')
           ) && (

@@ -200,6 +200,7 @@ import {
   filterVisibleSessions,
   mergeLoadedSessionsWithLocal,
   removeTrailingEmptyAssistantMessage,
+  settleStoppedAssistantMessage,
   replaceLastMessageInSession,
   replaceLastMessageWithMessagesInSession,
   normalizeRestoredSkillSelection,
@@ -2705,6 +2706,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   const terminateSession = useCallback(
     (sessionId: string, options?: { dropQueued?: boolean; pauseUserSends?: boolean }) => {
+      // Read before anything below ends the run: only a live run's reply is the one this Stop
+      // ends (in a send's preflight the last assistant message is an older reply).
+      const runWasLive = loadingSessionIdsRef.current.has(sessionId)
       // The queue is settled first: every lease token is gone before the abort below and before
       // clearLoadingSessionTracking schedules its drain, so neither can lease the next item.
       // - Explicit session/scope termination (dropQueued) drops everything queued behind the run.
@@ -2774,7 +2778,13 @@ const ChatPage: React.FC<ChatPageProps> = ({
       contextCompactAbortControllersRef.current.delete(sessionId)
       compactingSessionIdsRef.current.delete(sessionId)
       clearLoadingSessionTracking(sessionId, false, activeRunIdBySessionRef.current.get(sessionId))
-      setSessions((prev) => removeTrailingEmptyAssistantMessage(prev, sessionId))
+      // In the same update that ends loading: a reply the user stopped never shows as cut off,
+      // not even for one render (its cancelled-partial message is written later, by the send).
+      setSessions((prev) =>
+        runWasLive
+          ? settleStoppedAssistantMessage(prev, sessionId)
+          : removeTrailingEmptyAssistantMessage(prev, sessionId)
+      )
       emitPreviewRefresh('preview-only')
       window.dispatchEvent(
         new CustomEvent('chat:session-terminated', {

@@ -257,6 +257,71 @@ describe('ChatMessageList inline tool calls', () => {
     fireEvent.click(call)
     expect(screen.getByText('PAGE_RESULT')).toBeInTheDocument()
   })
+
+  it.each([false, true])(
+    'marks a reply cut off while it was being written, once, after its content (column %s)',
+    (columnStyle) => {
+      const toolRow = {
+        runId: 'run',
+        toolCallId: 'call',
+        toolName: 'web_fetch',
+        args: { url: 'https://example.com' },
+        status: 'completed' as const,
+        content: 'PAGE'
+      }
+      const cases: Array<{ message: ChatSession['messages'][number]; marked: number }> = [
+        { message: { role: 'assistant', content: 'partial', runState: 'streaming' }, marked: 1 },
+        {
+          message: {
+            role: 'assistant',
+            content: '',
+            runState: 'streaming',
+            toolHistory: [toolRow]
+          },
+          marked: 1
+        },
+        { message: { role: 'assistant', content: '', runState: 'streaming' }, marked: 1 },
+        // A legacy empty placeholder keeps its line; a finished reply has none.
+        { message: { role: 'assistant', content: '' }, marked: 1 },
+        { message: { role: 'assistant', content: 'done' }, marked: 0 },
+        // Only the exact value counts.
+        {
+          message: { role: 'assistant', content: 'done', runState: 'other' as never },
+          marked: 0
+        }
+      ]
+      for (const { message, marked } of cases) {
+        const view = renderChatMessageList(
+          {
+            id: 'cut',
+            title: 'Cut',
+            messages: [{ role: 'user', content: 'hi' }, message]
+          },
+          { columnStyle }
+        )
+        expect(screen.queryAllByText('chat.response_interrupted')).toHaveLength(marked)
+        view.unmount()
+      }
+    }
+  )
+
+  it('never marks the live reply, only an earlier one that was cut off', () => {
+    renderChatMessageList(
+      {
+        id: 'live',
+        title: 'Live',
+        messages: [
+          { role: 'user', content: 'one' },
+          { role: 'assistant', content: 'cut', runState: 'streaming' },
+          { role: 'user', content: 'two' },
+          { role: 'assistant', content: 'writing', runState: 'streaming' }
+        ]
+      },
+      { isLoading: true }
+    )
+    expect(screen.queryAllByText('chat.response_interrupted')).toHaveLength(1)
+    expect(screen.getByText('writing')).toBeInTheDocument()
+  })
 })
 
 describe('ChatMessageList context compression summary', () => {
