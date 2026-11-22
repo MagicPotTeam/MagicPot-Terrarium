@@ -1125,7 +1125,7 @@ async function primaryUrlMatches(record: RegistryRecord, primaryUrl: string): Pr
   if (!filePath) return false
   try {
     // The URL must name the file itself, not a link to it (only ancestors may be links,
-    // e.g. /var -> /private/var or a mapped drive): a link could be retargeted after
+    // e.g. macOS /var, a link into a system folder, or a mapped drive): a link could be retargeted after
     // verification.
     const stats = await fsp.lstat(filePath, { bigint: true })
     const real = stats.ino === 0n ? await canonicalPath(filePath) : ''

@@ -19,7 +19,8 @@ const png = (width = 50, height = 30): Buffer => {
   header.writeUInt32BE(height, 20)
   return header
 }
-const jpeg = (): Buffer => Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x08, 0x08, 0x00, 0x1e, 0x00, 0x32, 0x01])
+const jpeg = (): Buffer =>
+  Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x08, 0x08, 0x00, 0x1e, 0x00, 0x32, 0x01])
 function worker() {
   const child = new FakeChild()
   const spawn = vi.fn(() => child as unknown as ChildProcessWithoutNullStreams)
@@ -27,19 +28,42 @@ function worker() {
 }
 const basic = { binaryPath: 'C:\\safe\\image-worker.exe', source: new Uint8Array([1, 2, 3]) }
 // Host-specific absolute path: tests must also run on non-Windows CI.
-const input = { ...basic, binaryPath: process.platform === 'win32' ? basic.binaryPath : '/safe/image-worker' }
+const input = {
+  ...basic,
+  binaryPath: process.platform === 'win32' ? basic.binaryPath : '/safe/image-worker'
+}
 
 describe('chat image worker adapter', () => {
-  it.each([['png', png(), 'image/png'], ['jpeg', jpeg(), 'image/jpeg']] as const)('streams %s bytes without a shell or source path', async (_name, output, mimeType) => {
-    const { child, spawn } = worker()
-    const promise = runChatImageWorker({ ...input, targetBytes: 2000 }, spawn)
-    expect(spawn).toHaveBeenCalledWith(input.binaryPath, ['--chat-image', '--target-bytes', '2000', '--max-edge', '2000'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false })
-    expect(child.stdin.read()).toEqual(Buffer.from([1, 2, 3]))
-    child.stdout.write(output)
-    child.emit('close', 0)
-    await expect(promise).resolves.toMatchObject({ bytes: output, mimeType, width: 50, height: 30 })
-  })
-  it.each([Buffer.from('not an image'), png(2001, 1), png(0, 1), Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0xff, 0xff])])('rejects malformed, truncated or oversized encoded image', async (output) => {
+  it.each([
+    ['png', png(), 'image/png'],
+    ['jpeg', jpeg(), 'image/jpeg']
+  ] as const)(
+    'streams %s bytes without a shell or source path',
+    async (_name, output, mimeType) => {
+      const { child, spawn } = worker()
+      const promise = runChatImageWorker({ ...input, targetBytes: 2000 }, spawn)
+      expect(spawn).toHaveBeenCalledWith(
+        input.binaryPath,
+        ['--chat-image', '--target-bytes', '2000', '--max-edge', '2000'],
+        { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false }
+      )
+      expect(child.stdin.read()).toEqual(Buffer.from([1, 2, 3]))
+      child.stdout.write(output)
+      child.emit('close', 0)
+      await expect(promise).resolves.toMatchObject({
+        bytes: output,
+        mimeType,
+        width: 50,
+        height: 30
+      })
+    }
+  )
+  it.each([
+    Buffer.from('not an image'),
+    png(2001, 1),
+    png(0, 1),
+    Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0xff, 0xff])
+  ])('rejects malformed, truncated or oversized encoded image', async (output) => {
     const { child, spawn } = worker()
     const promise = runChatImageWorker(input, spawn)
     child.stdout.write(output)
@@ -58,13 +82,19 @@ describe('chat image worker adapter', () => {
     child.emit('close', 1)
     await expect(promise).rejects.toMatchObject({ code: 'CHAT_IMAGE_WORKER_OUTPUT_LIMIT' })
   })
-  it.each([[1, 'CHAT_IMAGE_WORKER_FAILED'], [2, 'CHAT_IMAGE_WORKER_PROTOCOL_UNSUPPORTED']] as const)('keeps worker exit %s opaque without output or stderr data', async (exitCode, code) => {
-    const { child, spawn } = worker()
-    const promise = runChatImageWorker(input, spawn)
-    child.stderr.write(Buffer.from('private/path and private input'))
-    child.emit('close', exitCode)
-    await expect(promise).rejects.toThrow(code)
-  })
+  it.each([
+    [1, 'CHAT_IMAGE_WORKER_FAILED'],
+    [2, 'CHAT_IMAGE_WORKER_PROTOCOL_UNSUPPORTED']
+  ] as const)(
+    'keeps worker exit %s opaque without output or stderr data',
+    async (exitCode, code) => {
+      const { child, spawn } = worker()
+      const promise = runChatImageWorker(input, spawn)
+      child.stderr.write(Buffer.from('hidden/path and private input'))
+      child.emit('close', exitCode)
+      await expect(promise).rejects.toThrow(code)
+    }
+  )
   it('cancels an in-flight worker and never resolves its later output', async () => {
     const controller = new AbortController()
     const { child, spawn } = worker()
@@ -77,7 +107,9 @@ describe('chat image worker adapter', () => {
   })
   it('holds the slot after kill fails, even if late data arrives', async () => {
     const { child, spawn } = worker()
-    child.kill.mockImplementation(() => { throw new Error('untrusted child error') })
+    child.kill.mockImplementation(() => {
+      throw new Error('untrusted child error')
+    })
     const controller = new AbortController()
     const promise = runChatImageWorker({ ...input, signal: controller.signal }, spawn)
     const rejected = vi.fn()
@@ -103,10 +135,17 @@ describe('chat image worker adapter', () => {
   })
   it('rejects an already-aborted signal and invalid limits before spawning', async () => {
     const { spawn } = worker()
-    const controller = new AbortController(); controller.abort()
-    await expect(runChatImageWorker({ ...input, signal: controller.signal }, spawn)).rejects.toMatchObject({ code: 'CHAT_IMAGE_WORKER_ABORTED' })
-    await expect(runChatImageWorker({ ...input, targetBytes: 0 }, spawn)).rejects.toMatchObject({ code: 'CHAT_IMAGE_WORKER_INVALID_INPUT' })
-    await expect(runChatImageWorker({ ...input, source: new Uint8Array(32 * 1024 * 1024 + 1) }, spawn)).rejects.toMatchObject({ code: 'CHAT_IMAGE_WORKER_INVALID_INPUT' })
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      runChatImageWorker({ ...input, signal: controller.signal }, spawn)
+    ).rejects.toMatchObject({ code: 'CHAT_IMAGE_WORKER_ABORTED' })
+    await expect(runChatImageWorker({ ...input, targetBytes: 0 }, spawn)).rejects.toMatchObject({
+      code: 'CHAT_IMAGE_WORKER_INVALID_INPUT'
+    })
+    await expect(
+      runChatImageWorker({ ...input, source: new Uint8Array(32 * 1024 * 1024 + 1) }, spawn)
+    ).rejects.toMatchObject({ code: 'CHAT_IMAGE_WORKER_INVALID_INPUT' })
     expect(spawn).not.toHaveBeenCalled()
   })
   it('kills a hung worker on the bounded deadline', async () => {
@@ -118,11 +157,17 @@ describe('chat image worker adapter', () => {
       await vi.advanceTimersByTimeAsync(10)
       expect(child.kill).toHaveBeenCalledOnce()
       let settled = false
-      void promise.finally(() => { settled = true }).catch(() => undefined)
+      void promise
+        .finally(() => {
+          settled = true
+        })
+        .catch(() => undefined)
       await Promise.resolve()
       expect(settled).toBe(false)
       child.emit('close', 1)
       await rejection
-    } finally { vi.useRealTimers() }
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

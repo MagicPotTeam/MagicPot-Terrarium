@@ -10,7 +10,7 @@ const receipt = {
     {
       type: 'image',
       url: 'data:image/gif;base64,legacy',
-      media: { relativePath: '/private/output' }
+      media: { relativePath: '/hidden/output' }
     }
   ],
   diagnostic: 'untrusted extra field'
@@ -35,7 +35,7 @@ describe('completed image tool provider receipt', () => {
       { edited_images: undefined },
       { edited_images: -1 },
       { edited_images: 6 },
-      { output_format: '/private/legacy.gif' }
+      { output_format: '/hidden/legacy.gif' }
     ].map((patch) => JSON.stringify({ ...receipt, ...patch }))
   ])('does not guess counts for malformed/legacy receipt %#', (content) => {
     expect(summarizeCompletedImageToolReceipt(content)).toBe('Image generation completed.')
