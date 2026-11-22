@@ -164,7 +164,9 @@ export function buildImageWorker({
   if (result.status !== 0) throw new Error(`cargo build failed with ${describeExit(result)}`)
   if (!fs.existsSync(paths.sourceBinaryPath))
     throw new Error(`cargo build completed but binary was not found: ${paths.sourceBinaryPath}`)
-  const prepared = prepareCargoImageWorkerSource(paths.sourceBinaryPath)
+  const prepared = prepareCargoImageWorkerSource(paths.sourceBinaryPath, {
+    searchRoot: paths.cargoTargetDir
+  })
   try {
     publishImageWorkerBinary(
       prepared.sourcePath,

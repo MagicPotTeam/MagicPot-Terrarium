@@ -5,11 +5,52 @@ const stable = (left, right) =>
   ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs', 'nlink'].every((key) => left[key] === right[key])
 const regular = (stat) => stat.isFile() && !stat.isSymbolicLink()
 
-// Cargo publishes the executable as two links: release/name.exe and
-// release/deps/name_with_underscores.exe. Only that exact two-link identity is
-// accepted here. The existing publication gate still receives a single-link
-// snapshot and continues to reject arbitrary linked source/output files.
-export function prepareCargoImageWorkerSource(sourcePath) {
+const MAX_SEARCH_ENTRIES = 200_000
+
+const lstatOrNull = (target) => {
+  try {
+    return fs.lstatSync(target)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+// Newer Cargo keeps its intermediate artifacts in a build directory inside the target directory
+// instead of release/deps, so the second link moves. It is looked for only inside this build's
+// own target directory, without following links, and it must be the only other link there.
+function findBuildDirAlias(sourcePath, searchRoot) {
+  // 64-bit file ids (NTFS) lose precision as numbers, so compare them as bigints.
+  const before = fs.lstatSync(sourcePath, { bigint: true })
+  const matches = []
+  const pending = [searchRoot]
+  let entries = 0
+  while (pending.length) {
+    const directory = pending.pop()
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (++entries > MAX_SEARCH_ENTRIES) {
+        throw new Error('Cargo image worker target directory is too large to search')
+      }
+      const full = path.join(directory, entry.name)
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) pending.push(full)
+      else if (entry.isFile() && full !== sourcePath) {
+        const stat = fs.lstatSync(full, { bigint: true })
+        if (stat.dev === before.dev && stat.ino === before.ino) matches.push(full)
+      }
+    }
+  }
+  if (matches.length !== 1) throw new Error('Cargo image worker hard-link alias not found')
+  return matches[0]
+}
+
+// Cargo publishes the executable as two links: release/name.exe and its build artifact, which
+// older Cargo keeps at release/deps/name_with_underscores.exe and newer Cargo keeps in its build
+// directory. Only that exact two-link identity is accepted here; with `searchRoot` (the build's
+// own Cargo target directory) the build-directory link is accepted too. The existing
+// publication gate still receives a single-link snapshot and continues to reject arbitrary
+// linked source/output files.
+export function prepareCargoImageWorkerSource(sourcePath, { searchRoot } = {}) {
   const before = fs.lstatSync(sourcePath)
   if (!regular(before)) throw new Error('Cargo image worker source must be a regular file')
   if (before.nlink === 1) return { sourcePath, cleanup() {} }
@@ -17,8 +58,21 @@ export function prepareCargoImageWorkerSource(sourcePath) {
     throw new Error('Unexpected Cargo image worker hard-link layout')
   }
   const releaseDir = path.dirname(sourcePath)
-  const depsDir = path.join(releaseDir, 'deps')
-  const alias = path.join(depsDir, 'canvas_thumbnail_sidecar.exe')
+  const legacyAlias = path.join(releaseDir, 'deps', 'canvas_thumbnail_sidecar.exe')
+  let alias = legacyAlias
+  if (!lstatOrNull(legacyAlias)) {
+    if (!searchRoot) throw new Error('Cargo image worker hard-link alias not found')
+    const root = path.resolve(searchRoot)
+    const rootStat = fs.lstatSync(root)
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+      throw new Error('Cargo image worker directories must not be symbolic links')
+    }
+    if (path.relative(root, sourcePath).startsWith('..')) {
+      throw new Error('Cargo image worker source is outside its target directory')
+    }
+    alias = findBuildDirAlias(sourcePath, root)
+  }
+  const depsDir = path.dirname(alias)
   for (const directory of [releaseDir, depsDir]) {
     const stat = fs.lstatSync(directory)
     if (!stat.isDirectory() || stat.isSymbolicLink()) {

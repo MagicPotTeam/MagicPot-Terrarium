@@ -50,6 +50,41 @@ describe('Cargo image worker publication source', () => {
       }
       expect(fs.readdirSync(release).sort()).toEqual(['canvas-thumbnail-sidecar.exe', 'deps'])
     }))
+  it('finds the second link in the build directory of newer Cargo, inside the target directory only', () =>
+    fixture(({ root, release, source }) => {
+      fs.rmSync(path.join(release, 'deps'), { recursive: true })
+      const buildDir = path.join(root, 'build', 'canvas-thumbnail-sidecar', 'abc123', 'out')
+      fs.mkdirSync(buildDir, { recursive: true })
+      const alias = path.join(buildDir, 'canvas_thumbnail_sidecar-abc123.exe')
+      fs.linkSync(source, alias)
+      const before = fs.readFileSync(source)
+      expect(() => prepareCargoImageWorkerSource(source)).toThrow('alias not found')
+      const prepared = prepareCargoImageWorkerSource(source, { searchRoot: root })
+      try {
+        expect(prepared.sourcePath).not.toBe(source)
+        expect(fs.statSync(prepared.sourcePath).nlink).toBe(1)
+        expect(fs.readFileSync(prepared.sourcePath)).toEqual(before)
+      } finally {
+        prepared.cleanup()
+      }
+      expect(fs.readdirSync(release)).toEqual(['canvas-thumbnail-sidecar.exe'])
+    }))
+  it('refuses a build-directory link outside the target directory', () =>
+    fixture(({ root, release, source }) => {
+      fs.rmSync(path.join(release, 'deps'), { recursive: true })
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'magicpot-cargo-outside-'))
+      try {
+        fs.linkSync(source, path.join(outside, 'canvas_thumbnail_sidecar.exe'))
+        expect(() => prepareCargoImageWorkerSource(source, { searchRoot: release })).toThrow(
+          'alias not found'
+        )
+        expect(() =>
+          prepareCargoImageWorkerSource(source, { searchRoot: path.join(root, 'missing') })
+        ).toThrow()
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true })
+      }
+    }))
   it('accepts an existing regular single-link artifact without mutating it', () =>
     fixture(({ source }) => {
       const prepared = prepareCargoImageWorkerSource(source)
