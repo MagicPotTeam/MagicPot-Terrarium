@@ -18255,12 +18255,19 @@ describe('ChatPage runtime workflow integration', () => {
     let releaseImage!: (value: { savedPath: string }) => void
     let releaseCompare!: () => void
     hoisted.saveImageToDirMock.mockReset()
-    hoisted.saveImageToDirMock.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          releaseImage = resolve
-        })
+    // Only this conversation's save waits; a save an earlier test's page still finishes after
+    // its unmount reaches the same mock and must neither take the gate nor count here.
+    hoisted.saveImageToDirMock.mockImplementation((request: { fileName?: string }) =>
+      request?.fileName?.includes(session.id)
+        ? new Promise((resolve) => {
+            releaseImage = resolve
+          })
+        : Promise.resolve({ savedPath: 'C:/MagicPot/AutoSave/Agent/earlier-test.png' })
     )
+    const ownSaveNames = () =>
+      hoisted.saveImageToDirMock.mock.calls
+        .map(([request]) => String((request as { fileName?: string })?.fileName ?? ''))
+        .filter((name) => name.includes(session.id))
     hoisted.storedSessions.value = [session]
     localStorage.setItem(
       scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
@@ -18282,7 +18289,7 @@ describe('ChatPage runtime workflow integration', () => {
           })
         )
       )
-      await waitFor(() => expect(hoisted.saveImageToDirMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(ownSaveNames()).toHaveLength(1))
       await waitFor(() =>
         expect(hoisted.storedSessions.value[0]?.messages.at(-1)?.attachments?.[0]?.url).toBe(
           sourceUrl

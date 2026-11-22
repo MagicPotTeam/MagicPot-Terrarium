@@ -87,6 +87,17 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
   const onReturnFocusRef = useRef(onReturnFocus)
   onReturnFocusRef.current = onReturnFocus
   const closeRef = useRef<() => void>(() => undefined)
+  // The pending focus retry, and whether the sheet is still mounted when it fires.
+  const retryTimerRef = useRef<number | null>(null)
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+    }
+  }, [])
 
   const returnFocus = () => {
     if (onReturnFocusRef.current) onReturnFocusRef.current()
@@ -98,7 +109,12 @@ const AgentColumnOverlay: React.FC<AgentColumnOverlayProps> = ({
     if (!isPlainBody(document.activeElement)) return
     returnFocus()
     if (attempt < 20 && isPlainBody(document.activeElement)) {
-      window.setTimeout(() => returnLostFocus(attempt + 1), 50)
+      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = window.setTimeout(() => {
+        retryTimerRef.current = null
+        // An unmounted sheet has no focus to hand back (and its document may be gone).
+        if (mountedRef.current) returnLostFocus(attempt + 1)
+      }, 50)
     }
   }
 
