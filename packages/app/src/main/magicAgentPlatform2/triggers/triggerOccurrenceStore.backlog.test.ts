@@ -370,10 +370,16 @@ describe('TriggerOccurrenceScheduler with events that waited', () => {
       expect(before.store.get('stranded-000001')?.state.lastError?.name).toBe(
         'TriggerOccurrenceStale'
       )
+      // The 1000th record, the last one the older build still claimed within.
       const marker = {
         schemaVersion: 1,
         firstPollAt,
-        strandedBefore: firstPollAt - TRIGGER_OCCURRENCE_STALE_AFTER_MS
+        strandedBefore: firstPollAt - TRIGGER_OCCURRENCE_STALE_AFTER_MS,
+        strandedAfter: {
+          updatedAt: 1_000_000 + 999 * MINUTE,
+          resourceKind: KIND,
+          resourceId: 'done-000999'
+        }
       }
       expect(eventStore.getResource(QUEUE_KIND, TRIGGER_OCCURRENCE_QUEUE_MARKER_ID)?.state).toEqual(
         marker
@@ -546,4 +552,197 @@ describe('TriggerOccurrenceStore stale occurrences', () => {
       eventStore.close()
     }
   })
+})
+
+describe('TriggerOccurrenceScheduler at the edges of the stranded rule', () => {
+  it('runs every record inside the window an older build claimed within', async () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    try {
+      // 1003 live: the older build claimed within the oldest 1000, so w-000000 and w-000001 were
+      // still claimable; only w-000002..4 were past its window.
+      seed(eventStore, 998, { from: 1_000_000, status: 'dead-letter', prefix: 'done' })
+      seed(eventStore, 5, {
+        from: 1_000_000_000,
+        status: 'pending',
+        prefix: 'w',
+        triggerId: 'chat',
+        step: 1,
+        source: 'channel-message'
+      })
+      const clock = { now: 2_000_000_000 }
+      const { store, executed, scheduler } = harness(eventStore, { chat: {} }, { runFor: 1, clock })
+      for (let poll = 0; poll < 40; poll += 1) {
+        await scheduler.runOnce()
+        clock.now += 1_000
+      }
+      expect([...new Set(executed)].sort()).toEqual(['w-000000', 'w-000001', 'w-000004'])
+      for (const id of ['w-000002', 'w-000003'])
+        expect(store.get(id)?.state).toMatchObject({
+          status: 'dead-letter',
+          lastError: { name: 'TriggerOccurrenceStale' }
+        })
+    } finally {
+      eventStore.close()
+    }
+  }, 60_000)
+
+  it('never treats a record enqueued after the first poll as stranded, whatever its time', async () => {
+    const eventStore = new MagicAgentEventStore(':memory:')
+    try {
+      seed(eventStore, 1_000, { from: 1_000_000, status: 'dead-letter', prefix: 'done' })
+      seed(eventStore, 1_500, {
+        from: 1_000_000_000,
+        status: 'pending',
+        prefix: 'stranded',
+        source: 'channel-message'
+      })
+      const clock = { now: 2_000_000_000 }
+      const { store, executed, scheduler } = harness(
+        eventStore,
+        { 'trigger-1': {}, 'trigger-9': {} },
+        { runFor: 1, clock }
+      )
+      await scheduler.runOnce()
+      expect(
+        eventStore.getResource(QUEUE_KIND, TRIGGER_OCCURRENCE_QUEUE_MARKER_ID)?.state
+      ).toMatchObject({ strandedBefore: 2_000_000_000 - TRIGGER_OCCURRENCE_STALE_AFTER_MS })
+      // Manual fires whose client time is older than the marker's bound, and older than the
+      // stranded records around them.
+      for (const [id, at] of [
+        ['old-a', 1_050_000_000],
+        ['old-b', 1_050_000_001]
+      ] as const)
+        store.enqueueManual({
+          occurrenceId: id,
+          triggerId: 'trigger-9',
+          scheduledAt: at,
+          requestedAt: at,
+          idempotencyKey: id
+        })
+      for (let poll = 0; poll < 80; poll += 1) {
+        await scheduler.runOnce()
+        clock.now += 1_000
+      }
+      expect(executed).toEqual(expect.arrayContaining(['old-a', 'old-b']))
+      expect([...new Set(executed.filter((id) => id.startsWith('stranded-')))]).toEqual([
+        'stranded-001499'
+      ])
+    } finally {
+      eventStore.close()
+    }
+  }, 60_000)
+
+  it('bounds a marker written without the window edge by time only, and ignores one it cannot read', async () => {
+    for (const [strandedAfter, expected] of [
+      [undefined, ['w-000004']],
+      [{ updatedAt: 'late' }, ['w-000000', 'w-000001', 'w-000002', 'w-000003', 'w-000004']]
+    ] as const) {
+      const eventStore = new MagicAgentEventStore(':memory:')
+      try {
+        seed(eventStore, 998, { from: 1_000_000, status: 'dead-letter', prefix: 'done' })
+        seed(eventStore, 5, {
+          from: 1_000_000_000,
+          status: 'pending',
+          prefix: 'w',
+          triggerId: 'chat',
+          step: 1,
+          source: 'channel-message'
+        })
+        const clock = { now: 2_000_000_000 }
+        eventStore.mutateResource({
+          operation: 'create',
+          kind: QUEUE_KIND,
+          id: TRIGGER_OCCURRENCE_QUEUE_MARKER_ID,
+          idempotencyKey: 'earlier-marker',
+          state: {
+            schemaVersion: 1,
+            firstPollAt: clock.now,
+            strandedBefore: clock.now - TRIGGER_OCCURRENCE_STALE_AFTER_MS,
+            ...(strandedAfter === undefined ? {} : { strandedAfter })
+          },
+          createdAt: clock.now,
+          event: {
+            protocolVersion: '2.0.0',
+            id: 'marker:occurrence-queue.marked:0',
+            type: 'occurrence-queue.marked',
+            createdAt: clock.now,
+            payload: {},
+            envelopeKind: 'event',
+            streamId: `${QUEUE_KIND}:${TRIGGER_OCCURRENCE_QUEUE_MARKER_ID}`,
+            sequence: 0,
+            resource: { kind: QUEUE_KIND, id: TRIGGER_OCCURRENCE_QUEUE_MARKER_ID },
+            revision: 0
+          } as never
+        })
+        const { executed, scheduler } = harness(eventStore, { chat: {} }, { runFor: 1, clock })
+        for (let poll = 0; poll < 40; poll += 1) {
+          await scheduler.runOnce()
+          clock.now += 1_000
+        }
+        expect([...new Set(executed)].sort()).toEqual(expected)
+      } finally {
+        eventStore.close()
+      }
+    }
+  }, 60_000)
+
+  it.each([
+    ['one page', 5],
+    ['many pages', 1_200]
+  ] as const)(
+    'keeps maxCatchUpRuns while the dead-letter batch keeps failing (%s)',
+    async (_name, count) => {
+      const eventStore = new MagicAgentEventStore(':memory:')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        seed(eventStore, count, { from: 1_000_000_000, status: 'pending', prefix: 'st' })
+        const clock = { now: 2_000_000_000 }
+        const { store, executed, scheduler } = harness(
+          eventStore,
+          { 'trigger-1': {}, 'trigger-2': {} },
+          { runFor: 1, clock }
+        )
+        // A due event that is not stale, written after the whole backlog.
+        store.enqueue({
+          occurrenceId: 'legit',
+          triggerId: 'trigger-2',
+          source: 'manual',
+          scheduledAt: 1_000_000_000 + count * MINUTE,
+          requestedAt: 1_000_000_000 + count * MINUTE,
+          idempotencyKey: 'legit'
+        })
+        const batch = eventStore.mutateResourcesBatch.bind(eventStore)
+        let failing = true
+        let failures = 0
+        vi.spyOn(eventStore, 'mutateResourcesBatch').mockImplementation((inputs, fence) => {
+          if (failing && inputs.length > 1) {
+            failures += 1
+            throw new Error('disk full')
+          }
+          return batch(inputs, fence)
+        })
+        for (let poll = 0; poll < 30; poll += 1) {
+          await scheduler.runOnce().catch(() => undefined)
+          clock.now += 1_000
+        }
+        expect(failures).toBeGreaterThan(3)
+        expect(executed).toContain('legit')
+        failing = false
+        for (let poll = 0; poll < 60; poll += 1) {
+          await scheduler.runOnce()
+          clock.now += 1_000
+        }
+        const last = `st-${String(count - 1).padStart(6, '0')}`
+        expect(executed.filter((id) => id.startsWith('st-'))).toEqual([last])
+        expect(store.get('st-000000')?.state).toMatchObject({
+          status: 'dead-letter',
+          lastError: { name: 'TriggerOccurrenceStale' }
+        })
+      } finally {
+        warn.mockRestore()
+        eventStore.close()
+      }
+    },
+    60_000
+  )
 })

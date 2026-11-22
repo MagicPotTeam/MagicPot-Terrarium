@@ -400,8 +400,9 @@ describe('TriggerOccurrenceScheduler with a long history', () => {
         enqueue(store, `fresh-${polls}`, clock.now)
         reads.rows = 0
         await expect(scheduler.runOnce()).resolves.toBe(true)
-        // A page of the backlog plus the recent records; the drain never waits for the claim.
-        expect(reads.rows).toBeLessThanOrEqual(500 + polls + 1)
+        // A page of the backlog plus the recent records; the drain never waits for the claim. The
+        // first poll also reads the one record at the older build's window edge for the marker.
+        expect(reads.rows).toBeLessThanOrEqual(500 + polls + 1 + (polls === 0 ? 1 : 0))
         polls += 1
       }
       expect(executed).toEqual(Array.from({ length: polls }, (_, index) => `fresh-${index}`))

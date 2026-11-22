@@ -81,6 +81,11 @@ export type TriggerOccurrenceQueueMarker = Readonly<{
    * the stale horizon before that poll, so nothing enqueued shortly before counts.
    */
   strandedBefore?: number
+  /**
+   * Set with strandedBefore: the position of the LEGACY_CLAIM_WINDOW-th unarchived record at that
+   * poll. The older build still reached every record up to it, so only one after it is stranded.
+   */
+  strandedAfter?: ResourceCursor
 }>
 /** Rows of the old part of the live index one poll reads; see TriggerOccurrenceStore.poll. */
 const SCAN_PAGE_SIZE = 500
@@ -124,6 +129,11 @@ export type TriggerOccurrenceState = Readonly<{
   createdAt: number
   updatedAt: number
   payloadDigest?: string
+  /**
+   * Enqueued by a build that claims beyond the oldest LEGACY_CLAIM_WINDOW records, so never one
+   * an older build stranded, whatever its (caller-supplied) requestedAt. Older builds ignore it.
+   */
+  unboundedQueue?: true
 }>
 
 export class TriggerOccurrenceConflictError extends Error {}
@@ -211,27 +221,75 @@ const unclaimedBefore = (item: Occurrence, before: number) =>
   item.state.permit === undefined &&
   item.updatedAt < before &&
   item.state.scheduledAt < before
-// A stale record runs only if it is among the newest `catchUpRuns` stale ones of its trigger: a
-// cron or calendar instant unclaimed past the horizon, or another occurrence an older build
-// stranded. Within min(...) a stranded record is always in the old part of the live index.
-const isStale = (item: Occurrence, staleBefore: number, strandedBefore: number | undefined) =>
-  TRIGGER_OCCURRENCE_SCHEDULE_SOURCES.has(item.state.source)
-    ? unclaimedBefore(item, staleBefore)
-    : strandedBefore !== undefined && unclaimedBefore(item, Math.min(staleBefore, strandedBefore))
-// The bound a stored marker sets; a marker this build cannot read marks nothing as stranded.
-const strandedBeforeOf = (state: unknown): number | undefined => {
-  const { schemaVersion, strandedBefore } = (state ?? {}) as Record<string, unknown>
-  return schemaVersion === 1 &&
-    typeof strandedBefore === 'number' &&
-    Number.isFinite(strandedBefore)
-    ? strandedBefore
-    : undefined
-}
+type Stranded = Readonly<{ before: number; after?: ResourceCursor }>
 const cursorOf = (item: Occurrence): ResourceCursor => ({
   updatedAt: item.updatedAt,
   resourceKind: item.kind,
   resourceId: item.id
 })
+// SQLite compares TEXT as UTF-8 bytes; JS `<` compares UTF-16 units, which differs past U+FFFF.
+const textOrder = (a: string, b: string) =>
+  a === b ? 0 : Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))
+// The live index order (updated_at, resource_kind, resource_id) of the event store.
+const cursorOrder = (a: ResourceCursor, b: ResourceCursor) =>
+  a.updatedAt - b.updatedAt ||
+  textOrder(a.resourceKind, b.resourceKind) ||
+  textOrder(a.resourceId, b.resourceId)
+// Written by an older build, never claimed, past the window it claimed within, and both due and
+// last written before the marker's bound.
+const isStranded = (item: Occurrence, staleBefore: number, stranded: Stranded) =>
+  item.state.unboundedQueue !== true &&
+  (stranded.after === undefined || cursorOrder(cursorOf(item), stranded.after) > 0) &&
+  unclaimedBefore(item, Math.min(staleBefore, stranded.before))
+// A stale record runs only if it is among the newest `catchUpRuns` stale ones of its trigger: a
+// cron or calendar instant unclaimed past the horizon, or another occurrence an older build
+// stranded. Within min(...) a stranded record is always in the old part of the live index.
+const isStale = (item: Occurrence, staleBefore: number, stranded: Stranded | undefined) =>
+  TRIGGER_OCCURRENCE_SCHEDULE_SOURCES.has(item.state.source)
+    ? unclaimedBefore(item, staleBefore)
+    : stranded !== undefined && isStranded(item, staleBefore, stranded)
+const isCursor = (value: unknown): value is ResourceCursor => {
+  const { updatedAt, resourceKind, resourceId } = (value ?? {}) as Record<string, unknown>
+  return (
+    typeof value === 'object' &&
+    typeof updatedAt === 'number' &&
+    Number.isFinite(updatedAt) &&
+    typeof resourceKind === 'string' &&
+    typeof resourceId === 'string'
+  )
+}
+// The bounds a stored marker sets; a marker this build cannot read marks nothing as stranded. A
+// marker without strandedAfter (an earlier build of this rule) bounds by time only.
+const strandedOf = (state: unknown): Stranded | undefined => {
+  const { schemaVersion, strandedBefore, strandedAfter } = (state ?? {}) as Record<string, unknown>
+  if (schemaVersion !== 1 || typeof strandedBefore !== 'number' || !Number.isFinite(strandedBefore))
+    return undefined
+  if (strandedAfter === undefined) return { before: strandedBefore }
+  return isCursor(strandedAfter)
+    ? {
+        before: strandedBefore,
+        after: {
+          updatedAt: strandedAfter.updatedAt,
+          resourceKind: strandedAfter.resourceKind,
+          resourceId: strandedAfter.resourceId
+        }
+      }
+    : undefined
+}
+type StaleFloor = Readonly<{ key: OrderKey; quota: number }>
+// Of two floors of one trigger, the later one that applies at this quota. Each alone proves that
+// many newer stale records, so keeping either never removes one of the newest `quota`.
+const laterFloor = (
+  a: StaleFloor | undefined,
+  b: StaleFloor | undefined,
+  quota: number
+): StaleFloor | undefined => {
+  const usable = [a, b].filter(
+    (floor): floor is StaleFloor => floor !== undefined && floor.quota >= quota
+  )
+  if (usable.length === 0) return b ?? a
+  return usable.reduce((x, y) => (keyOrder(x.key, y.key) >= 0 ? x : y))
+}
 // '!' sorts before every resource kind, so this cursor starts at the first record written at `at`.
 const firstAt = (at: number): ResourceCursor => ({
   updatedAt: at,
@@ -296,19 +354,21 @@ export class TriggerOccurrenceStore {
   // horizon), a page per poll, and the newest stale records per trigger it has met so far. It is
   // per store instance; a new instance starts a new pass, which is always safe.
   private pass: { after?: ResourceCursor; kept: Map<string, OrderKey[]> } = { kept: new Map() }
-  // From the last finished pass: the stale records that may still run, and for each trigger that
-  // filled its quota the oldest of them. A stale record older than that has at least `quota`
-  // newer ones, so it is dead-lettered.
+  // From the last finished pass: the stale records that may still run.
   private keptStale: ReadonlySet<string> = new Set()
-  private staleFloor: ReadonlyMap<string, Readonly<{ key: OrderKey; quota: number }>> = new Map()
-  // The marker's bound, once this store has read or written the marker. Until then polls go by
+  // For each trigger, the oldest of `quota` stale records seen at once (in one poll's page or over
+  // a finished pass). A stale record older than that has at least `quota` newer ones, so it is
+  // dead-lettered. Floors only move later: a record they doom stays doomed while a failing
+  // batch leaves it pending, even after the newer ones ran.
+  private staleFloor = new Map<string, StaleFloor>()
+  // The marker's bounds, once this store has read or written the marker. Until then polls go by
   // the marker this store's first poll proposed, and each writes it with its batch.
   private markerKnown = false
-  private strandedBefore: number | undefined
+  private stranded: Stranded | undefined
   private proposedMarker: TriggerOccurrenceQueueMarker | undefined
   // Batches that failed in a row; see PASS_FAILED_BATCH_LIMIT.
   private failedBatches = 0
-  /** The marker this poll must write, if none is stored yet; sets `strandedBefore` either way. */
+  /** The marker this poll must write, if none is stored yet; sets `stranded` either way. */
   private markerToWrite(now: number, live: number): TriggerOccurrenceQueueMarker | undefined {
     if (this.markerKnown) return undefined
     const stored = this.eventStore.getResource(
@@ -318,17 +378,31 @@ export class TriggerOccurrenceStore {
     )
     if (stored) {
       this.markerKnown = true
-      this.strandedBefore = strandedBeforeOf(stored.state)
+      this.stranded = strandedOf(stored.state)
       return undefined
     }
-    this.proposedMarker ??= {
-      schemaVersion: 1,
-      firstPollAt: now,
-      ...(live > LEGACY_CLAIM_WINDOW
-        ? { strandedBefore: now - TRIGGER_OCCURRENCE_STALE_AFTER_MS }
-        : {})
+    if (!this.proposedMarker) {
+      // The last record the older build still reached: one row, read once per store.
+      const edge =
+        live > LEGACY_CLAIM_WINDOW
+          ? (this.eventStore.listResources({
+              kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND,
+              limit: 1,
+              offset: LEGACY_CLAIM_WINDOW - 1
+            })[0] as Occurrence | undefined)
+          : undefined
+      this.proposedMarker = {
+        schemaVersion: 1,
+        firstPollAt: now,
+        ...(edge === undefined
+          ? {}
+          : {
+              strandedBefore: now - TRIGGER_OCCURRENCE_STALE_AFTER_MS,
+              strandedAfter: cursorOf(edge)
+            })
+      }
     }
-    this.strandedBefore = this.proposedMarker.strandedBefore
+    this.stranded = strandedOf(this.proposedMarker)
     return this.proposedMarker
   }
   // Committed with the poll's batch, so no record is dead-lettered as stranded unless the marker
@@ -408,16 +482,18 @@ export class TriggerOccurrenceStore {
       return
     }
     const ids = new Set<string>()
-    const floor = new Map<string, Readonly<{ key: OrderKey; quota: number }>>()
     for (const [triggerId, keys] of this.pass.kept) {
       for (const key of keys) ids.add(key.id)
       const oldest = keys.at(-1)
       if (oldest !== undefined && keys.length >= quota(triggerId))
-        floor.set(triggerId, { key: oldest, quota: keys.length })
+        this.raiseFloor(triggerId, { key: oldest, quota: keys.length }, quota(triggerId))
     }
     this.keptStale = ids
-    this.staleFloor = floor
     this.pass = { kept: new Map() }
+  }
+  private raiseFloor(triggerId: string, floor: StaleFloor, quota: number) {
+    const next = laterFloor(this.staleFloor.get(triggerId), floor, quota)
+    if (next !== undefined) this.staleFloor.set(triggerId, next)
   }
   // Soft delete that keeps the final state, the receipts and the events. The row and the
   // receipt already hold that state, and nothing reads occurrence events, so the archive event
@@ -505,7 +581,8 @@ export class TriggerOccurrenceStore {
       semanticDigest: digest,
       createdAt: input.requestedAt,
       updatedAt: input.requestedAt,
-      ...(input.payloadDigest === undefined ? {} : { payloadDigest: input.payloadDigest })
+      ...(input.payloadDigest === undefined ? {} : { payloadDigest: input.payloadDigest }),
+      unboundedQueue: true
     }
     return this.eventStore.mutateResource({
       operation: 'create',
@@ -578,14 +655,14 @@ export class TriggerOccurrenceStore {
       kind: MAGIC_AGENT_TRIGGER_OCCURRENCE_RESOURCE_KIND
     })
     const marker = this.markerToWrite(now, live)
-    const strandedBefore = this.strandedBefore
+    const stranded = this.stranded
     // A poll that reads the old part from its start to its end sees every stale record, so its
     // own count of the newest per trigger is exact, whatever it manages to write.
     const fromStart = this.pass.after === undefined
     const { old, recent, passEnds } = this.readPoll(staleBefore)
     const seesAllStale = fromStart && passEnds
     const stale = (item: Occurrence) =>
-      isStale(item, staleBefore, strandedBefore) && (mutable === undefined || mutable(item.state))
+      isStale(item, staleBefore, stranded) && (mutable === undefined || mutable(item.state))
     // A stale record goes once its trigger has at least `quota` newer stale ones, in this page or
     // as the last finished pass found. That never removes one of the newest `quota`.
     const doomed = new Set<string>()
@@ -606,9 +683,15 @@ export class TriggerOccurrenceStore {
         else byTrigger.set(triggerId, [item])
       }
     }
-    for (const [triggerId, items] of byTrigger)
-      for (const item of items.sort((a, b) => claimOrder(b, a)).slice(quota(triggerId)))
-        doomed.add(item.id)
+    for (const [triggerId, items] of byTrigger) {
+      const newest = items.sort((a, b) => claimOrder(b, a))
+      const limit = quota(triggerId)
+      for (const item of newest.slice(limit)) doomed.add(item.id)
+      // Known now, whether or not this poll's batch commits: a failed batch leaves the doomed
+      // records pending, and once the newer ones ran nothing else would mark them.
+      if (newest.length >= limit)
+        this.raiseFloor(triggerId, { key: orderKey(newest[limit - 1]), quota: limit }, limit)
+    }
     let room =
       live > TRIGGER_OCCURRENCE_ARCHIVE_ABOVE ? live - TRIGGER_OCCURRENCE_ARCHIVE_DOWN_TO : 0
     const deadLetter: Occurrence[] = []

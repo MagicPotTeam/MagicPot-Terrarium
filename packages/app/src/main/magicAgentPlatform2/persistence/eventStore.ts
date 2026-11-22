@@ -648,6 +648,8 @@ export class MagicAgentEventStore {
       includeDeleted?: boolean
       after?: ResourceCursor
       limit?: number
+      /** Rows to skip first; SQLite steps over them without decoding them. */
+      offset?: number
     } = {}
   ): StoredResource[] {
     this.assertOpen()
@@ -655,6 +657,8 @@ export class MagicAgentEventStore {
     const limit = options.limit ?? DEFAULT_READ_LIMIT
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT)
       throw new RangeError('invalid limit')
+    const offset = options.offset ?? 0
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new RangeError('invalid offset')
     const clauses: string[] = []
     const params: (string | number)[] = []
     if (options.kind !== undefined) {
@@ -677,9 +681,10 @@ export class MagicAgentEventStore {
     return this.adapter
       .all(
         `SELECT * FROM resources ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
-      ORDER BY updated_at ASC, resource_kind ASC, resource_id ASC LIMIT ?`,
+      ORDER BY updated_at ASC, resource_kind ASC, resource_id ASC LIMIT ? OFFSET ?`,
         ...params,
-        limit
+        limit,
+        offset
       )
       .map(readResource)
   }

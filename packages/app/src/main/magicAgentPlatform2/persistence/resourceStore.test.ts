@@ -428,6 +428,15 @@ describe('resource queries', () => {
     expect([...first, ...second].map((item) => item.id)).toEqual(['a', 'b', 'c', 'd'])
   })
 
+  it('skips `offset` rows in list order', () => {
+    const store = open()
+    for (const id of ['a', 'b', 'c', 'd']) store.mutateResource(createInput(id, { createdAt: 10 }))
+    expect(store.listResources({ limit: 1, offset: 2 }).map((item) => item.id)).toEqual(['c'])
+    expect(store.listResources({ offset: 4 })).toEqual([])
+    for (const offset of [-1, 1.5])
+      expect(() => store.listResources({ offset })).toThrow(RangeError)
+  })
+
   it.each([0, 10001])('rejects invalid resource list limit %s', (limit) => {
     expect(() => open().listResources({ limit })).toThrow(RangeError)
   })
