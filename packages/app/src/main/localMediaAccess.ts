@@ -77,6 +77,18 @@ function isInGrantExcludedFolder(filePath: string): boolean {
   return false
 }
 
+/**
+ * Whether a root serves a path. A root that holds an excluded folder (a storage or project
+ * folder configured as the user's home) never serves into it: only a root inside that folder
+ * does (the app's media folders).
+ */
+function rootServesPath(root: string, filePath: string): boolean {
+  return (
+    isSameOrInside(root, filePath) &&
+    (!isInGrantExcludedFolder(filePath) || isInGrantExcludedFolder(root))
+  )
+}
+
 function isExistingDirectory(filePath: string): boolean {
   try {
     return fs.statSync(filePath).isDirectory()
@@ -341,10 +353,11 @@ export function isWindowsNetworkLocalMediaPath(value: string): boolean {
 }
 
 /**
- * The NT object-namespace prefix ('\' + '??' + '\', separators of either kind): Windows file
- * APIs hand such a path to the object manager as it is, so '\??\UNC\host\share' contacts the
- * host as a UNC path does. No grant is ever for such a spelling, so it is refused whatever is
- * scoped (its resolved form, C:\??\..., would otherwise sit inside a picked C:\).
+ * The NT object-namespace prefix (a backslash, two question marks, a backslash; separators of
+ * either kind): Windows file APIs hand such a path to the object manager as it is, so that
+ * prefix followed by UNC, a host and a share contacts the host as a UNC path does. No grant is
+ * ever for such a spelling, so it is refused whatever is scoped (its resolved form, the drive
+ * followed by that prefix, would otherwise sit inside a picked drive root).
  */
 function isWindowsNtNamespaceLocalMediaPath(value: string): boolean {
   return /^[\\/][?]{2}[\\/]/.test(value)
@@ -461,7 +474,7 @@ export function resolveAuthorizedLocalMediaPath(
   return allowedRoots.some((root) => {
     const canonicalRoot =
       typeof root === 'string' ? canonicalizeExistingPath(root) : root.pinnedCanonicalPath
-    return canonicalRoot ? isSameOrInside(canonicalRoot, canonical) : false
+    return canonicalRoot ? rootServesPath(canonicalRoot, canonical) : false
   })
     ? canonical
     : null
@@ -562,7 +575,7 @@ export async function authorizeLocalMediaPathAsync(
     } else {
       canonicalRoot = root.pinnedCanonicalPath
     }
-    if (isSameOrInside(canonicalRoot, canonical)) return { canonicalPath: canonical }
+    if (rootServesPath(canonicalRoot, canonical)) return { canonicalPath: canonical }
   }
   return refused(rootUnanswered ? 'unavailable' : 'refused')
 }
@@ -597,7 +610,7 @@ export function isLexicallyCoveredLocalMediaPath(
           isSameOrInside(directory, resolved)
         ))) ||
     allowedRoots.some((root) =>
-      isSameOrInside(
+      rootServesPath(
         typeof root === 'string' ? path.resolve(root) : root.pinnedCanonicalPath,
         resolved
       )
@@ -908,7 +921,7 @@ export async function authorizeLocalMediaImportSourcePathAsync(
         typeof root === 'string'
           ? await canonicalizeExistingPathAsync(root, realpath)
           : root.pinnedCanonicalPath
-      if (canonicalRoot && isSameOrInside(canonicalRoot, canonical)) return persisted
+      if (canonicalRoot && rootServesPath(canonicalRoot, canonical)) return persisted
     }
   }
   return hasLocalMediaImportGrant(canonical, now())

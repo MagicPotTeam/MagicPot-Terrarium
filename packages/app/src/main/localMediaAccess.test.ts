@@ -113,16 +113,51 @@ describe('local media access policy', () => {
     expect(isLexicallyCoveredLocalMediaPath(config, roots)).toBe(false)
     // Its media folder is a root; the rest of the grant is untouched.
     for (const file of [media, picture]) {
-      expect(resolveAuthorizedLocalMediaPath(file, roots)).toBe(fs.realpathSync.native(file))
+      expect(resolveAuthorizedLocalMediaPath(file, roots)).toBe(
+        path.resolve(fs.realpathSync.native(file))
+      )
       await expect(authorizeLocalMediaPathAsync(file, roots)).resolves.toEqual({
-        canonicalPath: fs.realpathSync.native(file)
+        canonicalPath: path.resolve(fs.realpathSync.native(file))
       })
     }
     // A one-use import grant is for the very file the user just picked or dropped.
-    recordLocalMediaImportGrant(fs.realpathSync.native(config))
+    recordLocalMediaImportGrant(path.resolve(fs.realpathSync.native(config)))
     await expect(authorizeLocalMediaImportSourcePathAsync(config, roots)).resolves.toMatchObject({
       viaImportGrant: true
     })
+  })
+
+  it('never lets a root that holds the app data folder serve into it, only roots inside it', async () => {
+    const home = makeTempDir('magicpot-home-root-')
+    const userData = path.join(home, 'Library', 'MagicPot')
+    const write = (filePath: string) => {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true })
+      fs.writeFileSync(filePath, 'x')
+      return filePath
+    }
+    const config = write(path.join(userData, 'config.json'))
+    const media = write(path.join(userData, '.chat_media', 'a.png'))
+    const project = write(path.join(home, 'Projects', 'board.png'))
+    // A storage or project folder configured as the home folder, beside the media root.
+    const roots = [home, path.join(userData, '.chat_media')]
+    setLocalMediaGrantExcludedFolders([userData])
+
+    expect(resolveAuthorizedLocalMediaPath(config, roots)).toBeNull()
+    await expect(authorizeLocalMediaPathAsync(config, roots)).resolves.toEqual({
+      canonicalPath: null,
+      reason: 'refused'
+    })
+    await expect(authorizeLocalMediaImportSourcePathAsync(config, roots)).resolves.toBeNull()
+    expect(isLexicallyCoveredLocalMediaPath(config, roots)).toBe(false)
+    for (const file of [media, project]) {
+      expect(resolveAuthorizedLocalMediaPath(file, roots)).toBe(
+        path.resolve(fs.realpathSync.native(file))
+      )
+      await expect(authorizeLocalMediaPathAsync(file, roots)).resolves.toEqual({
+        canonicalPath: path.resolve(fs.realpathSync.native(file))
+      })
+      expect(isLexicallyCoveredLocalMediaPath(file, roots)).toBe(true)
+    }
   })
 
   it('does not turn a file path into a directory grant', () => {
