@@ -11,6 +11,10 @@ export type FilesReadInput = Readonly<{
   maxBytes?: number
   maxStringLength?: number
   timeoutMs?: number
+  /** 0-based first line of a plain-text window. */
+  offset?: number
+  /** Number of lines in a plain-text window. */
+  limit?: number
 }>
 
 export type FilesGlobInput = Readonly<{
@@ -265,6 +269,12 @@ export type FilesTextReadOutput = Readonly<{
   sha256: string
   truncated: boolean
   durationMs: number
+  /** Present only when offset or limit asked for a line window. */
+  lineOffset?: number
+  lineCount?: number
+  /** Lines in the bytes read; a lower bound when the file was longer than maxBytes. */
+  totalLines?: number
+  totalLinesComplete?: boolean
 }>
 
 export type FilesImageReadOutput = Readonly<{

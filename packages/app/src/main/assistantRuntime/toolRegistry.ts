@@ -1,5 +1,6 @@
 import { Config } from '@shared/config/config'
 import Ajv from 'ajv'
+import { TEXT_LINE_WINDOW_LIMITS } from '@shared/utils/textLineWindow'
 import { AGENT_LOCAL_FILE_LIMITS } from '@shared/api/svcAgentLocalFiles'
 import type { PolicyJsonRecord } from '../../shared/magicAgentPlatform2'
 import { throwIfAborted } from '@shared/agent'
@@ -542,7 +543,7 @@ const baseDefinitions: AssistantToolDefinition[] = [
   {
     name: 'files.read',
     description:
-      'Read bounded UTF-8 text, allowlisted PNG/JPEG/GIF/WebP bytes, or conservatively extracted PDF/DOCX/XLSX/PPTX text and metadata. Regular workspace files remain capped at 1 MiB; a local desktop absolute document path may be up to 8 MiB. Local desktop reads are available by default without a per-path confirmation. Media type is verified by magic bytes; binary payloads are never audited.',
+      'Read bounded UTF-8 text, allowlisted PNG/JPEG/GIF/WebP bytes, or conservatively extracted PDF/DOCX/XLSX/PPTX text and metadata. Regular workspace files remain capped at 1 MiB; a local desktop absolute document path may be up to 8 MiB. Local desktop reads are available by default without a per-path confirmation. Media type is verified by magic bytes; binary payloads are never audited. For plain UTF-8 text, offset (0-based first line) and limit (number of lines) return only that window plus lineOffset, lineCount and totalLines; the byte limits still apply to the whole file.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -551,7 +552,9 @@ const baseDefinitions: AssistantToolDefinition[] = [
         path: { type: 'string' },
         maxBytes: { type: 'integer', minimum: 1, maximum: AGENT_LOCAL_FILE_LIMITS.documentBytes },
         maxStringLength: { type: 'integer', minimum: 1, maximum: 1048576 },
-        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 }
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 10000 },
+        offset: { type: 'integer', minimum: 0, maximum: TEXT_LINE_WINDOW_LIMITS.offset },
+        limit: { type: 'integer', minimum: 1, maximum: TEXT_LINE_WINDOW_LIMITS.lines }
       }
     }
   },
@@ -1841,9 +1844,11 @@ const baseDefinitions: AssistantToolDefinition[] = [
 ]
 
 const fileMutationAjv = new Ajv({ strict: false, ownProperties: true })
-const fileMutationValidators = new Map(baseDefinitions
-  .filter((tool) => ['files.edit', 'files.patch', 'files.multi-edit'].includes(tool.name))
-  .map((tool) => [tool.name, fileMutationAjv.compile(tool.inputSchema)]))
+const fileMutationValidators = new Map(
+  baseDefinitions
+    .filter((tool) => ['files.edit', 'files.patch', 'files.multi-edit'].includes(tool.name))
+    .map((tool) => [tool.name, fileMutationAjv.compile(tool.inputSchema)])
+)
 
 const inspectRunRecord = async (
   args: Record<string, unknown>,
@@ -3404,10 +3409,16 @@ export class AssistantToolRegistry {
       ].includes(normalizedName)
     ) {
       if (!context.workspaceRootDir) throw new Error('File tools require a route workspace root.')
-      const extendedMutation = normalizedName === 'files.edit' || normalizedName === 'files.patch' || normalizedName === 'files.multi-edit'
+      const extendedMutation =
+        normalizedName === 'files.edit' ||
+        normalizedName === 'files.patch' ||
+        normalizedName === 'files.multi-edit'
       if (extendedMutation) {
         const validate = fileMutationValidators.get(normalizedName)!
-        if (!validate(args)) throw new Error(`Invalid input for tool "${normalizedName}": ${fileMutationAjv.errorsText(validate.errors)}`)
+        if (!validate(args))
+          throw new Error(
+            `Invalid input for tool "${normalizedName}": ${fileMutationAjv.errorsText(validate.errors)}`
+          )
         // Detach exact edits/batches/patches before awaiting approval. The prompt must
         // show all affected paths and edits, not merely a synthetic path=".".
         args = structuredClone(args)
@@ -3418,11 +3429,15 @@ export class AssistantToolRegistry {
         path.isAbsolute(args.path) &&
         context.readExternalFile
       ) {
+        const definition = baseDefinitions.find((tool) => tool.name === 'files.read')!
+        assertValidToolArgs(normalizedName, args, definition.inputSchema)
         return context.readExternalFile(args.path, context.signal, {
           maxBytes: typeof args.maxBytes === 'number' ? args.maxBytes : undefined,
           maxStringLength:
             typeof args.maxStringLength === 'number' ? args.maxStringLength : undefined,
-          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined
+          timeoutMs: typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined,
+          ...(typeof args.offset === 'number' ? { offset: args.offset } : {}),
+          ...(typeof args.limit === 'number' ? { limit: args.limit } : {})
         })
       }
       if (
@@ -3504,7 +3519,7 @@ export class AssistantToolRegistry {
               ? 'filesystem.search'
               : 'filesystem.read',
         toolInput: extendedMutation
-          ? { ...args, path: requestedPath } as PolicyJsonRecord
+          ? ({ ...args, path: requestedPath } as PolicyJsonRecord)
           : { path: requestedPath },
         filesystem: { paths: [requestedPath], allowedRoots: [context.workspaceRootDir] }
       })
@@ -3565,16 +3580,20 @@ export class AssistantToolRegistry {
         output = await host.patch(common as Parameters<FilesToolHost['patch']>[0])
       else if (normalizedName === 'files.multi-edit') {
         try {
-          output = await host.multiEdit(common as unknown as Parameters<FilesToolHost['multiEdit']>[0])
+          output = await host.multiEdit(
+            common as unknown as Parameters<FilesToolHost['multiEdit']>[0]
+          )
         } catch (error) {
           if (!(error instanceof FilesToolMutationError)) throw error
           const failure = { message: error.message, code: error.code }
           // Preserve only host-reported rollback facts. Neither a failed rollback
           // nor this receipt proves the final bytes; do not synthesize a success SHA.
-          throw new AssistantToolResultError(failure, jsonToolResult({ error: failure, rollback: error.rollback }))
+          throw new AssistantToolResultError(
+            failure,
+            jsonToolResult({ error: failure, rollback: error.rollback })
+          )
         }
-      }
-      else if (normalizedName === 'files.json.write')
+      } else if (normalizedName === 'files.json.write')
         output = await host.jsonWrite(common as Parameters<FilesToolHost['jsonWrite']>[0])
       else if (normalizedName === 'files.diff')
         output = await host.diff(common as Parameters<FilesToolHost['diff']>[0])

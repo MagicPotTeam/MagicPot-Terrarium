@@ -11,6 +11,7 @@ import { createDocumentUtilityExtractor } from '../agentLocalFiles/documents/doc
 import { authorizeMagicAgentApprovalRenderer } from '../magicAgentRuntime/trustedRouteBinding'
 import { withCanvasFileTools } from './canvasFileTools'
 import { watchSenderDocument } from '@shared/api/createServer/senderDocumentWatch'
+import { selectTextLines, wantsTextLineWindow } from '@shared/utils/textLineWindow'
 import {
   validateFilesReadGlob,
   matchesFilesReadGlob,
@@ -29,6 +30,9 @@ export type CanvasPathReadLimits = {
   maxFiles?: number
   maxDepth?: number
   maxEntries?: number
+  /** Plain-text line window: 0-based first line and line count. */
+  offset?: number
+  limit?: number
 }
 export type CanvasPathReadHandler = (
   filePath: string,
@@ -49,11 +53,20 @@ export function createCanvasPathReadHandler(
   invocation?: ServiceInvocationContext
 ): CanvasPathReadHandler | undefined {
   if (!invocation || withCanvasFileTools(request, invocation) === request) return undefined
-  try { return createScopedCanvasPathReadHandler({ route: request.route!, conversationId: request.conversationId! }, invocation) }
-  catch { return undefined } // Legacy optional-chat callback declines stale identity; side entry remains strict.
+  try {
+    return createScopedCanvasPathReadHandler(
+      { route: request.route!, conversationId: request.conversationId! },
+      invocation
+    )
+  } catch {
+    return undefined
+  } // Legacy optional-chat callback declines stale identity; side entry remains strict.
 }
 /** Reuses bounded passive file access after exact service/scope authorization. */
-export function createScopedCanvasPathReadHandler(thread: AgentThreadInteractionScope, invocation: ServiceInvocationContext): CanvasPathReadHandler | undefined {
+export function createScopedCanvasPathReadHandler(
+  thread: AgentThreadInteractionScope,
+  invocation: ServiceInvocationContext
+): CanvasPathReadHandler | undefined {
   authorizeAgentThreadScope(thread, invocation, invocation.methodName.split('.').at(-1)!)
   const senderId = invocation.senderId!
   const sender = webContents.fromId(senderId)
@@ -275,7 +288,25 @@ export function createScopedCanvasPathReadHandler(thread: AgentThreadInteraction
       )
       check()
       grants.assertDeliveryAuthorized(senderId, scope, grant.id)
-      if (!json && result.content.length > maxChars) throw new AgentLocalFileError('TEXT_TOO_LARGE')
+      const lineWindow = !json && wantsTextLineWindow(limits)
+      if (lineWindow && result.document)
+        throw new Error('offset and limit apply only to plain UTF-8 text.')
+      const window = lineWindow ? selectTextLines(result.content, limits) : undefined
+      if (!json && (window?.content ?? result.content).length > maxChars)
+        throw new AgentLocalFileError('TEXT_TOO_LARGE')
+      if (window)
+        return {
+          content: JSON.stringify({
+            ...result,
+            content: window.content,
+            returnedBytes: Buffer.byteLength(window.content, 'utf8'),
+            lineOffset: window.lineOffset,
+            lineCount: window.lineCount,
+            totalLines: window.totalLines,
+            totalLinesComplete: true
+          }),
+          metadata: { source: 'local-file', readOnly: true }
+        }
       if (json) {
         let parsed: unknown
         try {

@@ -1,3 +1,4 @@
+import { selectTextLines, wantsTextLineWindow } from '@shared/utils/textLineWindow'
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -367,7 +368,10 @@ export class FilesToolHost {
           sha256,
           durationMs: Date.now() - started
         }
+        const lineWindow = wantsTextLineWindow(call.input)
         const image = detectImage(sampled)
+        if (lineWindow && (image || sampled.subarray(0, 5).toString('ascii') === '%PDF-'))
+          throw new FilesToolValidationError('offset and limit apply only to plain UTF-8 text.')
         if (image) {
           const dimensions = imageDimensions(returned, image.mime)
           const output: FilesReadOutput = {
@@ -415,7 +419,10 @@ export class FilesToolHost {
         if (isBinary(sampled))
           throw new FilesToolValidationError('Unknown binary files are not readable.')
         let content = new TextDecoder('utf-8', { fatal: true }).decode(returned)
-        let truncated = stat.size > returned.length
+        const prefixOnly = stat.size > returned.length
+        let truncated = prefixOnly
+        const window = lineWindow ? selectTextLines(content, call.input) : undefined
+        if (window) content = window.content
         if (content.length > maxChars) {
           content = content.slice(0, maxChars)
           truncated = true
@@ -425,7 +432,15 @@ export class FilesToolHost {
           ...common,
           content,
           returnedBytes: Buffer.byteLength(content),
-          truncated
+          truncated,
+          ...(window
+            ? {
+                lineOffset: window.lineOffset,
+                lineCount: window.lineCount,
+                totalLines: window.totalLines,
+                totalLinesComplete: !prefixOnly
+              }
+            : {})
         }
         return {
           output,

@@ -730,6 +730,27 @@ describe('FilesToolHost bounded media reads', () => {
       returnedBytes: 11,
       truncated: false
     })
+    expect(text).not.toHaveProperty('totalLines')
+
+    writeFileSync(path.join(root, 'lines.txt'), 'l0\nl1\nl2\nl3\n')
+    const window = await host.read(
+      call('files.read', { path: 'lines.txt', offset: 1, limit: 2 }, authorization) as never
+    )
+    expect(window).toMatchObject({
+      kind: 'text',
+      content: 'l1\nl2\n',
+      returnedBytes: 6,
+      bytes: 12,
+      truncated: false,
+      lineOffset: 1,
+      lineCount: 2,
+      totalLines: 4,
+      totalLinesComplete: true
+    })
+    const prefix = await host.read(
+      call('files.read', { path: 'lines.txt', offset: 0, maxBytes: 6 }, authorization) as never
+    )
+    expect(prefix).toMatchObject({ content: 'l0\nl1\n', totalLines: 2, totalLinesComplete: false })
 
     const png = Buffer.concat([
       Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),

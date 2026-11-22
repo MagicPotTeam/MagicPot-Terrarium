@@ -235,6 +235,38 @@ describe('any ordinary local path is read without a per-path prompt', () => {
     expect(open).not.toHaveBeenCalled()
     await expectCode(handler()(file, undefined, { maxStringLength: 3 }), 'TEXT_TOO_LARGE')
   })
+  it('returns a line window of plain text with the total line count', async () => {
+    const file = await fixture('lines.txt', 'zero\r\none\ntwo\nthree')
+    const window = JSON.parse(
+      (await handler()(file, undefined, { offset: 1, limit: 2, maxStringLength: 8 })).content
+    )
+    expect(window).toMatchObject({
+      content: 'one\ntwo\n',
+      returnedBytes: 8,
+      lineOffset: 1,
+      lineCount: 2,
+      totalLines: 4,
+      totalLinesComplete: true
+    })
+    await expectCode(
+      handler()(file, undefined, { offset: 0, maxStringLength: 8 }),
+      'TEXT_TOO_LARGE'
+    )
+  })
+  it('refuses a line window on an extracted document', async () => {
+    const file = await fixture('windowed.pdf')
+    vi.spyOn(LocalFileReadGrants.prototype, 'read').mockResolvedValue({
+      name: 'windowed.pdf',
+      relativePath: '',
+      content: 'extracted',
+      encoding: 'utf-8',
+      sizeBytes: 1,
+      returnedBytes: 9,
+      truncated: false,
+      document: { format: 'pdf', segments: [], warnings: [] }
+    } as never)
+    await expect(handler()(file, undefined, { limit: 1 })).rejects.toThrow('plain UTF-8 text')
+  })
   it('retains plain text and document size ceilings', async () => {
     await expectCode(
       handler()(
