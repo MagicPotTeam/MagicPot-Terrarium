@@ -159,6 +159,16 @@ describe('build-image-worker normal compatibility', () => {
     expect(fs.statSync(result.outputBinaryPath).mode & 0o777).toBe(0o755)
   })
 
+  it('runs an explicitly resolved cargo executable in normal mode', () => {
+    const f = fixture({ platform: 'win32', env: { CARGO: 'ignored-custom-cargo' } })
+    buildImageWorker({ ...f.input, cargo: CARGO })
+    expect(f.spawn).toHaveBeenCalledExactlyOnceWith(
+      CARGO,
+      ['build', '--release', '--manifest-path', f.paths.manifestPath],
+      expect.objectContaining({ shell: false })
+    )
+  })
+
   for (const platform of ['linux', 'darwin', 'win32']) {
     it.each([undefined, '', '0'])(
       `${platform}: mode %j preserves args, env, cache and chmod`,

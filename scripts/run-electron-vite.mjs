@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import path from 'node:path'
+import { ensureDevImageWorker } from './dev-image-worker.mjs'
 import { killWindowsProcessTree } from './windows-process-tree.mjs'
 
 const DEV_USER_DATA_DIRNAME = '.aiengineelectron-dev'
@@ -72,6 +73,10 @@ if (command === 'dev') {
     process.exit(1)
   }
   if (build.status !== 0) process.exit(build.status ?? 1)
+
+  // Thumbnail image worker for dev: skipped when up to date, offline-only, and
+  // never fatal (it warns and thumbnails fall back to the original image).
+  ensureDevImageWorker({ repoRoot: process.cwd(), env })
 }
 
 const child = spawn(electronViteBin, args, {

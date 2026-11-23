@@ -118,6 +118,7 @@ export function buildImageWorker({
   platform = process.platform,
   arch = process.arch,
   env = process.env,
+  cargo = 'cargo',
   spawn = spawnSync,
   realpath,
   stat
@@ -147,7 +148,7 @@ export function buildImageWorker({
     paths.cargoTargetDir = win32.dirname(win32.dirname(options.releaseDir))
     paths.sourceBinaryPath = win32.join(options.releaseDir, `${sidecarPackageName}.exe`)
   } else {
-    options.cargo = 'cargo'
+    options.cargo = cargo
     options.args = ['build', '--release', '--manifest-path', paths.manifestPath]
   }
   console.log(`[image-worker] repo root: ${repoRoot}`)
