@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import type {
   CodexModelCatalogEntry,
   CodexModelsCacheSnapshot,
@@ -102,9 +102,16 @@ const awaitWithAbort = async <T>(promise: Promise<T>, signal?: AbortSignal): Pro
   })
 }
 
+// Cache keys only need to tell credentials apart inside this process. A keyed
+// HMAC with a per-process secret keeps the fingerprint useless outside it, so
+// it cannot be used to guess the credential (same approach as codexRequestGovernor).
+const CACHE_KEY_HMAC_SECRET = randomBytes(32)
+
 const buildCLIProxyCacheKey = (profile: Pick<LLMAPIProfile, 'base_url' | 'api_key'>): string => {
   const baseUrl = normalizeOpenAIBaseUrl(profile.base_url)
-  const keyFingerprint = createHash('sha256').update(profile.api_key).digest('hex')
+  const keyFingerprint = createHmac('sha256', CACHE_KEY_HMAC_SECRET)
+    .update(profile.api_key)
+    .digest('hex')
   return `${baseUrl}\u0000${keyFingerprint}`
 }
 
