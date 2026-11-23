@@ -50,21 +50,42 @@ beforeEach(() => {
 afterEach(() => __resetCodexRequestGovernorForTests())
 
 describe('MAIN-only selected Codex image backend capability, no provider work in discovery', () => {
-  it.each([undefined, false, null, 'true', 1, {}])(
-    'GIF capability is default-off and requires the source profile literal true (%j)',
-    (value) => {
-      Object.assign(config.llm_config.api_profiles[0], { codex_image_gif_enabled: value })
-      expect(factory()).toHaveProperty('gifEnabled', false)
+  it.each([
+    ['codex-json-api-key', profile, true],
+    ['codex-json-oauth', { ...profile, call_type: 'codex', auth_mode: 'codex_oauth' }, true],
+    ['openai-images-api-key', { ...profile, base_url: 'https://gateway.fixture/v1' }, false]
+  ] as const)(
+    '%s determines GIF capability regardless of legacy profile values or renderer hints',
+    (backend, imageProfile, supportsGif) => {
+      config.llm_config.api_profiles[0] = { ...imageProfile }
+      const linked = useSeparateTextProfile()
+      const [target, source] = config.llm_config.api_profiles
+      for (const req of [request, linked]) {
+        expect(factory(req)).toMatchObject({ gifEnabled: supportsGif, approval: { backend } })
+      }
+      // Old JSON may contain this field on the text profile, its target, or both. Neither it nor
+      // request-level claims may decide the capability; only MAIN's selected endpoint does.
+      for (const legacyValue of [false, true, null, 'true', 1, {}]) {
+        Object.assign(source, { codex_image_gif_enabled: legacyValue })
+        Object.assign(target, { codex_image_gif_enabled: !supportsGif })
+        const rendererClaim = {
+          ...linked,
+          gifEnabled: !supportsGif,
+          codex_image_gif_enabled: !supportsGif
+        }
+        expect(factory(rendererClaim)).toMatchObject({
+          gifEnabled: supportsGif,
+          approval: { backend }
+        })
+      }
       expect(h.ensure).not.toHaveBeenCalled()
+      expect(h.refresh).not.toHaveBeenCalled()
       expect(h.fetch).not.toHaveBeenCalled()
     }
   )
 
-  it('GIF source opt-in enables generation/edit flat wire, but target opt-in is never inherited', async () => {
+  it('sends flat GIF controls on a linked Codex backend with no GIF setting on either profile', async () => {
     const req = useSeparateTextProfile()
-    Object.assign(config.llm_config.api_profiles[0], { codex_image_gif_enabled: true })
-    expect(factory(req)).toHaveProperty('gifEnabled', false)
-    Object.assign(config.llm_config.api_profiles[1], { codex_image_gif_enabled: true })
     const generator = factory(req)!
     expect(generator).toHaveProperty('gifEnabled', true)
     const params = {
@@ -85,22 +106,31 @@ describe('MAIN-only selected Codex image backend capability, no provider work in
         frame_duration_ms: 100
       })
     }
-    Object.assign(config.llm_config.api_profiles[1], { codex_image_gif_enabled: false })
+    config.llm_config.api_profiles[0].base_url = 'https://gateway.fixture/v1'
     await expect(generator.generate('stale', params)).rejects.toThrow('changed')
+    const imagesApi = factory(req)!
+    expect(imagesApi).toMatchObject({
+      gifEnabled: false,
+      approval: { backend: 'openai-images-api-key' }
+    })
+    await expect(imagesApi.generate('unsupported', params)).rejects.toThrow(
+      /GIF output is not enabled/
+    )
+    await expect(
+      imagesApi.edit('unsupported', ['data:image/png;base64,QUJD'], params)
+    ).rejects.toThrow(/GIF output is not enabled/)
     expect(h.fetch).toHaveBeenCalledTimes(2)
+    expect(h.ensure).not.toHaveBeenCalled()
   })
-  it('GIF opt-in cannot be enabled by the renderer request and is revoked during OAuth preparation', async () => {
+  it('revokes a GIF request if the selected OAuth profile is edited during credential preparation', async () => {
     Object.assign(config.llm_config.api_profiles[0], {
       call_type: 'codex',
       auth_mode: 'codex_oauth'
     })
-    expect(
-      factory({ ...request, codex_image_gif_enabled: true, gifEnabled: true } as LLMChatReq)
-    ).toHaveProperty('gifEnabled', false)
-    Object.assign(config.llm_config.api_profiles[0], { codex_image_gif_enabled: true })
     const generator = factory()!
+    expect(generator.gifEnabled).toBe(true)
     h.ensure.mockImplementation(async () => {
-      config.llm_config.api_profiles[0].codex_image_gif_enabled = false
+      config.llm_config.api_profiles[0].model_name = 'changed-during-auth'
       return { accessToken: 'oauth-fixture', accountId: 'account-fixture' }
     })
     await expect(
@@ -110,6 +140,7 @@ describe('MAIN-only selected Codex image backend capability, no provider work in
         signal: new AbortController().signal
       })
     ).rejects.toThrow('changed')
+    expect(h.ensure).toHaveBeenCalledOnce()
     expect(h.fetch).not.toHaveBeenCalled()
     expect(h.refresh).not.toHaveBeenCalled()
   })
@@ -296,9 +327,13 @@ describe('MAIN-only selected Codex image backend capability, no provider work in
     await generate(generator)
     await edit(generator)
     expect(h.fetch.mock.calls.map(([url]) => url)).toEqual([
-      'https://gateway.fixture/v1/images/generations', 'https://gateway.fixture/v1/images/edits'
+      'https://gateway.fixture/v1/images/generations',
+      'https://gateway.fixture/v1/images/edits'
     ])
-    expect(JSON.parse(h.fetch.mock.calls[0][1].body)).toMatchObject({ model: 'gpt-image-2', prompt: 'frog' })
+    expect(JSON.parse(h.fetch.mock.calls[0][1].body)).toMatchObject({
+      model: 'gpt-image-2',
+      prompt: 'frog'
+    })
     const init = h.fetch.mock.calls[1][1]
     expect(init.body).toBeInstanceOf(FormData)
     expect(init.body.get('model')).toBe('gpt-image-2')

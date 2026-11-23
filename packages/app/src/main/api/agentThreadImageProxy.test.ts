@@ -307,23 +307,7 @@ async function approval() {
 }
 
 it.each([false, true])('GIF schema is exposed only with MAIN capability=%s', async (enabled) => {
-  const { createAgentThreadImageTools } = await import('./agentThreadImageTools')
-  const provider = createAgentThreadImageTools({
-    ...scope,
-    signal: new AbortController().signal,
-    generator: {
-      gifEnabled: enabled,
-      approval: {
-        backend: 'codex-json-api-key',
-        endpoint: 'https://image.fixture/codex',
-        profileId: 'agent-profile'
-      },
-      assertCurrent: h.current,
-      generate: h.generate
-    },
-    assertLive: () => {},
-    assertInvocation: () => {}
-  })
+  const provider = await gifProvider(enabled)
   const schema = provider.listTools()[0].inputSchema
   if (enabled)
     expect(schema).toHaveProperty('properties.gif', {
@@ -337,7 +321,11 @@ it.each([false, true])('GIF schema is exposed only with MAIN capability=%s', asy
   else expect(schema).not.toHaveProperty('properties.gif')
 })
 
-function gifProvider(enabled = true, messages: import('@shared/llm').ChatMessage[] = []) {
+function gifProvider(
+  enabled = true,
+  messages: import('@shared/llm').ChatMessage[] = [],
+  directStillGeneration = false
+) {
   return import('./agentThreadImageTools').then(({ createAgentThreadImageTools }) =>
     createAgentThreadImageTools({
       ...scope,
@@ -345,9 +333,10 @@ function gifProvider(enabled = true, messages: import('@shared/llm').ChatMessage
       messages,
       generator: {
         gifEnabled: enabled,
+        directStillGeneration,
         approval: {
-          backend: 'codex-json-api-key',
-          endpoint: 'https://image.fixture/codex',
+          backend: enabled ? 'codex-json-api-key' : 'openai-images-api-key',
+          endpoint: enabled ? 'https://image.fixture/codex' : 'https://image.fixture/v1',
           profileId: 'agent-profile'
         },
         assertCurrent: h.current,
@@ -384,9 +373,41 @@ it.each([
   expect(h.generate).not.toHaveBeenCalled()
   expect(h.edit).not.toHaveBeenCalled()
 })
+it('requires fresh formal approval for each text-only GIF even when still generation is direct', async () => {
+  const provider = await gifProvider(true, [], true)
+  h.generate.mockResolvedValue(gifResult())
+  const requestGif = (id: string) =>
+    provider.callTool(
+      'image_gen',
+      { ...args, gif: {} },
+      { route, runId: 'two-gifs', toolCallId: id }
+    )
+  const first = requestGif('first')
+  const firstPermit = await approval()
+  expect(firstPermit.entry.request.request.input).toMatchObject({ gif: {}, output_format: 'gif' })
+  expect(firstPermit.entry.request.request.input).not.toHaveProperty('uploadsInputImages')
+  expect(h.generate).not.toHaveBeenCalled()
+  firstPermit.resolve()
+  await first
+  expect(h.generate).toHaveBeenCalledOnce()
+
+  // A fresh tool call, not a replay of the same completed call. Identical GIF parameters are not consent.
+  const second = requestGif('second')
+  const secondPermit = await approval()
+  expect(secondPermit.entry.approvalId).not.toBe(firstPermit.entry.approvalId)
+  expect(secondPermit.entry.request.request.input).toMatchObject({ gif: {}, output_format: 'gif' })
+  expect(h.generate).toHaveBeenCalledOnce()
+  const denied = expect(second).rejects.toThrow(/denied by the user/i)
+  secondPermit.resolve(false)
+  await denied
+  expect(h.generate).toHaveBeenCalledOnce()
+  expect(h.edit).not.toHaveBeenCalled()
+  expect(getAssistantTerminalPolicyRuntime().listPendingTerminalApprovals()).toEqual([])
+})
+
 it.each([false, true])(
-  'GIF cannot be model enabled when trusted capability is %s',
-  async (explicit) => {
+  'a model cannot request GIF on a still-only backend (forged capability argument=%s)',
+  async (forgeCapability) => {
     const provider = await gifProvider(false)
     await expect(
       provider.callTool(
@@ -394,7 +415,7 @@ it.each([false, true])(
         {
           ...args,
           gif: {},
-          ...(explicit ? { gifEnabled: true, codex_image_gif_enabled: true } : {})
+          ...(forgeCapability ? { gifEnabled: true } : {})
         },
         { route, runId: 'off' }
       )
@@ -442,6 +463,7 @@ it.each(
     ])
     expect(permit.entry.request.request.input).toMatchObject({ ...gifArgs, output_format: 'gif' })
     expect(h.generate).not.toHaveBeenCalled()
+    expect(h.edit).not.toHaveBeenCalled()
     permit.resolve()
     const outcome = await pending
     if (!outcome.ok) throw outcome.error
@@ -529,7 +551,7 @@ it.each(
     else {
       if (ending === 'changed')
         h.current.mockImplementation(() => {
-          throw Error('GIF opt-in revoked.')
+          throw Error('Selected image backend changed.')
         })
       permit.resolve(ending !== 'deny')
     }
@@ -577,7 +599,7 @@ it.each(
     else if (ending === 'navigation') sender.emit('did-start-navigation')
     else
       h.current.mockImplementation(() => {
-        throw Error('GIF opt-in revoked.')
+        throw Error('Selected image backend changed.')
       })
     release(gifResult())
     const outcome = await pending
@@ -722,7 +744,7 @@ it.each(['fresh', 'replay'] as const)(
 )
 
 it.each([
-  'opt-out',
+  'still-only-backend',
   'forged-summary',
   'malformed-summary',
   'invalid-controls',
@@ -752,7 +774,7 @@ it.each([
     )
   if (kind === 'missing-file')
     await fs.unlink(path.join(h.data, '.chat_media', receipt.images[0].media.relativePath))
-  const restored = await gifProvider(kind !== 'opt-out')
+  const restored = await gifProvider(kind !== 'still-only-backend')
   await expect(
     restored.acceptCompletedResult({ ...result, content: JSON.stringify(receipt) })
   ).rejects.toMatchObject({ code: 'IMAGE_RESULT_RESTORE_FAILED', retryBlocked: true })

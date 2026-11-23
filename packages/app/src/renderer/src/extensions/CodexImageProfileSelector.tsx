@@ -1,5 +1,5 @@
 import React from 'react'
-import { Box, Checkbox, FormControlLabel, Stack, Typography } from '@mui/material'
+import { Box, Stack, Typography } from '@mui/material'
 import type { AgentApiProfileCardRenderOptions } from '@renderer/extensions/generatedRegistry'
 import { resolveProfileModelUse } from '@shared/llm'
 import { resolveCodexImageBackend } from '@shared/extensions/codexImageProfile'
@@ -24,11 +24,6 @@ export default function CodexImageProfileSelector({
   const selected =
     typeof profile.codex_image_profile_id === 'string' ? profile.codex_image_profile_id : ''
   const unavailable = selected && !eligible.some((candidate) => candidate.id === selected)
-  // The OpenAI images API backend has no GIF output; MAIN ignores the switch for it.
-  const target = selected ? eligible.find((candidate) => candidate.id === selected) : profile
-  const gifUnsupported = target
-    ? resolveCodexImageBackend(target)?.backend === 'openai-images-api-key'
-    : false
   return (
     <Stack spacing={1}>
       <Box component="label" htmlFor={selectId}>
@@ -71,24 +66,6 @@ export default function CodexImageProfileSelector({
       </Box>
       <Typography variant="caption" color="text.secondary">
         {copy('image_backend_hint')}
-      </Typography>
-      <FormControlLabel
-        control={
-          <Checkbox
-            disabled={gifUnsupported}
-            checked={!gifUnsupported && profile.codex_image_gif_enabled === true}
-            onChange={(_, checked) =>
-              onUpdate(profile.id, {
-                ...profile,
-                codex_image_gif_enabled: checked ? true : undefined
-              })
-            }
-          />
-        }
-        label={copy('image_gif_label')}
-      />
-      <Typography variant="caption" color="text.secondary">
-        {copy(gifUnsupported ? 'image_gif_unsupported' : 'image_gif_hint')}
       </Typography>
     </Stack>
   )

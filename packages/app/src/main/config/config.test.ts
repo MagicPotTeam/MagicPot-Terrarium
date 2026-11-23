@@ -58,48 +58,6 @@ describe('config', () => {
     vi.clearAllMocks()
   })
 
-  it('persists and clears source-only GIF output opt-in, without inferring or copying the image target option', async () => {
-    const configModule = await loadConfigModule()
-    await configModule.initConfig()
-    const text = {
-      id: 'text',
-      model_name: 'text',
-      base_url: 'https://text.fixture/v1',
-      api_key: 'text-key',
-      codex_image_profile_id: 'image'
-    }
-    const image = {
-      id: 'image',
-      model_name: 'image',
-      base_url: 'https://image.fixture/codex',
-      api_key: 'image-key',
-      codex_image_gif_enabled: true
-    }
-    await configModule.saveConfig({ llm_config: { api_profiles: [text, image] } })
-    await configModule.initConfig()
-    expect(
-      configModule.getConfig().llm_config.api_profiles[0].codex_image_gif_enabled
-    ).toBeUndefined()
-    await configModule.saveConfig({
-      llm_config: { api_profiles: [{ ...text, codex_image_gif_enabled: true }, image] }
-    })
-    await configModule.initConfig()
-    expect(configModule.getConfig().llm_config.api_profiles[0]).toMatchObject({
-      ...text,
-      codex_image_gif_enabled: true
-    })
-    await configModule.saveConfig({
-      llm_config: { api_profiles: [{ ...text, codex_image_gif_enabled: undefined }, image] }
-    })
-    await configModule.initConfig()
-    expect(configModule.getConfig().llm_config.api_profiles[0]).not.toHaveProperty(
-      'codex_image_gif_enabled'
-    )
-    const saved = JSON.parse(await fs.readFile(path.join(tempDir, 'config.json'), 'utf8'))
-    expect(saved.llm_config.api_profiles[0]).not.toHaveProperty('codex_image_gif_enabled')
-    expect(saved.llm_config.api_profiles[1].codex_image_gif_enabled).toBe(true)
-  })
-
   it('persists and explicitly clears the Agent image profile link without migrating an implicit backend', async () => {
     const configModule = await loadConfigModule()
     await configModule.initConfig()

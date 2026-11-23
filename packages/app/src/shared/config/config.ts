@@ -45,8 +45,6 @@ export type LLMAPIProfile = {
   codex_fast_mode?: boolean
   /** Explicit Agent image_gen backend link; absence uses only an eligible selected text profile itself. Never inferred or followed transitively. */
   codex_image_profile_id?: string
-  /** Explicit source text-profile opt-in for Agent image_gen GIF output. Default off; never inherited from a linked backend. */
-  codex_image_gif_enabled?: boolean
   context_window_tokens?: number
   context_budget_tokens?: number
   /** Only enable when the provider request path actually consumes and returns a continuation id/url. */

@@ -43,8 +43,5 @@
   "image_backend_own": "Use this text profile's own Codex backend",
   "image_backend_none": "Not configured (image_gen unavailable)",
   "image_backend_unavailable": "Unavailable backend",
-  "image_backend_hint": "Uses only this text profile's explicitly selected image backend in Agent threads, without copying keys, choosing a login or following nested links. A plain text-to-image request runs directly (it may use credits); every request that uploads images or outputs a GIF needs a fresh formal approval; changing either profile or this link revokes the current request.",
-  "image_gif_label": "Allow GIF output for image_gen (backend must support it)",
-  "image_gif_unsupported": "The selected image backend (OpenAI images API) has no GIF output.",
-  "image_gif_hint": "Default off for this text profile only; never inherited from its image backend. Every request still needs approval. GIF edit inputs remain unsupported; this switch does not verify backend availability."
+  "image_backend_hint": "Uses only this text profile's explicitly selected image backend in Agent threads, without copying keys, choosing a login or following nested links. A plain text-to-image request runs directly (it may use credits); every request that uploads images or outputs a GIF needs a fresh formal approval; changing either profile or this link revokes the current request."
 }
