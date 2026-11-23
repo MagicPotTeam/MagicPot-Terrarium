@@ -75,6 +75,10 @@ packages/runtime-assets/resources/bin/image-worker/${process.platform}-${process
 
 This creates a local packaging artifact; generated binaries are ignored by git and should be produced by the target-platform packaging job before `electron-builder` runs. Runtime IPC/resolver wiring is intentionally not included here.
 
+electron-builder also copies `packages/runtime-assets/resources/bin` to `<install dir>/bin`, next to the executable; the main process looks there before any cwd-relative location, so the packaged app does not depend on the shortcut's working directory.
+
+`npm run dev` (via `scripts/run-electron-vite.mjs` and `scripts/dev-image-worker.mjs`) publishes the same binary to the same `packages/runtime-assets` path, which the main process finds relative to the dev cwd. It skips cargo when the binary is newer than `Cargo.toml`, `Cargo.lock` and `src/`, uses `cargo` from `PATH` or `~/.cargo/bin`, builds with `CARGO_NET_OFFLINE=true`, and only warns on failure (thumbnails then fall back to the original image). The first build needs the crates already downloaded: run `npm run build:image-worker` once while online. Setting `MAGICPOT_CANVAS_THUMBNAIL_SIDECAR_PATH` skips the dev build.
+
 ## Test
 
 ```bash

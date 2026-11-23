@@ -428,6 +428,18 @@ export function getCanvasThumbnailSidecarCandidatePaths(
               binaryName
             )
           : undefined,
+        // electron-builder extraFiles publishes resources/bin as <install dir>/bin, next to
+        // the executable. Looking there keeps the packaged app independent of the cwd that
+        // a shortcut or launcher happens to set.
+        executableDir
+          ? path.join(
+              executableDir,
+              'bin',
+              'image-worker',
+              `${sidecarProcess.platform}-${sidecarProcess.arch}`,
+              binaryName
+            )
+          : undefined,
         path.join(
           cwd,
           'packages',

@@ -135,6 +135,32 @@ describe('canvasThumbnailSidecarAdapter', () => {
     ).toBe(true)
   })
 
+  it('checks the packaged bin directory next to the executable before cwd-relative locations', () => {
+    const workerPath = (...segments: string[]): string =>
+      path.join(...segments, 'image-worker', 'win32-x64', 'magicpot-image-worker.exe')
+
+    expect(
+      getCanvasThumbnailSidecarCandidatePaths({
+        ...createProcess(),
+        resourcesPath: 'D:/asar-resources'
+      })
+    ).toEqual([
+      workerPath('D:/asar-resources', 'bin'),
+      workerPath('C:/MagicPot', 'resources', 'bin'),
+      workerPath('C:/MagicPot', 'bin'),
+      workerPath('C:/repo/MagicPot-Terrarium', 'packages', 'runtime-assets', 'resources', 'bin'),
+      workerPath('C:/repo/MagicPot-Terrarium', 'bin'),
+      path.join(
+        'C:/repo/MagicPot-Terrarium',
+        '.cache',
+        'cargo-target',
+        'canvas-thumbnail-sidecar',
+        'release',
+        'canvas-thumbnail-sidecar.exe'
+      )
+    ])
+  })
+
   it('resolves the first accessible sidecar binary and reports all candidates on miss', async () => {
     const sidecarProcess = createProcess({
       [CANVAS_THUMBNAIL_SIDECAR_PATH_ENV]: 'C:/env/worker.exe'

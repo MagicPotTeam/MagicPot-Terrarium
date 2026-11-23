@@ -39,6 +39,10 @@ function runLauncher(command, buildResult = { status: 0 }, platform = 'win32') {
       process: fakeProcess,
       console: { error: () => {} },
       killWindowsProcessTree: () => {},
+      ensureDevImageWorker: (options) => {
+        calls.push({ kind: 'image-worker', options })
+        return { status: 'up-to-date' }
+      },
       spawnSync: (file, args, options) => {
         calls.push({ kind: 'build', file, args, options })
         return buildResult
@@ -57,8 +61,13 @@ function runLauncher(command, buildResult = { status: 0 }, platform = 'win32') {
 test('dev builds the document worker without a shell before launch and propagates failures', () => {
   for (const platform of ['win32', 'linux']) {
     const { calls, root, executable } = runLauncher('dev', { status: 0 }, platform)
-    assert.deepEqual(calls.map(({ kind }) => kind), ['build', 'launch'])
-    const [build, launch] = calls
+    assert.deepEqual(
+      calls.map(({ kind }) => kind),
+      ['build', 'image-worker', 'launch']
+    )
+    const [build, imageWorker, launch] = calls
+    assert.equal(imageWorker.options.repoRoot, root)
+    assert.equal(imageWorker.options.env.ELECTRON_CLI_ARGS, launch.options.env.ELECTRON_CLI_ARGS)
     assert.equal(build.file, executable)
     assert.deepEqual(Array.from(build.args), [path.join(root, 'scripts/build-document-worker.mjs')])
     assert.equal(build.options.shell, false)
