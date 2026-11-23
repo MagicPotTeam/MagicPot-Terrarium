@@ -121,6 +121,7 @@ type ChatRequestPayload = {
   teamMember?: LLMTeamMember
   teamMessageHop?: 1 | 2
   teamMessageDelivery?: { id: string; lease: string }
+  threadEvent?: { id: string; lease: string }
   goalProgressToken?: string
   sessionUrl?: string
   conversationId?: string
@@ -158,6 +159,8 @@ type RequestChatCompletionInput = {
   teamMessageHop?: 1 | 2
   /** The claim of the member message this request delivers; sent to the local MAIN only, beside teamMessageHop. */
   teamMessageDelivery?: { id: string; lease: string }
+  /** The claim of the thread event this turn runs; sent to the local MAIN only (agentThreadInbox.ts). */
+  threadEvent?: { id: string; lease: string }
   /** In-memory host callbacks only; never serialized into IPC or model input. */
   beforeLocalDispatch?: () => void | Promise<void>
   onLocalDispatch?: () => void
@@ -1345,6 +1348,9 @@ const buildChatRequestPayload = (
             lease: input.teamMessageDelivery.lease
           }
         }
+      : {}),
+    ...(input.threadEvent && destination.localMainBoundary === true
+      ? { threadEvent: { id: input.threadEvent.id, lease: input.threadEvent.lease } }
       : {}),
     ...(input.goalProgressToken ? { goalProgressToken: input.goalProgressToken } : {}),
     sessionUrl: input.sessionUrl,
@@ -3586,6 +3592,11 @@ const requestChatCompletionInStages = async (
     (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')
   )
     throw new Error('Team messages require local transport.')
+  if (
+    input.threadEvent &&
+    (input.config.use_remote_llm || input.externalAgentSkill || input.goalProgressToken)
+  )
+    throw new Error('Thread events require local transport.')
   assertLocalProfileRevisionInput(input)
   assertGoalProgressInput(input)
   validateCustomSkillForSend(input.externalAgentSkill)
@@ -3682,6 +3693,11 @@ const requestChatCompletionStreamInStages = async (
     (input.config.use_remote_llm || input.externalAgentSkill?.type === 'agent')
   )
     throw new Error('Team messages require local transport.')
+  if (
+    input.threadEvent &&
+    (input.config.use_remote_llm || input.externalAgentSkill || input.goalProgressToken)
+  )
+    throw new Error('Thread events require local transport.')
   assertLocalProfileRevisionInput(input)
   assertGoalProgressInput(input)
   validateCustomSkillForSend(input.externalAgentSkill)

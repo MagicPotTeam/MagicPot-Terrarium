@@ -1,6 +1,7 @@
 import type { LLMRetryStatus } from './modelCapacityRetry'
 import type { LLMFunctionCall, LLMFunctionTool, LLMToolTurn } from './nativeTools'
 import type { OCRResult } from '@shared/api/svcLLMProxy'
+import type { AgentThreadEventOrigin } from '@shared/api/agentThreadInbox'
 import type { ImageRequestContract } from './imageRequestContract'
 export type { ImageRequestContract } from './imageRequestContract'
 import type { MediaReference } from '@shared/mediaReference'
@@ -82,6 +83,8 @@ export interface ChatMessage {
   responseInterrupted?: boolean
   /** See ChatMessage.runState in svcLLMProxy: set while the reply is being written. */
   runState?: 'streaming'
+  /** See ChatMessage.threadEvent in svcLLMProxy: an injected thread event turn (display label). */
+  threadEvent?: AgentThreadEventOrigin
   /** Structured tool-loop records persisted separately from visible assistant prose. */
   toolHistory?: ToolHistoryEntry[]
 }

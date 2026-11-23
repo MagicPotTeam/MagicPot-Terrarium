@@ -4,6 +4,16 @@ import type {
   AgentTeamMessageQueueScope
 } from './agentTeamMessage'
 import type {
+  AgentThreadEventClaim,
+  AgentThreadEventDelivery,
+  AgentThreadEventExpire,
+  AgentThreadEventListScope,
+  AgentThreadEventOrigin,
+  AgentThreadEventRelease,
+  AgentThreadEventType,
+  AgentThreadEventView
+} from './agentThreadInbox'
+import type {
   AgentThreadNotes,
   AgentArchiveQuery,
   ResolveAgentArchiveQueryReq
@@ -149,6 +159,9 @@ export type ChatMessage = {
    * reload, a crash or quitting. Absent: finished, or stored before this field existed.
    */
   runState?: 'streaming'
+  /** An injected thread event turn (display label only): rendered as an event, never as the user's
+   * own message, consent or approval. The model sees the untrusted-data prefix in content. */
+  threadEvent?: AgentThreadEventOrigin
   /** Structured tool-loop records persisted with assistant messages. */
   toolHistory?: ToolHistoryEntry[]
 }
@@ -236,6 +249,11 @@ export type LLMChatReq = {
   /** The claim of the member message this request delivers (local MAIN only). MAIN records the start of
    * the request before it goes on and removes the field: never sent to a provider or a remote host. */
   teamMessageDelivery?: { id: string; lease: string }
+  /** The claim of the thread event this turn runs (local MAIN only). MAIN records its start before the
+   * request goes on and removes the field: never sent to a provider or a remote host. */
+  threadEvent?: AgentThreadEventDelivery
+  /** Set by MAIN on an admitted event turn: not the user's own turn, no consent and no approval. */
+  threadEventOrigin?: AgentThreadEventType
   /** Request-scoped cancellation ownership; never forwarded as provider authority. */
   cancellationId?: string
   /** Main-issued identifier used to correlate Desktop, Bridge and Provider stages. */
@@ -534,6 +552,14 @@ export type LLMProxySvc = {
     req: AgentTeamMessageQueueScope
   ): Promise<{ intents: AgentTeamMessageIntent[] }>
   claimAgentTeamMessage(req: AgentTeamMessageClaim): Promise<{ intent?: AgentTeamMessageIntent }>
+  /** Trusted local desktop only. Queued thread events of the sender's own canvas thread route. */
+  listAgentThreadEvents(req: AgentThreadEventListScope): Promise<{ events: AgentThreadEventView[] }>
+  /** A claim is a lease on a durable event (given out once), not a delivery. */
+  claimAgentThreadEvent(req: AgentThreadEventClaim): Promise<{ event?: AgentThreadEventView }>
+  /** The claimed event's turn did not start: queued again. */
+  releaseAgentThreadEvent(req: AgentThreadEventRelease): Promise<{ released: boolean }>
+  /** The session was stopped or removed: its waiting events expire. */
+  expireAgentThreadEvents(req: AgentThreadEventExpire): Promise<{ expired: number }>
   /** Conversation feedback, never operation approval. */
   getAgentNotes(req: AgentThreadInteractionScope): Promise<AgentThreadNotes>
   listAgentArchiveQueries(
@@ -657,6 +683,10 @@ export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
   stopAgentJob: { type: 'unary' },
   listAgentTeamMessages: { type: 'unary' },
   claimAgentTeamMessage: { type: 'unary' },
+  listAgentThreadEvents: { type: 'unary' },
+  claimAgentThreadEvent: { type: 'unary' },
+  releaseAgentThreadEvent: { type: 'unary' },
+  expireAgentThreadEvents: { type: 'unary' },
   getAgentNotes: { type: 'unary' },
   listAgentArchiveQueries: { type: 'unary' },
   resolveAgentArchiveQuery: { type: 'unary' },

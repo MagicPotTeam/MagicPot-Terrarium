@@ -7,6 +7,12 @@ import {
   teamMembersToStop
 } from './teamMemberStop'
 import { startTeamMessagePolling } from './teamMessagePolling'
+import { ThreadEventPump } from './threadEventPump'
+import {
+  formatAgentThreadEventForModel,
+  type AgentThreadEventExpire,
+  type AgentThreadEventType
+} from '@shared/api/agentThreadInbox'
 import {
   useHelperInvocationObserver,
   type HelperInvocationHandle
@@ -573,6 +579,13 @@ type SendMessageOverrides = {
   teamMessageHop?: 1 | 2
   /** The MAIN claim of the member message (lease from claimAgentTeamMessage); presented by the request. */
   teamMessageDelivery?: { id: string; lease: string }
+  /**
+   * A thread event turn (threadEventPump.ts): the lease from claimAgentThreadEvent rides to MAIN, the
+   * message is labelled as the event. Never a composer submission, consent or approval.
+   */
+  threadEvent?: { id: string; lease: string; type: AgentThreadEventType; source: string }
+  /** The event turn's request went to MAIN (not a delivery receipt). */
+  onThreadEventDispatched?: () => void
 }
 
 type QueuedSessionSend = {
@@ -1183,6 +1196,11 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // (the full chat page) keeps it in the composer.
   const modelInHeader = compact && Boolean(modelPillHost)
   const teamVisibilityRef = useRef({ active, epoch: 0 })
+  /**
+   * `${scope}\0${sessionId}` stopped (by hand or a stop request): dormant for thread events. No event
+   * turn starts there until the user's own next send to it resumes it; its events stay queued.
+   */
+  const threadEventHeldRef = useRef<Set<string>>(new Set())
   if (teamVisibilityRef.current.active !== active)
     teamVisibilityRef.current = { active, epoch: teamVisibilityRef.current.epoch + 1 }
   const protectionRef = useRef(existingConversationProtection)
@@ -6692,6 +6710,38 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }, [active, compact, createNewSession, storageScope])
 
+  // A session removed for good: its events expire in MAIN. Only removes work; a failure leaves the
+  // events to their TTL (they never re-create a session). A stopped session is not removed.
+  const expireThreadEvents = useCallback(
+    (conversationId: string, reason: AgentThreadEventExpire['reason']): void => {
+      if (
+        route?.channel !== 'canvas' ||
+        route.scopeType !== 'thread' ||
+        !route.scopeId ||
+        !route.threadId
+      )
+        return
+      try {
+        void api()
+          .svcLLMProxy.expireAgentThreadEvents({
+            route: {
+              channel: route.channel,
+              scopeType: route.scopeType,
+              scopeId: route.scopeId,
+              threadId: route.threadId
+            },
+            storageScope,
+            conversationId,
+            reason
+          })
+          .catch(() => undefined)
+      } catch {
+        /* IPC unavailable */
+      }
+    },
+    [route?.channel, route?.scopeType, route?.scopeId, route?.threadId, storageScope]
+  )
+
   useEffect(() => {
     const handleTerminateScope = (event: Event): void => {
       const customEvent = event as CustomEvent<{ scope?: string }>
@@ -6710,6 +6760,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       sessionIds.forEach((sessionId) => {
         terminateSession(sessionId, { dropQueued: true })
       })
+      // A stopped thread is dormant, not removed: its events stay queued in MAIN and run once the
+      // thread is open again (nothing runs them while its page is gone).
     }
     const handleTerminateSession = (event: Event): void => {
       const customEvent = event as CustomEvent<{ scope?: string; sessionId?: string }>
@@ -6722,6 +6774,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       if (!sessionId) return
 
       terminateSession(sessionId, { dropQueued: true })
+      // Stopped is dormant: its events wait (TTL still applies) until the user resumes it.
+      threadEventHeldRef.current.add(`${storageScope}\u0000${sessionId}`)
     }
 
     window.addEventListener('chat:terminate-scope', handleTerminateScope)
@@ -6730,7 +6784,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       window.removeEventListener('chat:terminate-scope', handleTerminateScope)
       window.removeEventListener('chat:terminate-session', handleTerminateSession)
     }
-  }, [active, storageScope, terminateSession])
+  }, [active, expireThreadEvents, storageScope, terminateSession])
 
   useEffect(() => {
     const handleAppendMessage = (event: Event) => {
@@ -6923,6 +6977,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
   const deleteSession = (sessionId: string) => {
     terminateSession(sessionId, { dropQueued: true })
+    expireThreadEvents(sessionId, 'session-removed')
     deleteSessionDraftBackup(sessionId, storageScope)
     cancelDebouncedSessionSave(sessionId, storageScope)
     deletedSessionKeysRef.current.add(`${storageScope}\u0000${sessionId}`)
@@ -7576,6 +7631,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // before the first await: whether the selection moved and whether the user changed
       // this thread's draft while the send was being prepared.
       const isComposerSubmission = !overrides || overrides.composerSubmission === true
+      if (isComposerSubmission && targetSessionId)
+        threadEventHeldRef.current.delete(`${storageScope}\u0000${targetSessionId}`)
       const composerSelectionEpoch = sessionSelectionEpochRef.current
       const composerDraftEditCount = targetSessionId
         ? (composerDraftEditCountRef.current.get(targetSessionId) ?? 0)
@@ -7801,7 +7858,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
         role: 'user',
         content: requestContent,
         attachments: rawAttachments,
-        hiddenContext: msgHiddenContext || undefined
+        hiddenContext: msgHiddenContext || undefined,
+        ...(overrides?.threadEvent
+          ? {
+              threadEvent: {
+                kind: 'thread-event' as const,
+                type: overrides.threadEvent.type,
+                source: overrides.threadEvent.source
+              }
+            }
+          : {})
       }
       const activeSkillRuntime = activeSkill
         ? resolveSkillRuntimeSpec(activeSkill, config, availableRuntimeApps)
@@ -7945,6 +8011,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !serializedSkillRuntime &&
         !inheritedTeamSettings &&
         !overrides?.teamMessageHop &&
+        !overrides?.threadEvent &&
         !overrides?.baseMessages &&
         !msgHiddenContext &&
         !provisionalAttachments.length &&
@@ -8237,6 +8304,18 @@ const ChatPage: React.FC<ChatPageProps> = ({
         notifyWarning(t('chat.agent_goal.share_unavailable'))
         return
       }
+      // An event turn runs only as one ordinary local chat request that presents its lease; anything
+      // else never goes out (the pump releases the event and retries it later).
+      if (
+        overrides?.threadEvent &&
+        (inheritedTeamSettings ||
+          explicitToolCommand ||
+          isImageGenerationRequest ||
+          useAttachmentBatching ||
+          activeExternalAgentSkill ||
+          goalProgressToken)
+      )
+        return
       // Only such a send puts every image of the new message into one model request.
       const checkNewMessageImageBytes =
         !explicitToolCommand &&
@@ -8904,6 +8983,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
                   onLocalDispatch: overrides.onTeamRequestStarted
                 }
               : {}),
+            ...(overrides?.threadEvent
+              ? {
+                  threadEvent: { id: overrides.threadEvent.id, lease: overrides.threadEvent.lease },
+                  onLocalDispatch: overrides.onThreadEventDispatched
+                }
+              : {}),
             ...(goalProgressToken ? { goalProgressToken } : {}),
             conversationId: targetSessionId ?? undefined,
             isEdit: !!overrides?.baseMessages,
@@ -8920,6 +9005,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (
             goalProgressToken ||
             overrides?.teamMessageHop ||
+            // The event's lease is used once: a re-dispatch could never present it again.
+            overrides?.threadEvent ||
             !requestState.sessionUrl ||
             !isInvalidSessionContinuationError(error, true)
           ) {
@@ -9033,6 +9120,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 teamMessageHop: overrides.teamMessageHop,
                 teamMessageDelivery: overrides.teamMessageDelivery,
                 onLocalDispatch: overrides.onTeamRequestStarted
+              }
+            : {}),
+          ...(overrides?.threadEvent
+            ? {
+                threadEvent: { id: overrides.threadEvent.id, lease: overrides.threadEvent.lease },
+                onLocalDispatch: overrides.onThreadEventDispatched
               }
             : {}),
           ...(goalProgressToken ? { goalProgressToken } : {}),
@@ -9208,6 +9301,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
           if (
             goalProgressToken ||
             overrides?.teamMessageHop ||
+            // The event's lease is used once: a re-dispatch could never present it again.
+            overrides?.threadEvent ||
             !requestState.sessionUrl ||
             !isInvalidSessionContinuationError(error, true) ||
             streamedResponse ||
@@ -10509,6 +10604,131 @@ const ChatPage: React.FC<ChatPageProps> = ({
     onThreadSubRowChange?.(openSubRowTitle)
   }, [openSubRowTitle, onThreadSubRowChange])
   useLayoutEffect(() => () => onThreadSubRowChange?.(null), [onThreadSubRowChange])
+  // The thread event wake pump (threadEventPump.ts) lives as long as this page's loaded session list
+  // of a canvas thread: once the project's chat is mounted it claims and runs MAIN's queued events,
+  // hidden or not (a hidden pane only polls every 3 s instead of every 500 ms). Each event runs as
+  // one turn of its own session, oldest first, one at a time per session. A session that is gone is
+  // never re-created: its events expire.
+  const threadEventPumpRef = useRef<{ pump: ThreadEventPump; wake: () => void } | null>(null)
+  useEffect(() => {
+    if (
+      !sessionsLoaded ||
+      sessionLoadError ||
+      route?.channel !== 'canvas' ||
+      route.scopeType !== 'thread' ||
+      !route.scopeId ||
+      !route.threadId
+    )
+      return
+    const scope = storageScope
+    const scopeEpoch = sessionLoadEpochRef.current
+    const apiScope = {
+      route: {
+        channel: route.channel,
+        scopeType: route.scopeType,
+        scopeId: route.scopeId,
+        threadId: route.threadId
+      },
+      storageScope: scope
+    }
+    let alive = true
+    const isCurrent = () =>
+      alive &&
+      isMountedRef.current &&
+      storageScopeRef.current === scope &&
+      sessionLoadEpochRef.current === scopeEpoch
+    const pump = new ThreadEventPump({
+      isCurrent,
+      sessionState: (id) => {
+        const session = sessionsRef.current.find((item) => item.id === id)
+        if (
+          !session ||
+          hasSessionDeleteTombstone(id, scope) ||
+          deletedSessionKeysRef.current.has(`${scope}\u0000${id}`)
+        )
+          return 'removed'
+        // Archived is not removed: its events wait (TTL applies) and never reopen it.
+        if (session.archived) return 'wait'
+        // A member turn belongs to its team (MAIN refuses an event turn with team fields).
+        if (session.teamLeadId) return 'unavailable'
+        if (
+          isSessionBusy(id) ||
+          (queuedSessionSendsRef.current.get(id)?.length ?? 0) > 0 ||
+          threadEventHeldRef.current.has(`${scope}\u0000${id}`)
+        )
+          return 'wait'
+        return 'ready'
+      },
+      list: async () => (await api().svcLLMProxy.listAgentThreadEvents(apiScope)).events,
+      claim: async (id, conversationId) =>
+        (await api().svcLLMProxy.claimAgentThreadEvent({ ...apiScope, conversationId, id })).event,
+      release: async (id, conversationId, lease) =>
+        (
+          await api().svcLLMProxy.releaseAgentThreadEvent({
+            ...apiScope,
+            conversationId,
+            id,
+            lease
+          })
+        ).released,
+      expire: async (conversationId, reason) => {
+        await api().svcLLMProxy.expireAgentThreadEvents({ ...apiScope, conversationId, reason })
+      },
+      run: async (event) => {
+        let dispatched = false
+        const overrides: SendMessageOverrides = {
+          // The model sees the untrusted-data prefix; the message shows the event's label.
+          content: formatAgentThreadEventForModel(event),
+          targetSessionId: event.conversationId,
+          queueKey: `thread-event:${event.id}`,
+          threadEvent: { id: event.id, lease: event.lease, type: event.type, source: event.source },
+          onThreadEventDispatched: () => {
+            dispatched = true
+          }
+        }
+        const send = sendMessageRef.current
+        if (!send) return 'refused'
+        const pending = send(overrides)
+        // sendMessage decides synchronously whether the session is busy; a queued send keeps the lease.
+        if (
+          queuedSessionSendsRef.current
+            .get(event.conversationId)
+            ?.some((item) => item.overrides === overrides)
+        )
+          return 'queued'
+        try {
+          await pending
+        } catch {
+          /* the turn's own error handling reported it */
+        }
+        return dispatched ? 'dispatched' : 'refused'
+      },
+      wake: () => threadEventPumpRef.current?.wake()
+    })
+    const isVisible = () => teamVisibilityRef.current.active
+    const poller = startTeamMessagePolling(isVisible, () => void pump.tick())
+    threadEventPumpRef.current = { pump, wake: poller.wake }
+    return () => {
+      alive = false
+      pump.end()
+      poller.stop()
+      if (threadEventPumpRef.current?.pump === pump) threadEventPumpRef.current = null
+    }
+  }, [
+    isSessionBusy,
+    sessionsLoaded,
+    sessionLoadError,
+    storageScope,
+    route?.channel,
+    route?.scopeType,
+    route?.scopeId,
+    route?.threadId
+  ])
+  // A pane shown again goes back to the visible pace at once.
+  useEffect(() => {
+    if (active) threadEventPumpRef.current?.wake()
+  }, [active])
+
   // The dispatcher lives as long as the team in this scope: it ends on unmount, a scope change or the
   // team's end, never because the pane was hidden. A hidden pane keeps claiming MAIN's intents into
   // queued records; deliveries start once the pane is visible again.
@@ -13039,6 +13259,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
         ))
     if (currentSessionId && (ownWork || !members.length)) {
       terminateSession(currentSessionId)
+      // A manual stop also keeps the next thread event turn back until the user's own next send.
+      threadEventHeldRef.current.add(`${storageScope}\u0000${currentSessionId}`)
     }
     // The one stop-all of the members (teamMemberStop.ts), on the state read before the lead's stop.
     // A member idle at the click with team messages still queued for it is held as well.

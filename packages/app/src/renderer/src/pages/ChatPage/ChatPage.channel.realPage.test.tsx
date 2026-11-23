@@ -408,6 +408,8 @@ class FakeTeamMain {
             }
           }
         ),
+        // MAIN holds no thread events for these sessions: the wake pump lists and claims nothing.
+        listAgentThreadEvents: this.track('listAgentThreadEvents', async () => ({ events: [] })),
         // The thread has no background jobs or processes, and a running request asks nothing.
         listAgentJobs: this.track('listAgentJobs', async () => ({ jobs: [] })),
         listAgentProcesses: this.track('listAgentProcesses', async () => ({ jobs: [] })),

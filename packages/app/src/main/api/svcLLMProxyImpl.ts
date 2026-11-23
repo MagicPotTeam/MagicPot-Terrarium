@@ -1,4 +1,11 @@
 import { AgentTeamMessageQueue } from './agentTeamMessageQueue'
+import { AgentThreadInbox } from './agentThreadInbox'
+import type {
+  AgentThreadEventClaim,
+  AgentThreadEventExpire,
+  AgentThreadEventListScope,
+  AgentThreadEventRelease
+} from '@shared/api/agentThreadInbox'
 import type {
   AgentTeamMessageClaim,
   AgentTeamMessageQueueScope
@@ -2243,6 +2250,29 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: AgentTeamMessageClaim,
     invocation?: ServiceInvocationContext
   ) => ({ intent: this.teamMessageQueue.claim(req, invocation) })
+  /** MAIN-owned thread events (only MAIN enqueues); the renderer lists, claims, releases, expires. */
+  private readonly threadInbox = new AgentThreadInbox()
+  /** A conversation whose request still owns its abort controller (a running turn). */
+  private readonly isConversationBusy = (conversationId: string): boolean => {
+    const owner = this.conversationAbortControllers.get(conversationId.trim())
+    return Boolean(owner && !owner.controller.signal.aborted)
+  }
+  listAgentThreadEvents = async (
+    req: AgentThreadEventListScope,
+    invocation?: ServiceInvocationContext
+  ) => ({ events: this.threadInbox.list(req, invocation) })
+  claimAgentThreadEvent = async (
+    req: AgentThreadEventClaim,
+    invocation?: ServiceInvocationContext
+  ) => ({ event: this.threadInbox.claim(req, invocation) })
+  releaseAgentThreadEvent = async (
+    req: AgentThreadEventRelease,
+    invocation?: ServiceInvocationContext
+  ) => this.threadInbox.release(req, invocation)
+  expireAgentThreadEvents = async (
+    req: AgentThreadEventExpire,
+    invocation?: ServiceInvocationContext
+  ) => this.threadInbox.expire(req, invocation)
   // Current-conversation query rendezvous only. Notes/counter routes stay retired.
   listAgentArchiveQueries = async (
     req: AgentThreadInteractionScope,
@@ -2995,6 +3025,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: LLMChatReq,
     options?: ChatExecutionOptions & Partial<ServiceInvocationContext>
   ): Promise<LLMChatResp> => {
+    // A thread event turn: MAIN records its start (or refuses it) before any other set-up, and
+    // marks it threadEventOrigin (no user authority).
+    req = this.threadInbox.admitEvent(
+      req,
+      options?.methodName ? (options as ServiceInvocationContext) : undefined,
+      this.isConversationBusy
+    )
     assertTeamRequestActive(req)
     // The turn's End checks, built from the request as it entered; requests without teamMember get none.
     const teamChecks = createMemberTeamChecks(req)
@@ -3816,6 +3853,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       !req.structuredOutput &&
       !req.teamMember &&
       !req.teamMessageHop &&
+      !req.threadEventOrigin &&
       req.skillRuntime?.skillId === 'builtin.canvas-files' &&
       options?.canvasToolAdmission &&
       options.assertSkillContext
@@ -3950,7 +3988,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             correlationId: req.correlationId,
             // A message delivery is admitted once: after any provider attempt
             // fails its result may be unknown, even before output is visible.
-            ...(failedEditExplanation || req.teamMessageHop
+            ...(failedEditExplanation || req.teamMessageHop || req.threadEventOrigin
               ? { retryCapacity: false }
               : !req.videoGenerationOptions && this.retryModelCapacity
                 ? { retryCapacity: true }
@@ -3958,8 +3996,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             ...(failedEditExplanation || options?.goalProgress || restricted
               ? { disableProviderTools: true }
               : {}),
-            // The admitted ordinary image tool owns generation and its approval.
-            ...(failedEditExplanation || options?.imageToolAttachments
+            // The admitted ordinary image tool owns generation and its approval. Event text is
+            // untrusted data: never an inferred image request.
+            ...(failedEditExplanation || options?.imageToolAttachments || req.threadEventOrigin
               ? { disableAutomaticImageGeneration: true }
               : {}),
             ...(nativeToolsEnabled
@@ -4420,7 +4459,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           landed = normalizeLLMChatResult(
             await cli.chat({
               correlationId: req.correlationId,
-              ...(req.teamMessageHop
+              ...(req.teamMessageHop || req.threadEventOrigin
                 ? { retryCapacity: false }
                 : !req.videoGenerationOptions && this.retryModelCapacity
                   ? { retryCapacity: true }
@@ -4582,6 +4621,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     resp: ServerStreaming<LLMChatStreamResp>,
     invocation?: ServiceInvocationContext
   ): Promise<void> => {
+    // A thread event turn: MAIN records its start (or refuses it) before any other set-up, and
+    // marks it threadEventOrigin (no user authority).
+    req = this.threadInbox.admitEvent(req, invocation, this.isConversationBusy)
     assertTeamRequestActive(req)
     // The turn's End checks, built from the request as it entered; requests without teamMember get none.
     const teamChecks = createMemberTeamChecks(req)
