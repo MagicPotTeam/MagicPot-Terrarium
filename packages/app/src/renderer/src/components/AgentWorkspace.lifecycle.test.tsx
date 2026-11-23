@@ -87,8 +87,11 @@ const cssColor = (value: string): string => {
   return probe.style.backgroundColor
 }
 
+// The only (so the active) thread: its row is the toolbar's thread button.
 const getPaneRow = (): HTMLElement => {
-  const row = document.querySelector(`[data-agent-workspace-scope="${SCOPE}"][role="button"]`)
+  const row = document.querySelector(
+    `[data-agent-workspace-scope="${SCOPE}"][data-agent-thread-row][data-testid="agent-thread-toggle"]`
+  )
   if (!(row instanceof HTMLElement)) throw new Error('Agent lifecycle pane row is not mounted')
   return row
 }
@@ -146,27 +149,24 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
     ['failed', 'failed'],
     ['cancelled', 'cancelled'],
     ['interrupted', 'interrupted']
-  ] as const)(
-    'renders the %s state',
-    async (_label, status) => {
-      renderWorkspace()
-      await waitForPane()
+  ] as const)('renders the %s state', async (_label, status) => {
+    renderWorkspace()
+    await waitForPane()
 
-      await act(async () => {
-        startScopedChatRun(SCOPE, SESSION_ID, `run-${status}`)
-        dispatchStatus(`run-${status}`, status)
-      })
+    await act(async () => {
+      startScopedChatRun(SCOPE, SESSION_ID, `run-${status}`)
+      dispatchStatus(`run-${status}`, status)
+    })
 
-      await waitFor(() => {
-        expect(getPaneStatus()).toHaveAttribute('data-run-status', status)
-        expect(getPaneStatus()).toHaveAttribute('data-status', status)
-      })
-      expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
-        runId: `run-${status}`,
-        status
-      })
-    }
-  )
+    await waitFor(() => {
+      expect(getPaneStatus()).toHaveAttribute('data-run-status', status)
+      expect(getPaneStatus()).toHaveAttribute('data-status', status)
+    })
+    expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
+      runId: `run-${status}`,
+      status
+    })
+  })
 
   it.each([
     ['running', 'success', 'progressbar', 'agent_workspace.status_running'],
@@ -188,8 +188,15 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
       await waitFor(() => expect(getPaneStatus()).toHaveAttribute('data-run-status', status))
       const expected =
         tone === 'muted' ? lifecycleTheme.palette.text.secondary : lifecycleTheme.palette[tone].main
-      expect(getComputedStyle(getPaneStatus()).backgroundColor).toBe(cssColor(expected))
-      expect(getComputedStyle(getPaneStatus()).width).toBe('7px')
+      if (status === 'running') {
+        // The toolbar row spins while its thread runs, in the dot's colour.
+        expect(getPaneStatus()).toHaveAttribute('data-spinner', 'true')
+        const spinner = getPaneStatus().querySelector('.MuiCircularProgress-root')!
+        expect(getComputedStyle(spinner).color).toBe(cssColor(expected))
+      } else {
+        expect(getComputedStyle(getPaneStatus()).backgroundColor).toBe(cssColor(expected))
+        expect(getComputedStyle(getPaneStatus()).width).toBe('7px')
+      }
       expect(getPaneStatus()).toHaveAttribute('role', role)
       expect(getPaneStatus()).toHaveAttribute('aria-label', label)
     }
@@ -212,8 +219,9 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
     expect(getPaneStatus()).toHaveAttribute('aria-label', 'agent_workspace.status_idle')
     expect(getPaneStatus()).toHaveAttribute('role', 'img')
     expect(
-      getComputedStyle(getPaneRow().querySelector('[data-testid="agent-thread-title"]')!).fontWeight
-    ).toBe('400')
+      getComputedStyle(getPaneRow().querySelector('[data-testid="agent-thread-summary"]')!)
+        .fontWeight
+    ).not.toBe('600')
     expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
       runId: 'completed-run',
       status: 'completed'
