@@ -671,7 +671,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
           : []),
         ...(processes
           ? [
-              'python.background and shell.background, when enabled, wait for formal approval and an actual OS process-host start before returning an owned job ID. They retain the same execution limits and no-sandbox risk as synchronous code. Successful parent completion does not cancel them; Stop, parent failure/truncation or document navigation does. Use process.list/status/read/wait/stop in this exact document/thread/conversation; no automatic model follow-up or restart adoption. Current-job control remains available after disabling new starts. running/stopping/unknown or a job ID is never completed work.'
+              'python.background and shell.background, when enabled, wait for formal approval and an actual OS process-host start before returning an owned job ID. They retain the same execution limits and no-sandbox risk as synchronous code. Successful parent completion does not cancel them; Stop, parent failure/truncation or document navigation does. Use process.list/status/read/wait/stop in this exact document/thread/conversation; its end is reported once as a later job_done turn; no restart adoption. Current-job control remains available after disabling new starts. running/stopping/unknown or a job ID is never completed work.'
             ]
           : []),
         ...(imageTools
@@ -712,7 +712,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
           : []),
         ...(jobs
           ? [
-              'Sub-agents accept run_in_background:true to return a job ID and let the parent continue. Background work survives successful parent completion, not Stop/failure or document reload. Use jobs.list/status/read/wait or stop_task in this same conversation; no busy-polling. Results are retained temporarily in memory, not automatically delivered to the model and not resumed after restart. Do not claim completion from a submitted job ID. Background children retain the same read-only budgets and generate additional model usage.'
+              'Sub-agents accept run_in_background:true to return a job ID and let the parent continue. Background work survives successful parent completion, not Stop/failure or document reload. Use jobs.list/status/read/wait or stop_task in this same conversation; no busy-polling. Results are retained temporarily in memory and not resumed after restart; a finished job is reported once as a later job_done turn unless already read. Do not claim completion from a submitted job ID. Background children retain the same read-only budgets and generate additional model usage.'
             ]
           : []),
         ...(options.terminalEnabled

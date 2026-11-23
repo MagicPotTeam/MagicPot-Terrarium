@@ -25,7 +25,7 @@ const common = {
   ],
   lifecycle: {
     ownership: 'Jobs have MAIN-held memory-only leases owned by the exact sender/document, route/pane and conversation, not an arbitrary platform process registry. Foreign, revoked or expired jobs are unavailable; navigation/reload, renderer loss and window destruction invalidate ownership and cancel live work.',
-    parent: 'An approved background job survives only successful parent release. Parent Stop/failure before that release cancels it. There is no automatic model wake-up, later-turn result injection, arbitrary task/sub-agent control or application-restart recovery.',
+    parent: 'An approved background job survives only successful parent release. Parent Stop/failure before that release cancels it. When it ends on its own, a job_done turn reports it once to this conversation (skipped if you already read/waited for the final result, or stopped it yourself). There is no arbitrary task/sub-agent control or application-restart recovery.',
     retention: 'Metadata is retained for at most 15 minutes while owned and may be evicted earlier to meet bounded capacity. Uncertain termination is not a reusable slot: unknown ownership tombstones and the shared process host continue blocking unsafe admission, not silently authorizing another start.',
     settlement: 'preparing, running and stopping are not completion. operationSettled means the host operation finished monitoring/cleanup, not that the business task succeeded. cancellationRequested is only a request. outcome unknown or status unknown stays uncertain, even after disposal.'
   },
@@ -35,7 +35,7 @@ const common = {
     unknownIsSuccess: false,
     rule: 'A rejected, cancelled, timed-out, missing or publication-failed call is not proof of no side effects or confirmed OS termination. Keep known facts and unknown outcomes separate; do not retry, adopt handles, restore authority or launch replacements automatically. Use only the still-owned control path and report unavailable ownership honestly.'
   },
-  parity: 'Local process.* controls, not upstream bash/python run_in_background, allow_concurrent, timeout-zero, automatic job delivery or stop_task aliases. No arbitrary process/sub-agent cancellation, shell selection, environment, PTY, network or filesystem sandbox, manual-read unlock, plugin/cwd documentation fallback or restored authority is provided.'
+  parity: 'Local process.* controls, not upstream bash/python run_in_background, allow_concurrent, timeout-zero, or stop_task aliases. No arbitrary process/sub-agent cancellation, shell selection, environment, PTY, network or filesystem sandbox, manual-read unlock, plugin/cwd documentation fallback or restored authority is provided.'
 }
 const manuals = {
   'process.list': {
@@ -65,7 +65,7 @@ const manuals = {
     limits: { ...common.limits, minimumWaitSeconds: 1, maximumWaitSeconds: 30, defaultWaitSeconds: 30 },
     behavior: {
       input: 'Supply job_id and optional integer timeout_seconds from 1 through 30, default 30. No timeout_s, fractional, zero or indefinite wait is accepted.',
-      result: 'Returns job after host operation settlement or the bounded wait interval, with ownership checked again. An interval expiring can still return preparing/running/stopping; it is not a process timeout or completion. It does not fetch logs, deliver an automatic later model turn or verify the task.',
+      result: 'Returns job after host operation settlement or the bounded wait interval, with ownership checked again. An interval expiring can still return preparing/running/stopping; it is not a process timeout or completion. It does not fetch logs or verify the task.',
       cancellation: 'Cancelling this wait only ends waiting; it does not itself stop an independently released background process. Parent/document Stop has its own lifecycle cancellation. Use a separately admitted current process.stop if you need to stop a still-owned job.'
     }
   },

@@ -34,6 +34,21 @@ const make = (assertTeamActive?: () => void) => {
 }
 
 describe('thread job tools and detached read admission', () => {
+  it('gives a job_done event turn the read tools its report names (jobs.read, process.read)', () => {
+    const prepared = prepareCanvasAgentTools(
+      { ...scope, threadEventOrigin: 'job_done', messages: [{ role: 'user' as const, content: '[Tool job-1 completed]' }] },
+      invocation('chatStream'),
+      {
+        local: true, terminalEnabled: false, scriptToolsEnabled: () => true, shellToolsEnabled: () => true,
+        createSubagentClient: async () => ({ chat: vi.fn(), supportsIsolatedReadOnlyTurns: true }), listTools: () => [read],
+        callSubagentReadTool: async () => ({ content: '' })
+      }
+    )
+    const names = prepared.toolProvider!.listTools().map((tool) => tool.name)
+    expect(names).toEqual(expect.arrayContaining(['jobs.read', 'jobs.wait', 'process.read', 'process.wait']))
+    prepared.dispose!(true)
+  })
+
   it('keeps reading after parent success and follow-up request can inspect the same conversation', async () => {
     const first = make()
     let resume!: (value: unknown) => void

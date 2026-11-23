@@ -6,6 +6,7 @@ import type { LLMChatReq } from '@shared/api/svcLLMProxy'
 import { AGENT_THREAD_JOB_LIMITS as LIMITS, type AgentThreadJob, type AgentThreadJobReadReq, type AgentThreadJobReq } from '@shared/api/agentThreadJob'
 import { agentThreadInteractions, type AgentThreadInteractionChannel } from './agentThreadInteractions'
 import { authorizeAgentThreadScope } from './agentThreadScope'
+import { formatSubagentJobReport, type AgentThreadJobReportSink, type JobCancelCause } from './agentThreadJobReports'
 
 const key = (scope: AgentThreadInteractionScope, senderId: number) => JSON.stringify([senderId, getAgentSessionKey(normalizeAgentRoute(scope.route)), scope.conversationId])
 type Entry = {
@@ -19,11 +20,44 @@ type Entry = {
   finish(): void
   detachParent(): void
   expiry: ReturnType<typeof setTimeout>
+  /** A team member's job reports nothing (its turns belong to the team queue). */
+  reportable: boolean
+  reported: boolean
+  /** The agent already got the final result through jobs.read/jobs.wait in its session. */
+  consumed: boolean
+  cancelCause?: JobCancelCause
 }
+/** The agent's own job tools run inside its chat request; the user's controls are IPC calls. */
+const agentMethod = (method: string) => method === 'chat' || method === 'chatStream'
 
-/** Bounded, memory-only jobs; no persistent authority and no automatic model wake-up. */
+/**
+ * Bounded, memory-only jobs with no persistent authority. A job that ends on its own (or is
+ * cancelled by anything other than the agent's own stop or the user's stop) is reported once to the
+ * report sink: MAIN queues a job_done thread event that wakes the session (S3).
+ */
 export class AgentThreadJobs {
   private readonly entries = new Map<string, Entry>()
+  private sink?: AgentThreadJobReportSink
+
+  /** MAIN wiring only (svcLLMProxyImpl): where finished jobs are reported. */
+  reportTo(sink: AgentThreadJobReportSink | undefined): void { this.sink = sink }
+
+  private report(entry: Entry): void {
+    if (entry.reported || !entry.reportable || entry.consumed || entry.view.status === 'running') return
+    entry.reported = true
+    const text = formatSubagentJobReport(entry.view, entry.cancelCause)
+    if (!text || !this.sink) return
+    try {
+      this.sink.report({ route: entry.scope.route, conversationId: entry.scope.conversationId, jobId: entry.view.id, source: `background ${entry.view.kind}`, text })
+    } catch { /* The report is advisory; the job result stays readable. */ }
+  }
+
+  private consume(entry: Entry, method: string): void {
+    if (!agentMethod(method) || entry.view.status === 'running' || entry.consumed) return
+    entry.consumed = true
+    if (!entry.reported) return
+    try { this.sink?.withdraw(entry.scope, entry.view.id) } catch { /* Left to run as a report. */ }
+  }
 
   start(options: {
     request: LLMChatReq
@@ -58,11 +92,14 @@ export class AgentThreadJobs {
       view: { id, kind: options.kind, task: options.task.slice(0, 200), status: 'running', createdAt: Date.now(), expiresAt: Date.now() + LIMITS.retentionMs },
       controller, lease, done: new Promise<void>((resolve) => { done = resolve }), finish: () => done(),
       detachParent: () => parentSignal?.removeEventListener('abort', parentAbort),
-      expiry: setTimeout(() => this.remove(entry), LIMITS.retentionMs)
+      expiry: setTimeout(() => this.remove(entry), LIMITS.retentionMs),
+      reportable: !options.request.teamMember, reported: false, consumed: false
     }
-    const parentAbort = () => this.cancel(entry)
+    // The parent turn was stopped: the user's stop (the session is held anyway).
+    const parentAbort = () => this.cancel(entry, 'user-stop')
     const revoked = () => {
-      this.cancel(entry)
+      // The document ended (closed, reloaded, app quit): not the agent's or the user's stop.
+      this.cancel(entry, 'host')
       // Same-URL reload must not disclose old results into the successor document.
       if (lease.signal.aborted) this.remove(entry)
     }
@@ -104,6 +141,7 @@ export class AgentThreadJobs {
       } finally {
         entry.view.finishedAt ??= Date.now()
         entry.finish()
+        this.report(entry)
         // The parent abort listener remains until release: a child can complete
         // before the parent later fails or is stopped.
         // Retain the document listener until eviction/expiry to protect old results.
@@ -112,7 +150,8 @@ export class AgentThreadJobs {
     if (parentSignal?.aborted) parentAbort()
     return {
       job: this.view(entry),
-      release: (success) => { entry.detachParent(); if (!success) this.cancel(entry) }
+      // The parent request failed without a stop: a host cancellation.
+      release: (success) => { entry.detachParent(); if (!success) this.cancel(entry, 'host') }
     }
   }
 
@@ -120,8 +159,9 @@ export class AgentThreadJobs {
     const { result: _result, ...summary } = entry.view
     return structuredClone(includeResult ? entry.view : summary)
   }
-  private cancel(entry: Entry): void {
+  private cancel(entry: Entry, cause: JobCancelCause): void {
     if (entry.view.status === 'cancelled') return
+    entry.cancelCause = cause
     entry.view.status = 'cancelled'
     delete entry.view.result
     delete entry.view.error
@@ -130,10 +170,12 @@ export class AgentThreadJobs {
     entry.detachParent()
     entry.controller.abort(new DOMException('Background sub-agent stopped.', 'AbortError'))
     entry.finish()
+    this.report(entry)
   }
   private remove(entry: Entry): void {
     if (!this.entries.delete(entry.view.id)) return
-    this.cancel(entry)
+    // Evicted, expired or disposed while running: a host cancellation.
+    this.cancel(entry, 'host')
     clearTimeout(entry.expiry)
     entry.detachParent()
     entry.lease.dispose()
@@ -161,11 +203,13 @@ export class AgentThreadJobs {
     const offset = req.offset ?? 0, limit = req.limit ?? 8000
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > LIMITS.resultCharacters || !Number.isSafeInteger(limit) || limit < 1 || limit > 16000) throw new Error('Invalid background result range.')
     const text = entry.view.result || ''
+    this.consume(entry, method)
     return { job: this.view(entry), text: text.slice(offset, offset + limit), nextOffset: Math.min(offset + limit, text.length), totalCharacters: text.length, untrustedData: true }
   }
   stop(req: AgentThreadJobReq, invocation: ServiceInvocationContext | undefined, method = 'stopAgentJob') {
     const entry = this.find(req, invocation, method)
-    if (entry.view.status === 'running') this.cancel(entry)
+    // Through the agent's own stop tool the call returns the final state: no report.
+    if (entry.view.status === 'running') this.cancel(entry, agentMethod(method) ? 'agent-stop' : 'user-stop')
     return this.view(entry)
   }
   async wait(req: AgentThreadJobReq, invocation: ServiceInvocationContext, seconds: number, signal?: AbortSignal) {
@@ -190,7 +234,7 @@ export class AgentThreadJobs {
       if (entry.scope.conversationId !== conversationId || (cancellationId !== undefined && cancellationId !== entry.cancellationId)) continue
       try {
         if (authorizeAgentThreadScope(entry.scope, invocation, 'cancelConversation') !== entry.senderId) continue
-        if (entry.view.status !== 'cancelled') { this.cancel(entry); cancelled = true }
+        if (entry.view.status !== 'cancelled') { this.cancel(entry, 'user-stop'); cancelled = true }
       } catch { /* Other document's jobs are not a cancellation target. */ }
     }
     return cancelled

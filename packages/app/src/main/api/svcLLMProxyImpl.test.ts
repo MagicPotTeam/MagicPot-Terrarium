@@ -1777,7 +1777,7 @@ describe('LLMProxySvcImpl', () => {
             manuals.push(parsed); expect(cliFromProfile).toHaveBeenCalledOnce()
             expect(parsed.grantsPermission).toBe(false)
             if (!args.name) expect(parsed.subagents.map((helper: { name: string }) => helper.name)).toEqual(['explore', 'critic', 'summarize', 'response', 'fork'])
-            else expect(parsed.documentation).toMatchObject({ readOnly: true, advisoryOnly: true, execution: { startsOnInfo: false, providerEligibilityCheckedOnExecution: true }, limits: { delegations: 3, modelSteps: 8, toolCalls: 12 }, background: { available: true, autoWake: false, restartResume: false } })
+            else expect(parsed.documentation).toMatchObject({ readOnly: true, advisoryOnly: true, execution: { startsOnInfo: false, providerEligibilityCheckedOnExecution: true }, limits: { delegations: 3, modelSteps: 8, toolCalls: 12 }, background: { available: true, autoWake: true, restartResume: false } })
           } else reports.push(parsed)
           return result
         })
