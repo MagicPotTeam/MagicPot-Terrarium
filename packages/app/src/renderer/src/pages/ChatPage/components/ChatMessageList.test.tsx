@@ -1987,6 +1987,33 @@ describe('ChatMessageList managed image derivatives', () => {
     ).toBeInTheDocument()
   })
 
+  it('shows MAIN’s derivative-unavailable original for an old message with a broken export URL', async () => {
+    const exportUrl = 'file:///C:/Synthetic/AutoSave/Agent/error.png'
+    const original = 'local-media:///D:/Media%20Store/verified/original.png'
+    ensureDerivative.mockResolvedValue({
+      status: 'fallbackOriginal',
+      reason: 'derivative-unavailable',
+      localMediaUrl: original
+    })
+    const onPreviewImage = vi.fn()
+    renderChatMessageList(session([managedAttachment(exportUrl)]), { onPreviewImage })
+    expect(screen.queryByRole('img', { name: 'Attachment image 1' })).not.toBeInTheDocument()
+    act(markNear)
+    const image = await screen.findByRole('img', { name: 'Attachment image 1' })
+    await waitFor(() => expect(image).toHaveAttribute('src', original))
+    fireEvent.load(image)
+    fireEvent.click(image)
+    expect(onPreviewImage).toHaveBeenLastCalledWith(original)
+    // Only if the original also fails should the old export be tried, once, then the label.
+    fireEvent.error(image)
+    expect(image).toHaveAttribute('src', 'local-media:///C:/Synthetic/AutoSave/Agent/error.png')
+    fireEvent.error(image)
+    expect(
+      screen.getByRole('img', { name: 'Attachment image 1 failed to load' })
+    ).toBeInTheDocument()
+    expect(ensureDerivative).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps original when the service is missing or rejects', async () => {
     Object.defineProperty(window, 'api', { configurable: true, value: {} })
     const missing = renderChatMessageList(session([managedAttachment()]))

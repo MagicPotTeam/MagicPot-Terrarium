@@ -266,6 +266,7 @@ import {
   DroppedDirectoryLimitError
 } from '../ProjectCanvasPage/dropDirectory'
 import { normalizeMediaReference } from '@shared/mediaReference'
+import { isTerminalChatImageSaveError, readChatImageForSave } from './chatImageOriginal'
 import {
   CHAT_IMAGE_HEADER_READ_TIMED_OUT,
   readChatImageHeaderDimensions
@@ -796,59 +797,7 @@ const resolveChatFailureArchiveDir = (baseDir: string, runId: string): string =>
   })
 
 const CHAT_LOADING_TOTAL_STEPS = 4
-
-const normalizeImageAttachmentExtension = (mimeType?: string, fileName?: string): string => {
-  const fileExtension = fileName?.match(/\.([a-z0-9]{1,8})$/i)?.[1]
-  if (fileExtension) return fileExtension.toLowerCase()
-
-  if (mimeType?.includes('jpeg') || mimeType?.includes('jpg')) return 'jpg'
-  if (mimeType?.includes('webp')) return 'webp'
-  if (mimeType?.includes('gif')) return 'gif'
-  if (mimeType?.includes('bmp')) return 'bmp'
-  if (mimeType?.includes('svg')) return 'svg'
-  return 'png'
-}
-
-const buildChatImageAttachmentAutoSaveFileName = (
-  attachment: ChatAttachment,
-  index: number
-): string => {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-  const extension = normalizeImageAttachmentExtension(attachment.mimeType, attachment.fileName)
-  return `chat_upload_${timestamp}_${index + 1}.${extension}`
-}
-
-/** The hex SHA-256 of `bytes`, the id managed media gives the same image; null when unavailable. */
-const sha256HexOf = async (bytes: Uint8Array): Promise<string | null> => {
-  try {
-    const subtle = globalThis.crypto?.subtle
-    if (!subtle) return null
-    const digest = new Uint8Array(await subtle.digest('SHA-256', bytes as BufferSource))
-    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
-  } catch {
-    return null
-  }
-}
-
-const readBlobAsUint8Array = (blob: Blob): Promise<Uint8Array> => {
-  if (typeof blob.arrayBuffer === 'function') {
-    return blob.arrayBuffer().then((buffer) => new Uint8Array(buffer))
-  }
-
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (reader.result instanceof ArrayBuffer) {
-        resolve(new Uint8Array(reader.result))
-        return
-      }
-
-      reject(new Error('Failed to read blob as ArrayBuffer'))
-    }
-    reader.onerror = () => reject(reader.error || new Error('Failed to read blob'))
-    reader.readAsArrayBuffer(blob)
-  })
-}
+const MAX_CHAT_IMAGE_AUTOSAVE_ATTEMPTS = 3
 
 const saveChatImageAttachmentBlobToDir = async (options: {
   attachment: ChatAttachment
@@ -856,23 +805,19 @@ const saveChatImageAttachmentBlobToDir = async (options: {
   targetDir: string | undefined
 }): Promise<string | null> => {
   try {
-    const response = await fetch(options.attachment.url)
-    const blob = await response.blob()
-    const data = await readBlobAsUint8Array(blob)
-    const fileName = buildChatImageAttachmentAutoSaveFileName(
-      {
-        ...options.attachment,
-        mimeType: options.attachment.mimeType || blob.type || undefined
-      },
-      options.attachmentIndex
+    const { data, extension } = await readChatImageForSave(
+      options.attachment,
+      api().svcManagedMedia
     )
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const fileName = `chat_upload_${timestamp}_${options.attachmentIndex + 1}.${extension}`
     const result = await api().svcHyper.saveImageToDir({
       data,
       fileName,
       dir: options.targetDir
     })
 
-    return result.savedPath || null
+    return result.canceled ? null : result.savedPath || null
   } catch (error) {
     console.warn('[ChatPage] Failed to persist chat image attachment:', error)
     return null
@@ -1505,6 +1450,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // runs, its image can come back under another identity (an imported managed reference), which
   // the saved-key check cannot match yet; such a pass must not save the same image again.
   const autoSaveInFlightSlotsRef = useRef<Set<string>>(new Set())
+  // Failures, not successes: do not keep transferring the same bad image on unrelated edits.
+  // Keys include storage scope, conversation, attachment slot and SHA (or compact URL identity).
+  const autoSaveFailuresRef = useRef(new Map<string, number>())
+  // A file write and a conditional chat-storage update are separate operations. Retry the link,
+  // not the export, when storage was temporarily unavailable after writing the file.
+  const pendingAutoSaveLinksRef = useRef(new Map<string, string>())
   const teamAuthorityEpochsRef = useRef(new Map<string, number>())
   const [, setTeamAuthorityRevision] = useState(0)
   const teamEndPendingRef = useRef(new Set<string>())
@@ -5393,7 +5344,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     if (!autoSaveScanInitializedRef.current) {
       scanCursorBySessionId.clear()
       for (const session of sessions) {
-        scanCursorBySessionId.set(session.id, session.messages.length)
+        scanCursorBySessionId.set(`${storageScope}\u0000${session.id}`, session.messages.length)
       }
       autoSaveScanInitializedRef.current = true
       return
@@ -5401,9 +5352,16 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
     const autoSaveAssistantImages = async () => {
       for (const session of sessions) {
-        const previousCursor = scanCursorBySessionId.get(session.id) ?? 0
+        const cursorKey = `${storageScope}\u0000${session.id}`
+        const retryFrom = (messageIndex: number) => {
+          scanCursorBySessionId.set(
+            cursorKey,
+            Math.min(scanCursorBySessionId.get(cursorKey) ?? messageIndex + 1, messageIndex + 1)
+          )
+        }
+        const previousCursor = scanCursorBySessionId.get(cursorKey) ?? 0
         const startIndex = Math.max(0, previousCursor - 1)
-        scanCursorBySessionId.set(session.id, session.messages.length)
+        scanCursorBySessionId.set(cursorKey, session.messages.length)
 
         for (
           let messageIndex = startIndex;
@@ -5425,7 +5383,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 // must not look new and be saved again.
                 const keyFor = (identity: string): string =>
                   buildAutoSavedChatImageKey({
-                    sessionId: session.id,
+                    sessionId: cursorKey,
                     messageIndex,
                     attachmentIndex,
                     url: identity
@@ -5436,50 +5394,87 @@ const ChatPage: React.FC<ChatPageProps> = ({
                 const trackerKey = managedSha256
                   ? keyFor(`sha256:${managedSha256}`)
                   : keyFor(attachment.url)
-                if (hasAutoSavedChatImageKey(trackerKey)) continue
-                const slotKey = `${session.id}\u0000${messageIndex}\u0000${attachmentIndex}`
+                const failures = autoSaveFailuresRef.current
+                if ((failures.get(trackerKey) ?? 0) >= MAX_CHAT_IMAGE_AUTOSAVE_ATTEMPTS) continue
+                const pendingLinks = pendingAutoSaveLinksRef.current
+                const pendingPath = pendingLinks.get(trackerKey)
+                if (!pendingPath && hasAutoSavedChatImageKey(trackerKey)) continue
+                const slotKey = `${cursorKey}\u0000${messageIndex}\u0000${attachmentIndex}`
                 const inFlightSlots = autoSaveInFlightSlotsRef.current
-                if (inFlightSlots.has(slotKey)) continue
-                recordAutoSavedChatImageKey(trackerKey)
+                if (inFlightSlots.has(slotKey)) {
+                  retryFrom(messageIndex) // Its source may have been replaced since the read started.
+                  continue
+                }
                 inFlightSlots.add(slotKey)
 
                 try {
+                  const persistLink = async (savedPath: string, expectedUrl = attachment.url) => {
+                    const committed = await persistAssistantAttachmentFileReference(
+                      session.id,
+                      messageIndex,
+                      attachmentIndex,
+                      expectedUrl,
+                      savedPath,
+                      storageScope
+                    )
+                    if (
+                      !committed &&
+                      storageScopeRef.current === storageScope &&
+                      sessionsRef.current.find((s) => s.id === session.id)?.messages[messageIndex]
+                        ?.attachments?.[attachmentIndex]?.url === expectedUrl
+                    ) {
+                      pendingLinks.set(trackerKey, savedPath)
+                      throw new Error('Verified image saved; attachment link not committed')
+                    }
+                    failures.delete(trackerKey)
+                    pendingLinks.delete(trackerKey)
+                  }
+                  if (pendingPath) {
+                    // The change that triggered this retry may not be in IndexedDB yet. Wait on
+                    // the session's guarded save chain; never defeat its compare-and-set check.
+                    await persistSessionWithBaseline(session, storageScope)
+                    await persistLink(pendingPath)
+                    continue
+                  }
                   const targetDir = resolveAssistantImageAutoSaveDir({
                     config: { download_dir: config.download_dir },
                     storageScope
                   })
                   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-                  const fileName = `agent_auto_${timestamp}_${session.id}_${messageIndex}_${attachmentIndex}.png`
-                  const response = await fetch(attachment.url)
-                  const blob = await response.blob()
-                  const data = await readBlobAsUint8Array(blob)
-                  if (!managedSha256) {
-                    // Its managed id comes from its bytes: an image saved already under that id
-                    // (after the guard adopted its reference) is not saved twice.
-                    const sha256 = await sha256HexOf(data)
-                    if (sha256) {
-                      const contentKey = keyFor(`sha256:${sha256}`)
-                      if (hasAutoSavedChatImageKey(contentKey)) continue
-                      recordAutoSavedChatImageKey(contentKey)
-                    }
-                  }
+                  const { data, extension, sha256 } = await readChatImageForSave(
+                    attachment,
+                    api().svcManagedMedia
+                  )
+                  const contentKey = sha256 ? keyFor(`sha256:${sha256}`) : null
+                  if (contentKey && hasAutoSavedChatImageKey(contentKey)) continue
+                  const fileName = `agent_auto_${timestamp}_${session.id}_${messageIndex}_${attachmentIndex}.${extension}`
                   const res = await api().svcHyper.saveImageToDir({
                     data,
                     fileName,
                     dir: targetDir
                   })
-                  if (res.savedPath) {
-                    await persistAssistantAttachmentFileReference(
-                      session.id,
-                      messageIndex,
-                      attachmentIndex,
-                      attachment.url,
-                      res.savedPath,
-                      storageScope
-                    )
-                  }
+                  if (!res.savedPath || res.canceled) throw new Error('Image was not saved')
+                  recordAutoSavedChatImageKey(trackerKey)
+                  if (contentKey) recordAutoSavedChatImageKey(contentKey)
+                  // Importing an inline image can replace its URL during the write. Follow only
+                  // the same verified bytes in the same slot; never relink a replacement image.
+                  const live = sessionsRef.current.find((s) => s.id === session.id)?.messages[
+                    messageIndex
+                  ]?.attachments?.[attachmentIndex]
+                  const liveMedia = normalizeMediaReference(live?.media)
+                  const expectedUrl =
+                    live && sha256 && liveMedia?.kind === 'managed' && liveMedia.sha256 === sha256
+                      ? live.url
+                      : attachment.url
                   console.log(`[自动保存] Agent 图片已保存到 ${res.savedPath}`)
+                  await persistLink(res.savedPath, expectedUrl)
                 } catch (error) {
+                  const attempts = isTerminalChatImageSaveError(error)
+                    ? MAX_CHAT_IMAGE_AUTOSAVE_ATTEMPTS
+                    : (failures.get(trackerKey) ?? 0) + 1
+                  failures.set(trackerKey, attempts)
+                  if (attempts < MAX_CHAT_IMAGE_AUTOSAVE_ATTEMPTS) retryFrom(messageIndex)
+                  else pendingLinks.delete(trackerKey)
                   console.error('[自动保存] Agent 图片保存失败:', error)
                 } finally {
                   inFlightSlots.delete(slotKey)
@@ -5497,6 +5492,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     sessionsLoaded,
     config.download_dir,
     persistAssistantAttachmentFileReference,
+    persistSessionWithBaseline,
     storageScope
   ])
 
@@ -7528,6 +7524,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
           persistenceMap.set(attachment.url, persistence)
         }
         const savedPath = await persistence
+        if (!savedPath) persistenceMap.delete(attachment.url)
         persistedAttachments.push(
           savedPath ? { ...attachment, url: `file://${savedPath}` } : attachment
         )

@@ -7,6 +7,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_CONFIG, type Config, type SkillReferenceAttachment } from '@shared/config/config'
+import { createBinaryChunkTransport } from '@shared/binaryChunkProtocol'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import type {
   ChatAttachment,
@@ -173,6 +174,7 @@ const hoisted = vi.hoisted(() => ({
   importManagedFileMock: vi.fn(),
   importManagedDataUrlMock: vi.fn(),
   importManagedBytesMock: vi.fn(),
+  materializeImageForSave: { value: undefined as undefined | ReturnType<typeof vi.fn> },
   importManagedUrlMock: vi.fn(),
   readTextFileMock: vi.fn(),
   saveImageToDirMock: vi.fn(),
@@ -353,6 +355,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
       importFile: hoisted.importManagedFileMock,
       importDataUrl: hoisted.importManagedDataUrlMock,
       importBytes: hoisted.importManagedBytesMock,
+      materializeForRequest: hoisted.materializeImageForSave.value,
       importUrl: hoisted.importManagedUrlMock
     }
   })
@@ -1158,6 +1161,16 @@ vi.mock('./components/ChatMessageList', () => ({
   }
 }))
 
+// A known one-pixel PNG, not the first four bytes or a string merely labelled image/png.
+const pngBytes = () =>
+  Uint8Array.from(
+    atob(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNQ6nABAAG+AO+BmP0iAAAAAElFTkSuQmCC'
+    ),
+    (ch) => ch.charCodeAt(0)
+  )
+const pngResponse = () => new Response(pngBytes(), { headers: { 'Content-Type': 'image/png' } })
+
 const theme = createTheme()
 
 const createImageAttachment = (fileName: string): ChatAttachment => ({
@@ -1473,6 +1486,7 @@ const readLatestMessageListProps = (): {
 describe('ChatPage runtime workflow integration', () => {
   beforeEach(async () => {
     resetRenderLoopGuard()
+    hoisted.materializeImageForSave.value = undefined
     hoisted.currentConfig.value = createConfig()
     hoisted.runtimeMcpStatus.value = null
     hoisted.buildDataDir.value = 'C:/MagicPot/Data'
@@ -14478,13 +14492,9 @@ describe('ChatPage runtime workflow integration', () => {
   })
 
   it('keeps six image-producing new sessions independently in flight and persists their durable results', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })
-      }))
-    )
+    vi.stubGlobal('fetch', vi.fn(pngResponse))
+    const { reference } = await createBinaryChunkTransport(pngBytes(), { mimeType: 'image/png' })
+    const relativePath = `originals/${reference.sha256.slice(0, 2)}/${reference.sha256}.png`
     hoisted.saveImageToDirMock.mockImplementation(async ({ fileName }) => ({
       savedPath: `C:/MagicPot/AutoSave/Agent/${fileName}`
     }))
@@ -14583,10 +14593,10 @@ describe('ChatPage runtime workflow integration', () => {
                 media: {
                   version: 1,
                   kind: 'managed',
-                  relativePath: `originals/${String(index + 1).repeat(64)}.png`,
-                  sha256: String(index + 1).repeat(64),
+                  relativePath,
+                  sha256: reference.sha256,
                   mimeType: 'image/png',
-                  sizeBytes: index + 1,
+                  sizeBytes: reference.sizeBytes,
                   originalFileName: `generated-${index + 1}.png`
                 }
               }
@@ -14612,6 +14622,8 @@ describe('ChatPage runtime workflow integration', () => {
                   fileName: `generated-${index + 1}.png`,
                   media: expect.objectContaining({
                     kind: 'managed',
+                    relativePath,
+                    sha256: reference.sha256,
                     originalFileName: `generated-${index + 1}.png`
                   })
                 })
@@ -18246,12 +18258,7 @@ describe('ChatPage runtime workflow integration', () => {
     const sourceUrl = 'https://example.com/own-fixture.png'
     const savedPath = 'C:/MagicPot/AutoSave/Agent/own-fixture.png'
     const originalFetch = globalThis.fetch
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        blob: async () => new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' })
-      }))
-    )
+    vi.stubGlobal('fetch', vi.fn(pngResponse))
     let releaseImage!: (value: { savedPath: string }) => void
     let releaseCompare!: () => void
     hoisted.saveImageToDirMock.mockReset()
@@ -18381,12 +18388,7 @@ describe('ChatPage runtime workflow integration', () => {
     const sourceUrl = 'https://example.com/scope-a-fixture.png'
     const savedPath = 'C:/MagicPot/AutoSave/Agent/scope-a-fixture.png'
     const originalFetch = globalThis.fetch
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        blob: async () => new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' })
-      }))
-    )
+    vi.stubGlobal('fetch', vi.fn(pngResponse))
     let releaseImage!: (value: { savedPath: string }) => void
     let releaseCompare!: () => void
     hoisted.saveImageToDirMock.mockReset()
@@ -18486,19 +18488,282 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
+  it.each([
+    '500 text',
+    'write failure',
+    'network cap',
+    'write cap',
+    '200 fake PNG',
+    'empty',
+    'wrong hash',
+    'invalid size',
+    'missing',
+    'corrupt'
+  ] as const)(
+    'applies the assistant image retry policy for %s without changing the URL on failure',
+    async (failure) => {
+      const sourceUrl = 'local-media:///C:/Synthetic/source.png'
+      const savedPath = 'C:/Synthetic/Agent/output.gif'
+      // GIF89a fixture; a misleading PNG name and MIME must not set the extension.
+      const bytes = Uint8Array.from(atob('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='), (c) =>
+        c.charCodeAt(0)
+      )
+      const { reference } = await createBinaryChunkTransport(bytes, { mimeType: 'image/gif' })
+      const attachment: ChatAttachment = {
+        type: 'image',
+        url: sourceUrl,
+        fileName: 'source.png',
+        mimeType: 'image/png'
+      }
+      const shouldRecover = failure === '500 text' || failure === 'write failure'
+      const transient = shouldRecover || failure === 'network cap' || failure === 'write cap'
+      if (failure === 'invalid size') attachment.sizeBytes = -1
+      const missingOrCorrupt = failure === 'missing' || failure === 'corrupt'
+      if (failure === 'wrong hash' || failure === 'write failure' || missingOrCorrupt)
+        attachment.media = {
+          version: 1,
+          kind: 'managed',
+          relativePath: `originals/${reference.sha256.slice(0, 2)}/${reference.sha256}.gif`,
+          sha256: reference.sha256,
+          sizeBytes: bytes.length,
+          originalFileName: 'fixture.gif',
+          mimeType: 'image/gif'
+        }
+      const materialize = vi
+        .fn()
+        .mockRejectedValue(
+          failure === 'missing'
+            ? Object.assign(new Error('missing'), { code: 'MANAGED_MEDIA_MISSING' })
+            : new Error('ServiceError: Managed media is corrupt')
+        )
+      if (missingOrCorrupt) hoisted.materializeImageForSave.value = materialize
+      let recovered = false
+      const fetchImage = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        if (failure === 'network cap') throw new Error('network temporarily down')
+        if (!recovered && failure === '500 text')
+          return new Response('Internal error', { status: 500 })
+        if (!recovered && failure === '200 fake PNG')
+          return new Response('Internal error', { headers: { 'Content-Type': 'image/png' } })
+        if (!recovered && failure === 'empty') return new Response(new Uint8Array())
+        const body = bytes.slice()
+        if (!recovered && failure === 'wrong hash') body[15] ^= 1
+        return new Response(body, { headers: { 'Content-Type': 'image/png' } })
+      })
+      const write = hoisted.saveImageToDirMock.mockImplementation(async () => {
+        if ((!recovered && failure === 'write failure') || failure === 'write cap')
+          throw new Error('disk full')
+        return { savedPath }
+      })
+      const errors = vi
+        .spyOn(console, 'error')
+        .mockClear()
+        .mockImplementation(() => {})
+      const logs = vi
+        .spyOn(console, 'log')
+        .mockClear()
+        .mockImplementation(() => {})
+      const successLogs = () =>
+        logs.mock.calls.filter(([line]) => String(line).includes('[自动保存] Agent 图片已保存到'))
+      try {
+        renderChatPage()
+        await dispatchNewSession({ skillId: BUILT_IN_PROMPT_TRANSLATION_SKILL_ID })
+        const sessionId = readCurrentSessionState()!.id
+        const append = (content: string, attachments?: ChatAttachment[]) =>
+          act(async () => {
+            window.dispatchEvent(
+              new CustomEvent('chat:append-message', {
+                detail: {
+                  scope: 'runtime-flow',
+                  sessionId,
+                  role: 'assistant',
+                  content,
+                  attachments
+                }
+              })
+            )
+          })
+        const slot = (s?: ChatSession | null) =>
+          s?.messages.find((message) => message.content === 'result')?.attachments?.[0]
+        await append('result', [attachment])
+        await waitFor(() =>
+          expect(errors).toHaveBeenCalledWith('[自动保存] Agent 图片保存失败:', expect.anything())
+        )
+        expect(successLogs()).toHaveLength(0)
+        const errorCount = () =>
+          errors.mock.calls.filter(([line]) => line === '[自动保存] Agent 图片保存失败:').length
+        expect(write).toHaveBeenCalledTimes(
+          failure === 'write failure' || failure === 'write cap' ? 1 : 0
+        )
+        expect(slot(readCurrentSessionState())?.url).toBe(sourceUrl)
+        await waitFor(() =>
+          expect(slot(hoisted.storedSessions.value.find((s) => s.id === sessionId))?.url).toBe(
+            sourceUrl
+          )
+        )
+        if (transient) {
+          await append('another turn')
+          await waitFor(() => expect(errorCount()).toBe(2))
+        }
+        if (shouldRecover) {
+          recovered = true
+          await append('retry')
+          const expected = `file://${savedPath}`
+          await waitFor(() => expect(slot(readCurrentSessionState())?.url).toBe(expected))
+          expect(successLogs()).toHaveLength(1)
+          expect(write).toHaveBeenLastCalledWith(
+            expect.objectContaining({ data: bytes, fileName: expect.stringMatching(/\.gif$/) })
+          )
+          await waitFor(() =>
+            expect(slot(hoisted.storedSessions.value.find((s) => s.id === sessionId))?.url).toBe(
+              expected
+            )
+          )
+          expect(slot(readCurrentSessionState())?.media).toEqual(attachment.media)
+          await append('no duplicate export')
+          expect(fetchImage).toHaveBeenCalledTimes(3)
+          expect(write).toHaveBeenCalledTimes(failure === 'write failure' ? 3 : 1)
+        } else {
+          if (transient) {
+            await append('final attempt')
+            await waitFor(() => expect(errorCount()).toBe(3))
+          }
+          for (let i = 0; i < 4; ++i) await append(`later ${i}`)
+          const attempts = transient ? 3 : 1
+          expect(errorCount()).toBe(attempts)
+          expect(materialize).toHaveBeenCalledTimes(missingOrCorrupt ? 1 : 0)
+          expect(fetchImage).toHaveBeenCalledTimes(
+            missingOrCorrupt || failure === 'invalid size' ? 0 : attempts
+          )
+          expect(write).toHaveBeenCalledTimes(failure === 'write cap' ? 3 : 0)
+          expect(successLogs()).toHaveLength(0)
+          expect(slot(readCurrentSessionState())?.url).toBe(sourceUrl)
+          expect(slot(hoisted.storedSessions.value.find((s) => s.id === sessionId))?.url).toBe(
+            sourceUrl
+          )
+        }
+      } finally {
+        fetchImage.mockRestore()
+        errors.mockRestore()
+        logs.mockRestore()
+      }
+    }
+  )
+
+  it('can save a replacement in the same slot after a terminal managed-media failure', async () => {
+    const url = 'local-media:///C:/Synthetic/reused.png'
+    const savedPath = 'C:/Synthetic/AutoSave/replacement.png'
+    const data = pngBytes()
+    const next = await createBinaryChunkTransport(data, { mimeType: 'image/png' })
+    const media = (sha256: string): NonNullable<ChatAttachment['media']> => ({
+      version: 1,
+      kind: 'managed',
+      sha256,
+      sizeBytes: data.length,
+      relativePath: `originals/${sha256.slice(0, 2)}/${sha256}.png`,
+      mimeType: 'image/png',
+      originalFileName: 'fixture.png'
+    })
+    const first = media('a'.repeat(64)),
+      second = media(next.reference.sha256)
+    const materialize = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error('missing'), { code: 'MANAGED_MEDIA_MISSING' }))
+      .mockResolvedValue({ transport: 'chunked-binary-v1', ...next })
+    hoisted.materializeImageForSave.value = materialize
+    const write = hoisted.saveImageToDirMock.mockResolvedValue({ savedPath })
+    renderChatPage()
+    await dispatchNewSession({ skillId: BUILT_IN_PROMPT_TRANSLATION_SKILL_ID })
+    const sessionId = readCurrentSessionState()!.id
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('chat:append-message', {
+          detail: {
+            scope: 'runtime-flow',
+            sessionId,
+            role: 'assistant',
+            content: 'picture',
+            attachments: [{ type: 'image', url, media: first }]
+          }
+        })
+      )
+    })
+    await waitFor(() => expect(materialize).toHaveBeenCalledTimes(1))
+    const stored = () => hoisted.storedSessions.value.find((s) => s.id === sessionId)
+    await waitFor(() => expect(stored()?.messages.at(-1)?.attachments?.[0]?.media).toEqual(first))
+    const refresh = async (ref: NonNullable<ChatAttachment['media']>) => {
+      const replacement = cloneValue(stored()!)
+      replacement.messages.at(-1)!.attachments![0] = { type: 'image', url, media: ref }
+      replacement.title += '!'
+      hoisted.storedSessions.value = [replacement]
+      await act(async () => {
+        window.dispatchEvent(
+          new CustomEvent('chat:preview-refresh', {
+            detail: { scope: 'runtime-flow', reason: 'storage-updated' }
+          })
+        )
+      })
+      await waitFor(() => expect(readCurrentSessionState()?.title).toBe(replacement.title))
+    }
+    // Leave the rejected image at the tail so every refresh reconsiders this exact slot.
+    await refresh(first)
+    await refresh(first)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    expect(write).not.toHaveBeenCalled()
+    await refresh(second)
+    await waitFor(() =>
+      expect(stored()?.messages.at(-1)?.attachments?.[0]).toMatchObject({
+        url: `file://${savedPath}`,
+        media: second
+      })
+    )
+    expect(materialize).toHaveBeenCalledTimes(2)
+    expect(write).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ data, fileName: expect.stringMatching(/\.png$/) })
+    )
+  })
+
+  it('retries a refused attachment URL update without writing the successful export twice', async () => {
+    const source = 'blob:synthetic-retry-link'
+    const savedPath = 'C:/Synthetic/Agent/original.png'
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => pngResponse())
+    const write = hoisted.saveImageToDirMock.mockResolvedValue({ savedPath })
+    try {
+      renderChatPage()
+      await dispatchNewSession({ skillId: BUILT_IN_PROMPT_TRANSLATION_SKILL_ID })
+      const sessionId = readCurrentSessionState()!.id
+      const append = (content: string, attachments?: ChatAttachment[]) =>
+        act(async () => {
+          window.dispatchEvent(
+            new CustomEvent('chat:append-message', {
+              detail: { scope: 'runtime-flow', sessionId, role: 'assistant', content, attachments }
+            })
+          )
+        })
+      hoisted.skipMigrationOnce.value = true
+      await append('image', [{ type: 'image', url: source }])
+      await waitFor(() => expect(hoisted.skipMigrationOnce.value).toBe(false))
+      expect(
+        readCurrentSessionState()?.messages.find((m) => m.content === 'image')?.attachments?.[0].url
+      ).toBe(source)
+      await append('next turn')
+      await waitFor(() =>
+        expect(
+          readCurrentSessionState()?.messages.find((m) => m.content === 'image')?.attachments?.[0]
+            .url
+        ).toBe(`file://${savedPath}`)
+      )
+      expect(write).toHaveBeenCalledTimes(1)
+      expect(fetch).toHaveBeenCalledTimes(1)
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
   it('does not overwrite a replaced assistant attachment after a delayed auto-save', async () => {
     const sourceUrl = 'https://example.com/stale-generated.png'
     const savedPath = 'C:/MagicPot/AutoSave/Agent/stale.png'
     const originalFetch = globalThis.fetch
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        blob: async () =>
-          new Blob([new Uint8Array([137, 80, 78, 71])], {
-            type: 'image/png'
-          })
-      }))
-    )
+    vi.stubGlobal('fetch', vi.fn(pngResponse))
     let releaseSave!: (value: { savedPath: string }) => void
     hoisted.fileExistsBatchMock.mockReset()
     hoisted.fileExistsBatchMock.mockImplementation(async (paths: string[]) => paths.map(() => true))

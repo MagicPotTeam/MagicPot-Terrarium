@@ -602,8 +602,31 @@ export class ManagedMediaSvcImpl implements ManagedMediaSvc {
         )
       }
       if (error instanceof ServiceError) throw error
+      // The preview could not be made (no image worker in a dev build, a worker that failed
+      // or timed out): show the stored original, resolved as a request would read it, rather
+      // than nothing. A missing or corrupt original still fails above.
+      const localMediaUrl = await this.resolveOriginalLocalMediaUrl(req.reference).catch(() => null)
+      if (localMediaUrl) {
+        return validateEnsureManagedMediaDerivativeResp({
+          status: 'fallbackOriginal',
+          reason: 'derivative-unavailable',
+          localMediaUrl
+        })
+      }
       throw invalidDependencyResult()
     }
+  }
+
+  private async resolveOriginalLocalMediaUrl(
+    reference: EnsureManagedMediaDerivativeReq['reference']
+  ): Promise<string> {
+    const getMediaDir = this.dependencies.getMediaDir ?? getChatMediaDir
+    const realpath = this.dependencies.realpath ?? fs.realpath
+    const resolveReference = this.dependencies.resolveReference ?? resolveManagedMediaReference
+    const mediaDir = getMediaDir()
+    const authorizedRoot = await realpath(mediaDir)
+    const resolved = await resolveReference(mediaDir, reference, { authorizedRoot })
+    return resolved.localMediaUrl
   }
 
   async materializeForRequest(

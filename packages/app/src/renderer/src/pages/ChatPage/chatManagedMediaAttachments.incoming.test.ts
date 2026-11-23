@@ -387,6 +387,25 @@ describe('boundIncomingChatImageSize', () => {
     })
   })
 
+  it('will not send an oversized original as if it were a reduced image when the worker is unavailable', async () => {
+    const source = big('aa')
+    const fetchImpl = vi.fn()
+    const service = {
+      ensureDerivative: vi.fn().mockResolvedValue({
+        status: 'fallbackOriginal',
+        reason: 'derivative-unavailable',
+        localMediaUrl: source.url
+      }),
+      importBytes: vi.fn()
+    }
+    await expect(
+      boundIncomingChatImageSize(source, { service, maxBytes: MAX, fetchImpl })
+    ).rejects.toBeInstanceOf(ChatImageTooLargeError)
+    expect(service.ensureDerivative).toHaveBeenCalledOnce()
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(service.importBytes).not.toHaveBeenCalled()
+  })
+
   it('refuses an image above the limit that cannot be reduced', async () => {
     const gif = {
       ensureDerivative: vi.fn(async () => ({

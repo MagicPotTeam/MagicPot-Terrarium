@@ -349,8 +349,8 @@ const ChatImage: React.FC<{
   sourceHeight?: number
   maxHeight: number
   margin?: string
-  onPreview: () => void
-  onContextMenu: (event: React.MouseEvent<HTMLImageElement>) => void
+  onPreview: (managedOriginal?: string) => void
+  onContextMenu: (event: React.MouseEvent<HTMLImageElement>, managedOriginal?: string) => void
 }> = ({
   src: originalSrc,
   media,
@@ -369,6 +369,7 @@ const ChatImage: React.FC<{
   const [displaySource, setDisplaySource] = React.useState<{
     src: string
     cacheKey?: string
+    isServiceOriginal?: boolean
   } | null>(null)
   const displaySrc = displaySource?.src ?? null
   const [failed, setFailed] = React.useState(false)
@@ -377,6 +378,7 @@ const ChatImage: React.FC<{
   const { nearViewport, revision: visibilityRevision } = visibility
   const [maxEdge, setMaxEdge] = React.useState<ManagedMediaDerivativeMaxEdge | null>(null)
   const brokenDerivativeKeyRef = React.useRef<string | null>(null)
+  const actionOriginal = displaySource?.isServiceOriginal ? displaySource.src : undefined
   const previousManagedMediaRef = React.useRef<
     (MediaReference & { kind: 'managed'; sha256: string }) | undefined
   >(undefined)
@@ -500,7 +502,8 @@ const ChatImage: React.FC<{
   React.useEffect(() => {
     if (!nearViewport) return
     if (!managedMedia || !maxEdge) {
-      setDisplaySource({ src: originalSrc })
+      // Do not fetch the (potentially large) managed original while measuring for its preview.
+      if (!managedMedia) setDisplaySource({ src: originalSrc })
       return
     }
 
@@ -529,6 +532,7 @@ const ChatImage: React.FC<{
         setFailed(false)
         setDisplaySource({
           src: result.status === 'ready' ? result.descriptor.localMediaUrl : result.localMediaUrl,
+          isServiceOriginal: result.status === 'fallbackOriginal',
           cacheKey
         })
       },
@@ -611,35 +615,35 @@ const ChatImage: React.FC<{
           draggable
           onLoad={measureRequiredEdge}
           onError={() => {
-            if (displaySrc !== originalSrc) {
-              const failedCacheKey = displaySource?.cacheKey
-              if (failedCacheKey) {
-                invalidateCachedChatImageDerivative(failedCacheKey, displaySrc)
-                brokenDerivativeKeyRef.current = failedCacheKey
-              }
+            if (displaySource?.cacheKey) {
+              const failedCacheKey = displaySource.cacheKey
+              invalidateCachedChatImageDerivative(failedCacheKey, displaySrc)
+              brokenDerivativeKeyRef.current = failedCacheKey
               const requestedCacheKey =
                 managedMedia && maxEdge
                   ? getChatImageDerivativeCacheKey(managedMedia, maxEdge)
                   : null
               // A smaller preview can fail while a newer size is still being prepared.
-              if (!failedCacheKey || failedCacheKey === requestedCacheKey) {
+              if (failedCacheKey === requestedCacheKey) {
                 generationRef.current += 1
                 abortControllerRef.current?.abort()
                 abortControllerRef.current = null
               }
-              setFailed(false)
-              setDisplaySource({ src: originalSrc })
-              return
+              if (displaySrc !== originalSrc) {
+                setFailed(false)
+                setDisplaySource({ src: originalSrc })
+                return
+              }
             }
             setFailed(true)
           }}
           onDragStart={(event) => {
             event.stopPropagation()
             event.dataTransfer.effectAllowed = 'copy'
-            setAgentImageDragPayload(event.dataTransfer, originalSrc)
+            setAgentImageDragPayload(event.dataTransfer, actionOriginal ?? originalSrc)
           }}
-          onClick={onPreview}
-          onContextMenu={onContextMenu}
+          onClick={() => onPreview(actionOriginal)}
+          onContextMenu={(event) => onContextMenu(event, actionOriginal)}
         />
       ) : null}
     </Box>
@@ -2773,8 +2777,10 @@ const UserMessageBubble: React.FC<{
                     sourceWidth={attachment.sourceWidth}
                     sourceHeight={attachment.sourceHeight}
                     maxHeight={200}
-                    onPreview={() => onPreviewImage(attachment.url)}
-                    onContextMenu={(event) => onImageContextMenu(event, attachment.url)}
+                    onPreview={(original) => onPreviewImage(original ?? attachment.url)}
+                    onContextMenu={(event, original) =>
+                      onImageContextMenu(event, original ?? attachment.url)
+                    }
                   />
                 ) : attachment.type === 'video' ? (
                   <video
@@ -3027,8 +3033,10 @@ const AssistantMessageBubble: React.FC<{
                     sourceWidth={attachment.sourceWidth}
                     sourceHeight={attachment.sourceHeight}
                     maxHeight={600}
-                    onPreview={() => onPreviewImage(attachment.url)}
-                    onContextMenu={(event) => onImageContextMenu(event, attachment.url)}
+                    onPreview={(original) => onPreviewImage(original ?? attachment.url)}
+                    onContextMenu={(event, original) =>
+                      onImageContextMenu(event, original ?? attachment.url)
+                    }
                   />
                 ) : attachment.type === 'video' ? (
                   <AssistantVideoPlayer url={attachment.url} fileName={attachment.fileName} />

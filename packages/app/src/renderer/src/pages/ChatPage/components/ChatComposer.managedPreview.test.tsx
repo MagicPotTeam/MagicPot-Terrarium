@@ -132,21 +132,34 @@ describe('composer managed-image display only', () => {
     expect(await screen.findByRole('img', { name: 'Preview 1' })).toHaveAttribute('src', original)
   })
 
-  it('falls back for animated GIF', async () => {
-    const gif = {
-      ...attachment,
-      url: 'local-media:///originals/first.gif',
-      media: { ...reference, mimeType: 'image/gif', originalFileName: 'first.gif' }
+  it.each(['animated-gif', 'derivative-unavailable'] as const)(
+    'shows MAIN’s original for %s, not the stored attachment URL',
+    async (reason) => {
+      const format = reason === 'animated-gif' ? 'gif' : 'png'
+      const item = {
+        ...attachment,
+        url: 'local-media:///old/export.png',
+        media: { ...reference, mimeType: `image/${format}`, originalFileName: `fixture.${format}` }
+      }
+      const fromMain = `local-media:///verified/original.${format}`
+      ensureDerivative.mockResolvedValue({
+        status: 'fallbackOriginal',
+        reason,
+        localMediaUrl: fromMain
+      })
+      const preview = vi.fn()
+      render(show([item], preview))
+      const image = await screen.findByRole('img', { name: 'Preview 1' })
+      expect(image).toHaveAttribute('src', fromMain)
+      fireEvent.click(image)
+      expect(preview).toHaveBeenLastCalledWith(fromMain)
+      fireEvent.error(image)
+      expect(image).toHaveAttribute('src', item.url)
+      fireEvent.click(image)
+      expect(preview).toHaveBeenLastCalledWith(item.url)
+      expect(ensureDerivative).toHaveBeenCalledOnce()
     }
-    ensureDerivative.mockResolvedValue({
-      status: 'fallbackOriginal',
-      reason: 'animated-gif',
-      localMediaUrl: gif.url
-    })
-    render(show([gif]))
-    await waitFor(() => expect(ensureDerivative).toHaveBeenCalledOnce())
-    expect(await screen.findByRole('img', { name: 'Preview 1' })).toHaveAttribute('src', gif.url)
-  })
+  )
 
   it('falls back to the original if the derivative cannot load', async () => {
     ensureDerivative.mockResolvedValue(ready)

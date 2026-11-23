@@ -91,7 +91,12 @@ describe('svcManagedMedia contract', () => {
       localMediaUrl: 'local-media:///canonical/root/ab/original.gif'
     }
     expect(validateEnsureManagedMediaDerivativeResp(fallback)).toEqual(fallback)
+    // The original also stands in when the preview could not be made.
+    const unavailable = { ...fallback, reason: 'derivative-unavailable' as const }
+    expect(validateEnsureManagedMediaDerivativeResp(unavailable)).toEqual(unavailable)
     rejectsResponse({ ...fallback, reason: 'gif' })
+    rejectsResponse({ ...fallback, reason: 'unavailable' })
+    rejectsResponse({ ...unavailable, localMediaUrl: 'file:///canonical/root/ab/original.png' })
     rejectsResponse({ ...fallback, descriptor: ready.descriptor })
     rejectsResponse({ ...fallback, maxEdge: 512 })
   })
