@@ -180,7 +180,7 @@ describe('ChatComposer slash-command suggestions', () => {
   it('starts again at the first option when the query changes or the list reopens', async () => {
     render(<Harness commands={threadCommands} />)
     const user = await typeInto('/')
-    await user.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}')
+    await user.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}{ArrowDown}')
     expect(activeOption()).toHaveTextContent('/compact')
     await user.keyboard('s')
     expect(activeOption()).toHaveTextContent('/status')
@@ -216,7 +216,7 @@ describe('ChatComposer slash-command suggestions', () => {
     const onSend = vi.fn()
     render(<Harness commands={threadCommands} onSend={onSend} />)
     const user = await typeInto('/')
-    await user.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}{ArrowDown}{Tab}')
+    await user.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}{ArrowDown}{ArrowDown}{Tab}')
     expect(input().value).toBe('/btw ')
     expect(input().selectionStart).toBe(5)
     expect(document.activeElement).toBe(input())
