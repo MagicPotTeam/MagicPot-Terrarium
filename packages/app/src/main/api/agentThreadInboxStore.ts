@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   ResourceRevisionConflictError,
   type MagicAgentEventStore,
@@ -17,6 +17,11 @@ import {
 export const THREAD_EVENT_KIND = 'agent-thread-event-v1'
 /** The small record that changes: status, claim and start. No lease token or webContents id. */
 export const THREAD_EVENT_STATE_KIND = 'agent-thread-event-state-v1'
+/**
+ * One per session the user stopped (dormant): its events stay queued and are never claimed until the
+ * user's own next send resumes it. Survives a restart.
+ */
+export const THREAD_EVENT_HOLD_KIND = 'agent-thread-event-hold-v1'
 export const THREAD_INBOX_UNAVAILABLE = 'Thread inbox unavailable.'
 const PAGE = 1000
 
@@ -87,6 +92,11 @@ const sameSession = (a: ThreadEventSession, b: ThreadEventSession): boolean =>
   a.storageScope === b.storageScope &&
   a.routeKey === b.routeKey &&
   a.conversationId === b.conversationId
+type HoldState = Readonly<ThreadEventSession & { v: 1; held: boolean; at: number }>
+const holdId = (session: ThreadEventSession): string =>
+  createHash('sha256')
+    .update(JSON.stringify([session.storageScope, session.routeKey, session.conversationId]))
+    .digest('hex')
 const keyOf = (session: ThreadEventSession, key: string): string =>
   JSON.stringify([session.storageScope, session.routeKey, session.conversationId, key])
 const withoutClaim = (state: ThreadEventState): Omit<ThreadEventState, 'claim'> => {
@@ -156,6 +166,8 @@ export class ThreadInboxStore {
   private readonly index = new Map<string, Indexed>()
   /** Idempotency key (per session) -> event id, for queued and claimed events only. */
   private readonly keys = new Map<string, string>()
+  /** holdId -> revision and whether the session is held now. */
+  private readonly holds = new Map<string, { revision: number; held: boolean }>()
   readonly unavailable: boolean
 
   constructor(
@@ -195,7 +207,12 @@ export class ThreadInboxStore {
       event: {
         protocolVersion: '2.0.0',
         id: eventId,
-        type: kind === THREAD_EVENT_KIND ? 'thread-event-queued' : 'thread-event-state',
+        type:
+          kind === THREAD_EVENT_KIND
+            ? 'thread-event-queued'
+            : kind === THREAD_EVENT_HOLD_KIND
+              ? 'thread-event-hold'
+              : 'thread-event-state',
         createdAt,
         payload: {},
         envelopeKind: 'event',
@@ -244,7 +261,29 @@ export class ThreadInboxStore {
     }
   }
 
+  private recoverHolds(): void {
+    let after: ResourceCursor | undefined
+    for (;;) {
+      const page = this.store.listResources({
+        kind: THREAD_EVENT_HOLD_KIND,
+        limit: PAGE,
+        ...(after ? { after } : {})
+      })
+      for (const row of page) {
+        const state = row.state as Partial<HoldState> | undefined
+        // Unreadable: held (fail closed; the user's next send clears it).
+        const held = !plain(state) || typeof state.held !== 'boolean' || state.held
+        this.holds.set(row.id, { revision: row.revision, held })
+      }
+      if (page.length < PAGE) break
+      const last = page[page.length - 1]
+      after = { updatedAt: last.updatedAt, resourceKind: last.kind, resourceId: last.id }
+    }
+  }
+
   private recover(): void {
+    // Holds first: a held session's events stay queued below, whatever their old claim.
+    this.recoverHolds()
     const rows: Array<[StoredResource, ThreadEventState]> = []
     let after: ResourceCursor | undefined
     for (;;) {
@@ -317,7 +356,62 @@ export class ThreadInboxStore {
     return { event: entry.event, state: entry.state, duplicate: false }
   }
 
-  /** queued -> claimed{boot, at}. Undefined when not queued here, expired, or another claim won. */
+  /** Whether the user stopped this session (dormant) and has not sent to it since. */
+  isHeld(session: ThreadEventSession): boolean {
+    return this.holds.get(holdId(session))?.held === true
+  }
+
+  /** The user stopped the session: hold its events (durable before it returns). Idempotent. */
+  hold(session: ThreadEventSession): void {
+    this.setHold(session, true)
+  }
+
+  /** The user's own send to the session: its events may run again. Idempotent. */
+  resume(session: ThreadEventSession): void {
+    this.setHold(session, false)
+  }
+
+  private setHold(session: ThreadEventSession, held: boolean): void {
+    this.assertAvailable()
+    if (!isThreadEventSession(session)) throw new Error('Invalid thread event session.')
+    const id = holdId(session)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = this.holds.get(id)
+      if ((current?.held ?? false) === held) return
+      const state: HoldState = {
+        v: 1,
+        storageScope: session.storageScope,
+        routeKey: session.routeKey,
+        conversationId: session.conversationId,
+        held,
+        at: this.now()
+      }
+      try {
+        const [result] = this.store.mutateResourcesBatch([
+          current
+            ? this.mutation(
+                'update',
+                THREAD_EVENT_HOLD_KIND,
+                id,
+                state,
+                this.now(),
+                current.revision
+              )
+            : this.mutation('create', THREAD_EVENT_HOLD_KIND, id, state, this.now())
+        ])
+        this.holds.set(id, { revision: result.resource.revision, held })
+        return
+      } catch (error) {
+        // Another writer won: read the stored hold back and decide again.
+        const row = this.store.getResource<Partial<HoldState>>(THREAD_EVENT_HOLD_KIND, id)
+        if (!row) throw error
+        this.holds.set(id, { revision: row.revision, held: row.state?.held !== false })
+      }
+    }
+    throw new Error(THREAD_INBOX_UNAVAILABLE)
+  }
+
+  /** queued -> claimed{boot, at}. Undefined when not queued here, expired, held, or another claim won. */
   claim(id: string): ThreadEventEntry | undefined {
     this.assertAvailable()
     const entry = this.index.get(id)
@@ -326,6 +420,7 @@ export class ThreadInboxStore {
       this.write(entry, { ...entry.state, status: 'expired', expiredReason: 'ttl' })
       return undefined
     }
+    if (this.isHeld(entry.event)) return undefined
     return this.write(entry, {
       ...entry.state,
       status: 'claimed',
@@ -362,7 +457,10 @@ export class ThreadInboxStore {
   expireSession(session: ThreadEventSession, reason: string): number {
     this.assertAvailable()
     if (!isThreadEventSession(session)) throw new Error('Invalid thread event session.')
-    return this.expireWhere((entry) => sameSession(entry.event, session), reason)
+    const expired = this.expireWhere((entry) => sameSession(entry.event, session), reason)
+    // Removed for good: nothing is left to hold.
+    this.resume(session)
+    return expired
   }
 
   /** Every queued event past its TTL -> expired. A claimed one expires when claimed or stopped. */
@@ -432,6 +530,7 @@ export class ThreadInboxStore {
   close(): void {
     this.index.clear()
     this.keys.clear()
+    this.holds.clear()
     this.store.close()
   }
 

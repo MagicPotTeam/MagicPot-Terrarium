@@ -47,6 +47,11 @@ export type AgentThreadEventView = {
 export type AgentThreadEventListScope = { route: AgentRouteLike; storageScope: string }
 export type AgentThreadEventSessionScope = AgentThreadEventListScope & { conversationId: string }
 export type AgentThreadEventClaim = AgentThreadEventSessionScope & { id: string }
+/**
+ * held: the user stopped the session (dormant): its events stay queued, across a restart too, and
+ * none is claimed. held false: the user's own next send to it, which resumes it.
+ */
+export type AgentThreadEventHold = AgentThreadEventSessionScope & { held: boolean }
 export type AgentThreadEventRelease = AgentThreadEventClaim & { lease: string }
 /**
  * The session was removed for good (or cannot take an event turn): its waiting events expire.

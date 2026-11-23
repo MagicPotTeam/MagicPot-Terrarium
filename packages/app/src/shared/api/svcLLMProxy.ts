@@ -7,6 +7,7 @@ import type {
   AgentThreadEventClaim,
   AgentThreadEventDelivery,
   AgentThreadEventExpire,
+  AgentThreadEventHold,
   AgentThreadEventListScope,
   AgentThreadEventOrigin,
   AgentThreadEventRelease,
@@ -558,8 +559,10 @@ export type LLMProxySvc = {
   claimAgentThreadEvent(req: AgentThreadEventClaim): Promise<{ event?: AgentThreadEventView }>
   /** The claimed event's turn did not start: queued again. */
   releaseAgentThreadEvent(req: AgentThreadEventRelease): Promise<{ released: boolean }>
-  /** The session was stopped or removed: its waiting events expire. */
+  /** The session was removed for good: its waiting events expire. */
   expireAgentThreadEvents(req: AgentThreadEventExpire): Promise<{ expired: number }>
+  /** Stopped by the user (held) or resumed by the user's own send: durable, survives a restart. */
+  setAgentThreadEventHold(req: AgentThreadEventHold): Promise<{ held: boolean }>
   /** Conversation feedback, never operation approval. */
   getAgentNotes(req: AgentThreadInteractionScope): Promise<AgentThreadNotes>
   listAgentArchiveQueries(
@@ -687,6 +690,7 @@ export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
   claimAgentThreadEvent: { type: 'unary' },
   releaseAgentThreadEvent: { type: 'unary' },
   expireAgentThreadEvents: { type: 'unary' },
+  setAgentThreadEventHold: { type: 'unary' },
   getAgentNotes: { type: 'unary' },
   listAgentArchiveQueries: { type: 'unary' },
   resolveAgentArchiveQuery: { type: 'unary' },

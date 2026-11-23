@@ -1198,9 +1198,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const teamVisibilityRef = useRef({ active, epoch: 0 })
   /**
    * `${scope}\0${sessionId}` stopped (by hand or a stop request): dormant for thread events. No event
-   * turn starts there until the user's own next send to it resumes it; its events stay queued.
+   * turn starts there until the user's own next send to it resumes it; its events stay queued. This
+   * is the page's fast copy; MAIN keeps the durable hold (setAgentThreadEventHold), so the hold
+   * survives a reload or an app restart.
    */
   const threadEventHeldRef = useRef<Set<string>>(new Set())
+  const setThreadEventHoldRef = useRef<(sessionId: string, held: boolean) => void>(() => undefined)
   if (teamVisibilityRef.current.active !== active)
     teamVisibilityRef.current = { active, epoch: teamVisibilityRef.current.epoch + 1 }
   const protectionRef = useRef(existingConversationProtection)
@@ -6742,6 +6745,42 @@ const ChatPage: React.FC<ChatPageProps> = ({
     [route?.channel, route?.scopeType, route?.scopeId, route?.threadId, storageScope]
   )
 
+  // The user stopped a session (held) or sent to it again (resumed): the page's copy at once, then
+  // the durable hold in MAIN. If the MAIN write fails, the page's copy still holds for this page.
+  const setThreadEventHold = useCallback(
+    (sessionId: string, held: boolean): void => {
+      const key = `${storageScope}\u0000${sessionId}`
+      if (held) threadEventHeldRef.current.add(key)
+      else threadEventHeldRef.current.delete(key)
+      if (
+        route?.channel !== 'canvas' ||
+        route.scopeType !== 'thread' ||
+        !route.scopeId ||
+        !route.threadId
+      )
+        return
+      try {
+        void api()
+          .svcLLMProxy.setAgentThreadEventHold({
+            route: {
+              channel: route.channel,
+              scopeType: route.scopeType,
+              scopeId: route.scopeId,
+              threadId: route.threadId
+            },
+            storageScope,
+            conversationId: sessionId,
+            held
+          })
+          .catch(() => undefined)
+      } catch {
+        /* IPC unavailable */
+      }
+    },
+    [route?.channel, route?.scopeType, route?.scopeId, route?.threadId, storageScope]
+  )
+  setThreadEventHoldRef.current = setThreadEventHold
+
   useEffect(() => {
     const handleTerminateScope = (event: Event): void => {
       const customEvent = event as CustomEvent<{ scope?: string }>
@@ -6759,9 +6798,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       ])
       sessionIds.forEach((sessionId) => {
         terminateSession(sessionId, { dropQueued: true })
+        // Stopped is dormant, not removed: its events stay queued until the user resumes it.
+        setThreadEventHoldRef.current(sessionId, true)
       })
-      // A stopped thread is dormant, not removed: its events stay queued in MAIN and run once the
-      // thread is open again (nothing runs them while its page is gone).
     }
     const handleTerminateSession = (event: Event): void => {
       const customEvent = event as CustomEvent<{ scope?: string; sessionId?: string }>
@@ -6775,7 +6814,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
 
       terminateSession(sessionId, { dropQueued: true })
       // Stopped is dormant: its events wait (TTL still applies) until the user resumes it.
-      threadEventHeldRef.current.add(`${storageScope}\u0000${sessionId}`)
+      setThreadEventHoldRef.current(sessionId, true)
     }
 
     window.addEventListener('chat:terminate-scope', handleTerminateScope)
@@ -7632,7 +7671,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       // this thread's draft while the send was being prepared.
       const isComposerSubmission = !overrides || overrides.composerSubmission === true
       if (isComposerSubmission && targetSessionId)
-        threadEventHeldRef.current.delete(`${storageScope}\u0000${targetSessionId}`)
+        setThreadEventHoldRef.current(targetSessionId, false)
       const composerSelectionEpoch = sessionSelectionEpochRef.current
       const composerDraftEditCount = targetSessionId
         ? (composerDraftEditCountRef.current.get(targetSessionId) ?? 0)
@@ -13260,7 +13299,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
     if (currentSessionId && (ownWork || !members.length)) {
       terminateSession(currentSessionId)
       // A manual stop also keeps the next thread event turn back until the user's own next send.
-      threadEventHeldRef.current.add(`${storageScope}\u0000${currentSessionId}`)
+      setThreadEventHoldRef.current(currentSessionId, true)
     }
     // The one stop-all of the members (teamMemberStop.ts), on the state read before the lead's stop.
     // A member idle at the click with team messages still queued for it is held as well.

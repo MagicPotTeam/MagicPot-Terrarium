@@ -7,6 +7,7 @@ import {
   AGENT_THREAD_INBOX_LIMITS as LIMITS,
   type AgentThreadEventClaim,
   type AgentThreadEventExpire,
+  type AgentThreadEventHold,
   type AgentThreadEventListScope,
   type AgentThreadEventRelease,
   type AgentThreadEventType,
@@ -334,7 +335,10 @@ export class AgentThreadInbox {
       .queued()
       .filter(
         (entry) =>
-          entry.event.routeKey === routeKey && entry.event.storageScope === scope.storageScope
+          entry.event.routeKey === routeKey &&
+          entry.event.storageScope === scope.storageScope &&
+          // A stopped (dormant) session's events wait until the user resumes it.
+          !store.isHeld(entry.event)
       )
       .map((entry) => this.view(entry))
   }
@@ -425,6 +429,26 @@ export class AgentThreadInbox {
     return { expired: store.expireSession(session, req.reason) }
   }
 
+  /**
+   * The user stopped the session (held) or sent to it again (not held). Durable before it returns,
+   * so a held session's events stay queued across a restart and none is claimed or started.
+   */
+  setHold(req: AgentThreadEventHold, invocation?: ServiceInvocationContext): { held: boolean } {
+    const session = this.session(req, req?.conversationId)
+    if (typeof req.held !== 'boolean') throw Error('Invalid thread event scope.')
+    authorizeAgentThreadScope(
+      { route: threadRoute(req.route), conversationId: req.conversationId },
+      invocation,
+      'setAgentThreadEventHold'
+    )
+    // Nothing on disk is nothing held: a resume creates no file.
+    const store = this.opener.open(req.held)
+    if (!store) return { held: false }
+    if (req.held) store.hold(session)
+    else store.resume(session)
+    return { held: req.held }
+  }
+
   private dropLease(id: string): void {
     const lease = this.leases.get(id)
     if (!lease) return
@@ -477,6 +501,8 @@ export class AgentThreadInbox {
       if (!store || !entry || !req.route || !safeId(req.conversationId)) throw Error()
       if (getAgentSessionKey(threadRoute(req.route)) !== entry.event.routeKey) throw Error()
       if (req.conversationId !== entry.event.conversationId) throw Error()
+      // Claimed just before the user stopped the session: not started; the release queues it again.
+      if (store.isHeld(entry.event)) throw Error()
       // The session's turn (and anything it waits for, such as an approval) is still running: the
       // event is not started and its claim stays, so the renderer releases it for a later turn.
       if (isConversationBusy(req.conversationId)) {

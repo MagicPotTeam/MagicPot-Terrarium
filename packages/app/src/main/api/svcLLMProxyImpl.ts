@@ -3,6 +3,7 @@ import { AgentThreadInbox } from './agentThreadInbox'
 import type {
   AgentThreadEventClaim,
   AgentThreadEventExpire,
+  AgentThreadEventHold,
   AgentThreadEventListScope,
   AgentThreadEventRelease
 } from '@shared/api/agentThreadInbox'
@@ -2273,6 +2274,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: AgentThreadEventExpire,
     invocation?: ServiceInvocationContext
   ) => this.threadInbox.expire(req, invocation)
+  setAgentThreadEventHold = async (
+    req: AgentThreadEventHold,
+    invocation?: ServiceInvocationContext
+  ) => this.threadInbox.setHold(req, invocation)
   // Current-conversation query rendezvous only. Notes/counter routes stay retired.
   listAgentArchiveQueries = async (
     req: AgentThreadInteractionScope,

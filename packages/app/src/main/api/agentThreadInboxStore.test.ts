@@ -158,6 +158,60 @@ describe('durable thread event store', () => {
     expect(store.queued().map((entry) => entry.event.id)).toEqual([b.id, other.id])
   })
 
+  it('keeps a stopped session held across a restart: queued, never claimed, TTL still applies', () => {
+    let now = 1_000_000
+    const path = file()
+    const store = open(path, 'boot-a', () => now)
+    const claimed = store.append(event({ text: 'synthetic claimed before the stop' })).event
+    const waiting = store.append(event({ text: 'synthetic waiting' })).event
+    now += 10
+    const late = store.append(event({ text: 'synthetic late' })).event
+    const other = store.append(event({ conversationId: 'b' })).event
+    store.claim(claimed.id)
+    store.hold(session)
+    store.hold(session)
+    expect(store.isHeld(session)).toBe(true)
+    expect(store.claim(waiting.id)).toBeUndefined()
+    expect(store.claim(other.id)).toBeDefined()
+    // A new boot: the hold is read back first, the old claim is queued again, nothing is claimable.
+    now = waiting.expiresAt - 1
+    const reopened = reopen(store, path, 'boot-b', () => now)
+    expect(reopened.isHeld(session)).toBe(true)
+    expect(reopened.get(claimed.id)?.state.status).toBe('queued')
+    expect(reopened.claim(claimed.id)).toBeUndefined()
+    expect(reopened.claim(waiting.id)).toBeUndefined()
+    // TTL applies while held.
+    now = waiting.expiresAt
+    expect(reopened.expireStale()).toBe(2)
+    expect(reopened.get(waiting.id)?.state).toMatchObject({
+      status: 'expired',
+      expiredReason: 'ttl'
+    })
+    // The other session was never held: its old claim is simply queued again.
+    expect(
+      reopened
+        .queued()
+        .map((entry) => entry.event.id)
+        .sort()
+    ).toEqual([late.id, other.id].sort())
+    // The user's own send resumes it, durably.
+    reopened.resume(session)
+    const resumed = reopen(reopened, path, 'boot-c', () => now)
+    expect(resumed.isHeld(session)).toBe(false)
+    expect(resumed.claim(late.id)?.state.status).toBe('claimed')
+  })
+
+  it('a removed session ends its hold together with its events', () => {
+    const store = open(file())
+    store.append(event())
+    store.hold(session)
+    expect(store.expireSession(session, 'session-removed')).toBe(1)
+    expect(store.isHeld(session)).toBe(false)
+    expect(() => store.hold({ ...session, conversationId: '' })).toThrow(
+      'Invalid thread event session.'
+    )
+  })
+
   it('refuses malformed events and counts queued events per session', () => {
     const store = open(file())
     expect(() => store.append(event({ text: ' ' }))).toThrow('Invalid thread event.')

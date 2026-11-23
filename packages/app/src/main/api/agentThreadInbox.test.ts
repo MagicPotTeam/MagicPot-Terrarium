@@ -332,6 +332,50 @@ describe('thread event inbox', () => {
     })
   })
 
+  it('a stopped session stays held across a restart until the user sends to it again', () => {
+    sender(1)
+    const file = path()
+    const { q } = inbox(file, 'boot-a')
+    const hold = (target: AgentThreadInbox, held: boolean, by = 1) =>
+      target.setHold(
+        { ...scope, conversationId: 'session-a', held },
+        invoke(by, 'setAgentThreadEventHold')
+      )
+    // A resume with nothing on disk writes nothing.
+    expect(hold(q, false)).toEqual({ held: false })
+    expect(existsSync(file)).toBe(false)
+    const claimedId = q.enqueue(input({ text: 'synthetic claimed before the stop' })).id
+    const waiting = q.enqueue(input({ text: 'synthetic waiting' })).id
+    const lease = claim(q, claimedId)!.lease!
+    expect(() => hold(q, true, 9)).toThrow('unauthorized')
+    expect(() =>
+      q.setHold(
+        { ...scope, conversationId: 'session-a', held: 'yes' } as never,
+        invoke(1, 'setAgentThreadEventHold')
+      )
+    ).toThrow('Invalid thread event scope.')
+    expect(hold(q, true)).toEqual({ held: true })
+    // The claim taken just before the stop is not started; nothing new is listed or claimed.
+    expect(() => q.admitEvent(request({ id: claimedId, lease }), invoke(1, 'chat'))).toThrow(
+      THREAD_EVENT_UNAVAILABLE
+    )
+    expect(list(q)).toEqual([])
+    expect(claim(q, waiting)).toBeUndefined()
+    q.dispose()
+    // A new boot (app restart): the hold is durable, both events stay queued and undelivered.
+    const { q: next } = inbox(file, 'boot-b')
+    expect(list(next)).toEqual([])
+    expect(claim(next, claimedId)).toBeUndefined()
+    expect(claim(next, waiting)).toBeUndefined()
+    // The user's own send resumes it: oldest first again, and the turn is admitted.
+    expect(hold(next, false)).toEqual({ held: false })
+    expect(list(next).map((event) => event.id)).toEqual([claimedId, waiting])
+    const again = claim(next, claimedId)!.lease!
+    expect(
+      next.admitEvent(request({ id: claimedId, lease: again }), invoke(1, 'chat')).threadEventOrigin
+    ).toBe('trigger_fire')
+  })
+
   it('after a restart: an unstarted claim is queued again, a started one never returns', () => {
     sender(1)
     const file = path()
