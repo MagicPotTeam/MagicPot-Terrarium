@@ -232,6 +232,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
         !request.goalProgressToken &&
         !request.teamMember &&
         !request.teamMessageHop &&
+        !request.threadEventOrigin &&
         request.profileScope !== 'qapp' &&
         !request.structuredOutput &&
         !request.comparisonRouting &&

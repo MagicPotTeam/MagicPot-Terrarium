@@ -3,6 +3,7 @@
 import React from 'react'
 import { createPortal } from 'react-dom'
 import ChatToolCalls from './ChatToolCalls'
+import ThreadEventMessage from './ThreadEventMessage'
 import { isEqual } from 'es-toolkit'
 import {
   Box,
@@ -1299,7 +1300,14 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   {anchoredTailByRow.get(-1)}
                 </AnchoredTailCards>
               ) : null}
-              {message.role === 'user' ? (
+              {message.role === 'user' && message.threadEvent ? (
+                <ThreadEventMessage
+                  origin={message.threadEvent}
+                  content={message.content || ''}
+                  isLight={isLight}
+                  t={t}
+                />
+              ) : message.role === 'user' ? (
                 editingMessageIndex === index ? (
                   <UserMessageEditForm
                     key={messageIdentities[index]}
