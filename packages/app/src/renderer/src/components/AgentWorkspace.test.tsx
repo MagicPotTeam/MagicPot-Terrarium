@@ -385,7 +385,7 @@ describe('AgentWorkspace', () => {
     )
     expect(row).not.toBeNull()
     expect(row?.querySelector('[aria-label="agent_workspace.close_thread"]')).toBeNull()
-    expect(row?.querySelector('[data-testid="CloseIcon"]')).toBeNull()
+    expect(row?.querySelector('[data-testid="StopCircleIcon"]')).toBeNull()
     expect(row?.textContent).toBe('画布检查')
     expect(row?.textContent).not.toContain('最新提问')
     const status = screen.getByTestId('agent-thread-status')
@@ -683,9 +683,9 @@ describe('AgentWorkspace', () => {
       expect(row.querySelector('[data-testid="agent-workspace-chat-controls-slot"]')).toBeNull()
       expect(row.querySelector('[id^="agent-workspace-chat-controls-"]')).toBeNull()
       // Closing moved to one row at the end of the list that acts on the active thread.
-      expect(row.querySelector('[data-testid="CloseIcon"]')).toBeNull()
+      expect(row.querySelector('[data-testid="StopCircleIcon"]')).toBeNull()
     }
-    expect(container.querySelectorAll('[data-testid="CloseIcon"]')).toHaveLength(1)
+    expect(container.querySelectorAll('[data-testid="StopCircleIcon"]')).toHaveLength(1)
     expect(screen.getByTestId('agent-thread-close-current')).toHaveTextContent(
       'agent_workspace.close_thread'
     )
@@ -704,7 +704,7 @@ describe('AgentWorkspace', () => {
         messages: [
           {
             role: 'assistant',
-            content: '对话 4',
+            content: '会话 4',
             attachments: [{ type: 'image', url: 'blob:missing-preview' }]
           }
         ]
@@ -724,8 +724,8 @@ describe('AgentWorkspace', () => {
       expect(screen.queryByText('最新回复')).not.toBeInTheDocument()
     })
     expect(screen.queryByText('图片回复')).not.toBeInTheDocument()
-    expect(screen.queryByText('对话 4')).not.toBeInTheDocument()
-    expect(screen.queryByRole('img', { name: '对话 4' })).not.toBeInTheDocument()
+    expect(screen.queryByText('会话 4')).not.toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: '会话 4' })).not.toBeInTheDocument()
     expect(screen.queryByRole('img', { name: 'Image preview' })).not.toBeInTheDocument()
     expect(container.querySelector('img')).toBeNull()
   })
@@ -736,7 +736,7 @@ describe('AgentWorkspace', () => {
 
     const { container } = renderWorkspaceWithThreadList()
 
-    const closeIcon = container.querySelector('[data-testid="CloseIcon"]')
+    const closeIcon = container.querySelector('[data-testid="StopCircleIcon"]')
     expect(closeIcon?.parentElement).toBeTruthy()
 
     fireEvent.click(closeIcon!.parentElement as Element)
@@ -911,7 +911,7 @@ describe('AgentWorkspace', () => {
     renderWorkspace()
     const toolbar = screen.getByTestId('agent-thread-toolbar')
     const buttons = within(toolbar).getAllByRole('button')
-    const refresh = within(toolbar).getByRole('button', { name: 'agent_workspace.refresh' })
+    const refresh = within(toolbar).getByRole('button', { name: 'agent_workspace.refresh_threads' })
     expect(buttons.at(-1)).toBe(refresh)
     expect(buttons.at(-2)).toBe(
       within(toolbar).getByRole('button', { name: 'agent_workspace.new_chat' })
@@ -1339,8 +1339,8 @@ describe('AgentWorkspace', () => {
     })
 
     it('numbers threads that have no conversation title by their position', async () => {
-      expect(zhRenderer.agent_workspace.chat_label).toBe('对话 {{index}}')
-      expect(enRenderer.agent_workspace.chat_label).toBe('Conversation {{index}}')
+      expect(zhRenderer.agent_workspace.chat_label).toBe('会话 {{index}}')
+      expect(enRenderer.agent_workspace.chat_label).toBe('Session {{index}}')
       // agent-1 was closed earlier; the open panes are the 1st and 2nd rows whatever their ids.
       localStorage.setItem(
         'agent.workspace.project-1',
@@ -1364,12 +1364,12 @@ describe('AgentWorkspace', () => {
       renderWorkspaceWithThreadList()
       await waitFor(() =>
         expect(getThreadRows().map((row) => row.textContent)).toEqual([
-          '对话 1',
-          '对话 2',
+          '会话 1',
+          '会话 2',
           '海报配色'
         ])
       )
-      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 1$/)
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^会话 1$/)
       expect(screen.queryByText('新对话')).not.toBeInTheDocument()
 
       // Reordering renumbers: the label follows the position, not the pane.
@@ -1393,11 +1393,11 @@ describe('AgentWorkspace', () => {
         ])
       )
       expect(getThreadRows().map((row) => row.textContent)).toEqual([
-        '对话 1',
-        '对话 2',
+        '会话 1',
+        '会话 2',
         '海报配色'
       ])
-      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 2$/)
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^会话 2$/)
     })
 
     it('labels a new thread at once and never flashes a placeholder while titles load', async () => {
@@ -1433,13 +1433,13 @@ describe('AgentWorkspace', () => {
         )
       )
       fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
-      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 2$/)
-      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '对话 2'])
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^会话 2$/)
+      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '会话 2'])
       fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
       expect(getThreadRows().map((row) => row.textContent)).toEqual([
         '画布检查',
-        '对话 2',
-        '对话 3'
+        '会话 2',
+        '会话 3'
       ])
       await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-3'))
       await act(async () => {
@@ -1447,8 +1447,8 @@ describe('AgentWorkspace', () => {
       })
       expect(getThreadRows().map((row) => row.textContent)).toEqual([
         '画布检查',
-        '对话 2',
-        '对话 3'
+        '会话 2',
+        '会话 3'
       ])
       expect(screen.queryByText('新对话')).not.toBeInTheDocument()
     })
@@ -1572,9 +1572,9 @@ describe('AgentWorkspace', () => {
       renderWorkspace()
       await waitForThreadSummary('画布检查')
       expect(screen.queryByTestId('agent-workspace-no-thread-composer')).not.toBeInTheDocument()
-      expect(zhRenderer.agent_workspace.no_thread_composer).toBe('选择或新建一个线程开始对话')
+      expect(zhRenderer.agent_workspace.no_thread_composer).toBe('选择或新建一个会话开始对话')
       expect(enRenderer.agent_workspace.no_thread_composer).toBe(
-        'Select or create a thread to start'
+        'Choose a Session and send a message'
       )
     })
 
@@ -1608,6 +1608,7 @@ describe('AgentWorkspace', () => {
         'no_threads',
         'threads_none_selected',
         'new_chat',
+        'refresh_threads',
         'status_running',
         'status_queued',
         'status_waiting_tool',
@@ -1624,8 +1625,12 @@ describe('AgentWorkspace', () => {
       expect(zhRenderer.agent_workspace).not.toHaveProperty('status_unread')
       expect(enRenderer.agent_workspace).not.toHaveProperty('status_unread')
       expect(JSON.stringify(zhRenderer.agent_workspace)).not.toContain('有新回复')
-      expect(zhRenderer.agent_workspace.close_thread).toBe('关闭当前线程')
-      expect(enRenderer.agent_workspace.close_thread).toBe('Close this thread')
+      expect(zhRenderer.agent_workspace.close_thread).toBe('停止会话')
+      expect(enRenderer.agent_workspace.close_thread).toBe('Stop Session')
+      // Upstream's toolbar wording: New Session, Refresh Sessions; a new row is "Session N".
+      expect(enRenderer.agent_workspace.new_chat).toBe('New Session')
+      expect(zhRenderer.agent_workspace.new_chat).toBe('新会话')
+      expect(zhRenderer.agent_workspace.refresh_threads).toBe('刷新会话')
       expect(zhRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')
       expect(enRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')
     })

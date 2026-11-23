@@ -4,7 +4,7 @@ import { useTheme } from '@mui/material/styles'
 import {
   Add as AddIcon,
   Autorenew as RefreshIcon,
-  Close as CloseIcon,
+  StopCircle as StopCircleIcon,
   ExpandMore as ExpandMoreIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
@@ -1289,9 +1289,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
 
             {/* Re-reads the active thread (its unsaved changes are saved first); without a thread,
               the thread list. Always there and always safe to press, as upstream's Refresh. */}
-            <Tooltip title={t('agent_workspace.refresh')} arrow>
+            <Tooltip title={t('agent_workspace.refresh_threads')} arrow>
               <IconButton
-                aria-label={t('agent_workspace.refresh')}
+                aria-label={t('agent_workspace.refresh_threads')}
                 data-testid="agent-thread-refresh"
                 onClick={() => {
                   const reload = activePane ? paneReloads.current.get(activePane.id) : undefined
@@ -1410,7 +1410,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
                     '&:hover': { backgroundColor: columnTokens.hover }
                   }}
                 >
-                  <CloseIcon aria-hidden sx={{ fontSize: 16, flex: 'none' }} />
+                  <StopCircleIcon aria-hidden sx={{ fontSize: 16, flex: 'none' }} />
                   <Box
                     component="span"
                     sx={{

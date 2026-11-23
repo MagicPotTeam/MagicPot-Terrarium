@@ -22,10 +22,9 @@ import { createTeamLiveActivity } from './teamLiveActivity'
 import { claimTeamTaskInDB, releaseTeamTaskClaimInDB } from './agentTeamTaskDispatch'
 import AgentTeamMenu from './components/AgentTeamMenu'
 import { registerTeamApprovalSurface } from '../../components/teamApprovalSurface'
-import { AgentTeamMemberForm, AgentTeamMemberImages } from './components/AgentTeamTree'
+import { AgentTeamMemberImages } from './components/AgentTeamTree'
 import { useTeamImagePlacement } from './components/useTeamImagePlacement'
 import {
-  createTeamMember,
   readMemberModelChoice,
   resolveTeamRecipient,
   resolveTeamRequestSettings
@@ -59,7 +58,6 @@ import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import AdsClickOutlinedIcon from '@mui/icons-material/AdsClickOutlined'
 import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined'
 import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined'
-import PersonAddAltOutlinedIcon from '@mui/icons-material/PersonAddAltOutlined'
 import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
@@ -99,7 +97,6 @@ import {
   loadAllSessions,
   sameTeamLifecycle,
   compareAndUpdateSessionInDB,
-  createTeamMemberInDB,
   setTeamMemberModelChoiceInDB,
   endTeamInDB,
   loadSessionFromDB,
@@ -11197,12 +11194,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
     }
   }, [storageScope, refreshTeamLifecycle, notifyWarning])
   const [teamManagementOpenRequest, setTeamManagementOpenRequest] = useState(0)
-  const [creatingTeamMember, setCreatingTeamMember] = useState(false)
   // End changes refs synchronously; also re-render to suspend/restart the observer.
   const [, setTeamEndRevision] = useState(0)
-  useEffect(() => {
-    setCreatingTeamMember(false)
-  }, [storageScope, messageLeadId, messageGeneration, active])
   const jobController = useAgentThreadJobs({
     route,
     conversationId: currentSessionId || undefined,
@@ -14155,75 +14148,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
               }}
             />
           )}
-          {teamEnabled && teamLead && (
-            <AgentTeamMemberForm
-              key={imagePlacementKey}
-              placement={teamImagePlacement}
-              lead={teamLead}
-              members={teamMembers}
-              creating={creatingTeamMember}
-              overlayHost={overlayHost}
-              onReturnFocus={focusComposerInput}
-              onClose={() => setCreatingTeamMember(false)}
-              onCreate={async (name, role, onCommittedEmpty) => {
-                const lead = sessionsRef.current.find((session) => session.id === teamLead.id)
-                const teamKey = `${storageScope}\u0000${teamLead.id}`
-                const endEpoch = teamEndEpochsRef.current.get(teamKey) ?? 0
-                const scopeEpoch = sessionLoadEpochRef.current
-                const visibilityEpoch = teamVisibilityRef.current.epoch
-                if (
-                  !lead ||
-                  lead.teamLeadId ||
-                  lead.archived ||
-                  lead.teamEnded ||
-                  teamEndPendingRef.current.has(teamKey) ||
-                  teamEndedMainRef.current.has(teamKey) ||
-                  hasSessionDeleteTombstone(lead.id, storageScope) ||
-                  storageScopeRef.current !== storageScope ||
-                  !active
-                )
-                  throw new Error('Team scope changed')
-                const member = createTeamMember(lead, name, role, crypto.randomUUID(), Date.now())
-                const stillCurrent = () =>
-                  isMountedRef.current &&
-                  teamVisibilityRef.current.active &&
-                  teamVisibilityRef.current.epoch === visibilityEpoch &&
-                  storageScopeRef.current === storageScope &&
-                  sessionLoadEpochRef.current === scopeEpoch &&
-                  (teamEndEpochsRef.current.get(teamKey) ?? 0) === endEpoch &&
-                  sessionsRef.current.find((session) => session.id === lead.id) === lead
-                const result = await createTeamMemberInDB({
-                  scope: storageScope,
-                  expectedLead: lead,
-                  member,
-                  shouldUpdate: stillCurrent
-                })
-                noteSessionWriteAcknowledged(storageScope)
-                chatSaveBaselineRef.current.advance(storageScope, result.member.id, result.member)
-                if (!stillCurrent()) {
-                  if (isMountedRef.current && storageScopeRef.current === storageScope)
-                    void refreshSessionsFromStorage()
-                  throw new Error('Team scope changed')
-                }
-                persistedSessionsRef.current.set(result.member.id, result.member)
-                // This exact freshly committed member has empty history. Publish the creation boundary
-                // before the member can be rendered together with its first generated image.
-                if (
-                  result.member.id === member.id &&
-                  result.member.teamLeadId === lead.id &&
-                  result.member.messages.length === 0 &&
-                  !sessionsRef.current.some((session) => session.id === result.member.id)
-                ) {
-                  onCommittedEmpty(result.member.id)
-                }
-                setSessions((previous) =>
-                  previous.some((session) => session.id === result.member.id)
-                    ? previous
-                    : [...previous, result.member]
-                )
-              }}
-            />
-          )}
           <Box sx={{ display: 'contents' }}>
             {active && replayView?.scope === inspectionScope && (
               <Box data-testid="replay-confirmation" sx={{ p: 2 }}>
@@ -14712,36 +14636,24 @@ const ChatPage: React.FC<ChatPageProps> = ({
         {active && modelInHeader && modelPillHost
           ? createPortal(chatComposerControlSlot, modelPillHost)
           : null}
-        {/* The team actions (the composer has no "+" menu): in the column header, else above the composer. */}
-        {active && teamEnabled && teamLead
+        {/* The team action (the composer has no "+" menu): in the column header, else above the
+          composer. There is no "add member" button (owner's request; upstream has none). */}
+        {active && teamEnabled && teamLead && threadHasTeam
           ? ((actions: React.ReactNode) =>
               compact && modelPillHost ? createPortal(actions, modelPillHost) : actions)(
               <Box
                 data-testid="agent-header-team-actions"
                 sx={{ display: 'flex', alignItems: 'center', gap: '2px' }}
               >
-                {!teamLead.teamEnded && (
-                  <IconButton
-                    size="small"
-                    data-testid="agent-header-add-member"
-                    aria-label={t('chat.team_menu_add_member')}
-                    title={t('chat.team_menu_add_member')}
-                    onClick={() => setCreatingTeamMember(true)}
-                  >
-                    <PersonAddAltOutlinedIcon sx={{ fontSize: 16 }} />
-                  </IconButton>
-                )}
-                {threadHasTeam && (
-                  <IconButton
-                    size="small"
-                    data-testid="agent-header-team"
-                    aria-label={t('chat.team_menu_manage')}
-                    title={t('chat.team_menu_manage')}
-                    onClick={() => setTeamManagementOpenRequest((value) => value + 1)}
-                  >
-                    <GroupsOutlinedIcon sx={{ fontSize: 16 }} />
-                  </IconButton>
-                )}
+                <IconButton
+                  size="small"
+                  data-testid="agent-header-team"
+                  aria-label={t('chat.team_menu_manage')}
+                  title={t('chat.team_menu_manage')}
+                  onClick={() => setTeamManagementOpenRequest((value) => value + 1)}
+                >
+                  <GroupsOutlinedIcon sx={{ fontSize: 16 }} />
+                </IconButton>
               </Box>
             )
           : null}

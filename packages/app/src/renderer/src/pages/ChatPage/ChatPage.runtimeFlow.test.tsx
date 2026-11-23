@@ -22,6 +22,7 @@ import {
 import type { ChatLoadingStatus } from './chatLoadingStatus'
 import ChatPage from './ChatPage'
 import { TeamMessageDispatcher } from './teamMessageDispatcher'
+import { createTeamMember } from './agentTeam'
 import {
   ChatPathlessAttachmentTooLargeError,
   describeChatAttachmentImportFailure
@@ -1213,15 +1214,11 @@ const createExpiredContinuationError = (): Error & { status: number; body: strin
 }
 
 /** Picks one entry of the composer "+" menu; the mock composer renders the real addMenuSlot. */
-const chooseAddMenuEntry = (
-  testId: 'chat-composer-menu-add-member' | 'chat-composer-menu-team'
-): void => {
-  // The team actions sit above the conversation (the composer has no "+" menu any more).
-  fireEvent.click(
-    screen.getByTestId(
-      testId === 'chat-composer-menu-add-member' ? 'agent-header-add-member' : 'agent-header-team'
-    )
-  )
+const chooseAddMenuEntry = (testId: 'chat-composer-menu-team'): void => {
+  // The team action sits above the conversation (the composer has no "+" menu any more), and
+  // there is no "add member" entry (as upstream).
+  void testId
+  fireEvent.click(screen.getByTestId('agent-header-team'))
 }
 
 /**
@@ -1848,7 +1845,7 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
-  it('offline process area creates members from the conversation header and keeps navigation and management available', async () => {
+  it('offline process area lists a stored team after its lead and keeps navigation and management available', async () => {
     const fetchGuard = vi
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('network forbidden'))
@@ -1859,7 +1856,12 @@ describe('ChatPage runtime workflow integration', () => {
         messages: [],
         profileId: 'base-model'
       }
-      hoisted.storedSessions.value = [lead]
+      // There is no "add member" button (as upstream): the members are already stored.
+      hoisted.storedSessions.value = [
+        lead,
+        createTeamMember(lead, 'Alice', 'Alice', 'process-area-alice', 1),
+        createTeamMember(lead, 'Bob', 'Writer', 'process-area-bob', 2)
+      ]
       localStorage.setItem(
         scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
         lead.id
@@ -1867,15 +1869,9 @@ describe('ChatPage runtime workflow integration', () => {
       renderChatPage({ team: true, rows: true })
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
       expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: '团队管理' })).not.toBeInTheDocument()
-      // No banner above the transcript: a lead without a team offers only "add member" in the "+" menu.
       expect(screen.queryByTestId('team-conversation-actions')).not.toBeInTheDocument()
-      expect(screen.getByTestId('agent-header-add-member')).toBeInTheDocument()
-      expect(screen.queryByTestId('agent-header-team')).not.toBeInTheDocument()
-      chooseAddMenuEntry('chat-composer-menu-add-member')
-      fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Alice' } })
-      fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Alice' } })
-      fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
+      expect(screen.queryByTestId('agent-header-add-member')).not.toBeInTheDocument()
+      expect(screen.getByTestId('agent-header-team')).toBeInTheDocument()
       // The members are rows of the thread list, after the lead's row; the process area lists none.
       const alice = await teamRows().findByRole('button', { name: 'Alice' })
       expect(alice.textContent).toBe('Alice')
@@ -1883,13 +1879,8 @@ describe('ChatPage runtime workflow integration', () => {
         teamRows()
           .getAllByRole('button')
           .map((row) => row.textContent)
-      ).toEqual(['Lead', 'Alice'])
-      expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
-      chooseAddMenuEntry('chat-composer-menu-add-member')
-      fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'Bob' } })
-      fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'Writer' } })
-      fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-      expect(await teamRows().findByRole('button', { name: 'Bob' })).toHaveTextContent(/^Bob$/)
+      ).toEqual(['Lead', 'Alice', 'Bob'])
+      expect(teamRows().getByRole('button', { name: 'Bob' })).toHaveTextContent(/^Bob$/)
       expect(teamRows().getByRole('button', { name: 'Lead' })).toHaveAttribute(
         'aria-current',
         'true'
@@ -7959,21 +7950,27 @@ describe('ChatPage runtime workflow integration', () => {
           scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
           'base-model'
         )
-        renderChatPage({ team: true, rows: true })
-        await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
-        const lead = readCurrentSessionState()!.id
-        for (const [name, role, count] of [
-          [designerName, '设计师', '1'],
-          [writerName, '文案', '2']
-        ] as const) {
-          chooseAddMenuEntry('chat-composer-menu-add-member')
-          fireEvent.change(screen.getByLabelText('成员名'), { target: { value: name } })
-          fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: role } })
-          fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-          await waitFor(() =>
-            expect(teamRows().getAllByRole('button')).toHaveLength(Number(count) + 1)
-          )
+        // The column has no "add member" button (as upstream): the team is already stored.
+        const leadSession: ChatSession = {
+          id: 'two-member-lead',
+          title: 'Lead',
+          messages: [],
+          profileId: 'base-model'
         }
+        hoisted.storedSessions.value = [
+          leadSession,
+          createTeamMember(leadSession, designerName, '设计师', 'two-member-designer', 1),
+          createTeamMember(leadSession, writerName, '文案', 'two-member-writer', 2)
+        ]
+        localStorage.setItem(
+          scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
+          leadSession.id
+        )
+        renderChatPage({ team: true, rows: true })
+        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(leadSession.id))
+        expect(readCurrentSessionState()?.profileId).toBe('base-model')
+        const lead = leadSession.id
+        await waitFor(() => expect(teamRows().getAllByRole('button')).toHaveLength(3))
         const designer = hoisted.storedSessions.value.find(
           (session) => session.teamMemberName === designerName
         )!
@@ -8658,76 +8655,6 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('creates a member with empty history and switches back to its lead without enabling execution', async () => {
-    localStorage.setItem(
-      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
-      'base-model'
-    )
-    renderChatPage({ team: true, rows: true })
-    await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
-    const lead = readCurrentSessionState()!.id
-    chooseAddMenuEntry('chat-composer-menu-add-member')
-    fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'writer' } })
-    fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'write notes' } })
-    fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-    await waitFor(() =>
-      expect(
-        teamRows()
-          .getAllByRole('button')
-          .map((row) => row.textContent)
-      ).toEqual(['Lead', 'writer'])
-    )
-    const committed = hoisted.storedSessions.value.find(
-      (session) => session.teamMemberName === 'writer'
-    )
-    expect(committed).toMatchObject({ teamLeadId: lead, messages: [] })
-    fireEvent.click(teamRows().getByRole('button', { name: 'writer' }))
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(committed?.id))
-    expect(readCurrentSessionState()?.messages).toEqual([])
-    fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead))
-    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-  })
-
-  it('creates a team member, switches within the same column and returns to lead', async () => {
-    localStorage.setItem(
-      scopedStorageKey(STORAGE_KEY_SELECTED_PROFILE, 'runtime-flow'),
-      'base-model'
-    )
-    renderChatPage({ team: true, rows: true })
-    await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
-    const lead = readCurrentSessionState()!.id
-    chooseAddMenuEntry('chat-composer-menu-add-member')
-    fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'writer' } })
-    fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'write notes' } })
-    fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-    await waitFor(() =>
-      expect(
-        teamRows()
-          .getAllByRole('button')
-          .map((row) => row.textContent)
-      ).toEqual(['Lead', 'writer'])
-    )
-    expect(readCurrentSessionState()?.id).toBe(lead)
-    fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
-      target: { value: '@writer write a short note' }
-    })
-    fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalled())
-    expect(readCurrentSessionState()?.id).toBe(lead)
-    expect(readCurrentSessionState()?.messages).toHaveLength(0)
-    fireEvent.click(teamRows().getByRole('button', { name: 'writer' }))
-    await waitFor(() => expect(readCurrentSessionState()?.teamLeadId).toBe(lead))
-    await waitFor(() =>
-      expect(
-        readCurrentSessionState()?.messages.some(
-          (message) => message.content === 'write a short note'
-        )
-      ).toBe(true)
-    )
-    fireEvent.click(teamRows().getByRole('button', { name: 'Lead' }))
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead))
-  })
   async function openTeamManagement() {
     await waitFor(() => expect(readCurrentSessionState()).toBeDefined())
     const current = readCurrentSessionState()
@@ -11987,60 +11914,6 @@ describe('ChatPage runtime workflow integration', () => {
     expect(screen.getByTestId('chat-composer-input-mock')).toHaveValue('结束后不应执行')
   })
 
-  it('rejects member creation that is still pending when the team ends', async () => {
-    const lead: ChatSession = {
-      id: 'team-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: true }
-    }
-    hoisted.storedSessions.value = [lead]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    vi.mocked(createTeamMemberInDB).mockClear()
-    const page = renderChatPage({ team: true })
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    let release!: () => void
-    hoisted.saveSessionToDBGate.value = new Promise((resolve) => {
-      release = resolve
-    })
-    try {
-      chooseAddMenuEntry('chat-composer-menu-add-member')
-      fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'waiting' } })
-      fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'do work' } })
-      fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-      await waitFor(() =>
-        expect(screen.getByRole('button', { name: '确认创建成员' })).toBeDisabled()
-      )
-      await openTeamManagement()
-      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamEnded
-        ).toBe(true)
-      )
-      await act(async () => {
-        release()
-        hoisted.saveSessionToDBGate.value = null
-      })
-      await waitFor(() => expect(createTeamMemberInDB).toHaveReturnedTimes(1))
-      const committedCreate = vi.mocked(createTeamMemberInDB).mock.results[0].value
-      await expect(committedCreate).rejects.toThrow('Team changed')
-      // End unmounts the creation form; it must not resurrect its old error UI.
-      expect(screen.queryByText(MEMBER_CREATE_UNCONFIRMED)).not.toBeInTheDocument()
-      expect(
-        hoisted.storedSessions.value.some(
-          (session) => session.teamMemberName === 'waiting' && !session.archived
-        )
-      ).toBe(false)
-      expect(screen.queryByRole('button', { name: /waiting.*空闲/ })).toBeNull()
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-    } finally {
-      hoisted.saveSessionToDBGate.value = null
-      release()
-      page.unmount()
-    }
-  })
   it('keeps an existing member archived when its in-flight save resumes after End', async () => {
     const lead: ChatSession = {
       id: 'saving-lead',
@@ -12113,31 +11986,6 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('renders a creation error while a live team remains available', async () => {
-    const lead: ChatSession = {
-      id: 'team-create-error',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model'
-    }
-    hoisted.storedSessions.value = [lead]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const create = vi.mocked(createTeamMemberInDB)
-    create.mockClear()
-    create.mockRejectedValueOnce(new Error('Team changed'))
-    renderChatPage({ team: true })
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    chooseAddMenuEntry('chat-composer-menu-add-member')
-    fireEvent.change(screen.getByLabelText('成员名'), { target: { value: 'waiting' } })
-    fireEvent.change(screen.getByLabelText('角色 / 当前任务'), { target: { value: 'do work' } })
-    fireEvent.click(screen.getByRole('button', { name: '确认创建成员' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent(MEMBER_CREATE_UNCONFIRMED)
-    expect(within(screen.getByTestId('agent-team-member-form')).getByRole('alert')).toBeVisible()
-    expect(screen.getByLabelText('成员名')).toHaveValue('waiting')
-    expect(screen.getByLabelText('角色 / 当前任务')).toHaveValue('do work')
-    expect(create).toHaveBeenCalledTimes(1)
-    expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-  })
   it('keeps terminated members archived when selecting a lead that needs normalization', async () => {
     const lead: ChatSession = {
       id: 'team-lead',

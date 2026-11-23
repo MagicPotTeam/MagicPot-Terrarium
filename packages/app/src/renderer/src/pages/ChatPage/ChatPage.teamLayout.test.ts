@@ -23,7 +23,8 @@ describe('conversation team structure', () => {
     visit(file)
     // Helper jobs and processes are listed by /jobs; finished ones leave a divider in the transcript.
     expect(names).not.toContain('AgentProcessArea')
-    expect(names.filter((name) => name === 'AgentTeamMemberForm')).toHaveLength(1)
+    // No "add member" form: upstream has no such entry, and nothing here opens one.
+    expect(names).not.toContain('AgentTeamMemberForm')
     expect(names).not.toContain('AgentTeamMemberCreator')
     expect(names).not.toContain('TeamLeadJobEntries')
     expect(source.match(/\buseTeamImagePlacement\(/g)).toHaveLength(1)
@@ -38,8 +39,8 @@ describe('conversation team structure', () => {
     expect(source).not.toContain('hideTriggerWithoutHost')
     expect(source).not.toContain('addMenuSlot=')
     expect(source).toContain('data-testid="agent-header-team"')
-    expect(source).toContain('data-testid="agent-header-add-member"')
-    expect(source).toContain('setCreatingTeamMember(true)')
+    expect(source).not.toContain('agent-header-add-member')
+    expect(source).not.toContain('setCreatingTeamMember')
     expect(source).not.toContain('team-conversation-actions')
   })
 })
