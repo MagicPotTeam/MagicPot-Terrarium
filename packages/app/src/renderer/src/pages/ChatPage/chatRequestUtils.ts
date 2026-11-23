@@ -47,6 +47,7 @@ import {
 } from '@renderer/utils/llmProfileUtils'
 import { normalizeLocalMediaUrl } from './chatPageShared'
 import { assertExplicitUserImageCount } from './chatExplicitImageCount'
+import { downscaleHistoryImagesForRequest } from './chatManagedMediaAttachments'
 import {
   assertNoUnverifiedPrimaryReports,
   hasWellFormedReportBundleBinding,
@@ -2891,6 +2892,65 @@ const resolveManagedMediaRequestOptions = (input: RequestChatCompletionInput) =>
   }
 }
 
+// An image generation, edit or 3D request uses earlier images as its source: keep them as
+// they are. When the route cannot be decided from descriptors, assume it may generate. A
+// skill runtime (tool commands, special routes) keeps today's behaviour, as for the budget.
+const mayUseHistoryImagesAsGenerationSource = (
+  input: RequestChatCompletionInput,
+  profile: RemoteRequestProfile | undefined
+): boolean => {
+  if (
+    input.imageRequest ||
+    input.imageGenerationOptions?.enabled === true ||
+    input.skillRuntime ||
+    getBaseProfileId(input.profileId) === HUNYUAN_3D_PROFILE_ID
+  ) {
+    return true
+  }
+  if (!profile) return false
+  const modelUse = resolveProfileModelUse(profile)
+  if (modelUse === 'image' || modelUse === 'video' || isGPTImageProfile(profile, input.apiMode)) {
+    return true
+  }
+  return (
+    resolveProfileProvider(profile) === 'openai' &&
+    mayUseAutomaticImageGeneration(input, modelUse, input.imageGenerationOptions)
+  )
+}
+
+/**
+ * Before anything counts or reads the request's images: when the request sends the whole
+ * image history, replace earlier turns' images with smaller copies (see
+ * downscaleHistoryImagesForRequest). The latest user message is never changed.
+ */
+const downscaleHistoryImagesForInput = async <T extends RequestChatCompletionInput>(
+  input: T,
+  profile: RemoteRequestProfile | undefined
+): Promise<T> => {
+  if (input.imageHistoryPolicy !== 'all' || mayUseHistoryImagesAsGenerationSource(input, profile)) {
+    return input
+  }
+  const service = (api() as unknown as { svcManagedMedia?: ManagedMediaSvc }).svcManagedMedia
+  const ensureDerivative =
+    typeof service?.ensureDerivative === 'function'
+      ? (req: Parameters<ManagedMediaSvc['ensureDerivative']>[0]) =>
+          awaitWithAbort(service.ensureDerivative(req), input.signal)
+      : undefined
+  const { allowRequestDataUrl } = resolveAttachmentRequestCapabilities(
+    input.config,
+    input.profileId,
+    input.apiMode,
+    input.remoteProfile
+  )
+  const messages = await downscaleHistoryImagesForRequest(input.messages, {
+    ensureDerivative,
+    canSendDerivative: allowRequestDataUrl,
+    signal: input.signal
+  })
+  throwIfAborted(input.signal)
+  return { ...input, messages }
+}
+
 const resolveRemoteResponsesImagePolicy = (
   input: RequestChatCompletionInput,
   profile: RemoteRequestProfile | undefined
@@ -3530,14 +3590,16 @@ const requestChatCompletionInStages = async (
   assertGoalProgressInput(input)
   validateCustomSkillForSend(input.externalAgentSkill)
   throwIfAborted(input.signal)
-  const requestInput = projectRequestInputForTransport(input)
-  reportChatSendStage('request-start', requestInput.messages)
+  const projectedInput = projectRequestInputForTransport(input)
+  reportChatSendStage('request-start', projectedInput.messages)
   assertExplicitUserImageCount(
-    requestInput.messages.findLast((message) => message.role === 'user')?.attachments
+    projectedInput.messages.findLast((message) => message.role === 'user')?.attachments
   )
   // Shape only: refuse primary reports without a binding before any IPC, I/O or probe.
-  assertNoUnverifiedPrimaryReports(requestInput.messages)
-  const profile = resolveSelectedRequestProfile(requestInput)
+  assertNoUnverifiedPrimaryReports(projectedInput.messages)
+  const profile = resolveSelectedRequestProfile(projectedInput)
+  // Earlier turns' images are replaced by smaller copies before any count or size check.
+  const requestInput = await downscaleHistoryImagesForInput(projectedInput, profile)
   const maxImages = preflightRequestImageCount(requestInput, profile)
   // Nothing is verified, read or sent for a request MAIN would refuse for the size of its
   // images: first from the descriptors, before MAIN's report verification.
@@ -3624,14 +3686,16 @@ const requestChatCompletionStreamInStages = async (
   assertGoalProgressInput(input)
   validateCustomSkillForSend(input.externalAgentSkill)
   throwIfAborted(input.signal)
-  const requestInput = projectRequestInputForTransport(input)
-  reportChatSendStage('request-start', requestInput.messages)
+  const projectedInput = projectRequestInputForTransport(input)
+  reportChatSendStage('request-start', projectedInput.messages)
   assertExplicitUserImageCount(
-    requestInput.messages.findLast((message) => message.role === 'user')?.attachments
+    projectedInput.messages.findLast((message) => message.role === 'user')?.attachments
   )
   // Shape only: refuse primary reports without a binding before any IPC, I/O or probe.
-  assertNoUnverifiedPrimaryReports(requestInput.messages)
-  const profile = resolveSelectedRequestProfile(requestInput)
+  assertNoUnverifiedPrimaryReports(projectedInput.messages)
+  const profile = resolveSelectedRequestProfile(projectedInput)
+  // Earlier turns' images are replaced by smaller copies before any count or size check.
+  const requestInput = await downscaleHistoryImagesForInput(projectedInput, profile)
   const maxImages = preflightRequestImageCount(requestInput, profile)
   // Nothing is verified, read or sent for a request MAIN would refuse for the size of its
   // images: first from the descriptors, before MAIN's report verification.

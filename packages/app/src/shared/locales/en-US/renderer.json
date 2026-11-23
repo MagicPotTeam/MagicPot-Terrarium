@@ -1005,6 +1005,8 @@
     "context_compress_started": "Compressing context in the background…",
     "context_compress_stale": "Context changed before compression finished; kept the existing history.",
     "drop_folder_has_no_supported_images": "The dropped folder does not contain any supported images.",
+    "history_image_omitted": "[An earlier image ({{name}}) could not be downscaled and was not sent this time]",
+    "history_image_ordinal": "image {{index}}",
     "incoming_image_downscaled": "{{fileName}} is larger than {{maxMB}} MB, so a {{width}} × {{height}} copy was attached instead.",
     "incoming_image_too_large": "{{fileName}} is too large. Max {{maxMB}} MB, current size {{size}}.",
     "pathless_attachment_too_large": "{{fileName}} ({{size}}) is too large: pasted, generated or network data is limited to {{maxMB}} MB.",

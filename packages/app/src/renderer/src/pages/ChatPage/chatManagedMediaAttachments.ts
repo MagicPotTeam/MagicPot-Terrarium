@@ -1,6 +1,6 @@
 import i18next from 'i18next'
 import type { ManagedMediaSvc } from '@shared/api/svcManagedMedia'
-import type { ChatAttachment } from '@shared/api/svcLLMProxy'
+import type { ChatAttachment, ChatMessage } from '@shared/api/svcLLMProxy'
 import type { ManagedMediaStorage } from '@shared/api/svcManagedMedia'
 import {
   MANAGED_MEDIA_IMPORT_BYTES_MAX_BYTES,
@@ -710,4 +710,161 @@ export const boundIncomingChatImageSize = async (
     }
   }
   throw tooLarge()
+}
+
+/** Longest edge of the copy an earlier turn's image is replaced with in a model request. */
+export const HISTORY_IMAGE_REQUEST_MAX_EDGE = 1024
+/** An earlier image at or below this size (or this edge) is sent as it is. */
+export const HISTORY_IMAGE_SMALL_BYTES = 512 * 1024
+
+const knownSizeBytes = (attachment: ChatAttachment, managedSize?: number): number | undefined => {
+  const size = managedSize ?? attachment.sizeBytes
+  if (typeof size === 'number' && Number.isFinite(size) && size >= 0) return size
+  const match = /^data:[^,]*;base64,/iu.exec(attachment.url || '')
+  if (!match) return undefined
+  return Math.floor(((attachment.url.length - match[0].length) * 3) / 4)
+}
+
+const isSmallHistoryImage = (
+  attachment: ChatAttachment,
+  managed: ReturnType<typeof normalizeMediaReference>
+): boolean => {
+  const width = managed?.width ?? attachment.sourceWidth
+  const height = managed?.height ?? attachment.sourceHeight
+  if (
+    typeof width === 'number' &&
+    typeof height === 'number' &&
+    width > 0 &&
+    height > 0 &&
+    Math.max(width, height) <= HISTORY_IMAGE_REQUEST_MAX_EDGE
+  ) {
+    return true
+  }
+  const size = knownSizeBytes(attachment, managed?.sizeBytes)
+  return size !== undefined && size <= HISTORY_IMAGE_SMALL_BYTES
+}
+
+const historyImageOmittedNote = (name: string): string =>
+  // i18next returns nothing before it is initialised.
+  i18next.t('chat.history_image_omitted', { name }) ||
+  `[An earlier image (${name}) could not be downscaled and was not sent this time]`
+
+const historyImageOrdinalName = (index: number): string =>
+  i18next.t('chat.history_image_ordinal', { index }) || `image ${index}`
+
+/**
+ * Replace the images of earlier turns with smaller copies before a request that sends the
+ * whole image history ('all' policy), so old full-size images cannot overflow the request.
+ *
+ * The latest turn is the last user message: every image on it (including a resend or an
+ * edited resend) is sent unchanged. Every other image is earlier history:
+ * - small enough already (both edges <= HISTORY_IMAGE_REQUEST_MAX_EDGE, or at most
+ *   HISTORY_IMAGE_SMALL_BYTES): sent unchanged;
+ * - a managed image: replaced by the store's own bounded derivative (ensureDerivative, longest
+ *   edge HISTORY_IMAGE_REQUEST_MAX_EDGE), read later through its local-media URL like any
+ *   other request image;
+ * - otherwise (no derivative service, a derivative error or an animated GIF, the route cannot
+ *   carry a request data URL, a large non-managed image): left out of this request, with a
+ *   short note naming the image appended to that message's text. A remote URL of unknown size
+ *   and report-bundle images are never touched.
+ * The input messages are not modified. An abort is rethrown.
+ */
+export const downscaleHistoryImagesForRequest = async <T extends ChatMessage>(
+  messages: readonly T[],
+  options: {
+    ensureDerivative?: ManagedMediaSvc['ensureDerivative']
+    /** Whether the route can send a non-managed local image (request-data-url). */
+    canSendDerivative: boolean
+    signal?: AbortSignal
+  }
+): Promise<T[]> => {
+  const latestUserIndex = messages.findLastIndex((message) => message.role === 'user')
+  const derivatives = new Map<string, ReturnType<ManagedMediaSvc['ensureDerivative']>>()
+  const deriveOnce = (
+    reference: NonNullable<ReturnType<typeof normalizeMediaReference>>
+  ): ReturnType<ManagedMediaSvc['ensureDerivative']> => {
+    const key = reference.sha256 || reference.relativePath
+    let pending = derivatives.get(key)
+    if (!pending) {
+      pending = options.ensureDerivative!({
+        reference,
+        maxEdge: HISTORY_IMAGE_REQUEST_MAX_EDGE
+      })
+      derivatives.set(key, pending)
+    }
+    return pending
+  }
+
+  const result: T[] = []
+  for (const [index, message] of messages.entries()) {
+    if (index === latestUserIndex || !message.attachments?.some((a) => a.type === 'image')) {
+      result.push(message)
+      continue
+    }
+    const attachments: ChatAttachment[] = []
+    const omitted: string[] = []
+    let imageOrdinal = 0
+    let changed = false
+    for (const attachment of message.attachments) {
+      if (attachment.type !== 'image') {
+        attachments.push(attachment)
+        continue
+      }
+      imageOrdinal += 1
+      const reference = normalizeMediaReference(attachment.media)
+      const managed = reference?.kind === 'managed' ? reference : undefined
+      if (
+        attachment.reportBundleId ||
+        attachment.reportBundleRole ||
+        isSmallHistoryImage(attachment, managed) ||
+        (!managed && knownSizeBytes(attachment) === undefined)
+      ) {
+        attachments.push(attachment)
+        continue
+      }
+      changed = true
+      const name =
+        attachment.fileName || managed?.originalFileName || historyImageOrdinalName(imageOrdinal)
+      if (managed && options.canSendDerivative && options.ensureDerivative) {
+        try {
+          const derivative = await deriveOnce(managed)
+          if (derivative.status === 'ready') {
+            const { descriptor } = derivative
+            const replacement: ChatAttachment = {
+              ...attachment,
+              url: descriptor.localMediaUrl,
+              mimeType: descriptor.mimeType,
+              sizeBytes: descriptor.sizeBytes,
+              sourceWidth: descriptor.width,
+              sourceHeight: descriptor.height
+            }
+            delete replacement.media
+            attachments.push(replacement)
+            continue
+          }
+        } catch (error) {
+          if (options.signal?.aborted) throw error
+          console.warn('[chatManagedMediaAttachments] History image derivative unavailable:', error)
+        }
+      }
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error('Aborted')
+      console.warn('[chatManagedMediaAttachments] Earlier image left out of the request:', name)
+      omitted.push(name)
+    }
+    if (!changed) {
+      result.push(message)
+      continue
+    }
+    const notes = omitted.map(historyImageOmittedNote).join('\n')
+    result.push({
+      ...message,
+      attachments: attachments.length > 0 ? attachments : undefined,
+      content: notes
+        ? message.content
+          ? `${message.content}\n\n${notes}`
+          : notes
+        : message.content
+    })
+  }
+  return result
 }

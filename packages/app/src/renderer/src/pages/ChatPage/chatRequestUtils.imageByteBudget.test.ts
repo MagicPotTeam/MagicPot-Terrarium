@@ -16,6 +16,10 @@ import {
   requestChatCompletion,
   requestChatCompletionStream
 } from './chatRequestUtils'
+import type {
+  EnsureManagedMediaDerivativeReq,
+  EnsureManagedMediaDerivativeResp
+} from '@shared/api/svcManagedMedia'
 import { createReportBundleRegistryFixture } from './__fixtures__/reportBundleFixtures'
 import {
   ChatRequestImageBudgetError,
@@ -86,9 +90,29 @@ const output = {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  readyDerivative.mockClear()
 })
 
-function installBridge() {
+// The store's bounded copy of an earlier turn's image (the thumbnail program is mocked).
+const DERIVATIVE_BYTES = 40_000
+type EnsureDerivative = (
+  req: EnsureManagedMediaDerivativeReq
+) => Promise<EnsureManagedMediaDerivativeResp>
+const readyDerivative = vi.fn<EnsureDerivative>(async (req) => ({
+  status: 'ready',
+  descriptor: {
+    maxEdge: req.maxEdge,
+    relativePath: `derivatives/${req.reference.sha256}.webp`,
+    mimeType: 'image/webp',
+    sizeBytes: DERIVATIVE_BYTES,
+    width: req.maxEdge,
+    height: req.maxEdge,
+    sha256: 'f'.repeat(64),
+    localMediaUrl: `local-media:///derivatives/${req.reference.sha256}.webp`
+  }
+}))
+
+function installBridge(ensureDerivative: EnsureDerivative = readyDerivative) {
   const materializeForRequest = vi.fn(async () => output)
   const chat = vi.fn(async () => ({ content: 'ok' }))
   const chatStream = vi.fn(async (_request: unknown, response: ServerStreaming<LLMChatStreamResp>) => {
@@ -97,7 +121,7 @@ function installBridge() {
   const fetchMock = vi.fn(async (_url?: unknown) => new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/png' } }))
   vi.stubGlobal('fetch', fetchMock)
   window.api = {
-    svcManagedMedia: { materializeForRequest },
+    svcManagedMedia: { materializeForRequest, ensureDerivative },
     svcLLMProxy: { chat, chatStream, remoteFetch: vi.fn() }
   } as unknown as Window['api']
   const nothingRead = () => {
@@ -106,7 +130,10 @@ function installBridge() {
     expect(chat).not.toHaveBeenCalled()
     expect(chatStream).not.toHaveBeenCalled()
   }
-  return { materializeForRequest, chat, chatStream, fetchMock, nothingRead }
+  /** Earlier-turn image reads: the derivative local-media URLs fetched for the request. */
+  const derivativeReads = () =>
+    fetchMock.mock.calls.filter(([url]) => String(url).includes('/derivatives/')).length
+  return { materializeForRequest, chat, chatStream, fetchMock, nothingRead, derivativeReads }
 }
 
 describe.each([false, true])('request image byte budget, stream=%s', (stream) => {
@@ -118,15 +145,62 @@ describe.each([false, true])('request image byte budget, stream=%s', (stream) =>
       : requestChatCompletion(options)
   }
 
-  it('refuses the fifth 8-image turn of the report shape before reading any image (built-in Responses route)', async () => {
+  it('sends the fifth 8-image turn of the report shape with earlier turns downscaled (built-in Responses route)', async () => {
+    // Before history downscaling the originals of five turns overflowed MAIN's limit and the
+    // request was refused; now the budget counts the 1024 px copies of the earlier turns.
     const bridge = installBridge()
     const messages = turns(5, 8, REPORT_JPEG_BYTES)
     const snapshot = structuredClone(messages)
+    await expect(
+      send({ config: localConfig(), messages, imageHistoryPolicy: 'all' })
+    ).resolves.toBeDefined()
+    expect(readyDerivative).toHaveBeenCalledTimes(32)
+    expect(bridge.derivativeReads()).toBe(32)
+    // Only the latest turn is read from its managed original.
+    expect(bridge.materializeForRequest).toHaveBeenCalledTimes(8)
+    expect(stream ? bridge.chatStream : bridge.chat).toHaveBeenCalledOnce()
+    expect(messages).toEqual(snapshot)
+  })
+
+  it('leaves earlier images out, with a note, when no copy can be made, and still sends', async () => {
+    // E.g. a development build without the thumbnail program: ensureDerivative fails.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const bridge = installBridge(async () =>
+      Promise.reject(new Error('fixture: no thumbnail program'))
+    )
+    await expect(
+      send({
+        config: localConfig(),
+        messages: turns(5, 8, REPORT_JPEG_BYTES),
+        imageHistoryPolicy: 'all'
+      })
+    ).resolves.toBeDefined()
+    expect(bridge.materializeForRequest).toHaveBeenCalledTimes(8)
+    expect(bridge.derivativeReads()).toBe(0)
+    const call = (stream ? bridge.chatStream : bridge.chat).mock.calls[0] as unknown as [
+      { messages: ChatMessage[] }
+    ]
+    const sent = call[0].messages
+    expect(sent[0].attachments ?? []).toHaveLength(0)
+    expect(sent[0].content).toContain('could not be downscaled and was not sent this time')
+    expect(sent.at(-1)!.attachments).toHaveLength(8)
+  })
+
+  it('still refuses, before reading any image, when the latest turn alone is over the limit', async () => {
+    const bridge = installBridge()
+    const messages: ChatMessage[] = [
+      ...turns(2, 8, REPORT_JPEG_BYTES),
+      { role: 'assistant', content: 'ok' },
+      {
+        role: 'user',
+        content: 'look',
+        attachments: [managedImage(MAX_CHAT_IMAGE_PREPARATION_SOURCE_BYTES + 1)]
+      }
+    ]
     const error = await send({ config: localConfig(), messages, imageHistoryPolicy: 'all' }).catch((value) => value)
     expect(error).toBeInstanceOf(ChatRequestImageBudgetError)
     expect(error.code).toBe(CHAT_REQUEST_IMAGE_BUDGET_EXCEEDED)
     bridge.nothingRead()
-    expect(messages).toEqual(snapshot)
   })
 
   it('still sends the fourth turn, which MAIN accepts', async () => {
@@ -134,7 +208,8 @@ describe.each([false, true])('request image byte budget, stream=%s', (stream) =>
     await expect(
       send({ config: localConfig(), messages: turns(4, 8, REPORT_JPEG_BYTES), imageHistoryPolicy: 'all' })
     ).resolves.toBeDefined()
-    expect(bridge.materializeForRequest).toHaveBeenCalledTimes(32)
+    expect(bridge.materializeForRequest).toHaveBeenCalledTimes(8)
+    expect(bridge.derivativeReads()).toBe(24)
     expect(stream ? bridge.chatStream : bridge.chat).toHaveBeenCalledOnce()
   })
 
@@ -194,7 +269,9 @@ describe.each([false, true])('request image byte budget, stream=%s', (stream) =>
     await expect(
       send({ config: localConfig(), messages: turns(5, 8, REPORT_JPEG_BYTES), imageHistoryPolicy: 'all', sessionUrl: 'resp_fixture' })
     ).resolves.toBeDefined()
-    expect(bridge.materializeForRequest).toHaveBeenCalledTimes(40)
+    // History images under the 'all' policy are still sent, as smaller copies.
+    expect(bridge.materializeForRequest).toHaveBeenCalledTimes(8)
+    expect(bridge.derivativeReads()).toBe(32)
   })
 
   it.each([
@@ -213,6 +290,8 @@ describe.each([false, true])('request image byte budget, stream=%s', (stream) =>
       })
     ).resolves.toBeDefined()
     expect(bridge.materializeForRequest).toHaveBeenCalledTimes(40)
+    // Generation requests and skill runtimes keep earlier images as their source.
+    expect(readyDerivative).not.toHaveBeenCalled()
   })
 
   it('leaves external agents exempt', async () => {
@@ -250,7 +329,9 @@ describe.each([false, true])('request image byte budget, stream=%s', (stream) =>
     await expect(
       send({ config: localConfig({ api_mode: 'chat-completions' }), messages: turns(5, 8, REPORT_JPEG_BYTES), imageHistoryPolicy: 'all' })
     ).resolves.toBeDefined()
-    expect(bridge.materializeForRequest).toHaveBeenCalledTimes(40)
+    // No budget, but earlier turns still go as smaller copies; the latest turn as it is.
+    expect(bridge.materializeForRequest).toHaveBeenCalledTimes(8)
+    expect(bridge.derivativeReads()).toBe(32)
   })
 
   it.each(['gemini', 'claude'] as const)('refuses base64 above the provider JSON budget on the %s route', async (provider) => {
@@ -307,6 +388,39 @@ describe('remote route', () => {
     const input = { config: remoteConfig, remoteProfile, profileId: 'remote-fixture', messages }
     expect(() => preflightChatRequestImages({ ...input, checkNewMessageImageBytes: true })).toThrow(ChatRequestImageBudgetError)
     expect(() => preflightChatRequestImages(input)).not.toThrow()
+  })
+
+  it('downscales earlier turns on the remote route too (use_remote_llm)', async () => {
+    const bridge = installBridge()
+    // Six turns of 6 MB images: the originals of the earlier turns alone exceed the remote
+    // request limit; their 1024 px copies do not.
+    const messages = turns(6, 1, 6 * MiB)
+    const latest = messages.at(-1)!.attachments![0]
+    await expect(
+      requestChatCompletionStream({
+        config: remoteConfig,
+        remoteProfile,
+        profileId: 'remote-fixture',
+        messages,
+        imageHistoryPolicy: 'all',
+        onEvent: vi.fn()
+      })
+    ).resolves.toBeDefined()
+    expect(readyDerivative).toHaveBeenCalledTimes(5)
+    expect(bridge.derivativeReads()).toBe(5)
+    const sent = (bridge.chatStream.mock.calls[0] as unknown as [{ messages: ChatMessage[] }])[0]
+      .messages
+    for (const message of sent.slice(0, -1)) {
+      for (const image of message.attachments ?? []) expect(image.sizeBytes).toBe(DERIVATIVE_BYTES)
+    }
+    // The latest turn is read from its own managed original, not from a copy.
+    expect(bridge.materializeForRequest).toHaveBeenCalledOnce()
+    expect(bridge.materializeForRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reference: expect.objectContaining({ sha256: latest.media!.sha256 })
+      })
+    )
+    expect(sent.at(-1)!.attachments).toHaveLength(1)
   })
 })
 
