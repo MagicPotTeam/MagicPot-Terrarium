@@ -395,10 +395,29 @@ const clearSendObservations = (): void => {
   fixture.discoverVideoFrames.mockClear()
 }
 
+// The draft autosave imports every blob: image of the composer one by one, and its reads land in
+// the same fetch/IPC spies the send assertions use. A fixed delay lets a slow CI runner carry those
+// reads past the clear, so wait until the autosave has gone quiet before clearing the observations.
+const draftPersistenceActivity = (): number =>
+  fixture.fetch.mock.calls.length +
+  fixture.saveImageToDir.mock.calls.length +
+  fixture.materializeInternalImageDragAttachment.mock.calls.length +
+  fixture.writeTextFile.mock.calls.length
+
 const settleInitialDraftPersistence = async (): Promise<void> => {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 260))
-  })
+  const quietMs = 260
+  const deadline = Date.now() + 10_000
+  let seen = -1
+  for (;;) {
+    const before = draftPersistenceActivity()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, quietMs))
+    })
+    const after = draftPersistenceActivity()
+    if (after === before && after === seen) break
+    seen = after
+    if (Date.now() > deadline) throw new Error('The initial draft autosave never went quiet')
+  }
   clearSendObservations()
 }
 
