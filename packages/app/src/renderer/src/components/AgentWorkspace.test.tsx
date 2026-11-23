@@ -246,23 +246,38 @@ describe('AgentWorkspace', () => {
     ])
   })
 
-  it('keeps the workspace heading on one line in a header that holds the title block and the model slot', () => {
+  it('has no title or project name: the header holds only the target and model slots, like upstream', () => {
     renderWorkspace('海报项目')
-    const heading = screen.getByText('agent_workspace.title')
-    expect(getComputedStyle(heading).whiteSpace).toBe('nowrap')
-    expect(getComputedStyle(heading).textOverflow).toBe('ellipsis')
-    // No skills button host and no buttons of its own: the two text lines, then the slot that
-    // the active conversation fills with its model pill.
+    expect(screen.queryByText('agent_workspace.title')).not.toBeInTheDocument()
+    expect(screen.queryByText('海报项目')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-workspace-subtitle')).not.toBeInTheDocument()
+    // No skills button host and no buttons of its own: just the two slots that the active
+    // conversation fills (team target select, then the model/team controls).
     expect(document.getElementById('agent-workspace-skill-portal')).toBeNull()
     const header = screen.getByTestId('agent-workspace-header')
-    expect(heading.parentElement!.parentElement).toBe(header)
     expect(header.querySelector('button, [role="button"]')).toBeNull()
     expect(Array.from(header.children)).toEqual([
-      heading.parentElement,
       screen.getByTestId('agent-workspace-target-host'),
       screen.getByTestId('agent-workspace-model-host')
     ])
-    expect(header).toHaveTextContent(/^agent_workspace\.title海报项目$/)
+    expect(header).toHaveTextContent(/^$/)
+  })
+
+  it('takes no room while both slots are empty and shows as soon as one holds a control', () => {
+    renderWorkspace('海报项目')
+    const header = screen.getByTestId('agent-workspace-header')
+    const target = screen.getByTestId('agent-workspace-target-host')
+    const model = screen.getByTestId('agent-workspace-model-host')
+    expect(header).not.toBeVisible()
+    const select = document.createElement('button')
+    target.append(select)
+    expect(header).toBeVisible()
+    const actions = document.createElement('button')
+    model.append(actions)
+    select.remove()
+    expect(header).toBeVisible()
+    actions.remove()
+    expect(header).not.toBeVisible()
   })
 
   it('hands every pane one overlay layer that covers the column, header included', async () => {
@@ -335,7 +350,7 @@ describe('AgentWorkspace', () => {
 
   it("has no trace or canvas target anywhere in the Agent column (owner's request)", async () => {
     renderWorkspace()
-    const header = screen.getByText('agent_workspace.title').closest('div')!.parentElement!
+    const header = screen.getByTestId('agent-workspace-header')
     expect(header.querySelector('button')).toBeNull()
     expect(screen.queryByTestId('agent-workspace-trace-button')).not.toBeInTheDocument()
     await waitFor(() => expect(chatPageMock).toHaveBeenCalled())
@@ -362,15 +377,19 @@ describe('AgentWorkspace', () => {
     expect(screen.queryByText('画布执行已开始。')).not.toBeInTheDocument()
   })
 
-  it('shows a visible status dot and the title in a thread row, with no per-row close control', async () => {
+  it('shows a visible status dot and the title in a thread row, with its stop button beside it', async () => {
     renderWorkspaceWithThreadList()
     await waitForThreadSummary('画布检查')
     const row = document.querySelector(
       '[data-agent-workspace-scope="project-1.agent-1"][role="button"]'
     )
     expect(row).not.toBeNull()
-    expect(row?.querySelector('[aria-label="agent_workspace.close_thread"]')).toBeNull()
-    expect(row?.querySelector('[data-testid="CloseIcon"]')).toBeNull()
+    // The stop button is the row's sibling on the same line, not a button inside a button.
+    expect(row?.querySelector('[data-testid="agent-thread-stop"]')).toBeNull()
+    expect(row?.parentElement?.lastElementChild).toBe(
+      row?.parentElement?.querySelector('[data-testid="agent-thread-stop"]')
+    )
+    expect(row?.parentElement?.querySelector('[data-testid="StopRoundedIcon"]')).not.toBeNull()
     expect(row?.textContent).toBe('画布检查')
     expect(row?.textContent).not.toContain('最新提问')
     const status = screen.getByTestId('agent-thread-status')
@@ -667,13 +686,11 @@ describe('AgentWorkspace', () => {
       expect(row).not.toHaveTextContent('最新回复')
       expect(row.querySelector('[data-testid="agent-workspace-chat-controls-slot"]')).toBeNull()
       expect(row.querySelector('[id^="agent-workspace-chat-controls-"]')).toBeNull()
-      // Closing moved to one row at the end of the list that acts on the active thread.
-      expect(row.querySelector('[data-testid="CloseIcon"]')).toBeNull()
+      // Each line has its own stop button, beside the row; there is no close row at the end.
+      expect(row.querySelector('[data-testid="StopRoundedIcon"]')).toBeNull()
     }
-    expect(container.querySelectorAll('[data-testid="CloseIcon"]')).toHaveLength(1)
-    expect(screen.getByTestId('agent-thread-close-current')).toHaveTextContent(
-      'agent_workspace.close_thread'
-    )
+    expect(container.querySelectorAll('[data-testid="StopRoundedIcon"]')).toHaveLength(2)
+    expect(screen.queryByTestId('agent-thread-close-current')).toBeNull()
     fireEvent.click(rows[0])
     for (const row of rows) {
       expect(row).not.toHaveTextContent('gpt-5.5')
@@ -689,7 +706,7 @@ describe('AgentWorkspace', () => {
         messages: [
           {
             role: 'assistant',
-            content: '对话 4',
+            content: '会话 4',
             attachments: [{ type: 'image', url: 'blob:missing-preview' }]
           }
         ]
@@ -709,8 +726,8 @@ describe('AgentWorkspace', () => {
       expect(screen.queryByText('最新回复')).not.toBeInTheDocument()
     })
     expect(screen.queryByText('图片回复')).not.toBeInTheDocument()
-    expect(screen.queryByText('对话 4')).not.toBeInTheDocument()
-    expect(screen.queryByRole('img', { name: '对话 4' })).not.toBeInTheDocument()
+    expect(screen.queryByText('会话 4')).not.toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: '会话 4' })).not.toBeInTheDocument()
     expect(screen.queryByRole('img', { name: 'Image preview' })).not.toBeInTheDocument()
     expect(container.querySelector('img')).toBeNull()
   })
@@ -721,7 +738,7 @@ describe('AgentWorkspace', () => {
 
     const { container } = renderWorkspaceWithThreadList()
 
-    const closeIcon = container.querySelector('[data-testid="CloseIcon"]')
+    const closeIcon = container.querySelector('[data-testid="StopRoundedIcon"]')
     expect(closeIcon?.parentElement).toBeTruthy()
 
     fireEvent.click(closeIcon!.parentElement as Element)
@@ -735,23 +752,27 @@ describe('AgentWorkspace', () => {
   })
 
   it.each(['Enter', ' '])(
-    'closes the active thread from the keyboard with %s on the close row',
+    'stops a thread from the keyboard with %s on its stop button',
     async (key) => {
       const terminateScope = vi.fn()
       window.addEventListener('chat:terminate-scope', terminateScope as EventListener)
       try {
         renderWorkspaceWithThreadList()
-        const close = screen.getByRole('button', { name: 'agent_workspace.close_thread' })
+        const close = (
+          await screen.findAllByRole('button', { name: /^agent_workspace\.close_thread: / })
+        )[0]
         expect(close.tagName).toBe('BUTTON')
+        expect(close.closest('[data-agent-thread-line]')).toHaveAttribute(
+          'data-agent-thread-line',
+          'agent-1'
+        )
         close.focus()
         await userEvent.keyboard(key === 'Enter' ? '{Enter}' : ' ')
         expect(terminateScope).toHaveBeenCalledTimes(1)
         expect(
           (terminateScope.mock.calls[0]?.[0] as CustomEvent<{ scope?: string }>).detail
         ).toEqual({ scope: 'project-1.agent-1' })
-        expect(
-          screen.queryByRole('button', { name: 'agent_workspace.close_thread' })
-        ).not.toBeInTheDocument()
+        expect(document.querySelector('[data-agent-thread-line="agent-1"]')).toBeNull()
       } finally {
         window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
       }
@@ -863,7 +884,7 @@ describe('AgentWorkspace', () => {
     expect(host).toBeInTheDocument()
     await waitFor(() => expect(propsOf().threadSubRowsHost).toBe(host))
     // Directly under the thread's own row, inside the list, and empty until a chat page fills it.
-    expect(host.previousElementSibling).toBe(getThreadRows()[0])
+    expect(host.previousElementSibling).toBe(getThreadRows()[0].parentElement)
     expect(screen.getByTestId('agent-thread-list')).toContainElement(host)
     expect(host).toBeEmptyDOMElement()
 
@@ -896,7 +917,7 @@ describe('AgentWorkspace', () => {
     renderWorkspace()
     const toolbar = screen.getByTestId('agent-thread-toolbar')
     const buttons = within(toolbar).getAllByRole('button')
-    const refresh = within(toolbar).getByRole('button', { name: 'agent_workspace.refresh' })
+    const refresh = within(toolbar).getByRole('button', { name: 'agent_workspace.refresh_threads' })
     expect(buttons.at(-1)).toBe(refresh)
     expect(buttons.at(-2)).toBe(
       within(toolbar).getByRole('button', { name: 'agent_workspace.new_chat' })
@@ -1122,10 +1143,12 @@ describe('AgentWorkspace', () => {
       for (const row of rows) {
         expect(['0', '0px']).toContain(getComputedStyle(row).borderRadius)
         expect(getComputedStyle(row).boxShadow).toBe('none')
-        expect(getComputedStyle(row).padding).toBe('7px 10px')
+        // The stop button sits at the right edge, so the row keeps less padding there.
+        expect(getComputedStyle(row).padding).toBe('7px 4px 7px 10px')
       }
-      expect(getComputedStyle(rows[0]).backgroundColor).not.toBe(
-        getComputedStyle(rows[1]).backgroundColor
+      // The line (row plus its stop button) carries the selected fill.
+      expect(getComputedStyle(rows[0].parentElement!).backgroundColor).not.toBe(
+        getComputedStyle(rows[1].parentElement!).backgroundColor
       )
 
       fireEvent.click(rows[1])
@@ -1175,10 +1198,11 @@ describe('AgentWorkspace', () => {
       expect(listRule).toContain('max-height:min(38vh, 280px)')
       expect(getComputedStyle(list).overflowY).toBe('auto')
       expect(getComputedStyle(list).overflowX).toBe('hidden')
-      // The close row is the last child of the same scroll box, after every thread.
-      expect(list.lastElementChild).toBe(screen.getByTestId('agent-thread-close-current'))
-      // Twelve thread rows, each followed by its (empty) sub-row host, then the close row.
-      expect(list.children).toHaveLength(25)
+      // No close row: every line has its own stop button.
+      expect(screen.queryByTestId('agent-thread-close-current')).toBeNull()
+      expect(screen.getAllByTestId('agent-thread-stop')).toHaveLength(12)
+      // Twelve thread lines, each followed by its (empty) sub-row host.
+      expect(list.children).toHaveLength(24)
       expect(list.querySelectorAll('[data-agent-thread-sub-rows]')).toHaveLength(12)
     })
 
@@ -1251,7 +1275,7 @@ describe('AgentWorkspace', () => {
       await waitForThreadSummary('Older conversation')
     })
 
-    it('closes the active thread from the red last row and keeps the list open on the next thread', async () => {
+    it('stops the active thread from its own stop button and keeps the list open on the next thread', async () => {
       storePanes(2)
       loadAllSessionsMock.mockImplementation(titledSessions)
       const terminateScope = vi.fn()
@@ -1262,8 +1286,11 @@ describe('AgentWorkspace', () => {
         fireEvent.click(getThreadRows()[1])
         await waitForThreadSummary('Thread 2')
 
-        const close = screen.getByTestId('agent-thread-close-current')
-        expect(getComputedStyle(close).color).toBe(cssColor(testTheme.palette.error.main))
+        const close = screen.getAllByTestId('agent-thread-stop')[1]
+        expect(close).toHaveAccessibleName('agent_workspace.close_thread: Thread 2')
+        // A quiet grey square, not a red row.
+        expect(getComputedStyle(close).color).not.toBe(cssColor(testTheme.palette.error.main))
+        expect(close.querySelector('[data-testid="StopRoundedIcon"]')).not.toBeNull()
         fireEvent.click(close)
 
         expect(terminateScope).toHaveBeenCalledTimes(1)
@@ -1273,7 +1300,7 @@ describe('AgentWorkspace', () => {
         await waitForThreadSummary('Thread 1')
         expect(getThreadRows().map((row) => row.textContent)).toEqual(['Thread 1'])
         expect(screen.getByTestId('agent-thread-list')).toBeInTheDocument()
-        expect(screen.getByTestId('agent-thread-close-current')).toBeInTheDocument()
+        expect(screen.getAllByTestId('agent-thread-stop')).toHaveLength(1)
       } finally {
         window.removeEventListener('chat:terminate-scope', terminateScope as EventListener)
       }
@@ -1306,15 +1333,17 @@ describe('AgentWorkspace', () => {
       expect(border(toolbar, 'Bottom')).toBe('none')
       expect(border(list, 'Top')).toBe(divider)
       expect(border(list, 'Bottom')).toBe('none')
+      const lines = getThreadRows().map((row) => row.parentElement!)
+      for (const [index, line] of lines.entries()) {
+        // The last line leaves the closing line to the region.
+        expect(border(line, 'Bottom')).toBe(index === lines.length - 1 ? 'none' : divider)
+        expect(border(line, 'Top')).toBe('none')
+      }
       for (const row of getThreadRows()) {
-        expect(border(row, 'Bottom')).toBe(divider)
+        expect(border(row, 'Bottom')).toBe('none')
         expect(border(row, 'Top')).toBe('none')
       }
-      // The last row leaves the closing line to the region.
-      const close = screen.getByTestId('agent-thread-close-current')
-      expect(list.lastElementChild).toBe(close)
-      expect(border(close, 'Bottom')).toBe('none')
-      expect(border(close, 'Top')).toBe('none')
+      expect(screen.queryByTestId('agent-thread-close-current')).toBeNull()
 
       // The (empty) host of the error line follows that single divider and draws nothing.
       const errorHost = screen.getByTestId('agent-workspace-error-line-host')
@@ -1324,8 +1353,8 @@ describe('AgentWorkspace', () => {
     })
 
     it('numbers threads that have no conversation title by their position', async () => {
-      expect(zhRenderer.agent_workspace.chat_label).toBe('对话 {{index}}')
-      expect(enRenderer.agent_workspace.chat_label).toBe('Conversation {{index}}')
+      expect(zhRenderer.agent_workspace.chat_label).toBe('会话 {{index}}')
+      expect(enRenderer.agent_workspace.chat_label).toBe('Session {{index}}')
       // agent-1 was closed earlier; the open panes are the 1st and 2nd rows whatever their ids.
       localStorage.setItem(
         'agent.workspace.project-1',
@@ -1349,12 +1378,12 @@ describe('AgentWorkspace', () => {
       renderWorkspaceWithThreadList()
       await waitFor(() =>
         expect(getThreadRows().map((row) => row.textContent)).toEqual([
-          '对话 1',
-          '对话 2',
+          '会话 1',
+          '会话 2',
           '海报配色'
         ])
       )
-      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 1$/)
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^会话 1$/)
       expect(screen.queryByText('新对话')).not.toBeInTheDocument()
 
       // Reordering renumbers: the label follows the position, not the pane.
@@ -1378,11 +1407,11 @@ describe('AgentWorkspace', () => {
         ])
       )
       expect(getThreadRows().map((row) => row.textContent)).toEqual([
-        '对话 1',
-        '对话 2',
+        '会话 1',
+        '会话 2',
         '海报配色'
       ])
-      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 2$/)
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^会话 2$/)
     })
 
     it('labels a new thread at once and never flashes a placeholder while titles load', async () => {
@@ -1418,13 +1447,13 @@ describe('AgentWorkspace', () => {
         )
       )
       fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
-      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^对话 2$/)
-      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '对话 2'])
+      expect(screen.getByTestId('agent-thread-summary')).toHaveTextContent(/^会话 2$/)
+      expect(getThreadRows().map((row) => row.textContent)).toEqual(['画布检查', '会话 2'])
       fireEvent.click(screen.getByRole('button', { name: 'agent_workspace.new_chat' }))
       expect(getThreadRows().map((row) => row.textContent)).toEqual([
         '画布检查',
-        '对话 2',
-        '对话 3'
+        '会话 2',
+        '会话 3'
       ])
       await waitFor(() => expect(loadAllSessionsMock).toHaveBeenCalledWith('project-1.agent-3'))
       await act(async () => {
@@ -1432,8 +1461,8 @@ describe('AgentWorkspace', () => {
       })
       expect(getThreadRows().map((row) => row.textContent)).toEqual([
         '画布检查',
-        '对话 2',
-        '对话 3'
+        '会话 2',
+        '会话 3'
       ])
       expect(screen.queryByText('新对话')).not.toBeInTheDocument()
     })
@@ -1461,23 +1490,23 @@ describe('AgentWorkspace', () => {
       await waitForThreadSummary('画布检查（改名）')
     })
 
-    it('moves focus to New when the last thread is closed, and leaves it alone otherwise', async () => {
+    it('moves focus to the next stop button, and to New when the last thread is stopped', async () => {
       storePanes(2)
       loadAllSessionsMock.mockImplementation(titledSessions)
       renderWorkspaceWithThreadList()
       await waitFor(() => expect(getThreadRows()).toHaveLength(2))
       const add = screen.getByRole('button', { name: 'agent_workspace.new_chat' })
 
-      // One thread remains: the close row is still there and keeps the focus.
-      const close = screen.getByTestId('agent-thread-close-current')
+      // One thread remains: its stop button takes the focus from the one that went away.
+      const close = screen.getAllByTestId('agent-thread-stop')[0]
       act(() => close.focus())
       fireEvent.click(close)
       await waitFor(() => expect(getThreadRows()).toHaveLength(1))
       expect(add).not.toHaveFocus()
-      expect(screen.getByTestId('agent-thread-close-current')).toHaveFocus()
+      await waitFor(() => expect(screen.getByTestId('agent-thread-stop')).toHaveFocus())
 
       // The last thread: the list disappears, so the focus goes to the one way forward.
-      fireEvent.click(screen.getByTestId('agent-thread-close-current'))
+      fireEvent.click(screen.getByTestId('agent-thread-stop'))
       await waitFor(() => expect(screen.queryByTestId('agent-thread-list')).not.toBeInTheDocument())
       expect(getThreadRows()).toHaveLength(0)
       expect(screen.getByTestId('agent-thread-toggle')).toBeDisabled()
@@ -1557,9 +1586,9 @@ describe('AgentWorkspace', () => {
       renderWorkspace()
       await waitForThreadSummary('画布检查')
       expect(screen.queryByTestId('agent-workspace-no-thread-composer')).not.toBeInTheDocument()
-      expect(zhRenderer.agent_workspace.no_thread_composer).toBe('选择或新建一个线程开始对话')
+      expect(zhRenderer.agent_workspace.no_thread_composer).toBe('选择或新建一个会话开始对话')
       expect(enRenderer.agent_workspace.no_thread_composer).toBe(
-        'Select or create a thread to start'
+        'Choose a Session and send a message'
       )
     })
 
@@ -1586,20 +1615,6 @@ describe('AgentWorkspace', () => {
       expect(screen.getByTestId('agent-thread-toggle')).toHaveAttribute('aria-expanded', 'true')
     })
 
-    it('shows the project name as a muted subtitle and omits it when empty', () => {
-      const { unmount } = renderWorkspace('Poster campaign')
-      const subtitle = screen.getByTestId('agent-workspace-subtitle')
-      expect(subtitle).toHaveTextContent('Poster campaign')
-      expect(getComputedStyle(subtitle).fontSize).toBe('11px')
-      expect(getComputedStyle(subtitle).textOverflow).toBe('ellipsis')
-      expect(getComputedStyle(screen.getByText('agent_workspace.title')).fontSize).toBe('14px')
-      expect(getComputedStyle(screen.getByText('agent_workspace.title')).fontWeight).toBe('600')
-      unmount()
-
-      renderWorkspace('   ')
-      expect(screen.queryByTestId('agent-workspace-subtitle')).not.toBeInTheDocument()
-    })
-
     it('ships every toolbar and list string in both locales', () => {
       const keys = [
         'close_thread',
@@ -1607,6 +1622,7 @@ describe('AgentWorkspace', () => {
         'no_threads',
         'threads_none_selected',
         'new_chat',
+        'refresh_threads',
         'status_running',
         'status_queued',
         'status_waiting_tool',
@@ -1623,8 +1639,12 @@ describe('AgentWorkspace', () => {
       expect(zhRenderer.agent_workspace).not.toHaveProperty('status_unread')
       expect(enRenderer.agent_workspace).not.toHaveProperty('status_unread')
       expect(JSON.stringify(zhRenderer.agent_workspace)).not.toContain('有新回复')
-      expect(zhRenderer.agent_workspace.close_thread).toBe('关闭当前线程')
-      expect(enRenderer.agent_workspace.close_thread).toBe('Close this thread')
+      expect(zhRenderer.agent_workspace.close_thread).toBe('停止会话')
+      expect(enRenderer.agent_workspace.close_thread).toBe('Stop Session')
+      // Upstream's toolbar wording: New Session, Refresh Sessions; a new row is "Session N".
+      expect(enRenderer.agent_workspace.new_chat).toBe('New Session')
+      expect(zhRenderer.agent_workspace.new_chat).toBe('新会话')
+      expect(zhRenderer.agent_workspace.refresh_threads).toBe('刷新会话')
       expect(zhRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')
       expect(enRenderer.agent_workspace.threads_none_selected).toContain('{{count}}')
     })

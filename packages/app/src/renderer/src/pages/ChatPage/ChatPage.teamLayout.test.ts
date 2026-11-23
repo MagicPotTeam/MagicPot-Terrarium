@@ -13,7 +13,7 @@ const file = ts.createSourceFile(
 )
 
 describe('conversation team structure', () => {
-  it('mounts no process area and puts the team actions in the column header, not in a composer menu', () => {
+  it('keeps member rows without mounting team management in the column header or composer', () => {
     const names: string[] = []
     const visit = (node: ts.Node) => {
       if (ts.isJsxSelfClosingElement(node)) names.push(node.tagName.getText(file))
@@ -23,7 +23,8 @@ describe('conversation team structure', () => {
     visit(file)
     // Helper jobs and processes are listed by /jobs; finished ones leave a divider in the transcript.
     expect(names).not.toContain('AgentProcessArea')
-    expect(names.filter((name) => name === 'AgentTeamMemberForm')).toHaveLength(1)
+    // No "add member" form: upstream has no such entry, and nothing here opens one.
+    expect(names).not.toContain('AgentTeamMemberForm')
     expect(names).not.toContain('AgentTeamMemberCreator')
     expect(names).not.toContain('TeamLeadJobEntries')
     expect(source.match(/\buseTeamImagePlacement\(/g)).toHaveLength(1)
@@ -31,15 +32,15 @@ describe('conversation team structure', () => {
     expect(names).not.toContain('AgentTeamStatus')
     expect(names).not.toContain('AgentThreadJobsPanel')
     expect(names).not.toContain('AgentThreadProcessesPanel')
-    // Team management has no trigger of its own in the transcript; the column header holds the
-    // team actions (the composer has no "+" menu). The members are rows of the thread list.
+    expect(names).not.toContain('AgentTeamMenu')
+    expect(names).toContain('AgentTeamThreadRows')
     expect(source).not.toContain('buttonHost=')
     expect(source).not.toContain('managementSlot=')
     expect(source).not.toContain('hideTriggerWithoutHost')
     expect(source).not.toContain('addMenuSlot=')
-    expect(source).toContain('data-testid="agent-header-team"')
-    expect(source).toContain('data-testid="agent-header-add-member"')
-    expect(source).toContain('setCreatingTeamMember(true)')
+    expect(source).not.toContain('agent-header-team')
+    expect(source).not.toContain('agent-header-add-member')
+    expect(source).not.toContain('setCreatingTeamMember')
     expect(source).not.toContain('team-conversation-actions')
   })
 })

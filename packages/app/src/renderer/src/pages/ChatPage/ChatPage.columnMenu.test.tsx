@@ -10,8 +10,7 @@ import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import ChatPage from './ChatPage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 
-// Wiring only: where the real ChatPage offers the functions that left the Agent column chrome
-// (the column header's team buttons and slash commands; the composer has no "+" menu).
+// Wiring in the Agent column: slash commands and model selection, with no team-management chrome.
 const h = vi.hoisted(() => ({
   config: { value: null as any },
   sessions: { value: [] as any[] },
@@ -269,22 +268,18 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(draftSyncKey()).toBe(syncKey)
   })
 
-  it('offers "add member" in the header instead of a team banner and opens the existing member form', async () => {
+  it('has no "add member" button and, without a team, no team button either (as upstream)', async () => {
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
     expect(screen.queryByTestId('team-conversation-actions')).toBeNull()
     expect(screen.queryByText('团队协作')).toBeNull()
-    const addMember = await screen.findByTestId('agent-header-add-member')
-    // No team yet: nothing to manage.
+    expect(screen.queryByTestId('agent-header-add-member')).toBeNull()
     expect(screen.queryByTestId('agent-header-team')).toBeNull()
-    expect(addMember).toHaveAccessibleName('添加成员…')
-    expect(en.chat.team_menu_add_member).toBe('Add member…')
-
-    fireEvent.click(addMember)
-    expect(await screen.findByRole('dialog', { name: '创建成员' })).toBeInTheDocument()
+    expect(screen.queryByTestId('agent-header-team-actions')).toBeNull()
+    expect(screen.queryByRole('dialog', { name: '创建成员' })).toBeNull()
   })
 
-  it('offers "team" after "add member" in the header when the thread has a team and opens team management', async () => {
+  it('has no team-management button or dialog even when a team exists', async () => {
     h.sessions.value = [
       { id: 'lead', title: 'Lead', profileId: 'fixture-profile', messages: [] },
       {
@@ -299,23 +294,11 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     ]
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    const team = await screen.findByTestId('agent-header-team')
-    const actions = screen.getByTestId('agent-header-team-actions')
-    expect([...actions.children].map((entry) => entry.getAttribute('data-testid'))).toEqual([
-      'agent-header-add-member',
-      'agent-header-team'
-    ])
-    expect(team).toHaveAccessibleName('团队…')
-    expect(en.chat.team_menu_manage).toBe('Team…')
+    expect(screen.queryByTestId('agent-header-team')).toBeNull()
+    expect(screen.queryByTestId('agent-header-team-actions')).toBeNull()
+    expect(screen.queryByTestId('agent-team-overlay')).toBeNull()
+    expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
     expect(menuEntryIds()).toEqual([])
-    expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
-
-    fireEvent.click(team)
-    const dialog = await screen.findByRole('dialog', { name: '团队管理' })
-    const closeTeam = screen.getByRole('button', { name: '关闭团队管理' })
-    await waitFor(() => expect(closeTeam).toHaveFocus())
-    fireEvent.keyDown(dialog, { key: 'Escape' })
-    expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
   })
 
   it('offers no team buttons with the remote model service', async () => {
@@ -360,7 +343,7 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(screen.queryByRole('button', { name: '技能' })).toBeNull()
   })
 
-  describe("model selector inside the column composer (owner's request)", () => {
+  describe("model selector in the column header, as in KohakuTerrarium (owner's request)", () => {
     const renderWithHost = (props: { active?: boolean; host?: HTMLElement | null }) => (
       <MemoryRouter>
         <ThemeProvider theme={createTheme()}>
@@ -380,25 +363,23 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
       return host
     }
 
-    it('keeps the model selector in the composer and puts only the team buttons into the header host', async () => {
+    it('puts the model selector into the header host; the composer has none', async () => {
       const host = header()
       const view = render(renderWithHost({ host }))
       await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
 
-      const slot = screen.getByTestId('composer-model-slot')
-      expect(slot).toHaveAttribute('data-layout', 'column')
-      expect(within(slot).getByTestId('model-selector')).toHaveAttribute(
-        'data-header-pill',
-        'false'
-      )
-      expect(within(host).queryByTestId('model-selector')).toBeNull()
-      expect(within(host).getByTestId('agent-header-add-member')).toBeInTheDocument()
+      expect(
+        within(screen.getByTestId('composer-model-slot')).queryByTestId('model-selector')
+      ).toBeNull()
+      const selector = within(host).getByTestId('model-selector')
+      expect(selector).toHaveAttribute('data-header-pill', 'true')
+      expect(within(host).queryByTestId('agent-header-add-member')).toBeNull()
 
       // An inactive pane leaves the header host to the pane that is active.
       view.rerender(renderWithHost({ host, active: false }))
       expect(host).toBeEmptyDOMElement()
       view.rerender(renderWithHost({ host, active: true }))
-      expect(within(host).getByTestId('agent-header-add-member')).toBeInTheDocument()
+      expect(within(host).getByTestId('model-selector')).toBeInTheDocument()
       host.remove()
     })
 

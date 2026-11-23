@@ -146,27 +146,24 @@ describe('AgentWorkspace real scoped run lifecycle DOM', () => {
     ['failed', 'failed'],
     ['cancelled', 'cancelled'],
     ['interrupted', 'interrupted']
-  ] as const)(
-    'renders the %s state',
-    async (_label, status) => {
-      renderWorkspace()
-      await waitForPane()
+  ] as const)('renders the %s state', async (_label, status) => {
+    renderWorkspace()
+    await waitForPane()
 
-      await act(async () => {
-        startScopedChatRun(SCOPE, SESSION_ID, `run-${status}`)
-        dispatchStatus(`run-${status}`, status)
-      })
+    await act(async () => {
+      startScopedChatRun(SCOPE, SESSION_ID, `run-${status}`)
+      dispatchStatus(`run-${status}`, status)
+    })
 
-      await waitFor(() => {
-        expect(getPaneStatus()).toHaveAttribute('data-run-status', status)
-        expect(getPaneStatus()).toHaveAttribute('data-status', status)
-      })
-      expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
-        runId: `run-${status}`,
-        status
-      })
-    }
-  )
+    await waitFor(() => {
+      expect(getPaneStatus()).toHaveAttribute('data-run-status', status)
+      expect(getPaneStatus()).toHaveAttribute('data-status', status)
+    })
+    expect(readScopedChatRun(SCOPE, SESSION_ID)).toMatchObject({
+      runId: `run-${status}`,
+      status
+    })
+  })
 
   it.each([
     ['running', 'success', 'progressbar', 'agent_workspace.status_running'],

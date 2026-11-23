@@ -53,7 +53,11 @@ describe('chatQueuedSendPersistence', () => {
         } as PersistableQueuedSend['overrides'],
         { fromComposer: true, originalComposerHiddenContext: 'user hidden' }
       ),
-      userItem('plain-composer', { content: 'typed', hiddenContext: 'composer hidden' }, { fromComposer: true }),
+      userItem(
+        'plain-composer',
+        { content: 'typed', hiddenContext: 'composer hidden' },
+        { fromComposer: true }
+      ),
       userItem('edit', {
         content: 'edited',
         hiddenContext: 'canvas context',
@@ -61,13 +65,23 @@ describe('chatQueuedSendPersistence', () => {
         targetSessionId: 'other-session'
       } as PersistableQueuedSend['overrides']),
       userItem('member', { content: 'member message' }, { queueKey: 'team-key' }),
-      userItem('task', { content: 'task', onTaskCompleted: () => undefined }),
+      userItem('delivery', { content: 'delivery', onTeamRequestStarted: () => undefined }),
       userItem('resolve', { content: 'resolve', resolveAttachments: async () => [] }),
       { id: 2, overrides: { content: 'no persist id' } }
     ])
     expect(stored).toEqual([
-      { id: 'composer', content: 'lead text', originalComposerHiddenContext: 'user hidden', queuedAt: 7 },
-      { id: 'plain-composer', content: 'typed', originalComposerHiddenContext: 'composer hidden', queuedAt: 7 },
+      {
+        id: 'composer',
+        content: 'lead text',
+        originalComposerHiddenContext: 'user hidden',
+        queuedAt: 7
+      },
+      {
+        id: 'plain-composer',
+        content: 'typed',
+        originalComposerHiddenContext: 'composer hidden',
+        queuedAt: 7
+      },
       { id: 'edit', content: 'edited', queuedAt: 7 }
     ])
     const json = JSON.stringify(stored)
@@ -87,7 +101,11 @@ describe('chatQueuedSendPersistence', () => {
           inline(1024, 'small.png'),
           { type: 'image', url: 'blob:file:///dead', fileName: 'blob.png', mimeType: 'image/png' },
           inline(QUEUED_SEND_INLINE_ATTACHMENT_MAX_CHARS + 1, 'large.png'),
-          { ...managedImage, fileName: 'broken.png', media: { version: 1, kind: 'managed' } as never },
+          {
+            ...managedImage,
+            fileName: 'broken.png',
+            media: { version: 1, kind: 'managed' } as never
+          },
           { type: 'video', url: 'https://example.com/clip.mp4', fileName: 'clip.mp4' }
         ]
       })
@@ -155,7 +173,9 @@ describe('chatQueuedSendPersistence', () => {
         paused: true,
         heldByStop: 1
       }) as PersistableQueuedSend
-    const inMemory: PersistableQueuedSend[] = [{ id: 1, persistId: 'q2', overrides: { content: 'two' } }]
+    const inMemory: PersistableQueuedSend[] = [
+      { id: 1, persistId: 'q2', overrides: { content: 'two' } }
+    ]
     const restored = restoreQueuedSends(
       [
         { id: 'q1', content: 'one', queuedAt: 1 },
@@ -167,7 +187,9 @@ describe('chatQueuedSendPersistence', () => {
     expect(restored?.map((item) => item.persistId)).toEqual(['q1', 'q2'])
     expect(restored?.[0]).toMatchObject({ id: 101, paused: true, heldByStop: 1 })
     expect(restored?.[1]).toBe(inMemory[0])
-    expect(restoreQueuedSends([{ id: 'q2', content: 'two', queuedAt: 2 }], inMemory, create)).toBeUndefined()
+    expect(
+      restoreQueuedSends([{ id: 'q2', content: 'two', queuedAt: 2 }], inMemory, create)
+    ).toBeUndefined()
     // What is restored is stored again unchanged: no rewrite after a reload.
     const roundTrip = serializeQueuedSends(restored)
     expect(roundTrip.map((item) => item.id)).toEqual(['q1', 'q2'])

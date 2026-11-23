@@ -4,7 +4,7 @@ import { useTheme } from '@mui/material/styles'
 import {
   Add as AddIcon,
   Autorenew as RefreshIcon,
-  Close as CloseIcon,
+  StopRounded as StopRoundedIcon,
   ExpandMore as ExpandMoreIcon
 } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
@@ -452,7 +452,11 @@ type ThreadListRowProps = {
   dragOver: boolean
   statusLabels: Record<ThreadStatusLabelKey, string>
   tokens: AgentColumnTokens
+  /** Name of the per-row stop button ("Stop Session"). */
+  stopLabel: string
   onSelect: (paneId: string) => void
+  /** Stops this session and takes it out of the list (its history stays). */
+  onStop: (paneId: string) => void
   onDragStart: (paneId: string) => void
   onDragEnd: () => void
   onDragOver: (event: React.DragEvent<HTMLElement>, paneId: string) => void
@@ -473,53 +477,23 @@ const ThreadListRow: React.FC<ThreadListRowProps> = ({
   dragOver,
   statusLabels,
   tokens,
+  stopLabel,
   onSelect,
+  onStop,
   onDragStart,
   onDragEnd,
   onDragOver,
   onDrop
 }) => (
-  <ButtonBase
-    component="div"
-    role="button"
-    tabIndex={0}
-    disableRipple
-    aria-current={selected ? 'true' : undefined}
-    data-agent-thread-row={pane.id}
-    data-agent-workspace-scope={paneScope}
-    draggable
-    onClick={() => {
-      onSelect(pane.id)
-    }}
-    onKeyDown={(event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault()
-        onSelect(pane.id)
-      }
-    }}
-    onDragStart={(event) => {
-      event.dataTransfer.effectAllowed = 'move'
-      event.dataTransfer.setData(AGENT_THREAD_REORDER_DRAG_MIME, pane.id)
-      onDragStart(pane.id)
-    }}
-    onDragEnd={onDragEnd}
-    onDragOver={(event) => {
-      onDragOver(event, pane.id)
-    }}
-    onDrop={(event) => {
-      onDrop(event, pane.id)
-    }}
+  // The row and its stop button are siblings (no button inside a button); the line carries
+  // the fill, divider and drop outline.
+  <Box
+    data-agent-thread-line={pane.id}
     sx={{
-      ...flatControlSx(tokens),
-      width: '100%',
-      minWidth: 0,
       display: 'flex',
       alignItems: 'center',
-      justifyContent: 'flex-start',
-      gap: '7px',
-      padding: '7px 10px',
+      minWidth: 0,
       borderBottom: last ? 'none' : `1px solid ${tokens.border}`,
-      color: tokens.text,
       backgroundColor: selected ? tokens.selected : 'transparent',
       opacity: dragging ? tokens.disabledOpacity : 1,
       outline: dragOver ? `1px solid ${tokens.accent}` : 'none',
@@ -529,23 +503,87 @@ const ThreadListRow: React.FC<ThreadListRowProps> = ({
       }
     }}
   >
-    <ThreadStatusDot status={status} labels={statusLabels} tokens={tokens} />
-    <Box
-      component="span"
-      data-testid="agent-thread-title"
-      title={title}
+    <ButtonBase
+      component="div"
+      role="button"
+      tabIndex={0}
+      disableRipple
+      aria-current={selected ? 'true' : undefined}
+      data-agent-thread-row={pane.id}
+      data-agent-workspace-scope={paneScope}
+      draggable
+      onClick={() => {
+        onSelect(pane.id)
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onSelect(pane.id)
+        }
+      }}
+      onDragStart={(event) => {
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData(AGENT_THREAD_REORDER_DRAG_MIME, pane.id)
+        onDragStart(pane.id)
+      }}
+      onDragEnd={onDragEnd}
+      onDragOver={(event) => {
+        onDragOver(event, pane.id)
+      }}
+      onDrop={(event) => {
+        onDrop(event, pane.id)
+      }}
       sx={{
-        minWidth: 0,
+        ...flatControlSx(tokens),
         flex: 1,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        fontWeight: hasSubRows ? 600 : 400
+        minWidth: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'flex-start',
+        gap: '7px',
+        padding: '7px 4px 7px 10px',
+        color: tokens.text,
+        backgroundColor: 'transparent'
       }}
     >
-      {title}
-    </Box>
-  </ButtonBase>
+      <ThreadStatusDot status={status} labels={statusLabels} tokens={tokens} />
+      <Box
+        component="span"
+        data-testid="agent-thread-title"
+        title={title}
+        sx={{
+          minWidth: 0,
+          flex: 1,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          fontWeight: hasSubRows ? 600 : 400
+        }}
+      >
+        {title}
+      </Box>
+    </ButtonBase>
+    <IconButton
+      size="small"
+      data-testid="agent-thread-stop"
+      aria-label={`${stopLabel}: ${title}`}
+      title={stopLabel}
+      onClick={() => onStop(pane.id)}
+      sx={{
+        width: 24,
+        height: 24,
+        padding: 0,
+        marginRight: '6px',
+        flex: 'none',
+        borderRadius: `${tokens.radius.control}px`,
+        color: tokens.muted,
+        '&:hover': { backgroundColor: tokens.hover, color: tokens.text },
+        '&.Mui-focusVisible': tokens.focusRing
+      }}
+    >
+      <StopRoundedIcon aria-hidden sx={{ fontSize: 18 }} />
+    </IconButton>
+  </Box>
 )
 
 interface AgentWorkspaceProps {
@@ -556,7 +594,7 @@ interface AgentWorkspaceProps {
 
 const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
   projectId,
-  projectName,
+
   existingConversationOpen
 }) => {
   const { t } = useTranslation()
@@ -713,10 +751,10 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
       ? t('agent_workspace.threads_none_selected', { count: openPanes.length })
       : t('agent_workspace.no_threads')
   const threadListOpen = !threadsCollapsed && openPanes.length > 0
-  const headerSubtitle = projectName?.trim() || ''
   const threadListId = `agent-thread-list-${useId()}`
   const threadToggleRef = useRef<HTMLButtonElement | null>(null)
   const newThreadButtonRef = useRef<HTMLButtonElement | null>(null)
+  const pendingStopFocusPaneIdRef = useRef<string | null>(null)
   const threadListRef = useRef<HTMLDivElement | null>(null)
   const openChatInput = useExistingConversationWorkspacePane({
     adapter: existingConversationOpen,
@@ -1047,8 +1085,29 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
     }
     // Closing the last thread removes the list and the row that was clicked; the only
     // control left that leads anywhere is New, so the keyboard continues from there.
-    if (remainingOpenPanes.length === 0) newThreadButtonRef.current?.focus()
+    if (remainingOpenPanes.length === 0) {
+      newThreadButtonRef.current?.focus()
+      return
+    }
+    // The stop button that had the focus goes away with its row: continue from the stop
+    // button of the row that takes its place (the next one, else the one before).
+    const focused = typeof document === 'undefined' ? null : document.activeElement
+    if (focused instanceof HTMLElement && focused.closest(`[data-agent-thread-line="${paneId}"]`)) {
+      const index = openPanes.findIndex((pane) => pane.id === paneId)
+      pendingStopFocusPaneIdRef.current = (openPanes[index + 1] ?? openPanes[index - 1])?.id ?? null
+    }
   }
+
+  useEffect(() => {
+    const paneId = pendingStopFocusPaneIdRef.current
+    if (!paneId) return
+    pendingStopFocusPaneIdRef.current = null
+    threadListRef.current
+      ?.querySelector<HTMLElement>(
+        `[data-agent-thread-line="${paneId}"] [data-testid="agent-thread-stop"]`
+      )
+      ?.focus()
+  }, [openPanes])
 
   const markPaneNew = (paneId: string) =>
     setPanePreviews((prev) => (prev[paneId] ? prev : { ...prev, [paneId]: NEW_PANE_PREVIEW }))
@@ -1153,7 +1212,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
           data-testid="agent-workspace-header"
           inert={overlayOpen || undefined}
           sx={(theme) => ({
-            // A wrapping row: the model pill drops onto its own line when it does not fit.
+            // Like upstream's header: the "send to" select and the model select, no title. A
+            // wrapping row (the model select drops onto its own line when it does not fit),
+            // gone entirely while both hosts are empty.
             display: 'flex',
             flexWrap: 'wrap',
             alignItems: 'center',
@@ -1167,51 +1228,10 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
             zIndex: 3,
             overflow: 'visible',
             containerType: 'inline-size',
-            WebkitAppRegion: 'no-drag'
+            WebkitAppRegion: 'no-drag',
+            '&:not(:has(> :not(:empty)))': { display: 'none' }
           })}
         >
-          <Box
-            sx={{
-              flex: '1 1 auto',
-              minWidth: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              // In a narrow column the title block takes the first line and the target select and
-              // the model pill share the second one, each as wide as it needs.
-              '@container (max-width: 560px)': { flexBasis: '100%' }
-            }}
-          >
-            <Typography
-              variant="caption"
-              sx={{
-                fontSize: 14,
-                fontWeight: 600,
-                lineHeight: 1.2,
-                color: 'text.primary',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis'
-              }}
-            >
-              {t('agent_workspace.title')}
-            </Typography>
-            {headerSubtitle && (
-              <Typography
-                variant="caption"
-                data-testid="agent-workspace-subtitle"
-                sx={{
-                  fontSize: columnTokens.fontSize.caption,
-                  lineHeight: 1.3,
-                  color: 'text.secondary',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis'
-                }}
-              >
-                {headerSubtitle}
-              </Typography>
-            )}
-          </Box>
           {/* Filled by the active pane's chat page; empty (and out of the layout) without one. */}
           <Box
             ref={setTeamTargetHost}
@@ -1329,9 +1349,9 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
 
             {/* Re-reads the active thread (its unsaved changes are saved first); without a thread,
               the thread list. Always there and always safe to press, as upstream's Refresh. */}
-            <Tooltip title={t('agent_workspace.refresh')} arrow>
+            <Tooltip title={t('agent_workspace.refresh_threads')} arrow>
               <IconButton
-                aria-label={t('agent_workspace.refresh')}
+                aria-label={t('agent_workspace.refresh_threads')}
                 data-testid="agent-thread-refresh"
                 onClick={() => {
                   const reload = activePane ? paneReloads.current.get(activePane.id) : undefined
@@ -1376,12 +1396,14 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
                     status={panePreviews[pane.id]?.status}
                     selected={pane.id === activePane?.id}
                     hasSubRows={(paneSubRowCounts[pane.id] ?? 0) > 0}
-                    last={!activePane && index === openPanes.length - 1}
+                    last={index === openPanes.length - 1}
                     dragging={pane.id === draggingPaneId}
                     dragOver={pane.id === dragOverPaneId && pane.id !== draggingPaneId}
                     statusLabels={threadStatusLabels}
                     tokens={columnTokens}
+                    stopLabel={t('agent_workspace.close_thread')}
                     onSelect={setActivePaneId}
+                    onStop={handleRemovePane}
                     onDragStart={(paneId) => {
                       setDraggingPaneId(paneId)
                       setDragOverPaneId(null)
@@ -1430,40 +1452,6 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
                   />
                 </React.Fragment>
               ))}
-              {activePane && (
-                <ButtonBase
-                  type="button"
-                  disableRipple
-                  data-testid="agent-thread-close-current"
-                  onClick={() => handleRemovePane(activePane.id)}
-                  sx={{
-                    ...flatControlSx(columnTokens),
-                    width: '100%',
-                    minWidth: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'flex-start',
-                    gap: '6px',
-                    padding: '7px 10px',
-                    // The last row: the region's own divider follows, so no second line here.
-                    color: columnTokens.danger,
-                    '&:hover': { backgroundColor: columnTokens.hover }
-                  }}
-                >
-                  <CloseIcon aria-hidden sx={{ fontSize: 16, flex: 'none' }} />
-                  <Box
-                    component="span"
-                    sx={{
-                      minWidth: 0,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap'
-                    }}
-                  >
-                    {t('agent_workspace.close_thread')}
-                  </Box>
-                </ButtonBase>
-              )}
             </Box>
           )}
         </Box>

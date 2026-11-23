@@ -7,25 +7,15 @@ import {
   teamMembersToStop
 } from './teamMemberStop'
 import { startTeamMessagePolling } from './teamMessagePolling'
-import { createTeamMessageReceipts, mergeTeamMessageReceipts } from './teamMessageReceipt'
 import {
   useHelperInvocationObserver,
   type HelperInvocationHandle
 } from './useHelperInvocationObserver'
-import {
-  revertTeamTaskRun,
-  setTeamTaskStatus,
-  validateTeamTasks,
-  type TeamTaskOutcome
-} from './agentTeamTasks'
 import { createTeamLiveActivity } from './teamLiveActivity'
-import { claimTeamTaskInDB, releaseTeamTaskClaimInDB } from './agentTeamTaskDispatch'
-import AgentTeamMenu from './components/AgentTeamMenu'
 import { registerTeamApprovalSurface } from '../../components/teamApprovalSurface'
-import { AgentTeamMemberForm, AgentTeamMemberImages } from './components/AgentTeamTree'
+import { AgentTeamMemberImages } from './components/AgentTeamTree'
 import { useTeamImagePlacement } from './components/useTeamImagePlacement'
 import {
-  createTeamMember,
   readMemberModelChoice,
   resolveTeamRecipient,
   resolveTeamRequestSettings
@@ -59,8 +49,6 @@ import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import AdsClickOutlinedIcon from '@mui/icons-material/AdsClickOutlined'
 import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined'
 import StopCircleOutlinedIcon from '@mui/icons-material/StopCircleOutlined'
-import PersonAddAltOutlinedIcon from '@mui/icons-material/PersonAddAltOutlined'
-import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import { useConfig } from '@renderer/hooks/useConfig'
@@ -99,9 +87,7 @@ import {
   loadAllSessions,
   sameTeamLifecycle,
   compareAndUpdateSessionInDB,
-  createTeamMemberInDB,
   setTeamMemberModelChoiceInDB,
-  endTeamInDB,
   loadSessionFromDB,
   deleteSessionFromDB,
   cancelDebouncedSessionSave,
@@ -569,12 +555,6 @@ type SendMessageOverrides = {
   hy3dParams?: ReturnType<typeof getHy3dParams>
   queueKey?: string
   queuedAttachmentTypes?: ChatAttachment['type'][]
-  /** The task remains running unless a real model response completes. */
-  onTaskCompleted?: () => void
-  /** The run ended without a confirmed result (failed, cancelled, or its reply save unconfirmed). */
-  onTaskSettled?: (outcome: TeamTaskOutcome) => void
-  /** A task the user dispatched: like the user's own send, its accepted turn releases stop holds. */
-  userTaskDispatch?: boolean
   /** Renderer initiated a member request, not proof the provider received it. */
   onTeamRequestStarted?: () => void
   /** True only while the originating composer draft still belongs to this submission. */
@@ -1196,10 +1176,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   onRegisterReload
 }) => {
   const queueResumeNoticeId = React.useId()
-  // The model and reasoning selectors sit inside the composer, also in the Agent column (owner's request).
-  // Keep it off until the header pill has what the composer menu gives a member: the re-pick of a
-  // model that can no longer be used and the "继承组长" row (see ChatPrimarySelection headerPill).
-  const modelInHeader = false
+  // In the Agent column the model and reasoning select sits in the column header, as in the
+  // KohakuTerrarium extension (owner's request); the composer then has none. The header pill
+  // offers a member what the composer menu did: re-picking a model that can no longer be used
+  // and the "继承组长" row (see ChatPrimarySelection headerPill). A page without a header slot
+  // (the full chat page) keeps it in the composer.
+  const modelInHeader = compact && Boolean(modelPillHost)
   const teamVisibilityRef = useRef({ active, epoch: 0 })
   if (teamVisibilityRef.current.active !== active)
     teamVisibilityRef.current = { active, epoch: teamVisibilityRef.current.epoch + 1 }
@@ -1458,11 +1440,8 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const pendingAutoSaveLinksRef = useRef(new Map<string, string>())
   const teamAuthorityEpochsRef = useRef(new Map<string, number>())
   const [, setTeamAuthorityRevision] = useState(0)
-  const teamEndPendingRef = useRef(new Set<string>())
   const memberModelChoicePendingRef = useRef(new Set<string>())
   const [memberModelChoiceRevision, setMemberModelChoiceRevision] = useState(0)
-  const teamEndedMainRef = useRef(new Set<string>())
-  const teamEndEpochsRef = useRef(new Map<string, number>())
   const teamLifecycleRefreshRef = useRef(new Map<string, number>())
   const setSessions = useCallback<React.Dispatch<React.SetStateAction<ChatSession[]>>>((value) => {
     const previous = sessionsRef.current
@@ -2482,9 +2461,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
   // Incremented for every explicit stop/termination. Sends that are still in
   // async preparation capture the value and must not continue when it changes.
   const sessionTerminationEpochRef = useRef<Map<string, number>>(new Map())
-  // The termination epoch of the user's last stop of a session (a manual Stop, a member stop or
-  // stop-all; not scope termination or deletion): a send it ended in preflight was cancelled.
-  const sessionUserStopEpochRef = useRef<Map<string, number>>(new Map())
   const cancelledSessionsRef = useRef<Set<string>>(new Set())
   const [loadingStatusBySessionId, setLoadingStatusBySessionId] = useState<
     Record<string, ChatLoadingStatus>
@@ -2700,12 +2676,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         sessionId,
         (sessionTerminationEpochRef.current.get(sessionId) ?? 0) + 1
       )
-      if (!options?.dropQueued || options.pauseUserSends) {
-        sessionUserStopEpochRef.current.set(
-          sessionId,
-          sessionTerminationEpochRef.current.get(sessionId)!
-        )
-      }
       cancelledSessionsRef.current.add(sessionId)
       const helper = helperHandlesRef.current.get(sessionId)
       if (helper?.scope === storageScope) {
@@ -7180,11 +7150,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
       )
         return
       const key = `${scope}\u0000${member.id}`
-      const leadKey = `${scope}\u0000${lead.id}`
       const selectionEpoch = sessionSelectionEpochRef.current
       const scopeEpoch = sessionLoadEpochRef.current
       const visibilityEpoch = teamVisibilityRef.current.epoch
-      const endEpoch = teamEndEpochsRef.current.get(leadKey) ?? 0
       const memberClean = () =>
         persistedSessionsRef.current.get(member.id) === member &&
         !dirtySessionSnapshotsRef.current.has(getSessionStorageKey(scope, member.id)) &&
@@ -7212,9 +7180,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         // (a refused send, a restart) waits for the person, and the send their action leads to
         // runs every check again with the model picked here; blocking on it left no way out.
         !queueSendsWithoutUserAction(queuedSessionSendsRef.current.get(member.id)) &&
-        !teamEndPendingRef.current.has(leadKey) &&
-        !teamEndedMainRef.current.has(leadKey) &&
-        (teamEndEpochsRef.current.get(leadKey) ?? 0) === endEpoch &&
         !hasSessionDeleteTombstone(lead.id, scope) &&
         !hasSessionDeleteTombstone(member.id, scope)
       if (memberModelChoicePendingRef.current.has(key) || !stillCurrent()) {
@@ -7379,8 +7344,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !teamVisibilityRef.current.active ||
         storageScopeRef.current !== storageScope ||
         memberModelChoicePendingRef.current.has(`${storageScope}\u0000${member.id}`) ||
-        teamEndPendingRef.current.has(`${storageScope}\u0000${lead.id}`) ||
-        teamEndedMainRef.current.has(`${storageScope}\u0000${lead.id}`) ||
         hasSessionDeleteTombstone(member.id, storageScope) ||
         hasSessionDeleteTombstone(lead.id, storageScope)
       )
@@ -7643,14 +7606,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       }
       if (cs.teamLeadId && config.use_remote_llm) {
         notifyWarning(t('chat.team_notice.member_no_remote_model'))
-        return
-      }
-      if (
-        cs.teamLeadId &&
-        (teamEndPendingRef.current.has(`${storageScope}\u0000${cs.teamLeadId}`) ||
-          teamEndedMainRef.current.has(`${storageScope}\u0000${cs.teamLeadId}`))
-      ) {
-        notifyWarning(t('chat.team_notice.ending'))
         return
       }
       const goalProgressToken = overrides?.goalProgressToken
@@ -9654,16 +9609,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         assertCurrentRun()
         lifecycleEvent('completed')
         overrides?.onTeamResponseReceived?.()
-        if (!sessionSnapshotSaveFailed) overrides?.onTaskCompleted?.()
-        else if (overrides?.onTaskCompleted) {
-          notifyWarning(
-            t('chat.team_task_reply_unsaved', {
-              defaultValue:
-                'The member replied, but its conversation save is not confirmed. The task is back to pending.'
-            })
-          )
-          overrides.onTaskSettled?.('interrupted')
-        }
         emitAgentTraceEvent(
           'success',
           `Agent response completed with ${traceResponseCount || 1} assistant message(s).`,
@@ -9693,7 +9638,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         )
         if (wasCancelled) {
           lifecycleEvent('cancelled')
-          overrides?.onTaskSettled?.('cancelled')
           const hasPartialStreamedResponse =
             Boolean(streamedResponse.trim()) ||
             streamedAttachments.length > 0 ||
@@ -9748,7 +9692,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } else {
           lifecycleEvent('failed')
           if (error === staleRunError || !isCurrentRun()) return
-          overrides?.onTaskSettled?.('failed')
           console.error('[ChatPage] Send message error:', error)
           const interrupted = isIncompleteChatStreamError(error)
           if (!interrupted) notifyError(error instanceof Error ? error.message : String(error))
@@ -10342,12 +10285,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         return Boolean(item && saved && !sameTeamLifecycle(item, saved))
       }
       if (outOfDate(session) || outOfDate(lead)) return unavailable
-      const teamKey = `${scope}\u0000${lead?.id ?? sessionId}`
-      if (teamEndPendingRef.current.has(teamKey)) return unavailable
       if (
         session.teamLeadId &&
         (lead?.teamEnded ||
-          teamEndedMainRef.current.has(teamKey) ||
           config.use_remote_llm ||
           memberModelChoicePendingRef.current.has(`${scope}\u0000${sessionId}`))
       )
@@ -10501,30 +10441,14 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const teamDeliveryEnabled =
     isReady && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread'
   const teamEnabled = active && teamDeliveryEnabled
-  // The thread has a team to manage: members, or a lead that still carries team records.
-  const threadHasTeam = Boolean(
-    teamLead &&
-    (teamMembers.length > 0 ||
-      teamLead.teamEnded ||
-      teamLead.teamSettings ||
-      teamLead.teamTasks?.length ||
-      teamLead.teamChannel?.length)
-  )
-  const [teamMessageSubscriptions, setTeamMessageSubscriptions] = useState<{
-    key: string
-    ids: readonly string[]
-  }>({ key: '', ids: [] })
   // Members with team messages held for them (joined ids), for their delegated rows.
   const [teamHeldRecipients, setTeamHeldRecipients] = useState<{ key: string; ids: string }>({
     key: '',
     ids: ''
   })
   const teamMessageDispatcherRef = useRef<{
-    key: string
     dispatcher: TeamMessageDispatcher
-    pump: () => void
     wake: () => void
-    scopeEpoch: number
   } | null>(null)
   const messageLeadId = teamLead?.id
   const messageGeneration = teamLead?.teamGeneration ?? 0
@@ -10585,288 +10509,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     onThreadSubRowChange?.(openSubRowTitle)
   }, [openSubRowTitle, onThreadSubRowChange])
   useLayoutEffect(() => () => onThreadSubRowChange?.(null), [onThreadSubRowChange])
-  const teamTaskClaimsRef = useRef(new Set<string>())
-  // Tasks whose run ended and whose result is still being saved on the lead ('scope\0lead\0task' ->
-  // owner). Their owners count as busy, so team management never offers or accepts a reset while a
-  // finish waits for its turn on the lead's save chain. The version re-renders the menu when one settles.
-  const teamTaskFinishesRef = useRef(new Map<string, { ownerId: string }>())
-  const [, setTeamTaskFinishVersion] = useState(0)
-  const dispatchSelectedTeamTask = async (taskId: string): Promise<void> => {
-    const scope = storageScope
-    const leadId = teamLead?.id
-    if (!teamEnabled || !leadId) return
-    const teamKey = `${scope}\u0000${leadId}`
-    const claimKey = `${teamKey}\u0000${taskId}`
-    if (teamTaskClaimsRef.current.has(claimKey)) return
-    const lead = sessionsRef.current.find((session) => session.id === leadId)
-    const task = lead?.teamTasks?.find((item) => item.id === taskId)
-    const member = task && sessionsRef.current.find((session) => session.id === task.ownerId)
-    const validTeam = (
-      currentLead: ChatSession | undefined,
-      currentMember: ChatSession | undefined
-    ): boolean =>
-      Boolean(
-        currentLead &&
-        currentMember &&
-        !currentLead.teamLeadId &&
-        !currentLead.teamEnded &&
-        !currentLead.archived &&
-        currentMember.teamLeadId === leadId &&
-        !currentMember.archived &&
-        (currentMember.teamMemberGeneration ?? 0) === (currentLead.teamGeneration ?? 0) &&
-        !hasSessionDeleteTombstone(leadId, scope) &&
-        !hasSessionDeleteTombstone(currentMember.id, scope) &&
-        !teamEndPendingRef.current.has(teamKey) &&
-        !teamEndedMainRef.current.has(teamKey)
-      )
-    const ownerBusy = isSessionBusy
-    if (
-      !lead ||
-      !task ||
-      task.status !== 'pending' ||
-      !member ||
-      !validTeam(lead, member) ||
-      ownerBusy(member.id) ||
-      persistedSessionsRef.current.get(leadId) !== lead ||
-      chatSaveBaselineRef.current.isPending(scope, leadId)
-    ) {
-      notifyWarning(
-        t('chat.team_task_unavailable', {
-          defaultValue: 'Task cannot run: check its owner, dependencies and saved state.'
-        })
-      )
-      return
-    }
-    const scopeEpoch = sessionLoadEpochRef.current
-    const visibilityEpoch = teamVisibilityRef.current.epoch
-    const endEpoch = teamEndEpochsRef.current.get(teamKey) ?? 0
-    teamTaskClaimsRef.current.add(claimKey)
-    try {
-      const claimed = await claimTeamTaskInDB({ scope, leadId, expectedLead: lead, taskId })
-      noteSessionWriteAcknowledged(scope)
-      const stillCurrent =
-        isMountedRef.current &&
-        teamVisibilityRef.current.active &&
-        teamVisibilityRef.current.epoch === visibilityEpoch &&
-        storageScopeRef.current === scope &&
-        sessionLoadEpochRef.current === scopeEpoch &&
-        (teamEndEpochsRef.current.get(teamKey) ?? 0) === endEpoch &&
-        sessionsRef.current.find((session) => session.id === leadId) === lead &&
-        validTeam(
-          lead,
-          sessionsRef.current.find((session) => session.id === member.id)
-        )
-      // The owner became busy while the claim was committing: this task's run never starts.
-      const busyAfterClaim = stillCurrent && ownerBusy(member.id)
-      if (!stillCurrent || busyAfterClaim) {
-        // Nothing runs for this claim, so undo it: the stored lead goes back to the exact snapshot the
-        // claim started from. Another write since the claim wins; the task then stays running and the
-        // team menu offers a reset. Never dispatched again automatically.
-        let released: ChatSession | null = null
-        try {
-          released = await releaseTeamTaskClaimInDB({
-            scope,
-            leadId,
-            claimedLead: claimed,
-            taskBeforeClaim: task
-          })
-        } catch {
-          /* Stays running. */
-        }
-        if (released) noteSessionWriteAcknowledged(scope)
-        if (
-          isMountedRef.current &&
-          storageScopeRef.current === scope &&
-          (!stillCurrent || !released)
-        )
-          void refreshSessionsFromStorage()
-        notifyWarning(
-          stillCurrent
-            ? t('chat.team_task_owner_busy', {
-                defaultValue:
-                  'The owner is busy with another request. The task was not started; try again later.'
-              })
-            : t('chat.team_task_claim_changed', {
-                defaultValue: 'Task claimed, but the team changed. Check the task status.'
-              })
-        )
-        return
-      }
-      chatSaveBaselineRef.current.fenceAndAdvance(scope, leadId, claimed)
-      persistedSessionsRef.current.set(leadId, claimed)
-      setSessions((previous) => previous.map((session) => (session === lead ? claimed : session)))
-      // Records the end of this task's run on the lead: done after a confirmed reply, otherwise back to
-      // pending with the outcome. Skipped (the task stays running until the user resets it) when the
-      // pane, scope or team changed meanwhile.
-      const finishTaskRun = (outcome: 'done' | TeamTaskOutcome) => {
-        if (
-          !isMountedRef.current ||
-          storageScopeRef.current !== scope ||
-          sessionLoadEpochRef.current !== scopeEpoch
-        )
-          return
-        const targetStatus = outcome === 'done' ? 'done' : 'pending'
-        const current = sessionsRef.current.find((session) => session.id === leadId)
-        const currentTask = current?.teamTasks?.find((item) => item.id === taskId)
-        if (
-          !current ||
-          current.teamEnded ||
-          teamEndPendingRef.current.has(teamKey) ||
-          teamEndedMainRef.current.has(teamKey) ||
-          (teamEndEpochsRef.current.get(teamKey) ?? 0) !== endEpoch ||
-          currentTask?.status !== 'running' ||
-          currentTask.ownerId !== member.id ||
-          (current.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)
-        )
-          return
-        let updated: ChatSession | undefined
-        const notifyTaskStateUnsaved = (): void => {
-          if (outcome === 'done')
-            notifyWarning(
-              t('chat.team_task_result_unsaved', {
-                defaultValue: 'The task returned its result, but its status could not be saved.'
-              })
-            )
-          else
-            notifyWarning(
-              t('chat.team_task_revert_unsaved', {
-                defaultValue:
-                  'The task could not be returned to pending. Reset it in team management.'
-              })
-            )
-        }
-        chatSaveBaselineRef.current.freeze(
-          scope,
-          leadId,
-          persistedSessionsRef.current.get(leadId) ?? null
-        )
-        const finishToken = { ownerId: member.id }
-        teamTaskFinishesRef.current.set(claimKey, finishToken)
-        setTeamTaskFinishVersion((version) => version + 1)
-        void chatSaveBaselineRef.current
-          .persistLatest(
-            scope,
-            leadId,
-            () =>
-              storageScopeRef.current === scope && sessionLoadEpochRef.current === scopeEpoch
-                ? (sessionsRef.current.find((session) => session.id === leadId) ?? null)
-                : null,
-            () => persistedSessionsRef.current.get(leadId) ?? null,
-            () => noteSessionWriteAcknowledged(scope),
-            true,
-            () => {
-              if (
-                !isMountedRef.current ||
-                storageScopeRef.current !== scope ||
-                sessionLoadEpochRef.current !== scopeEpoch ||
-                (teamEndEpochsRef.current.get(teamKey) ?? 0) !== endEpoch ||
-                teamEndPendingRef.current.has(teamKey) ||
-                teamEndedMainRef.current.has(teamKey)
-              )
-                return null
-              const latest = sessionsRef.current.find((session) => session.id === leadId)
-              const latestTask = latest?.teamTasks?.find((item) => item.id === taskId)
-              if (
-                !latest ||
-                latest.teamEnded ||
-                (latest.teamGeneration ?? 0) !== (lead.teamGeneration ?? 0)
-              )
-                return null
-              if (latestTask?.status === targetStatus && updated) return latest
-              if (latestTask?.status !== 'running' || latestTask.ownerId !== member.id) return null
-              const nextTasks =
-                outcome === 'done'
-                  ? setTeamTaskStatus(latest.teamTasks ?? [], taskId, 'done')
-                  : revertTeamTaskRun(latest.teamTasks ?? [], taskId, member.id, outcome)
-              if (!nextTasks) return null
-              updated = { ...latest, teamTasks: nextTasks }
-              setSessions((previous) =>
-                previous.map((session) => (session === latest ? updated! : session))
-              )
-              setDirtySessionSnapshot(scope, updated)
-              return updated
-            }
-          )
-          .then((saved) => {
-            if (!saved || !clearDirtySessionSnapshotIfCurrent(scope, saved))
-              notifyTaskStateUnsaved()
-          })
-          .catch((error) => {
-            const detail = error instanceof Error ? error.message : String(error)
-            setSessionSaveError(`Failed to save chat session: ${detail}`)
-            notifyTaskStateUnsaved()
-          })
-          .finally(() => {
-            if (teamTaskFinishesRef.current.get(claimKey) !== finishToken) return
-            teamTaskFinishesRef.current.delete(claimKey)
-            if (isMountedRef.current) setTeamTaskFinishVersion((version) => version + 1)
-          })
-      }
-      let taskRunReported = false
-      const complete = () => {
-        taskRunReported = true
-        finishTaskRun('done')
-      }
-      const settle = (outcome: TeamTaskOutcome) => {
-        if (taskRunReported) return
-        taskRunReported = true
-        finishTaskRun(outcome)
-      }
-      const terminationEpochAtSend = sessionTerminationEpochRef.current.get(member.id) ?? 0
-      try {
-        // Only the user's click in team management dispatches a task: it is the user's next explicit
-        // send to the owner and releases what the user's stop held for it (see sendReleasesStopHolds).
-        await sendMessage({
-          content: `团队任务：${task.title}`,
-          targetSessionId: member.id,
-          onTaskCompleted: complete,
-          onTaskSettled: settle,
-          userTaskDispatch: true
-        })
-      } finally {
-        // The send returned without reporting the run: it never started, or it was abandoned in its
-        // preflight or when its scope changed. The user's own stop in that window cancelled it;
-        // anything else interrupted it. The task send is never queued behind another run: the owner
-        // was checked idle (isSessionBusy) just above with no await before this call, and
-        // sendMessage queues only on that same busy test.
-        const stoppedByUser =
-          (sessionUserStopEpochRef.current.get(member.id) ?? 0) > terminationEpochAtSend
-        if (!taskRunReported) settle(stoppedByUser ? 'cancelled' : 'interrupted')
-      }
-    } catch {
-      notifyWarning(
-        t('chat.team_task_claim_failed', {
-          defaultValue: 'Could not claim the task. Refresh the team and try again.'
-        })
-      )
-    } finally {
-      teamTaskClaimsRef.current.delete(claimKey)
-    }
-  }
-  // A running task whose owner has no live run or send in this pane is left over from an earlier
-  // run (or an earlier app session): the team menu offers a reset for it, never a re-run. An owner
-  // whose finished task is still being saved on the lead is busy too (no reset window after a run).
-  // The menu calls this when it renders and again when 重置 is clicked: the refs give the state at
-  // that moment (a run, a send or a Canvas Target run that started after the last render), and the
-  // rendered state is kept as well, so the answer is busy whenever either says so.
-  const isTeamTaskOwnerBusy = (id: string): boolean => {
-    if (
-      loadingSessionIdsRef.current.has(id) ||
-      externalLoadingSessionIdsRef.current.has(id) ||
-      sessionPreparing(id, sendingSessionIdsRef.current, queuedSessionSendsRef.current)
-    )
-      return true
-    if (
-      loadingSessionIds.has(id) ||
-      externalLoadingSessionIds.has(id) ||
-      sessionPreparing(id, sendingSessionIds, queuedSessionSends)
-    )
-      return true
-    const scopePrefix = `${storageScope}\u0000`
-    for (const [key, finish] of teamTaskFinishesRef.current)
-      if (finish.ownerId === id && key.startsWith(scopePrefix)) return true
-    return false
-  }
   // The dispatcher lives as long as the team in this scope: it ends on unmount, a scope change or the
   // team's end, never because the pane was hidden. A hidden pane keeps claiming MAIN's intents into
   // queued records; deliveries start once the pane is visible again.
@@ -10889,7 +10531,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
     const key = messageKey
     let alive = true,
       polling = false
-    const teamKey = `${scope}\u0000${leadId}`
     const scopeRoute = {
       channel: route.channel,
       scopeType: route.scopeType,
@@ -10908,8 +10549,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
         !lead.archived &&
         !lead.teamEnded &&
         (lead.teamGeneration ?? 0) === generation &&
-        !teamEndPendingRef.current.has(teamKey) &&
-        !teamEndedMainRef.current.has(teamKey) &&
         !hasSessionDeleteTombstone(leadId, scope)
       )
     }
@@ -10991,14 +10630,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
           knownMembers.add(id)
         }
       for (const id of knownMembers) if (!members.includes(id)) knownMembers.delete(id)
-      const ids = members.filter((id) => dispatcher.isSubscribed(id))
-      setTeamMessageSubscriptions((previous) =>
-        previous.key === key &&
-        previous.ids.length === ids.length &&
-        previous.ids.every((id, i) => id === ids[i])
-          ? previous
-          : { key, ids }
-      )
     }
     const pump = () => {
       if (!isCurrent() || !isVisible()) return
@@ -11061,7 +10692,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       pump()
       void tick()
     })
-    teamMessageDispatcherRef.current = { key, dispatcher, pump, wake: poller.wake, scopeEpoch }
+    teamMessageDispatcherRef.current = { dispatcher, wake: poller.wake }
     return () => {
       alive = false
       poller.stop()
@@ -11191,13 +10822,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       channel?.close()
     }
   }, [storageScope, refreshTeamLifecycle, notifyWarning])
-  const [teamManagementOpenRequest, setTeamManagementOpenRequest] = useState(0)
-  const [creatingTeamMember, setCreatingTeamMember] = useState(false)
-  // End changes refs synchronously; also re-render to suspend/restart the observer.
-  const [, setTeamEndRevision] = useState(0)
-  useEffect(() => {
-    setCreatingTeamMember(false)
-  }, [storageScope, messageLeadId, messageGeneration, active])
   const jobController = useAgentThreadJobs({
     route,
     conversationId: currentSessionId || undefined,
@@ -11592,8 +11216,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
   )
   // "/goal" shows the goal records of the conversation it was typed in.
   const [goalViewScope, setGoalViewScope] = useState<string | null>(null)
-  // Closing a view by hand gives the keyboard back to this conversation's composer.
-  const focusComposerInput = useCallback(() => composerInputRef.current?.focus(), [])
   const closeGoalView = useCallback((dismissed?: boolean) => {
     setGoalViewScope(null)
     // In the column the view is a card of the transcript: it leaves with the view.
@@ -11700,19 +11322,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
       return
     }
     const input = inputValueRef.current
-    const leadId = currentSession?.teamLeadId || currentSession?.id
-    if (leadId && teamEndPendingRef.current.has(`${storageScope}\u0000${leadId}`)) {
-      notifyWarning(t('chat.team_notice.ending'))
-      return
-    }
-    if (
-      leadId &&
-      teamEndedMainRef.current.has(`${storageScope}\u0000${leadId}`) &&
-      (currentSession?.teamLeadId || /^@/.test(input))
-    ) {
-      notifyWarning(t('chat.team_ended'))
-      return
-    }
     if (teamEnabled && teamLead && /^@/.test(input)) {
       if (teamLead.teamEnded || currentSession?.teamLeadId) {
         notifyWarning(t('chat.team_notice.ended_or_not_lead'))
@@ -13873,352 +13482,6 @@ const ChatPage: React.FC<ChatPageProps> = ({
               </Button>
             </Box>
           )}
-          {teamEnabled && teamLead && (
-            <AgentTeamMenu
-              openRequest={teamManagementOpenRequest}
-              overlayHost={overlayHost}
-              onReturnFocus={focusComposerInput}
-              onDispatch={(taskId) => void dispatchSelectedTeamTask(taskId)}
-              isOwnerBusy={isTeamTaskOwnerBusy}
-              onBroadcast={async ({ id, text }) => {
-                const current = teamMessageDispatcherRef.current
-                if (
-                  !current ||
-                  current.key !== messageKey ||
-                  !route?.threadId ||
-                  !messageLeadId ||
-                  !teamEnabled
-                )
-                  throw new Error('Team channel unavailable.')
-                // Avoid consuming the broadcast draft for a known-unavailable model setting.
-                // Actual dispatch still performs its full preflight checks.
-                const liveLead = sessionsRef.current.find((session) => session.id === messageLeadId)
-                if (!liveLead || liveLead.teamEnded || liveLead.archived)
-                  throw new Error('Team channel unavailable.')
-                if (
-                  liveLead.teamSettings &&
-                  Object.hasOwn(liveLead.teamSettings, 'memberModelSelection')
-                )
-                  throw new Error('Team model selection is unavailable.')
-                const recipients = sessionsRef.current
-                  .filter(
-                    (member) =>
-                      member.teamLeadId === messageLeadId &&
-                      !member.archived &&
-                      (member.teamMemberGeneration ?? 0) === messageGeneration
-                  )
-                  .filter((member) => current.dispatcher.isSubscribed(member.id))
-                  .map((member) => member.id)
-                if (recipients.length > 0) {
-                  // Persist the intent before starting delivery. A queued receipt is only a durable
-                  // pending snapshot; it never claims that an agent received or processed the message.
-                  const receiptTeamKey = JSON.stringify([
-                    storageScope,
-                    route.threadId,
-                    messageLeadId,
-                    messageGeneration
-                  ])
-                  const receipts = createTeamMessageReceipts({
-                    id,
-                    teamKey: receiptTeamKey,
-                    text,
-                    recipients,
-                    now: Date.now()
-                  })
-                  const updated = {
-                    ...liveLead,
-                    teamMessageReceipts: mergeTeamMessageReceipts(
-                      liveLead.teamMessageReceipts,
-                      receipts
-                    )
-                  }
-                  setSessions((previous) =>
-                    previous.map((session) => (session === liveLead ? updated : session))
-                  )
-                  const savedLead = await persistSessionWithBaseline(updated, storageScope)
-                  const currentAcknowledgement =
-                    isMountedRef.current &&
-                    teamVisibilityRef.current.active &&
-                    storageScopeRef.current === storageScope &&
-                    sessionsRef.current.find((session) => session.id === messageLeadId) ===
-                      savedLead &&
-                    chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, savedLead)
-                  if (
-                    !currentAcknowledgement ||
-                    !clearDirtySessionSnapshotIfCurrent(storageScope, savedLead)
-                  ) {
-                    throw new Error('Team receipt save was not confirmed; message was not queued.')
-                  }
-                }
-                const result = current.dispatcher.enqueueUserChannel({
-                  id,
-                  source: {
-                    kind: 'user',
-                    scope: storageScope,
-                    thread: route.threadId,
-                    lead: messageLeadId
-                  },
-                  text
-                })
-                // Once enqueued, an observer or pump error must not encourage a duplicate send.
-                try {
-                  current.pump()
-                } catch {
-                  /* The next pump can handle queued work. */
-                }
-                return result
-              }}
-              subscriptions={
-                teamMessageSubscriptions.key === messageKey ? teamMessageSubscriptions.ids : []
-              }
-              onSubscriptionChange={(id, subscribed) => {
-                const current = teamMessageDispatcherRef.current
-                if (!current || current.key !== messageKey) return
-                try {
-                  if (subscribed) current.dispatcher.subscribe(id)
-                  else current.dispatcher.unsubscribe(id)
-                  setTeamMessageSubscriptions({
-                    key: messageKey,
-                    ids: teamMembers
-                      .filter((member) => current.dispatcher.isSubscribed(member.id))
-                      .map((member) => member.id)
-                  })
-                } catch {
-                  notifyWarning(t('chat.team_notice.subscription_unchanged'))
-                }
-              }}
-              key={JSON.stringify([storageScope, teamLead.id, teamLead.teamGeneration ?? 0])}
-              models={config.llm_config.api_profiles.map((profile) => ({
-                id: profile.id,
-                name: profile.model_name
-              }))}
-              lead={teamLead}
-              members={teamMembers}
-              onEnd={() => {
-                const teamKey = `${storageScope}\u0000${teamLead.id}`
-                const expectedLead = sessionsRef.current.find(
-                  (session) => session.id === teamLead.id
-                )
-                const scopeEpoch = sessionLoadEpochRef.current
-                const visibilityEpoch = teamVisibilityRef.current.epoch
-                if (
-                  !expectedLead ||
-                  expectedLead.teamLeadId ||
-                  expectedLead.archived ||
-                  expectedLead.teamEnded ||
-                  !route?.threadId
-                ) {
-                  notifyWarning(t('chat.team_notice.team_changed'))
-                  return
-                }
-                if (teamEndPendingRef.current.has(teamKey)) return
-                teamEndPendingRef.current.add(teamKey)
-                teamEndEpochsRef.current.set(
-                  teamKey,
-                  (teamEndEpochsRef.current.get(teamKey) ?? 0) + 1
-                )
-                setTeamEndRevision((revision) => revision + 1)
-                let mainEnded = teamEndedMainRef.current.has(teamKey)
-                void (async () => {
-                  if (!mainEnded) {
-                    await api().svcLLMProxy.endTeam({
-                      scope: storageScope,
-                      thread: route.threadId!,
-                      lead: expectedLead.id
-                    })
-                    mainEnded = true
-                    teamEndedMainRef.current.add(teamKey)
-                  }
-                  return endTeamInDB({
-                    scope: storageScope,
-                    expectedLead,
-                    shouldUpdate: () =>
-                      isMountedRef.current &&
-                      teamVisibilityRef.current.active &&
-                      teamVisibilityRef.current.epoch === visibilityEpoch &&
-                      storageScopeRef.current === storageScope &&
-                      sessionLoadEpochRef.current === scopeEpoch
-                  })
-                })()
-                  .then((result) => {
-                    noteSessionWriteAcknowledged(storageScope)
-                    if (
-                      isMountedRef.current &&
-                      storageScopeRef.current === storageScope &&
-                      sessionLoadEpochRef.current === scopeEpoch
-                    )
-                      reconcileTeamLifecycle([result.lead, ...result.members])
-                    const lifecycleNotice = { scope: storageScope, leadId: result.lead.id }
-                    if (typeof BroadcastChannel === 'function') {
-                      try {
-                        const channel = new BroadcastChannel('magicpot-team-lifecycle')
-                        channel.postMessage(lifecycleNotice)
-                        channel.close()
-                      } catch {
-                        /* Local reconciliation still applies if cross-window notification is unavailable. */
-                      }
-                    }
-                    window.dispatchEvent(
-                      new CustomEvent('chat:team-lifecycle-ended', { detail: lifecycleNotice })
-                    )
-                    if (
-                      !isMountedRef.current ||
-                      storageScopeRef.current !== storageScope ||
-                      sessionLoadEpochRef.current !== scopeEpoch
-                    )
-                      return
-                    selectSession(result.lead.id)
-                  })
-                  .catch(() =>
-                    notifyWarning(
-                      mainEnded
-                        ? t('chat.team_notice.end_sync_failed')
-                        : t('chat.team_notice.end_failed')
-                    )
-                  )
-                  .finally(() => {
-                    teamEndPendingRef.current.delete(teamKey)
-                    if (isMountedRef.current) setTeamEndRevision((revision) => revision + 1)
-                  })
-              }}
-              onSave={async (value) => {
-                const current = sessionsRef.current.find((session) => session.id === value.id)
-                if (!current || current !== teamLead || storageScopeRef.current !== storageScope)
-                  return false
-                const scopeEpoch = sessionLoadEpochRef.current
-                const visibilityEpoch = teamVisibilityRef.current.epoch
-                if (value.teamSettings?.defaultModel !== current.teamSettings?.defaultModel) {
-                  if (currentSessionIdRef.current !== current.id) {
-                    notifyWarning(t('chat.team_notice.model_change_in_lead'))
-                    return false
-                  }
-                  if (
-                    value.teamSettings?.defaultModel &&
-                    value.teamSettings.defaultModel !== current.profileId
-                  ) {
-                    notifyWarning(t('chat.team_notice.member_model_matches_lead'))
-                    return false
-                  }
-                  if (
-                    value.teamSettings?.defaultModel &&
-                    !config.llm_config.api_profiles.some(
-                      (profile) => profile.id === value.teamSettings?.defaultModel
-                    )
-                  ) {
-                    notifyWarning(t('chat.team_notice.model_id_missing'))
-                    return false
-                  }
-                }
-                try {
-                  validateTeamTasks(value.teamTasks ?? [])
-                } catch {
-                  notifyWarning(t('chat.task_dependency_invalid'))
-                  return false
-                }
-                const updated = {
-                  ...current,
-                  teamTasks: value.teamTasks,
-                  teamChannel: value.teamChannel,
-                  teamSettings: value.teamSettings
-                }
-                setSessions((previous) =>
-                  previous.map((session) => (session === current ? updated : session))
-                )
-                try {
-                  const saved = await persistSessionWithBaseline(updated, storageScope)
-                  const currentAcknowledgement =
-                    isMountedRef.current &&
-                    teamVisibilityRef.current.active &&
-                    teamVisibilityRef.current.epoch === visibilityEpoch &&
-                    storageScopeRef.current === storageScope &&
-                    sessionLoadEpochRef.current === scopeEpoch &&
-                    sessionsRef.current.find((session) => session.id === updated.id) === saved &&
-                    chatSaveBaselineRef.current.isAcknowledgementCurrent(storageScope, saved)
-                  return (
-                    currentAcknowledgement &&
-                    clearDirtySessionSnapshotIfCurrent(storageScope, saved)
-                  )
-                } catch {
-                  if (
-                    isMountedRef.current &&
-                    storageScopeRef.current === storageScope &&
-                    sessionLoadEpochRef.current === scopeEpoch
-                  )
-                    notifyWarning(t('chat.team_notice.settings_save_failed'))
-                  return false
-                }
-              }}
-            />
-          )}
-          {teamEnabled && teamLead && (
-            <AgentTeamMemberForm
-              key={imagePlacementKey}
-              placement={teamImagePlacement}
-              lead={teamLead}
-              members={teamMembers}
-              creating={creatingTeamMember}
-              overlayHost={overlayHost}
-              onReturnFocus={focusComposerInput}
-              onClose={() => setCreatingTeamMember(false)}
-              onCreate={async (name, role, onCommittedEmpty) => {
-                const lead = sessionsRef.current.find((session) => session.id === teamLead.id)
-                const teamKey = `${storageScope}\u0000${teamLead.id}`
-                const endEpoch = teamEndEpochsRef.current.get(teamKey) ?? 0
-                const scopeEpoch = sessionLoadEpochRef.current
-                const visibilityEpoch = teamVisibilityRef.current.epoch
-                if (
-                  !lead ||
-                  lead.teamLeadId ||
-                  lead.archived ||
-                  lead.teamEnded ||
-                  teamEndPendingRef.current.has(teamKey) ||
-                  teamEndedMainRef.current.has(teamKey) ||
-                  hasSessionDeleteTombstone(lead.id, storageScope) ||
-                  storageScopeRef.current !== storageScope ||
-                  !active
-                )
-                  throw new Error('Team scope changed')
-                const member = createTeamMember(lead, name, role, crypto.randomUUID(), Date.now())
-                const stillCurrent = () =>
-                  isMountedRef.current &&
-                  teamVisibilityRef.current.active &&
-                  teamVisibilityRef.current.epoch === visibilityEpoch &&
-                  storageScopeRef.current === storageScope &&
-                  sessionLoadEpochRef.current === scopeEpoch &&
-                  (teamEndEpochsRef.current.get(teamKey) ?? 0) === endEpoch &&
-                  sessionsRef.current.find((session) => session.id === lead.id) === lead
-                const result = await createTeamMemberInDB({
-                  scope: storageScope,
-                  expectedLead: lead,
-                  member,
-                  shouldUpdate: stillCurrent
-                })
-                noteSessionWriteAcknowledged(storageScope)
-                chatSaveBaselineRef.current.advance(storageScope, result.member.id, result.member)
-                if (!stillCurrent()) {
-                  if (isMountedRef.current && storageScopeRef.current === storageScope)
-                    void refreshSessionsFromStorage()
-                  throw new Error('Team scope changed')
-                }
-                persistedSessionsRef.current.set(result.member.id, result.member)
-                // This exact freshly committed member has empty history. Publish the creation boundary
-                // before the member can be rendered together with its first generated image.
-                if (
-                  result.member.id === member.id &&
-                  result.member.teamLeadId === lead.id &&
-                  result.member.messages.length === 0 &&
-                  !sessionsRef.current.some((session) => session.id === result.member.id)
-                ) {
-                  onCommittedEmpty(result.member.id)
-                }
-                setSessions((previous) =>
-                  previous.some((session) => session.id === result.member.id)
-                    ? previous
-                    : [...previous, result.member]
-                )
-              }}
-            />
-          )}
           <Box sx={{ display: 'contents' }}>
             {active && replayView?.scope === inspectionScope && (
               <Box data-testid="replay-confirmation" sx={{ p: 2 }}>
@@ -14703,38 +13966,9 @@ const ChatPage: React.FC<ChatPageProps> = ({
         </Box>
 
         {statusErrorLine}
-        {/* The team actions (the composer has no "+" menu): in the column header, else above the composer. */}
-        {active && teamEnabled && teamLead
-          ? ((actions: React.ReactNode) =>
-              compact && modelPillHost ? createPortal(actions, modelPillHost) : actions)(
-              <Box
-                data-testid="agent-header-team-actions"
-                sx={{ display: 'flex', alignItems: 'center', gap: '2px' }}
-              >
-                {!teamLead.teamEnded && (
-                  <IconButton
-                    size="small"
-                    data-testid="agent-header-add-member"
-                    aria-label={t('chat.team_menu_add_member')}
-                    title={t('chat.team_menu_add_member')}
-                    onClick={() => setCreatingTeamMember(true)}
-                  >
-                    <PersonAddAltOutlinedIcon sx={{ fontSize: 16 }} />
-                  </IconButton>
-                )}
-                {threadHasTeam && (
-                  <IconButton
-                    size="small"
-                    data-testid="agent-header-team"
-                    aria-label={t('chat.team_menu_manage')}
-                    title={t('chat.team_menu_manage')}
-                    onClick={() => setTeamManagementOpenRequest((value) => value + 1)}
-                  >
-                    <GroupsOutlinedIcon sx={{ fontSize: 16 }} />
-                  </IconButton>
-                )}
-              </Box>
-            )
+        {/* The model select of the active conversation, first in the column header. */}
+        {active && modelInHeader && modelPillHost
+          ? createPortal(chatComposerControlSlot, modelPillHost)
           : null}
         {/* For a thread with a team the header also lists the lead and the members. */}
         {active && teamTargetHost && teamRowsTeam

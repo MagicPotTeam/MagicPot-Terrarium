@@ -2459,7 +2459,10 @@ export async function createTeamMemberInDB(
   })
 }
 
-/** End and optional archive commit atomically against the latest records in this scope. */
+/**
+ * End and optional archive commit atomically against the latest records in this scope.
+ * No page calls this at the moment; it stays as the team lifecycle storage contract.
+ */
 export async function endTeamInDB(
   input: TeamMutationInput
 ): Promise<{ lead: ChatSession; members: ChatSession[] }> {

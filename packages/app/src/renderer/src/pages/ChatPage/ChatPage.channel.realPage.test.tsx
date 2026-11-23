@@ -51,6 +51,7 @@ import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { createFakeChatIndexedDb, type FakeChatIndexedDb } from '../../testUtils/fakeChatIndexedDb'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 import type { ChatSession } from './chatStorage'
+import { subscribedTeamDispatcher } from './__fixtures__/subscribedTeamDispatcher'
 
 // Runs before every import of this file: the guards must already be installed by the setup file.
 vi.hoisted(() => {
@@ -464,7 +465,6 @@ interface ChannelPage {
   /** The thread-list host the page renders its lead and member rows into. */
   rows: HTMLElement
   send(text: string): void
-  openTeamManagement(): Promise<HTMLElement>
   /** Names of the member rows the thread list shows, sorted. */
   memberNames(): string[]
   /** Unmounts, waits until storage and bridge are quiet, and asserts nothing was refused. */
@@ -655,11 +655,6 @@ async function mountChannelPage(input: {
     send: (text) => {
       fireEvent.change(firstPage.getByTestId('chat-composer-input'), { target: { value: text } })
       fireEvent.click(firstPage.getByRole('button', { name: 'chat.send_message' }))
-    },
-    openTeamManagement: async () => {
-      // Team management opens from the conversation header (the composer has no "+" menu).
-      fireEvent.click(await screen.findByTestId('agent-header-team'))
-      return screen.findByRole('dialog', { name: '团队管理' })
     },
     memberNames,
     finish: async () => {
@@ -1294,11 +1289,9 @@ describe('real ChatPage team messages on in-memory fakes', () => {
     })
     const { main } = page
 
-    const dialog = await page.openTeamManagement()
-    const observer = await within(dialog).findByRole('checkbox', { name: 'observer' })
-    await waitFor(() => expect(observer).toBeChecked())
-    fireEvent.click(observer)
-    expect(observer).not.toBeChecked()
+    const { TeamMessageDispatcher } = await import('./teamMessageDispatcher')
+    const dispatcher = await subscribedTeamDispatcher(TeamMessageDispatcher, ['observer'])
+    dispatcher.unsubscribe('observer')
 
     page.send('@designer 发送频道广播')
     await waitFor(
@@ -1377,23 +1370,23 @@ describe('real ChatPage team messages on in-memory fakes', () => {
 
     page.send('@writer hold writer busy')
     await waitFor(() => expect(releaseBusy).toBeDefined())
-    const dialog = await page.openTeamManagement()
-    const writer = await within(dialog).findByRole('checkbox', { name: 'writer' })
-    const reviewer = within(dialog).getByRole('checkbox', { name: 'reviewer' })
-    const observer = within(dialog).getByRole('checkbox', { name: 'observer' })
-    const designer = within(dialog).getByRole('checkbox', { name: 'designer' })
-    await waitFor(() => {
-      expect(writer).toBeChecked()
-      expect(reviewer).toBeChecked()
-      expect(observer).toBeChecked()
-      expect(designer).toBeChecked()
-    })
-    fireEvent.click(observer)
-    fireEvent.click(designer)
-    const broadcast = (text: string): void => {
-      fireEvent.change(screen.getByLabelText('频道消息'), { target: { value: text } })
-      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
-    }
+    const { TeamMessageDispatcher } = await import('./teamMessageDispatcher')
+    const dispatcher = await subscribedTeamDispatcher(TeamMessageDispatcher, [
+      'writer',
+      'reviewer',
+      'observer',
+      'designer'
+    ])
+    dispatcher.unsubscribe('observer')
+    dispatcher.unsubscribe('designer')
+    const broadcast = (text: string) =>
+      expect(
+        dispatcher.enqueueUserChannel({
+          id: text,
+          source: { kind: 'user', scope: SCOPE, thread: ROUTE.threadId, lead: 'lead' },
+          text
+        }).queued
+      ).toBe(2)
     const byRecipient = (id: string, text: string) =>
       main.chatRequests.filter(
         (request) => request.conversationId === id && requestText(request).includes(text)
@@ -1410,12 +1403,8 @@ describe('real ChatPage team messages on in-memory fakes', () => {
       ).toBe(true)
     })
     expect(byRecipient('writer', 'snapshot old broadcast')).toHaveLength(0)
-    fireEvent.click(writer)
-    fireEvent.click(observer)
-    await waitFor(() => {
-      expect(writer).not.toBeChecked()
-      expect(observer).toBeChecked()
-    })
+    dispatcher.unsubscribe('writer')
+    dispatcher.subscribe('observer')
     broadcast('snapshot new broadcast')
     await waitFor(() => {
       expect(byRecipient('reviewer', 'snapshot new broadcast')).toHaveLength(1)
@@ -1951,92 +1940,6 @@ describe('real ChatPage stop on in-memory fakes', () => {
     ).toBeNull()
     await page.finish()
   }, 30000)
-  it('releases a stopped member when the user dispatches a task to it: its held team message follows the task once', async () => {
-    const page = await mountChannelPage({
-      members: [member('designer', '设计师'), member('writer', '文案')],
-      lead: {
-        teamTasks: [
-          {
-            id: 'task-writer',
-            title: '写文案',
-            ownerId: 'writer',
-            status: 'pending',
-            dependsOn: []
-          }
-        ]
-      },
-      model: ({ request, lastUserText, teamTools, toolResults }) => {
-        if (request.conversationId === 'writer') {
-          if (lastUserText.includes('hold writer busy'))
-            return new Promise<ModelStep>(() => undefined)
-          if (lastUserText.includes('团队任务：写文案')) return { text: '文案任务完成 fixture' }
-          return {
-            text: lastUserText.includes('来自成员的测试消息')
-              ? '文案已收到 fixture'
-              : '文案继续 fixture'
-          }
-        }
-        if (!toolResults.length && teamTools.includes('send_message')) {
-          return {
-            tool: 'send_message',
-            callId: 'fixture-task-send',
-            args: { recipient: 'writer', text: '来自成员的测试消息' }
-          }
-        }
-        return { text: '发送成员完成 fixture' }
-      }
-    })
-    const { main } = page
-    const toWriter = () =>
-      main.chatRequests
-        .filter((request) => request.conversationId === 'writer')
-        .map((request) => textOf(request.messages.at(-1)?.content))
-
-    page.send('@writer hold writer busy')
-    await waitFor(() => expect(toWriter()).toHaveLength(1))
-    fireEvent.change(screen.getByTestId('chat-composer-input'), {
-      target: { value: '@designer 请联系文案' }
-    })
-    fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter' })
-    await waitFor(() => expect(main.claimRequests).toHaveLength(1), { timeout: 5000 })
-    await waitFor(async () =>
-      expect((await page.stored('designer'))?.messages.map((message) => message.content)).toContain(
-        '发送成员完成 fixture'
-      )
-    )
-    fireEvent.click(await screen.findByRole('button', { name: 'chat.stop_generating' }))
-    await waitFor(() => expect(main.cancelledRuns).toEqual(['writer']))
-    await new Promise((resolve) => setTimeout(resolve, 1200))
-    // Held: the stop is not undone by the team message.
-    expect(toWriter()).toHaveLength(1)
-
-    // The user dispatches the writer's task: it runs first, then the held message follows, once.
-    const dialog = await page.openTeamManagement()
-    fireEvent.click(within(dialog).getByRole('button', { name: '执行 写文案' }))
-    await waitFor(() => expect(toWriter()).toHaveLength(3), { timeout: 6000 })
-    expect(toWriter()[1]).toContain('团队任务：写文案')
-    expect(toWriter()[2]).toContain('来自成员的测试消息')
-    await waitFor(async () => {
-      const stored = await page.stored('lead')
-      expect(stored?.teamTasks?.[0]).toEqual({
-        id: 'task-writer',
-        title: '写文案',
-        ownerId: 'writer',
-        status: 'done',
-        dependsOn: []
-      })
-    })
-    await waitFor(async () =>
-      expect((await page.stored('writer'))?.messages.map((message) => message.content)).toContain(
-        '文案已收到 fixture'
-      )
-    )
-    await new Promise((resolve) => setTimeout(resolve, 1500))
-    expect(toWriter()).toHaveLength(3)
-    expect(main.claimRequests).toHaveLength(1)
-    await page.finish()
-  }, 30000)
-
   it('stop-all holds a member whose run ended just before the click while a team message waits for it', async () => {
     const page = await mountChannelPage({
       members: [member('designer', '设计师'), member('writer', '文案')],
@@ -2146,8 +2049,8 @@ describe('real ChatPage stop on in-memory fakes', () => {
 })
 
 describe('real ChatPage member model on the real composer selector', () => {
-  // The Agent column passes these hosts (AgentWorkspace); the model selector itself stays in the
-  // composer (owner's request), the header host holds the team actions.
+  // Exercise the real composer selector without a column header host. The hosted case below
+  // covers the pane that supplies the model pill host, as AgentWorkspace does.
   const A = { id: PROFILE_ID, model_name: 'fixture-model' }
   const B = { id: 'fixture-profile-b', model_name: 'fixture-model-b' }
   const INHERITED = 'Inherits lead: {{model}}'
@@ -2171,7 +2074,7 @@ describe('real ChatPage member model on the real composer selector', () => {
       members: team(),
       model: ({ request }) => ({ text: `${request.conversationId} reply fixture` }),
       profiles: [A, B],
-      props: { modelPillHost: pillHost, overlayHost },
+      props: { overlayHost },
       ...input
     })
   const slot = (): HTMLElement => screen.getByTestId('chat-composer-model-selector-slot')
@@ -2233,10 +2136,23 @@ describe('real ChatPage member model on the real composer selector', () => {
     return puts
   }
 
-  it('shows the lead model selector in the composer and leaves the header host to the team actions', async () => {
+  it('places the model entry in the real column header without a team-management button', async () => {
+    const page = await mountTeam({ props: { modelPillHost: pillHost, overlayHost } })
+    const model = within(pillHost).getByTestId('chat-model-pill')
+    expect(model).toHaveTextContent('fixture-model')
+    expect(model).toHaveAttribute('aria-haspopup', 'dialog')
+    expect(screen.queryByTestId('chat-composer-model-selector-slot')).toBeNull()
+    expect(screen.queryByTestId('agent-header-team')).toBeNull()
+    expect(screen.queryByTestId('agent-header-team-actions')).toBeNull()
+    fireEvent.click(model)
+    expect(await within(overlayHost).findByRole('dialog')).toBeVisible()
+    await page.finish()
+  }, 30000)
+
+  it('shows the lead model selector in the composer when the page has no model pill host', async () => {
     const page = await mountTeam()
     const selector = within(slot()).getByRole('button', { name: 'fixture-model' })
-    expect(within(pillHost).getByTestId('agent-header-team-actions')).toBeInTheDocument()
+    expect(within(pillHost).queryByTestId('agent-header-team')).toBeNull()
     expect(within(pillHost).queryByRole('button', { name: /fixture-model/ })).toBeNull()
     const menu = await openMenu(selector)
     expect(
@@ -2250,9 +2166,7 @@ describe('real ChatPage member model on the real composer selector', () => {
     await page.finish()
   }, 30000)
 
-  it('gives a member its re-pick and inherit row in the composer, and shows no header pill', async () => {
-    // ChatPage keeps modelInHeader off: the header pill (ChatPrimarySelection headerPill) has no
-    // re-pick for a member whose model is gone and no inherit row. Turning it on fails here.
+  it('gives a member its re-pick and inherit row in the composer when no header host is supplied', async () => {
     const C = { id: 'fixture-profile-c', model_name: 'fixture-model-c' }
     const page = await mountTeam({
       profiles: [A, C],
@@ -2265,7 +2179,7 @@ describe('real ChatPage member model on the real composer selector', () => {
     const unavailable = await openConversation(page, 'designer', 'Member model unavailable')
     expect(unavailable).toBeEnabled()
     expect(screen.queryByTestId('chat-model-pill')).toBeNull()
-    expect(within(pillHost).getByTestId('agent-header-team-actions')).toBeInTheDocument()
+    expect(within(pillHost).queryByTestId('agent-header-team')).toBeNull()
     const menu = await openMenu(unavailable)
     expect(rowNames(menu)).toEqual([
       inheritRow('fixture-model'),

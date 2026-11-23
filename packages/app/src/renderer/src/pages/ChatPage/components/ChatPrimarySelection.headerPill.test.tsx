@@ -388,10 +388,38 @@ describe('ChatPrimarySelection header pill', () => {
     expect(pill()).toHaveAttribute('aria-busy', 'true')
   })
 
-  // Dormant: ChatPage keeps modelInHeader off because this pill lacks what the composer menu gives
-  // a member. Porting either one changes this test; turning the pill on without them is caught by
-  // the channel bed (ChatPage.channel.realPage.test.tsx, member model cases).
-  it('offers a member neither the re-pick of an unusable model nor the inherit row', async () => {
+  // What the composer menu gives a member, now that the pill carries members in the column header.
+  it('lets a member whose model can no longer be used pick again, efforts stay shut', async () => {
+    const user = userEvent.setup()
+    const member = vi.fn()
+    const effort = vi.fn()
+    renderPill({
+      memberModel: {
+        state: 'unavailable',
+        onSelectProfile: member,
+        selectableProfileIds: ['sonnet', 'gpt']
+      },
+      memberReasoningEffort: null,
+      memberAvailableReasoningEfforts: ['low', 'high'],
+      onSelectMemberReasoningEffort: effort
+    })
+    expect(pill()).toHaveTextContent(/^Member model unavailable/)
+    expect(pill()).toBeEnabled()
+    await user.click(pill())
+    const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    // Nothing is in use, so no row is checked.
+    expect(
+      within(sheet)
+        .getAllByRole('radio')
+        .filter((row) => row.getAttribute('aria-checked') === 'true')
+    ).toEqual([])
+    await user.click(within(sheet).getByRole('radio', { name: /openai\/gpt-5\.5/ }))
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
+    expect(member).toHaveBeenCalledWith('gpt')
+    expect(effort).not.toHaveBeenCalled()
+  })
+
+  it('offers a member the inherit row first, checked while it inherits, as the composer menu does', async () => {
     const user = userEvent.setup()
     const member = vi.fn()
     const inherit = vi.fn()
@@ -402,43 +430,75 @@ describe('ChatPrimarySelection header pill', () => {
     }
     const { rerender, props } = renderPill({
       memberModel: {
-        state: 'unavailable',
+        state: 'selected',
+        label: 'openai/gpt-5.5',
+        profileId: 'gpt',
         onSelectProfile: member,
         selectableProfileIds: ['sonnet', 'gpt'],
         inheritLead
       }
     })
-    // The composer menu would offer a pick here; the pill stays shut.
-    expect(pill()).toHaveTextContent(/^Member model unavailable$/)
-    expect(pill()).toBeDisabled()
-    expect(screen.queryByRole('dialog')).toBeNull()
+    await user.click(pill())
+    let sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    const rows = () =>
+      within(sheet)
+        .getAllByRole('radio')
+        .map((row) => [row.textContent, row.getAttribute('aria-checked')])
+    expect(rows()).toEqual([
+      ['Inherit leadanthropic/claude-sonnet', 'false'],
+      ['anthropic/claude-sonnetclaude', 'false'],
+      ['openai/gpt-5.5openai', 'true']
+    ])
+    // Inheriting clears the member's own choice; no model is stored for it.
+    await user.click(within(sheet).getByRole('radio', { name: /Inherit lead/ }))
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
+    expect(inherit).toHaveBeenCalledTimes(1)
+    expect(member).not.toHaveBeenCalled()
 
+    // While it inherits, the inherit row is the one in use (not the lead's model row), and
+    // picking the lead's model stores it as the member's own choice.
     rerender(
       <ThemeProvider theme={theme}>
         <ChatPrimarySelection
           {...props}
           memberModel={{
-            state: 'selected',
-            label: 'openai/gpt-5.5',
-            profileId: 'gpt',
+            state: 'inherited',
+            label: 'anthropic/claude-sonnet',
+            profileId: 'sonnet',
             onSelectProfile: member,
             selectableProfileIds: ['sonnet', 'gpt'],
-            inheritLead
+            inheritLead: { profileId: 'sonnet', modelName: 'anthropic/claude-sonnet' }
           }}
         />
       </ThemeProvider>
     )
-    await user.click(pill())
-    const sheet = await screen.findByRole('dialog', { name: 'Switch model' })
-    // Only the models: no row clears the member's own choice.
-    expect(
-      within(sheet)
-        .getAllByRole('radio')
-        .map((row) => row.textContent)
-    ).toEqual(['anthropic/claude-sonnetclaude', 'openai/gpt-5.5openai'])
-    expect(within(sheet).queryByText('Inherit lead')).toBeNull()
-    expect(member).not.toHaveBeenCalled()
-    expect(inherit).not.toHaveBeenCalled()
+    if (!screen.queryByRole('dialog', { name: 'Switch model' })) await user.click(pill())
+    sheet = await screen.findByRole('dialog', { name: 'Switch model' })
+    expect(rows()).toEqual([
+      ['Inherit leadanthropic/claude-sonnet', 'true'],
+      ['anthropic/claude-sonnetclaude', 'false'],
+      ['openai/gpt-5.5openai', 'false']
+    ])
+    await user.click(within(sheet).getByRole('radio', { name: /^anthropic\/claude-sonnet/ }))
+    await user.click(within(sheet).getByRole('button', { name: 'Switch' }))
+    expect(member).toHaveBeenCalledWith('sonnet')
+    expect(inherit).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers no inherit row to a member that cannot change its model', () => {
+    renderPill({
+      memberModel: {
+        state: 'selected',
+        label: 'openai/gpt-5.5',
+        profileId: 'gpt',
+        inheritLead: {
+          profileId: 'sonnet',
+          modelName: 'anthropic/claude-sonnet',
+          onSelect: vi.fn()
+        }
+      }
+    })
+    expect(pill()).toBeDisabled()
   })
 
   it('shows nothing for an agent skill, which brings its own model', () => {
