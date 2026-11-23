@@ -379,10 +379,10 @@ describe('actual AgentWorkspace optional existing-only Open adapter; no Layout/U
     expect(document.querySelectorAll('[data-agent-thread-row]')).toHaveLength(2)
     expect(document.querySelector('[data-agent-thread-row][aria-current="true"]')).toBeNull()
     expect(screen.queryByTestId('agent-thread-close-current')).not.toBeInTheDocument()
-    // Without a close row the last thread row is the last row: it leaves the closing divider to the region.
-    const rows = [...document.querySelectorAll('[data-agent-thread-row]')]
-    expect(getComputedStyle(rows[0]).borderBottomStyle).toBe('solid')
-    expect(getComputedStyle(rows[1]).borderBottomStyle).toBe('none')
+    // The last thread line leaves the closing divider to the region.
+    const lines = [...document.querySelectorAll('[data-agent-thread-line]')]
+    expect(getComputedStyle(lines[0]).borderBottomStyle).toBe('solid')
+    expect(getComputedStyle(lines[1]).borderBottomStyle).toBe('none')
     expect(
       getComputedStyle(screen.getByTestId('agent-thread-list').parentElement!).borderBottomStyle
     ).toBe('solid')
