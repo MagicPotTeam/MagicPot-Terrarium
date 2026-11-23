@@ -21,25 +21,21 @@ export type QueuedSendState = {
   overrides?: {
     composerSubmission?: boolean
     onTeamRequestStarted?: unknown
-    onTaskCompleted?: unknown
     resolveAttachments?: unknown
   }
 }
 
 /**
  * A queued item that carries user-authored content (the composer, an edit, a send-to-agent
- * without lazily resolved attachments). Team-internal work (channel messages, task dispatches,
- * auto-sends that resolve attachments) has its own delivery state and is never paused or held.
+ * without lazily resolved attachments). Internal work (channel messages and auto-sends that
+ * resolve attachments) has its own delivery state and is never paused or held.
  */
 export const isUserQueuedSend = (item: QueuedSendState): boolean =>
   Boolean(item.overrides) &&
   Boolean(
     item.fromComposer ||
     item.overrides?.composerSubmission ||
-    (!item.queueKey &&
-      !item.overrides?.onTeamRequestStarted &&
-      !item.overrides?.onTaskCompleted &&
-      !item.overrides?.resolveAttachments)
+    (!item.queueKey && !item.overrides?.onTeamRequestStarted && !item.overrides?.resolveAttachments)
   )
 
 /**

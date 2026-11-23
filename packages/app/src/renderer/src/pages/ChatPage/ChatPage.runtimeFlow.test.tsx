@@ -13,9 +13,9 @@ import type {
   ChatMessage
 } from '../QuickAppPage/QAppExecutePanel/qAppExecuteInputs/api/LLM'
 import {
-  createTeamMemberInDB,
   saveSessionToDB,
   setTeamMemberModelChoiceInDB,
+  endTeamInDB,
   type ChatSession,
   type ChatSessionDraft
 } from './chatStorage'
@@ -84,14 +84,8 @@ const hoisted = vi.hoisted(() => ({
   },
   saveSessionToDBGate: { value: null as Promise<void> | null },
   saveSessionToDBGateStarted: { value: null as string | null },
-  selectiveSaveGate: {
-    value: null as null | { id: string; gate: Promise<void>; started: boolean }
-  },
-  failTaskResponseSave: { value: null as string | null },
   listPendingApprovalsMock: vi.fn(),
   resolvePendingApprovalMock: vi.fn(),
-  teamPostCommitGate: { value: null as Promise<void> | null },
-  teamPostCommitSnapshot: { value: null as ChatSession | null },
   latestSaveCallback: {
     value: null as null | ((id: string, scope: string) => Promise<ChatSession | null>)
   },
@@ -135,7 +129,6 @@ const hoisted = vi.hoisted(() => ({
   listAgentProcessesMock: vi.fn(),
   readAgentProcessMock: vi.fn(),
   stopAgentProcessMock: vi.fn(),
-  endTeamMock: vi.fn(async () => ({ ended: true })),
   listAgentJobsMock: vi.fn(),
   readAgentJobMock: vi.fn(),
   stopAgentJobMock: vi.fn(),
@@ -301,7 +294,6 @@ vi.mock('@renderer/utils/windowUtils', () => ({
       readTextFile: hoisted.readTextFileMock
     },
     svcLLMProxy: {
-      endTeam: hoisted.endTeamMock,
       signHy3DModel: vi.fn(),
       listAgentInteractions: hoisted.listAgentInteractionsMock,
       listAgentTeamMessages: hoisted.listAgentTeamMessagesMock,
@@ -404,40 +396,6 @@ vi.mock('./chatStorage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./chatStorage')>()
   return {
     ...actual,
-    createTeamMemberInDB: vi.fn(
-      async (input: {
-        scope: string
-        expectedLead: ChatSession
-        member: ChatSession
-        shouldUpdate?: () => boolean
-      }) => {
-        if (hoisted.saveSessionToDBGate.value) await hoisted.saveSessionToDBGate.value
-        const lead = hoisted.storedSessions.value.find(
-          (session) => session.id === input.expectedLead.id
-        )
-        if (
-          !lead ||
-          lead.teamEnded ||
-          input.shouldUpdate?.() === false ||
-          JSON.stringify(lead) !== JSON.stringify(input.expectedLead)
-        )
-          throw new Error('Team changed')
-        const members = hoisted.storedSessions.value.filter(
-          (session) =>
-            session.teamLeadId === lead.id &&
-            !session.archived &&
-            (session.teamMemberGeneration ?? 0) === (lead.teamGeneration ?? 0)
-        )
-        if (
-          members.length >= (lead.teamSettings?.maxMembers ?? 6) ||
-          members.some((session) => session.teamMemberName === input.member.teamMemberName)
-        )
-          throw new Error('Team full')
-        const member = { ...input.member, teamMemberGeneration: lead.teamGeneration ?? 0 }
-        hoisted.storedSessions.value = [...hoisted.storedSessions.value, cloneValue(member)]
-        return { lead: cloneValue(lead), member: cloneValue(member) }
-      }
-    ),
     setTeamMemberModelChoiceInDB: vi.fn(
       async (input: {
         scope: string
@@ -574,22 +532,10 @@ vi.mock('./chatStorage', async (importOriginal) => {
         scope = 'default',
         options?: { expectedSession?: ChatSession | null; shouldUpdate?: () => boolean }
       ) => {
-        const selective = hoisted.selectiveSaveGate.value
-        if (selective?.id === session.id) {
-          selective.started = true
-          await selective.gate
-        }
         if (hoisted.saveSessionToDBGate.value) {
           hoisted.saveSessionToDBGateStarted.value = session.id
           await hoisted.saveSessionToDBGate.value
         }
-        if (
-          hoisted.failTaskResponseSave.value === session.id &&
-          session.messages.some(
-            (message) => message.role === 'assistant' && message.content === '结果已返回但未保存'
-          )
-        )
-          throw new Error('fixture response save failure')
         const nextSessions = cloneValue(
           hoisted.scopedTestSessions.value?.[scope] ?? hoisted.storedSessions.value
         )
@@ -622,13 +568,6 @@ vi.mock('./chatStorage', async (importOriginal) => {
         }
         if (hoisted.scopedTestSessions.value) hoisted.scopedTestSessions.value[scope] = nextSessions
         else hoisted.storedSessions.value = nextSessions
-        if (
-          hoisted.teamPostCommitGate.value &&
-          session.teamTasks?.some((task) => task.title === 'scope A task')
-        ) {
-          hoisted.teamPostCommitSnapshot.value = cloneValue(session)
-          await hoisted.teamPostCommitGate.value
-        }
       }
     ),
     deleteSessionFromDB: vi.fn(async (sessionId: string) => {
@@ -1213,12 +1152,15 @@ const createExpiredContinuationError = (): Error & { status: number; body: strin
   return error
 }
 
-/** Picks one entry of the composer "+" menu; the mock composer renders the real addMenuSlot. */
-const chooseAddMenuEntry = (testId: 'chat-composer-menu-team'): void => {
-  // The team action sits above the conversation (the composer has no "+" menu any more), and
-  // there is no "add member" entry (as upstream).
-  void testId
-  fireEvent.click(screen.getByTestId('agent-header-team'))
+/** Another owner ended the team: commit its fixture records and announce the lifecycle change. */
+const endStoredTeam = async (expectedLead: ChatSession) => {
+  const scope = 'runtime-flow'
+  await act(async () => {
+    await endTeamInDB({ scope, expectedLead })
+    window.dispatchEvent(
+      new CustomEvent('chat:team-lifecycle-ended', { detail: { scope, leadId: expectedLead.id } })
+    )
+  })
 }
 
 /**
@@ -1287,7 +1229,15 @@ const watchTeamDispatch = () => {
   }
   const enqueue = TeamMessageDispatcher.prototype.enqueue
   const pump = TeamMessageDispatcher.prototype.pump
+  const subscribe = TeamMessageDispatcher.prototype.subscribe
   const spies = [
+    vi.spyOn(TeamMessageDispatcher.prototype, 'subscribe').mockImplementation(function (
+      this: TeamMessageDispatcher,
+      id
+    ) {
+      track(this)
+      return subscribe.call(this, id)
+    }),
     vi.spyOn(TeamMessageDispatcher.prototype, 'enqueue').mockImplementation(function (
       this: TeamMessageDispatcher,
       input
@@ -1317,8 +1267,26 @@ const watchTeamDispatch = () => {
             ? entry.intent.source.kind === 'user'
             : entry.intent.source.kind === 'member' && entry.intent.source.member === source)
       )
+  const subscribed = async (members: string[]) =>
+    waitFor(() => {
+      const dispatcher = dispatchers.find((d) => members.every((id) => d.isSubscribed(id)))
+      if (!dispatcher) throw new Error('The fixture members are not subscribed yet')
+      return dispatcher
+    })
   return {
     dispatchers,
+    subscribed,
+    // Seed the live dispatcher's queue, not a UI, request or completion. The page must drain it.
+    async queueBroadcast(lead: string, recipients: string[], text: string) {
+      const dispatcher = await subscribed(recipients)
+      expect(
+        dispatcher.enqueueUserChannel({
+          id: `fixture:${text}`,
+          source: { kind: 'user', scope: 'runtime-flow', thread: 'runtime-pane', lead },
+          text
+        }).queued
+      ).toBe(recipients.length)
+    },
     records,
     /** The state of the latest such message, optionally only one whose text contains `text`. */
     status: (source: string, recipient: string, text?: string) =>
@@ -1327,14 +1295,6 @@ const watchTeamDispatch = () => {
         .at(-1)?.status
   }
 }
-
-/**
- * What the member form (AgentTeamMemberForm, opened from "+" > 添加成员 since a0384d0a, in the
- * column overlay since 83165777) says when a create fails: the create may have committed, so it
- * is reported as unconfirmed, not as refused.
- */
-const MEMBER_CREATE_UNCONFIRMED =
-  '创建结果未确认；请先核对原团队成员列表。没有记录不代表未创建；未确认前请勿重复创建。'
 
 const storedMessages = (id: string) =>
   hoisted.storedSessions.value.find((session) => session.id === id)?.messages ?? []
@@ -1488,10 +1448,6 @@ describe('ChatPage runtime workflow integration', () => {
     hoisted.draftBackups.value = {}
     hoisted.saveSessionToDBGate.value = null
     hoisted.saveSessionToDBGateStarted.value = null
-    hoisted.selectiveSaveGate.value = null
-    hoisted.failTaskResponseSave.value = null
-    hoisted.teamPostCommitGate.value = null
-    hoisted.teamPostCommitSnapshot.value = null
     hoisted.latestSaveCallback.value = null
     hoisted.saveSuccessCount.value = 0
     hoisted.saveCallbackGate.value = null
@@ -1845,7 +1801,7 @@ describe('ChatPage runtime workflow integration', () => {
     })
   })
 
-  it('offline process area lists a stored team after its lead and keeps navigation and management available', async () => {
+  it('offline process area lists a stored team after its lead and keeps member navigation available', async () => {
     const fetchGuard = vi
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('network forbidden'))
@@ -1871,7 +1827,7 @@ describe('ChatPage runtime workflow integration', () => {
       expect(screen.queryByRole('region', { name: '进程区' })).not.toBeInTheDocument()
       expect(screen.queryByTestId('team-conversation-actions')).not.toBeInTheDocument()
       expect(screen.queryByTestId('agent-header-add-member')).not.toBeInTheDocument()
-      expect(screen.getByTestId('agent-header-team')).toBeInTheDocument()
+      expect(screen.queryByTestId('agent-header-team')).not.toBeInTheDocument()
       // The members are rows of the thread list, after the lead's row; the process area lists none.
       const alice = await teamRows().findByRole('button', { name: 'Alice' })
       expect(alice.textContent).toBe('Alice')
@@ -8655,661 +8611,6 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  async function openTeamManagement() {
-    await waitFor(() => expect(readCurrentSessionState()).toBeDefined())
-    const current = readCurrentSessionState()
-    const hasMembers =
-      !current?.teamEnded &&
-      hoisted.storedSessions.value.some(
-        (session) => session.teamLeadId === current?.id && !session.archived
-      )
-    fireEvent.click(
-      hasMembers
-        ? await screen.findByTestId('agent-header-team')
-        : screen.getByTestId('agent-header-team')
-    )
-    await screen.findByRole('dialog', { name: '团队管理' })
-  }
-
-  it.each([
-    {
-      label: '频道消息',
-      text: 'local channel entry',
-      button: '添加到频道记录',
-      field: 'teamChannel' as const
-    },
-    { label: '任务', text: 'local task entry', button: '添加任务', field: 'teamTasks' as const }
-  ])(
-    'persists $field after changing the lead model while retaining stale team default',
-    async ({ label, text, button, field }) => {
-      const lead: ChatSession = {
-        id: 'model-change-local-record',
-        title: 'Lead',
-        messages: [],
-        profileId: 'base-model',
-        teamSettings: { maxMembers: 6, defaultModel: 'base-model', autoCleanup: false }
-      }
-      hoisted.storedSessions.value = [lead]
-      localStorage.setItem(
-        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
-        lead.id
-      )
-      renderChatPage({ team: true, rows: true })
-      await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('base-model'))
-      fireEvent.click(screen.getByTestId('select-vision-model'))
-      await waitFor(() => expect(readCurrentSessionState()?.profileId).toBe('vision-model'))
-      await waitFor(() =>
-        expect(hoisted.storedSessions.value.find((s) => s.id === lead.id)?.profileId).toBe(
-          'vision-model'
-        )
-      )
-      expect(readCurrentSessionState()?.teamSettings?.defaultModel).toBe('base-model')
-      await openTeamManagement()
-      fireEvent.change(screen.getByLabelText(label), { target: { value: text } })
-      expect(screen.getByLabelText(label)).toHaveValue(text)
-      fireEvent.click(screen.getByRole('button', { name: button }))
-      await waitFor(() => {
-        const stored = hoisted.storedSessions.value.find((s) => s.id === lead.id)
-        if (field === 'teamChannel')
-          expect(stored?.teamChannel).toEqual(
-            expect.arrayContaining([expect.objectContaining({ text })])
-          )
-        else
-          expect(stored?.teamTasks).toEqual(
-            expect.arrayContaining([expect.objectContaining({ title: text })])
-          )
-      })
-    }
-  )
-
-  it.each([
-    { label: '任务', text: 'keep pending task', button: '添加任务', field: 'teamTasks' as const },
-    {
-      label: '频道消息',
-      text: 'keep pending channel',
-      button: '添加到频道记录',
-      field: 'teamChannel' as const
-    }
-  ])(
-    'retains $field draft until CAS succeeds and keeps it on conflict',
-    async ({ label, text, button, field }) => {
-      const lead: ChatSession = {
-        id: 'team-draft-save-race',
-        title: 'Lead',
-        profileId: 'base-model',
-        messages: [],
-        teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
-      }
-      hoisted.storedSessions.value = [lead]
-      localStorage.setItem(
-        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
-        lead.id
-      )
-      renderChatPage({ team: true, rows: true })
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      await openTeamManagement()
-      const input = screen.getByLabelText(label)
-      fireEvent.change(input, { target: { value: text } })
-      let release!: () => void
-      hoisted.saveSessionToDBGateStarted.value = null
-      hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
-        release = resolve
-      })
-      try {
-        fireEvent.click(screen.getByRole('button', { name: button }))
-        await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(lead.id))
-        expect(input).toHaveValue(text)
-        const external = cloneValue(hoisted.storedSessions.value.find((s) => s.id === lead.id)!)
-        external.title = 'External change'
-        hoisted.storedSessions.value = [external]
-        await act(async () => {
-          hoisted.saveSessionToDBGate.value = null
-          release()
-        })
-        await waitFor(() =>
-          expect(hoisted.notifyWarningMock).toHaveBeenCalledWith('无法保存团队设置')
-        )
-        expect(input).toHaveValue(text)
-        const stored = hoisted.storedSessions.value.find((s) => s.id === lead.id)
-        expect(stored?.title).toBe('External change')
-        expect(stored?.[field]).toBeUndefined()
-        expect(screen.getByText(new RegExp(`${text}.*未确认|未确认.*${text}`))).toBeVisible()
-        expect(screen.getByRole('button', { name: button })).toBeDisabled()
-        expect(readCurrentSessionState()?.[field]?.length).toBe(1)
-      } finally {
-        release?.()
-        hoisted.saveSessionToDBGate.value = null
-      }
-    }
-  )
-
-  it.each([
-    {
-      label: '任务',
-      text: 'successful task draft',
-      button: '添加任务',
-      field: 'teamTasks' as const
-    },
-    {
-      label: '频道消息',
-      text: 'successful channel draft',
-      button: '添加到频道记录',
-      field: 'teamChannel' as const
-    }
-  ])('clears $field draft only after successful CAS', async ({ label, text, button, field }) => {
-    const lead: ChatSession = {
-      id: 'team-draft-success',
-      title: 'Lead',
-      profileId: 'base-model',
-      messages: [],
-      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
-    }
-    hoisted.storedSessions.value = [lead]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    renderChatPage({ team: true, rows: true })
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    await openTeamManagement()
-    const input = screen.getByLabelText(label)
-    fireEvent.change(input, { target: { value: text } })
-    let release!: () => void
-    hoisted.saveSessionToDBGateStarted.value = null
-    hoisted.saveSessionToDBGate.value = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    try {
-      fireEvent.click(screen.getByRole('button', { name: button }))
-      await waitFor(() => expect(hoisted.saveSessionToDBGateStarted.value).toBe(lead.id))
-      expect(input).toHaveValue(text)
-      await act(async () => {
-        hoisted.saveSessionToDBGate.value = null
-        release()
-      })
-      await waitFor(() => {
-        const stored = hoisted.storedSessions.value.find((s) => s.id === lead.id)
-        if (field === 'teamTasks')
-          expect(stored?.teamTasks).toEqual(
-            expect.arrayContaining([expect.objectContaining({ title: text })])
-          )
-        else
-          expect(stored?.teamChannel).toEqual(
-            expect.arrayContaining([expect.objectContaining({ text })])
-          )
-      })
-      await waitFor(() => expect(input).toHaveValue(''))
-    } finally {
-      release?.()
-      hoisted.saveSessionToDBGate.value = null
-    }
-  })
-
-  it('keeps the new scope task draft when an older scope task save acknowledges after commit', async () => {
-    const scopeA = 'runtime-flow',
-      scopeB = 'team-scope-b',
-      id = 'same-team-lead'
-    const leadA: ChatSession = {
-      id,
-      title: 'Lead A',
-      profileId: 'base-model',
-      messages: [],
-      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
-    }
-    const leadB: ChatSession = { ...leadA, title: 'Lead B' }
-    hoisted.scopedTestSessions.value = { [scopeA]: [leadA], [scopeB]: [leadB] }
-    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) =>
-      cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
-    )
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scopeA), id)
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scopeB), id)
-    const route = {
-      channel: 'canvas' as const,
-      scopeType: 'thread' as const,
-      scopeId: 'runtime-project',
-      threadId: 'runtime-pane'
-    }
-    const page = renderChatPage({ team: true })
-    let release!: () => void
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Lead A'))
-      await openTeamManagement()
-      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'scope A task' } })
-      hoisted.teamPostCommitGate.value = new Promise<void>((resolve) => {
-        release = resolve
-      })
-      fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
-      await waitFor(() =>
-        expect(hoisted.teamPostCommitSnapshot.value?.teamTasks).toEqual(
-          expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
-        )
-      )
-      expect(hoisted.scopedTestSessions.value?.[scopeA][0].teamTasks).toEqual(
-        expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
-      )
-      page.rerender(
-        <MemoryRouter>
-          <ThemeProvider theme={theme}>
-            <ChatPage compact storageScope={scopeB} route={route} />
-          </ThemeProvider>
-        </MemoryRouter>
-      )
-      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Lead B'))
-      if (!screen.queryByLabelText('任务')) await openTeamManagement()
-      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'scope B draft' } })
-      await act(async () => {
-        hoisted.teamPostCommitGate.value = null
-        release()
-      })
-      expect(screen.getByLabelText('任务')).toHaveValue('scope B draft')
-      expect(hoisted.scopedTestSessions.value?.[scopeB][0].teamTasks).toBeUndefined()
-      expect(hoisted.scopedTestSessions.value?.[scopeA][0].teamTasks).toEqual(
-        expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
-      )
-      expect(readCurrentSessionState()?.title).toBe('Lead B')
-    } finally {
-      release?.()
-      hoisted.teamPostCommitGate.value = null
-      page.unmount()
-    }
-  })
-
-  it('keeps the committed A task and B isolated after A-B-A and a delayed mock save, then retries', async () => {
-    const a = 'ack-scope-a',
-      b = 'ack-scope-b',
-      id = 'ack-shared-id'
-    const leadA: ChatSession = {
-      id,
-      title: 'Ack A',
-      profileId: 'base-model',
-      messages: [],
-      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
-    }
-    const leadB: ChatSession = { ...leadA, title: 'Ack B' }
-    hoisted.scopedTestSessions.value = { [a]: [leadA], [b]: [leadB] }
-    let aReads = 0,
-      releaseStale!: (value: ChatSession[]) => void
-    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) => {
-      if (scope === a && ++aReads === 2)
-        return new Promise<ChatSession[]>((resolve) => {
-          releaseStale = resolve
-        })
-      return cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
-    })
-    for (const scope of [a, b])
-      localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), id)
-    const route = {
-      channel: 'canvas' as const,
-      scopeType: 'thread' as const,
-      scopeId: 'runtime-project',
-      threadId: 'runtime-pane'
-    }
-    const ui = (scope: string) => (
-      <MemoryRouter>
-        <ThemeProvider theme={theme}>
-          <ChatPage compact storageScope={scope} route={route} />
-        </ThemeProvider>
-      </MemoryRouter>
-    )
-    const page = render(ui(a))
-    let releaseWrite!: () => void
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Ack A'))
-      await openTeamManagement()
-      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'scope A task' } })
-      hoisted.teamPostCommitGate.value = new Promise<void>((resolve) => {
-        releaseWrite = resolve
-      })
-      fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
-      await waitFor(() =>
-        expect(hoisted.teamPostCommitSnapshot.value?.teamTasks).toEqual(
-          expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
-        )
-      )
-      page.rerender(ui(b))
-      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('Ack B'))
-      page.rerender(ui(a))
-      await waitFor(() => expect(releaseStale).toBeDefined())
-      await act(async () => {
-        hoisted.teamPostCommitGate.value = null
-        releaseWrite()
-      })
-      await act(async () => releaseStale([cloneValue(leadA)]))
-      await waitFor(() =>
-        expect(
-          screen.getByText('This thread has unsaved changes. Retry saving before closing it.')
-        ).toBeVisible()
-      )
-      expect(hoisted.scopedTestSessions.value?.[b][0].teamTasks).toBeUndefined()
-      expect(hoisted.scopedTestSessions.value?.[a][0].teamTasks).toEqual(
-        expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
-      )
-      fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-      await waitFor(() =>
-        expect(readCurrentSessionState()?.teamTasks).toEqual(
-          expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
-        )
-      )
-      await waitFor(() =>
-        expect(
-          screen.queryByText('This thread has unsaved changes. Retry saving before closing it.')
-        ).not.toBeInTheDocument()
-      )
-      expect(hoisted.scopedTestSessions.value?.[b][0].teamTasks).toBeUndefined()
-    } finally {
-      hoisted.teamPostCommitGate.value = null
-      releaseWrite?.()
-      page.unmount()
-    }
-  })
-
-  it('retains a newer A task and rejects an external A change during delayed mock save acknowledgement', async () => {
-    const a = 'ack-external-a',
-      b = 'ack-external-b',
-      id = 'ack-external-id'
-    const leadA: ChatSession = {
-      id,
-      title: 'External A',
-      profileId: 'base-model',
-      messages: [],
-      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false }
-    }
-    const leadB: ChatSession = { ...leadA, title: 'External B' }
-    hoisted.scopedTestSessions.value = { [a]: [leadA], [b]: [leadB] }
-    let aReads = 0,
-      releaseStale!: (value: ChatSession[]) => void
-    hoisted.loadAllSessionsMock.mockImplementation(async (scope: string) => {
-      if (scope === a && ++aReads === 2)
-        return new Promise<ChatSession[]>((resolve) => {
-          releaseStale = resolve
-        })
-      return cloneValue(hoisted.scopedTestSessions.value?.[scope] ?? [])
-    })
-    for (const scope of [a, b])
-      localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), id)
-    const route = {
-      channel: 'canvas' as const,
-      scopeType: 'thread' as const,
-      scopeId: 'runtime-project',
-      threadId: 'runtime-pane'
-    }
-    const ui = (scope: string) => (
-      <MemoryRouter>
-        <ThemeProvider theme={theme}>
-          <ChatPage compact storageScope={scope} route={route} />
-        </ThemeProvider>
-      </MemoryRouter>
-    )
-    const page = render(ui(a))
-    let releaseWrite!: () => void
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('External A'))
-      await openTeamManagement()
-      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'scope A task' } })
-      hoisted.teamPostCommitGate.value = new Promise<void>((resolve) => {
-        releaseWrite = resolve
-      })
-      fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
-      await waitFor(() =>
-        expect(hoisted.teamPostCommitSnapshot.value?.teamTasks).toEqual(
-          expect.arrayContaining([expect.objectContaining({ title: 'scope A task' })])
-        )
-      )
-      page.rerender(ui(b))
-      await waitFor(() => expect(readCurrentSessionState()?.title).toBe('External B'))
-      page.rerender(ui(a))
-      await waitFor(() => expect(releaseStale).toBeDefined())
-      const committed = cloneValue(hoisted.scopedTestSessions.value![a][0])
-      hoisted.scopedTestSessions.value![a] = [{ ...committed, title: 'Third-party edit' }]
-      await act(async () => {
-        hoisted.teamPostCommitGate.value = null
-        releaseWrite()
-      })
-      await act(async () => releaseStale([cloneValue(leadA)]))
-      await openTeamManagement()
-      fireEvent.change(screen.getByLabelText('任务'), { target: { value: 'newer local task' } })
-      fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
-      await waitFor(() =>
-        expect(readCurrentSessionState()?.teamTasks).toEqual(
-          expect.arrayContaining([expect.objectContaining({ title: 'newer local task' })])
-        )
-      )
-      fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-      await waitFor(() => expect(screen.getByText(/Failed to save chat session/)).toBeVisible())
-      expect(hoisted.scopedTestSessions.value?.[a][0].title).toBe('Third-party edit')
-      expect(hoisted.scopedTestSessions.value?.[a][0].teamTasks).not.toEqual(
-        expect.arrayContaining([expect.objectContaining({ title: 'newer local task' })])
-      )
-      expect(readCurrentSessionState()?.teamTasks).toEqual(
-        expect.arrayContaining([expect.objectContaining({ title: 'newer local task' })])
-      )
-      expect(hoisted.scopedTestSessions.value?.[b][0].teamTasks).toBeUndefined()
-    } finally {
-      hoisted.teamPostCommitGate.value = null
-      releaseWrite?.()
-      page.unmount()
-    }
-  })
-
-  it('dispatches only a ready assigned team task and persists done after its member responds', async () => {
-    const lead: ChatSession = {
-      id: 'task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false },
-      teamTasks: [
-        {
-          id: 'first',
-          title: '准备素材',
-          ownerId: 'task-member',
-          status: 'pending',
-          dependsOn: []
-        },
-        {
-          id: 'second',
-          title: '制作海报',
-          ownerId: 'task-member',
-          status: 'pending',
-          dependsOn: ['first']
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'task-member',
-      title: 'designer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'designer',
-      teamRole: '设计师'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    let finish!: (value: { content: string }) => void
-    hoisted.requestChatCompletionMock.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve
-        })
-    )
-    renderChatPage({ team: true })
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    chooseAddMenuEntry('chat-composer-menu-team')
-    expect(screen.getByRole('button', { name: '执行 制作海报' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: '执行 准备素材' }))
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-    const req = hoisted.requestChatCompletionMock.mock.calls[0][0]
-    expect(req.teamMember).toEqual({
-      scope: 'runtime-flow',
-      thread: 'runtime-pane',
-      lead: lead.id,
-      member: member.id
-    })
-    expect(req.messages.at(-1)?.content).toContain('准备素材')
-    expect(
-      hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0].status
-    ).toBe('running')
-    expect(screen.getByRole('button', { name: '执行 制作海报' })).toBeDisabled()
-    await act(async () => {
-      finish({ content: '素材已准备' })
-    })
-    await waitFor(() =>
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-          .status
-      ).toBe('done')
-    )
-    await waitFor(() => expect(screen.getByRole('button', { name: '执行 制作海报' })).toBeEnabled())
-    fireEvent.click(screen.getByRole('button', { name: '执行 制作海报' }))
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
-    expect(hoisted.requestChatCompletionMock.mock.calls[1][0].messages.at(-1)?.content).toContain(
-      '制作海报'
-    )
-  })
-
-  it('keeps two member results and a newer lead message when task completion overlaps lead saving', async () => {
-    const lead: ChatSession = {
-      id: 'interleave-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        { id: 'task', title: '准备素材', ownerId: 'interleave-a', status: 'pending', dependsOn: [] }
-      ]
-    }
-    const a: ChatSession = {
-      id: 'interleave-a',
-      title: 'Alice',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'Alice'
-    }
-    const b: ChatSession = {
-      id: 'interleave-b',
-      title: 'Bob',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'Bob'
-    }
-    hoisted.storedSessions.value = [lead, a, b]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    let finishA!: (value: { content: string }) => void
-    let finishLead!: (value: { content: string }) => void
-    hoisted.requestChatCompletionMock
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishA = resolve
-          })
-      )
-      .mockResolvedValueOnce({ content: 'Bob result' })
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishLead = resolve
-          })
-      )
-    const page = renderChatPage({ team: true })
-    let release!: () => void
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      await openTeamManagement()
-      fireEvent.click(screen.getByRole('button', { name: '执行 准备素材' }))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
-        target: { value: '@Bob independent' }
-      })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value
-            .find((s) => s.id === b.id)
-            ?.messages.some((m) => m.content === 'Bob result')
-        ).toBe(true)
-      )
-      const gate = new Promise<void>((resolve) => {
-        release = resolve
-      })
-      const selective = { id: lead.id, gate, started: false }
-      hoisted.selectiveSaveGate.value = selective
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
-        target: { value: 'Lead latest message' }
-      })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(selective.started).toBe(true))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3))
-      await act(async () => finishA({ content: 'Alice result' }))
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value
-            .find((s) => s.id === a.id)
-            ?.messages.some((m) => m.content === 'Alice result')
-        ).toBe(true)
-      )
-      hoisted.selectiveSaveGate.value = null
-      await act(async () => release())
-      await act(async () => finishLead({ content: 'Lead reply' }))
-      await waitFor(() => {
-        const saved = hoisted.storedSessions.value.find((s) => s.id === lead.id)
-        expect(saved?.teamTasks?.[0].status).toBe('done')
-        expect(saved?.messages.some((m) => m.content === 'Lead latest message')).toBe(true)
-        expect(saved?.messages.some((m) => m.content === 'Lead reply')).toBe(true)
-      })
-      expect(hoisted.notifyErrorMock).not.toHaveBeenCalledWith(
-        expect.stringMatching(/Failed to save chat session/)
-      )
-      hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: 'Summary reply' })
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
-        target: { value: 'Summarize members' }
-      })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(4))
-      const summaryRequest = hoisted.requestChatCompletionMock.mock.calls[3][0]
-      const summaryContext = JSON.stringify(summaryRequest.messages)
-      expect(summaryContext).toContain('Alice result')
-      expect(summaryContext).toContain('Bob result')
-      await waitFor(() => {
-        const saved = hoisted.storedSessions.value.find((s) => s.id === lead.id)
-        expect(saved?.messages.some((m) => m.content === 'Lead latest message')).toBe(true)
-        expect(saved?.messages.some((m) => m.content === 'Summary reply')).toBe(true)
-      })
-    } finally {
-      hoisted.selectiveSaveGate.value = null
-      release?.()
-      finishA?.({ content: 'cleanup' })
-      finishLead?.({ content: 'cleanup' })
-      page.unmount()
-    }
-  })
-
-  it('can execute a task immediately after creating it in the team menu', async () => {
-    const lead: ChatSession = {
-      id: 'new-task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model'
-    }
-    const member: ChatSession = {
-      id: 'new-task-member',
-      title: 'designer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'designer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    renderChatPage({ team: true })
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    chooseAddMenuEntry('chat-composer-menu-team')
-    fireEvent.change(screen.getByLabelText('任务'), { target: { value: '刚添加的任务' } })
-    fireEvent.mouseDown(screen.getByLabelText('负责人'))
-    fireEvent.click(await screen.findByRole('option', { name: 'designer' }))
-    fireEvent.click(screen.getByRole('button', { name: '添加任务' }))
-    await waitFor(() => expect(screen.getByLabelText('任务')).toHaveValue(''))
-    fireEvent.click(screen.getByRole('button', { name: '执行 刚添加的任务' }))
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-    expect(hoisted.requestChatCompletionMock.mock.calls[0][0].messages.at(-1)?.content).toContain(
-      '刚添加的任务'
-    )
-  })
-
   it('pumps a busy user broadcast when MAIN list remains pending', async () => {
     const lead: ChatSession = {
       id: 'pending-list-lead',
@@ -9348,12 +8649,7 @@ describe('ChatPage runtime workflow integration', () => {
       })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-      await openTeamManagement()
-      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Bob' })).toBeChecked())
-      fireEvent.change(screen.getByLabelText('频道消息'), {
-        target: { value: 'pending list broadcast' }
-      })
-      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      await dispatch.queueBroadcast(lead.id, [bob.id], 'pending list broadcast')
       await waitFor(() =>
         expect(dispatch.status('user', bob.id, 'pending list broadcast')).toBe('queued')
       )
@@ -9662,11 +8958,7 @@ describe('ChatPage runtime workflow integration', () => {
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
       await waitFor(() => expect(hoisted.listAgentTeamMessagesMock).toHaveBeenCalled())
-      await openTeamManagement()
-      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Bob' })).toBeChecked())
-      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Carol' })).toBeChecked())
-      fireEvent.change(screen.getByLabelText('频道消息'), { target: { value: '用户本地广播' } })
-      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      await dispatch.queueBroadcast(lead.id, [bob.id, carol.id], '用户本地广播')
       await waitFor(() =>
         expect(dispatch.status('user', carol.id, '用户本地广播')).toBe('response_received')
       )
@@ -9686,151 +8978,6 @@ describe('ChatPage runtime workflow integration', () => {
     } finally {
       finish?.({ content: 'cleanup' })
       page.unmount()
-    }
-  })
-
-  it('broadcasts the user menu message once to each subscriber, distinct from agent tool messages', async () => {
-    const lead: ChatSession = {
-      id: 'user-broadcast-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model'
-    }
-    const alice: ChatSession = {
-      id: 'alice',
-      title: 'Alice',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'Alice'
-    }
-    const bob: ChatSession = {
-      id: 'bob',
-      title: 'Bob',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'Bob'
-    }
-    const carol: ChatSession = {
-      id: 'carol',
-      title: 'Carol',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'Carol'
-    }
-    hoisted.storedSessions.value = [lead, alice, bob, carol]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const agentIntent = {
-      id: 'agent-origin',
-      source: { scope: 'runtime-flow', thread: 'runtime-pane', lead: lead.id, member: alice.id },
-      kind: 'message',
-      hop: 1,
-      recipient: bob.id,
-      text: 'agent tool origin'
-    }
-    let queued = false
-    hoisted.listAgentTeamMessagesMock.mockImplementation(async () => ({
-      intents: queued ? [agentIntent] : []
-    }))
-    hoisted.claimAgentTeamMessageMock.mockImplementation(async () => {
-      queued = false
-      return { intent: agentIntent }
-    })
-    const dispatch = watchTeamDispatch()
-    const page = renderChatPage({ team: true })
-    try {
-      await openTeamManagement()
-      const carolSubscription = await screen.findByRole('checkbox', { name: 'Carol' })
-      await waitFor(() => expect(carolSubscription).toBeChecked())
-      fireEvent.click(carolSubscription)
-      const draft = screen.getByLabelText('频道消息')
-      fireEvent.change(draft, { target: { value: '用户广播正文' } })
-      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
-      const requests = hoisted.requestChatCompletionMock.mock.calls.map((call) => call[0])
-      expect(requests.map((req) => req.teamMember.member).sort()).toEqual(['alice', 'bob'])
-      for (const req of requests) {
-        expect(req.teamMessageHop).toBe(1)
-        expect(req.messages.at(-1).content).toContain('用户频道消息')
-        expect(req.messages.at(-1).content).toContain('用户广播正文')
-        expect(req.messages.at(-1).content).not.toContain('团队成员消息')
-      }
-      await waitFor(() =>
-        expect(dispatch.status('user', alice.id, '用户广播正文')).toBe('response_received')
-      )
-      await waitFor(() =>
-        expect(dispatch.status('user', bob.id, '用户广播正文')).toBe('response_received')
-      )
-      expect(dispatch.records('user', carol.id)).toEqual([])
-      expect(dispatch.records('user', alice.id)).toHaveLength(1)
-      expect(dispatch.records('user', bob.id)).toHaveLength(1)
-      await waitFor(() => expect(draft).toHaveValue(''))
-      queued = true
-      await waitFor(() =>
-        expect(dispatch.status(alice.id, bob.id, 'agent tool origin')).toBe('response_received')
-      )
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(3)
-      const memberRequest = hoisted.requestChatCompletionMock.mock.calls[2][0]
-      expect(memberRequest.messages.at(-1).content).toContain('团队成员消息，来自 Alice')
-      expect(memberRequest.teamMessageHop).toBe(1)
-    } finally {
-      page.unmount()
-    }
-  })
-
-  it('does not enqueue a broadcast under an unavailable versioned member model and preserves its draft', async () => {
-    const lead: ChatSession = {
-      id: 'blocked-broadcast-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamSettings: {
-        maxMembers: 6,
-        defaultModel: null,
-        autoCleanup: false,
-        memberModelSelection: { version: 1, profileId: 'vision-model' }
-      }
-    }
-    const member: ChatSession = {
-      id: 'blocked-broadcast-member',
-      title: 'Bob',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'Bob'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const fetchBlocked = vi.fn(async () => {
-      throw new Error('Unexpected network request in broadcast test')
-    })
-    vi.stubGlobal('fetch', fetchBlocked)
-    const page = renderChatPage({ team: true })
-    try {
-      await openTeamManagement()
-      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Bob' })).toBeChecked())
-      const input = screen.getByLabelText('频道消息')
-      fireEvent.change(input, { target: { value: '不可用的广播' } })
-      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
-      expect(
-        await screen.findByText('广播结果未确认，请先核对相关会话，避免重复发送。')
-      ).toBeVisible()
-      expect(input).toHaveValue('不可用的广播')
-      const broadcast = screen.getByRole('button', { name: '广播给订阅成员' })
-      expect(broadcast).toBeDisabled()
-      fireEvent.change(input, { target: { value: '修改后的广播草稿' } })
-      expect(broadcast).toBeDisabled()
-      fireEvent.click(screen.getByRole('button', { name: '我已了解风险，允许再次广播' }))
-      expect(input).toHaveValue('修改后的广播草稿')
-      expect(broadcast).toBeEnabled()
-      expect(screen.queryByText(/用户 → Bob/)).not.toBeInTheDocument()
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === member.id)?.messages
-      ).toEqual([])
-    } finally {
-      page.unmount()
-      vi.unstubAllGlobals()
-      expect(fetchBlocked).not.toHaveBeenCalled()
     }
   })
 
@@ -9868,12 +9015,7 @@ describe('ChatPage runtime workflow integration', () => {
       const dispatch = watchTeamDispatch()
       const page = renderChatPage({ team: true })
       try {
-        await openTeamManagement()
-        await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Bob' })).toBeChecked())
-        fireEvent.change(screen.getByLabelText('频道消息'), {
-          target: { value: '等候中的频道消息' }
-        })
-        fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+        await dispatch.queueBroadcast(lead.id, [bob.id], '等候中的频道消息')
         await waitFor(() => expect(gate.entered).toBe(true))
         hoisted.storedSessions.value = hoisted.storedSessions.value.map((session) =>
           session.id === lead.id
@@ -9901,96 +9043,6 @@ describe('ChatPage runtime workflow integration', () => {
       } finally {
         hoisted.teamBeforeDispatchGate.value = null
         release()
-        page.unmount()
-      }
-    }
-  )
-
-  it('preserves user broadcast draft and sends no request with no subscribers', async () => {
-    const lead: ChatSession = {
-      id: 'broadcast-empty-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model'
-    }
-    const bob: ChatSession = {
-      id: 'bob',
-      title: 'Bob',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'Bob'
-    }
-    hoisted.storedSessions.value = [lead, bob]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const page = renderChatPage({ team: true })
-    try {
-      await openTeamManagement()
-      const subscription = await screen.findByRole('checkbox', { name: 'Bob' })
-      await waitFor(() => expect(subscription).toBeChecked())
-      fireEvent.click(subscription)
-      const draft = screen.getByLabelText('频道消息')
-      fireEvent.change(draft, { target: { value: '保留广播草稿' } })
-      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
-      expect(await screen.findByText('未送出，请检查订阅')).toBeVisible()
-      expect(draft).toHaveValue('保留广播草稿')
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-    } finally {
-      page.unmount()
-    }
-  })
-
-  it.fails(
-    'P6 known End-remount draft loss: preserves user broadcast draft after End',
-    async () => {
-      const lead: ChatSession = {
-        id: 'broadcast-empty-lead',
-        title: 'Lead',
-        messages: [],
-        profileId: 'base-model'
-      }
-      const bob: ChatSession = {
-        id: 'bob',
-        title: 'Bob',
-        messages: [],
-        teamLeadId: lead.id,
-        teamMemberName: 'Bob'
-      }
-      hoisted.storedSessions.value = [lead, bob]
-      localStorage.setItem(
-        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
-        lead.id
-      )
-      const page = renderChatPage({ team: true })
-      try {
-        await openTeamManagement()
-        const subscription = await screen.findByRole('checkbox', { name: 'Bob' })
-        await waitFor(() => expect(subscription).toBeChecked())
-        fireEvent.click(subscription)
-        const draft = screen.getByLabelText('频道消息')
-        fireEvent.change(draft, { target: { value: '保留广播草稿' } })
-        fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
-        expect(await screen.findByText('未送出，请检查订阅')).toBeVisible()
-        expect(draft).toHaveValue('保留广播草稿')
-        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-        fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
-        await waitFor(() =>
-          expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(
-            true
-          )
-        )
-        await waitFor(() => expect(readCurrentSessionState()?.teamEnded).toBe(true))
-        if (!screen.queryByLabelText('频道消息')) await openTeamManagement()
-        const endButton = screen.queryByRole('button', { name: '广播给订阅成员' })
-        if (endButton && !endButton.hasAttribute('disabled')) {
-          fireEvent.click(endButton)
-          expect(await screen.findByText(/未送出/)).toBeVisible()
-        } else if (endButton) expect(endButton).toBeDisabled()
-        expect(screen.getByLabelText('频道消息')).toHaveValue('保留广播草稿')
-        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-        expect(hoisted.requestChatCompletionStreamMock).not.toHaveBeenCalled()
-      } finally {
         page.unmount()
       }
     }
@@ -10044,11 +9096,8 @@ describe('ChatPage runtime workflow integration', () => {
     const dispatch = watchTeamDispatch()
     const page = renderChatPage({ team: true })
     try {
-      await openTeamManagement()
-      const carolSubscription = await screen.findByRole('checkbox', { name: 'Carol' })
-      await waitFor(() => expect(carolSubscription).toBeChecked())
-      fireEvent.click(carolSubscription)
-      expect(carolSubscription).not.toBeChecked()
+      const channel = await dispatch.subscribed([carol.id])
+      channel.unsubscribe(carol.id)
       queued = true
       await waitFor(() =>
         expect(dispatch.status(alice.id, bob.id, '广播测试')).toBe('response_received')
@@ -10761,8 +9810,7 @@ describe('ChatPage runtime workflow integration', () => {
       await waitFor(() =>
         expect(dispatch.status(alice.id, bob.id, 'already started')).toBe('request_started')
       )
-      await openTeamManagement()
-      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+      await endStoredTeam(lead)
       await waitFor(() =>
         expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(
           true
@@ -10974,8 +10022,7 @@ describe('ChatPage runtime workflow integration', () => {
     const page = renderChatPage({ team: true })
     try {
       await waitFor(() => expect(release).toBeDefined())
-      await openTeamManagement()
-      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+      await endStoredTeam(lead)
       await waitFor(() =>
         expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(
           true
@@ -11074,783 +10121,6 @@ describe('ChatPage runtime workflow integration', () => {
     }
   })
 
-  it('returns a task to pending with outcome failed if its member request fails, and never retries it by itself', async () => {
-    const lead: ChatSession = {
-      id: 'failed-task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        {
-          id: 'task',
-          title: '失败任务',
-          ownerId: 'failed-task-member',
-          status: 'pending',
-          dependsOn: []
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'failed-task-member',
-      title: 'writer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'writer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    hoisted.requestChatCompletionMock.mockRejectedValueOnce(new Error('fixture failure'))
-    renderChatPage({ team: true })
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    chooseAddMenuEntry('chat-composer-menu-team')
-    fireEvent.click(screen.getByRole('button', { name: '执行 失败任务' }))
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-    await waitFor(() =>
-      expect(
-        hoisted.storedSessions.value
-          .find((session) => session.id === member.id)
-          ?.messages.some((message) => String(message.content).includes('fixture failure'))
-      ).toBe(true)
-    )
-    // K2: the failed run no longer leaves the task running; it is back to pending with its outcome.
-    await waitFor(() =>
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-      ).toEqual({
-        id: 'task',
-        title: '失败任务',
-        ownerId: member.id,
-        status: 'pending',
-        dependsOn: [],
-        lastOutcome: 'failed'
-      })
-    )
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    })
-    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
-    // The user runs it again; a confirmed reply marks it done and clears the outcome.
-    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: 'second attempt' })
-    await waitFor(() => expect(screen.getByRole('button', { name: '执行 失败任务' })).toBeEnabled())
-    fireEvent.click(screen.getByRole('button', { name: '执行 失败任务' }))
-    await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
-    await waitFor(() =>
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-      ).toEqual({
-        id: 'task',
-        title: '失败任务',
-        ownerId: member.id,
-        status: 'done',
-        dependsOn: []
-      })
-    )
-  })
-
-  it('does not mark a task done when its member response cannot be saved', async () => {
-    const lead: ChatSession = {
-      id: 'unsaved-task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        {
-          id: 'task',
-          title: '需保存结果',
-          ownerId: 'unsaved-task-member',
-          status: 'pending',
-          dependsOn: []
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'unsaved-task-member',
-      title: 'writer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'writer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    hoisted.failTaskResponseSave.value = member.id
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: '结果已返回但未保存' })
-    renderChatPage({ team: true })
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    chooseAddMenuEntry('chat-composer-menu-team')
-    fireEvent.click(screen.getByRole('button', { name: '执行 需保存结果' }))
-    await waitFor(() =>
-      expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
-        'The member replied, but its conversation save is not confirmed. The task is back to pending.'
-      )
-    )
-    // K2: an unconfirmed reply is not a result; the task goes back to pending instead of staying running.
-    await waitFor(() =>
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-      ).toMatchObject({ status: 'pending', lastOutcome: 'interrupted' })
-    )
-    expect(
-      hoisted.storedSessions.value
-        .find((session) => session.id === member.id)
-        ?.messages.some((message) => message.content === '结果已返回但未保存')
-    ).toBe(false)
-    expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('returns a task to pending with outcome cancelled when its member run is stopped, and leaves done tasks alone', async () => {
-    const doneTask = {
-      id: 'earlier',
-      title: '已完成任务',
-      ownerId: 'cancel-task-member',
-      status: 'done' as const,
-      dependsOn: []
-    }
-    const lead: ChatSession = {
-      id: 'cancel-task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        doneTask,
-        {
-          id: 'task',
-          title: '可取消任务',
-          ownerId: 'cancel-task-member',
-          status: 'pending',
-          dependsOn: ['earlier']
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'cancel-task-member',
-      title: 'writer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'writer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    let signal: AbortSignal | undefined
-    hoisted.requestChatCompletionMock.mockImplementationOnce(
-      ({ signal: requestSignal }: { signal: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          signal = requestSignal
-          requestSignal.addEventListener(
-            'abort',
-            () => reject(new DOMException('aborted', 'AbortError')),
-            { once: true }
-          )
-        })
-    )
-    const page = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      chooseAddMenuEntry('chat-composer-menu-team')
-      fireEvent.click(screen.getByRole('button', { name: '执行 可取消任务' }))
-      await waitFor(() => expect(signal).toBeDefined())
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[1]
-          .status
-      ).toBe('running')
-      fireEvent.click(screen.getByRole('button', { name: '关闭团队管理' }))
-      // The lead's composer stop stops the running member.
-      await waitFor(() => expect(screen.getByTestId('chat-composer-stop-mock')).toBeVisible())
-      fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
-      expect(signal?.aborted).toBe(true)
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[1]
-        ).toEqual({
-          id: 'task',
-          title: '可取消任务',
-          ownerId: member.id,
-          status: 'pending',
-          dependsOn: ['earlier'],
-          lastOutcome: 'cancelled'
-        })
-      )
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-      ).toEqual(doneTask)
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-      })
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1)
-    } finally {
-      page.unmount()
-    }
-  })
-
-  it('offers a reset for a stored running task with no live run after a remount, and runs it only on the next explicit dispatch', async () => {
-    const doneTask = {
-      id: 'earlier',
-      title: '已完成任务',
-      ownerId: 'orphan-task-member',
-      status: 'done' as const,
-      dependsOn: []
-    }
-    const lead: ChatSession = {
-      id: 'orphan-task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        doneTask,
-        {
-          id: 'task',
-          title: '中断任务',
-          ownerId: 'orphan-task-member',
-          status: 'running',
-          dependsOn: ['earlier']
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'orphan-task-member',
-      title: 'writer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'writer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const first = renderChatPage({ team: true })
-    await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-    first.unmount()
-    hoisted.requestChatCompletionMock.mockResolvedValueOnce({ content: '重新执行完成' })
-    const page = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      chooseAddMenuEntry('chat-composer-menu-team')
-      expect(screen.getByText(/中断任务 · writer · 进行中 · Last run interrupted/)).toBeVisible()
-      expect(screen.getByRole('button', { name: '执行 中断任务' })).toBeDisabled()
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      fireEvent.click(screen.getByRole('button', { name: 'Reset: 中断任务' }))
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[1]
-        ).toEqual({
-          id: 'task',
-          title: '中断任务',
-          ownerId: member.id,
-          status: 'pending',
-          dependsOn: ['earlier'],
-          lastOutcome: 'interrupted'
-        })
-      )
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-      ).toEqual(doneTask)
-      expect(screen.queryByRole('button', { name: 'Reset: 中断任务' })).not.toBeInTheDocument()
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-      })
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      await waitFor(() =>
-        expect(screen.getByRole('button', { name: '执行 中断任务' })).toBeEnabled()
-      )
-      fireEvent.click(screen.getByRole('button', { name: '执行 中断任务' }))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[1]
-        ).toEqual({
-          id: 'task',
-          title: '中断任务',
-          ownerId: member.id,
-          status: 'done',
-          dependsOn: ['earlier']
-        })
-      )
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-      ).toEqual(doneTask)
-    } finally {
-      page.unmount()
-    }
-  })
-
-  it('offers no reset while the owner of a running task is still running it', async () => {
-    const lead: ChatSession = {
-      id: 'live-task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        {
-          id: 'task',
-          title: '运行中任务',
-          ownerId: 'live-task-member',
-          status: 'pending',
-          dependsOn: []
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'live-task-member',
-      title: 'writer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'writer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    let finish!: (value: { content: string }) => void
-    hoisted.requestChatCompletionMock.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve
-        })
-    )
-    const page = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      chooseAddMenuEntry('chat-composer-menu-team')
-      fireEvent.click(screen.getByRole('button', { name: '执行 运行中任务' }))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-      await waitFor(() => expect(screen.getByText(/运行中任务 · writer · 进行中/)).toBeVisible())
-      expect(screen.queryByRole('button', { name: 'Reset: 运行中任务' })).not.toBeInTheDocument()
-      expect(screen.queryByText(/Last run interrupted/)).not.toBeInTheDocument()
-      await act(async () => {
-        finish({ content: '完成' })
-      })
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-            .status
-        ).toBe('done')
-      )
-      expect(screen.queryByRole('button', { name: 'Reset: 运行中任务' })).not.toBeInTheDocument()
-    } finally {
-      finish?.({ content: 'cleanup' })
-      page.unmount()
-    }
-  })
-
-  it('offers no reset while a finished task waits for its turn on the lead save chain, and records it done', async () => {
-    const lead: ChatSession = {
-      id: 'finish-window-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        {
-          id: 'task',
-          title: '保存中任务',
-          ownerId: 'finish-window-member',
-          status: 'pending',
-          dependsOn: []
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'finish-window-member',
-      title: 'writer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'writer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const finishers: Array<(value: { content: string }) => void> = []
-    hoisted.requestChatCompletionMock.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finishers.push(resolve)
-        })
-    )
-    let release: (() => void) | undefined
-    const page = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      chooseAddMenuEntry('chat-composer-menu-team')
-      fireEvent.click(screen.getByRole('button', { name: '执行 保存中任务' }))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-      fireEvent.click(screen.getByRole('button', { name: '关闭团队管理' }))
-      // A lead save is in flight: the task's finish has to wait for its turn on the lead's chain.
-      const selective = {
-        id: lead.id,
-        gate: new Promise<void>((resolve) => {
-          release = resolve
-        }),
-        started: false
-      }
-      hoisted.selectiveSaveGate.value = selective
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
-        target: { value: 'Lead message during the task' }
-      })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(selective.started).toBe(true))
-      await act(async () => finishers[0]({ content: '任务结果' }))
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value
-            .find((session) => session.id === member.id)
-            ?.messages.some((message) => message.content === '任务结果')
-        ).toBe(true)
-      )
-      // The member is idle and the lead still shows the task running, but its finish is pending: no reset.
-      chooseAddMenuEntry('chat-composer-menu-team')
-      await waitFor(() => expect(screen.getByText(/保存中任务 · writer · 进行中/)).toBeVisible())
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-      })
-      expect(screen.queryByRole('button', { name: 'Reset: 保存中任务' })).not.toBeInTheDocument()
-      expect(screen.queryByText(/Last run interrupted/)).not.toBeInTheDocument()
-      hoisted.selectiveSaveGate.value = null
-      await act(async () => {
-        release?.()
-      })
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-        ).toEqual({
-          id: 'task',
-          title: '保存中任务',
-          ownerId: member.id,
-          status: 'done',
-          dependsOn: []
-        })
-      )
-      expect(hoisted.notifyWarningMock).not.toHaveBeenCalledWith(
-        'The task returned its result, but its status could not be saved.'
-      )
-      expect(screen.queryByRole('button', { name: 'Reset: 保存中任务' })).not.toBeInTheDocument()
-    } finally {
-      hoisted.selectiveSaveGate.value = null
-      release?.()
-      for (const finish of finishers) finish({ content: 'cleanup' })
-      page.unmount()
-    }
-  })
-
-  it('re-checks the owner at the moment of the reset click, not at the last render', async () => {
-    const lead: ChatSession = {
-      id: 'click-check-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        {
-          id: 'task',
-          title: '点击时检查',
-          ownerId: 'click-check-member',
-          status: 'running',
-          dependsOn: []
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'click-check-member',
-      title: 'writer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'writer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const externalLoading = (loading: boolean) =>
-      window.dispatchEvent(
-        new CustomEvent('chat:set-external-loading', {
-          detail: { scope: 'runtime-flow', sessionId: member.id, loading }
-        })
-      )
-    const page = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      chooseAddMenuEntry('chat-composer-menu-team')
-      const reset = screen.getByRole('button', { name: 'Reset: 点击时检查' })
-      // A Canvas Target run of the owner starts and the reset is clicked before the page renders again.
-      await act(async () => {
-        externalLoading(true)
-        reset.click()
-      })
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-      })
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-      ).toEqual(lead.teamTasks![0])
-      expect(readCurrentSessionState()?.teamTasks?.[0].status).toBe('running')
-      expect(screen.queryByRole('button', { name: 'Reset: 点击时检查' })).not.toBeInTheDocument()
-      // The external run ends: the reset is offered again and works.
-      await act(async () => {
-        externalLoading(false)
-      })
-      fireEvent.click(await screen.findByRole('button', { name: 'Reset: 点击时检查' }))
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-        ).toEqual({
-          id: 'task',
-          title: '点击时检查',
-          ownerId: member.id,
-          status: 'pending',
-          dependsOn: [],
-          lastOutcome: 'interrupted'
-        })
-      )
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-    } finally {
-      externalLoading(false)
-      page.unmount()
-    }
-  })
-
-  it.each([
-    ['the user stops it', 'cancelled'],
-    ['its team record changes', 'interrupted']
-  ] as const)(
-    'returns a task whose member send ends in preflight because %s to pending with outcome %s',
-    async (cause, outcome) => {
-      const lead: ChatSession = {
-        id: 'preflight-task-lead',
-        title: 'Lead',
-        messages: [],
-        profileId: 'base-model',
-        teamTasks: [
-          {
-            id: 'task',
-            title: '准备中任务',
-            ownerId: 'preflight-task-member',
-            status: 'pending',
-            dependsOn: []
-          }
-        ]
-      }
-      const member: ChatSession = {
-        id: 'preflight-task-member',
-        title: 'writer',
-        messages: [],
-        teamLeadId: lead.id,
-        teamMemberName: 'writer'
-      }
-      hoisted.storedSessions.value = [lead, member]
-      localStorage.setItem(
-        scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'),
-        lead.id
-      )
-      let release!: () => void
-      const gate = {
-        gate: new Promise<void>((resolve) => {
-          release = resolve
-        }),
-        entered: false
-      }
-      const page = renderChatPage({ team: true })
-      try {
-        await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-        chooseAddMenuEntry('chat-composer-menu-team')
-        hoisted.teamPreflightReadGate.value = gate
-        fireEvent.click(screen.getByRole('button', { name: '执行 准备中任务' }))
-        await waitFor(() => expect(gate.entered).toBe(true))
-        fireEvent.click(screen.getByRole('button', { name: '关闭团队管理' }))
-        if (cause === 'the user stops it') {
-          // The lead's composer stop covers a member whose send is still preparing.
-          await waitFor(() => expect(screen.getByTestId('chat-composer-stop-mock')).toBeVisible())
-          fireEvent.click(screen.getByTestId('chat-composer-stop-mock'))
-        } else {
-          hoisted.storedSessions.value = hoisted.storedSessions.value.map((session) =>
-            session.id === member.id ? { ...session, teamLifecycleRevision: 1 } : session
-          )
-        }
-        await act(async () => {
-          hoisted.teamPreflightReadGate.value = null
-          release()
-        })
-        await waitFor(() =>
-          expect(
-            hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-          ).toEqual({
-            id: 'task',
-            title: '准备中任务',
-            ownerId: member.id,
-            status: 'pending',
-            dependsOn: [],
-            lastOutcome: outcome
-          })
-        )
-        await act(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 50))
-        })
-        expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-            .lastOutcome
-        ).toBe(outcome)
-      } finally {
-        hoisted.teamPreflightReadGate.value = null
-        release()
-        page.unmount()
-      }
-    }
-  )
-
-  it('keeps a task pending when its owner is busy at dispatch, before or while the claim commits', async () => {
-    const lead: ChatSession = {
-      id: 'busy-task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        {
-          id: 'task',
-          title: '忙碌任务',
-          ownerId: 'busy-task-member',
-          status: 'pending',
-          dependsOn: []
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'busy-task-member',
-      title: 'Alice',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'Alice'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    const finishers: Array<(value: { content: string }) => void> = []
-    hoisted.requestChatCompletionMock.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finishers.push(resolve)
-        })
-    )
-    let release: (() => void) | undefined
-    const page = renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      // Busy before dispatch: refused, nothing claimed.
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
-        target: { value: '@Alice first' }
-      })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
-      chooseAddMenuEntry('chat-composer-menu-team')
-      fireEvent.click(screen.getByRole('button', { name: '执行 忙碌任务' }))
-      await waitFor(() =>
-        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
-          'Task cannot run: check its owner, dependencies and saved state.'
-        )
-      )
-      expect(
-        hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-      ).toEqual(lead.teamTasks![0])
-      await act(async () => {
-        finishers[0]({ content: 'first done' })
-      })
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value
-            .find((session) => session.id === member.id)
-            ?.messages.some((message) => message.content === 'first done')
-        ).toBe(true)
-      )
-      // Busy while the claim commits: the claim is undone, the stored task is the pre-claim record.
-      hoisted.migrationStarted.value = false
-      hoisted.migrationCommitGate.value = new Promise<void>((resolve) => {
-        release = resolve
-      })
-      await waitFor(() =>
-        expect(screen.getByRole('button', { name: '执行 忙碌任务' })).toBeEnabled()
-      )
-      fireEvent.click(screen.getByRole('button', { name: '执行 忙碌任务' }))
-      await waitFor(() => expect(hoisted.migrationStarted.value).toBe(true))
-      fireEvent.click(screen.getByRole('button', { name: '关闭团队管理' }))
-      fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
-        target: { value: '@Alice second' }
-      })
-      fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
-      await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2))
-      await act(async () => {
-        hoisted.migrationCommitGate.value = null
-        release?.()
-      })
-      await waitFor(() =>
-        expect(hoisted.notifyWarningMock).toHaveBeenCalledWith(
-          'The owner is busy with another request. The task was not started; try again later.'
-        )
-      )
-      await waitFor(() =>
-        expect(
-          hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamTasks?.[0]
-        ).toEqual(lead.teamTasks![0])
-      )
-      expect(readCurrentSessionState()?.teamTasks?.[0].status).toBe('pending')
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-      })
-      expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(2)
-      expect(
-        hoisted.requestChatCompletionMock.mock.calls.every(
-          (call) => !JSON.stringify(call[0].messages).includes('忙碌任务')
-        )
-      ).toBe(true)
-    } finally {
-      hoisted.migrationCommitGate.value = null
-      release?.()
-      for (const finish of finishers) finish({ content: 'cleanup' })
-      page.unmount()
-    }
-  })
-
-  it('does not dispatch a task whose claim commits after End', async () => {
-    const lead: ChatSession = {
-      id: 'gated-task-lead',
-      title: 'Lead',
-      messages: [],
-      profileId: 'base-model',
-      teamTasks: [
-        {
-          id: 'task',
-          title: '等待结束',
-          ownerId: 'gated-task-member',
-          status: 'pending',
-          dependsOn: []
-        }
-      ]
-    }
-    const member: ChatSession = {
-      id: 'gated-task-member',
-      title: 'writer',
-      messages: [],
-      teamLeadId: lead.id,
-      teamMemberName: 'writer'
-    }
-    hoisted.storedSessions.value = [lead, member]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, 'runtime-flow'), lead.id)
-    let release!: () => void
-    hoisted.migrationCommitGate.value = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    renderChatPage({ team: true })
-    try {
-      await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      await openTeamManagement()
-      fireEvent.click(screen.getByRole('button', { name: '执行 等待结束' }))
-      await waitFor(() => expect(hoisted.migrationStarted.value).toBe(true))
-      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
-      await waitFor(() =>
-        expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(
-          true
-        )
-      )
-      await act(async () => {
-        release()
-        hoisted.migrationCommitGate.value = null
-      })
-      expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
-      expect(
-        hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamTasks?.[0].status
-      ).toBe('pending')
-    } finally {
-      hoisted.migrationCommitGate.value = null
-      release?.()
-    }
-  })
-
   it('keeps an already dispatched member request alive through End and denies later sends', async () => {
     const lead: ChatSession = {
       id: 'end-live-lead',
@@ -11888,8 +10158,7 @@ describe('ChatPage runtime workflow integration', () => {
     fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
     await waitFor(() => expect(hoisted.requestChatCompletionMock).toHaveBeenCalledTimes(1))
     expect(signal?.aborted).toBe(false)
-    await openTeamManagement()
-    fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+    await endStoredTeam(lead)
     await waitFor(() =>
       expect(hoisted.storedSessions.value.find((item) => item.id === lead.id)?.teamEnded).toBe(true)
     )
@@ -11959,8 +10228,7 @@ describe('ChatPage runtime workflow integration', () => {
       const saveIndex = save.mock.calls.findIndex(([session]) => session.id === member.id)
       expect(saveIndex).toBeGreaterThanOrEqual(0)
       const inFlightSave = save.mock.results[saveIndex].value
-      await openTeamManagement()
-      fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+      await endStoredTeam(lead)
       await waitFor(() =>
         expect(
           hoisted.storedSessions.value.find((session) => session.id === lead.id)?.teamEnded
@@ -12014,8 +10282,8 @@ describe('ChatPage runtime workflow integration', () => {
     expect(hoisted.storedSessions.value.find((session) => session.id === lead.id)?.profileId).toBe(
       'missing-model'
     )
-    chooseAddMenuEntry('chat-composer-menu-team')
-    fireEvent.click(screen.getByRole('button', { name: '结束团队' }))
+    await endStoredTeam(lead)
+    await dispatchSwitchSession(lead.id)
     await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
     expect(screen.queryByRole('button', { name: /writer.*空闲/ })).toBeNull()
     await waitFor(() =>
@@ -12584,13 +10852,11 @@ describe('ChatPage runtime workflow integration', () => {
       entered: false
     }
     hoisted.teamPreflightReadGate.value = gate
+    const dispatch = watchTeamDispatch()
     const page = renderChatPage({ team: true })
     try {
       await waitFor(() => expect(readCurrentSessionState()?.id).toBe(lead.id))
-      await openTeamManagement()
-      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'writer' })).toBeChecked())
-      fireEvent.change(screen.getByLabelText('频道消息'), { target: { value: 'background work' } })
-      fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
+      await dispatch.queueBroadcast(lead.id, [member.id], 'background work')
       await waitFor(() => expect(gate.entered).toBe(true))
       fireEvent.change(screen.getByTestId('chat-composer-input-mock'), {
         target: { value: 'new lead draft' }

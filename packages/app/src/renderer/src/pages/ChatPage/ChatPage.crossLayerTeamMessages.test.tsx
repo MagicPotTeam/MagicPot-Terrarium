@@ -4,7 +4,10 @@ import { createServer } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { AgentTeamMessageQueue } from '../../../../main/api/agentTeamMessageQueue'
+import { subscribedTeamDispatcher } from './__fixtures__/subscribedTeamDispatcher'
+import { TeamMessageDispatcher } from './teamMessageDispatcher'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, it, vi } from 'vitest'
@@ -352,6 +355,9 @@ it.each(['direct', 'channel', 'snapshot'] as const)(
       const store = getTeamEndStore()
       cleanup.push(() => (store as unknown as { store: { close(): void } }).store.close())
       const llm = new LLMProxySvcImpl()
+      // The test owns this service. Release its SQLite handle before removing its directory.
+      const { teamMessageQueue } = llm as unknown as { teamMessageQueue: AgentTeamMessageQueue }
+      cleanup.push(() => teamMessageQueue.dispose())
       cleanup.push(() => {
         sender.emit('destroyed')
       })
@@ -438,34 +444,33 @@ it.each(['direct', 'channel', 'snapshot'] as const)(
       )
       cleanup.push(() => view.unmount())
       await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-      const openManagement = async () => {
-        // Team management opens from the conversation header (the composer has no team menu).
-        fireEvent.click(await screen.findByTestId('agent-header-team'))
-        return screen.findByRole('dialog', { name: '团队管理' })
-      }
       if (scenario === 'snapshot') {
         fireEvent.change(screen.getByTestId('input'), {
           target: { value: '@writer hold writer busy' }
         })
         fireEvent.click(screen.getByText('send fixture'))
         await waitFor(() => expect(releaseBusy).toBeDefined())
-        const dialog = await openManagement()
-        const writer = await within(dialog).findByRole('checkbox', { name: 'writer' })
-        const reviewer = within(dialog).getByRole('checkbox', { name: 'reviewer' })
-        const observer = within(dialog).getByRole('checkbox', { name: 'observer' })
-        const designer = within(dialog).getByRole('checkbox', { name: 'designer' })
-        await waitFor(() => {
-          expect(writer).toBeChecked()
-          expect(reviewer).toBeChecked()
-          expect(observer).toBeChecked()
-          expect(designer).toBeChecked()
-        })
-        fireEvent.click(observer)
-        fireEvent.click(designer)
-        const broadcast = (text: string) => {
-          fireEvent.change(screen.getByLabelText('频道消息'), { target: { value: text } })
-          fireEvent.click(screen.getByRole('button', { name: '广播给订阅成员' }))
-        }
+        const dispatcher = await subscribedTeamDispatcher(TeamMessageDispatcher, [
+          'writer',
+          'reviewer',
+          'observer',
+          'designer'
+        ])
+        dispatcher.unsubscribe('observer')
+        dispatcher.unsubscribe('designer')
+        const broadcast = (text: string) =>
+          expect(
+            dispatcher.enqueueUserChannel({
+              id: text,
+              source: {
+                kind: 'user',
+                scope: 'isolated-fixture',
+                thread: route.threadId,
+                lead: 'lead'
+              },
+              text
+            }).queued
+          ).toBe(2)
         const byRecipient = (id: string, text: string) =>
           chatRequests.filter(
             (req) =>
@@ -482,12 +487,8 @@ it.each(['direct', 'channel', 'snapshot'] as const)(
           ).toBe(true)
         })
         expect(byRecipient('writer', 'snapshot old broadcast')).toHaveLength(0)
-        fireEvent.click(writer)
-        fireEvent.click(observer)
-        await waitFor(() => {
-          expect(writer).not.toBeChecked()
-          expect(observer).toBeChecked()
-        })
+        dispatcher.unsubscribe('writer')
+        dispatcher.subscribe('observer')
         broadcast('snapshot new broadcast')
         await waitFor(() => {
           expect(byRecipient('reviewer', 'snapshot new broadcast')).toHaveLength(1)
@@ -510,11 +511,8 @@ it.each(['direct', 'channel', 'snapshot'] as const)(
         ] as const)
           expect(byRecipient(id, text)).toHaveLength(count)
       } else if (scenario === 'channel') {
-        const dialog = await openManagement()
-        const observer = await within(dialog).findByRole('checkbox', { name: 'observer' })
-        await waitFor(() => expect(observer).toBeChecked())
-        fireEvent.click(observer)
-        expect(observer).not.toBeChecked()
+        const dispatcher = await subscribedTeamDispatcher(TeamMessageDispatcher, ['observer'])
+        dispatcher.unsubscribe('observer')
         fireEvent.change(screen.getByTestId('input'), {
           target: { value: '@designer 发送频道广播' }
         })

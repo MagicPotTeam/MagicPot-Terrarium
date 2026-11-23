@@ -1,15 +1,13 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { zhLocaleText } from '../../testUtils/localeTranslator'
 import { DEFAULT_CONFIG, type Config } from '@shared/config/config'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
-import type { ReactNode } from 'react'
 import type { ChatSession } from './chatStorage'
 import { ChatSessionSaveBaseline } from './chatSaveBaseline'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
-import { setTeamTaskStatus } from './agentTeamTasks'
 import ChatPage from './ChatPage'
 
 const h = vi.hoisted(() => ({
@@ -21,9 +19,7 @@ const h = vi.hoisted(() => ({
   updateConfig: vi.fn(),
   load: vi.fn(),
   save: vi.fn(),
-  fetch: vi.fn(),
-  claim: vi.fn(),
-  request: vi.fn()
+  fetch: vi.fn()
 }))
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -89,32 +85,6 @@ vi.mock('./chatStorage', async (importOriginal) => {
     writeSessionDraftBackup: vi.fn()
   }
 })
-// A team runs on the local transport, which always streams (supportsStreamingChatCompletion), so a member's
-// task request goes through requestChatCompletionStream. Only that export is replaced, so a refactor of
-// chatRequestUtils breaks this fixture loudly instead of silently reaching a real transport.
-vi.mock('./chatRequestUtils', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./chatRequestUtils')>()
-  return {
-    ...actual,
-    requestChatCompletionStream: async (input: {
-      beforeLocalDispatch?: () => void | Promise<void>
-      onLocalDispatch?: () => void
-      signal?: AbortSignal
-    }) => {
-      if (input.beforeLocalDispatch) await input.beforeLocalDispatch()
-      if (input.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-      const pending = h.request(input) as Promise<{ content: string }>
-      input.onLocalDispatch?.()
-      const result = await pending
-      return { result, response: result.content }
-    }
-  }
-})
-// The guarded claim is a compare-and-update in the real store; the fixture commits it to the synthetic store.
-vi.mock('./agentTeamTaskDispatch', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./agentTeamTaskDispatch')>()),
-  claimTeamTaskInDB: (...args: unknown[]) => h.claim(...args)
-}))
 vi.mock('./components/SessionSidebar', () => ({ default: () => <div /> }))
 vi.mock('./components/SessionHistoryDialog', () => ({ default: () => null }))
 vi.mock('./components/ChatPrimarySelection', () => ({ default: () => null }))
@@ -138,27 +108,7 @@ vi.mock('@renderer/utils/windowUtils', () => ({
     svcManagedMedia: {}
   })
 }))
-// The composer renders the page's real "+" menu slot, as the runtime-flow fixture does.
-vi.mock('./components/ChatComposer', async () => {
-  const { useState } = await import('react')
-  return {
-    default: function ChatComposerMock({
-      addMenuSlot
-    }: {
-      addMenuSlot?: (closeMenu: () => void) => ReactNode
-    }) {
-      const [open, setOpen] = useState(false)
-      return (
-        <div data-testid="composer">
-          <button type="button" onClick={() => setOpen(true)}>
-            open-add-menu
-          </button>
-          {open && addMenuSlot?.(() => setOpen(false))}
-        </div>
-      )
-    }
-  }
-})
+vi.mock('./components/ChatComposer', () => ({ default: () => null }))
 vi.mock('./components/ChatMessageList', () => ({
   default: ({ currentSession }: { currentSession?: ChatSession }) => (
     <output data-testid="session">
@@ -183,51 +133,6 @@ const page = () => (
     </ThemeProvider>
   </MemoryRouter>
 )
-// A canvas thread route enables team management for the page.
-const teamRoute = {
-  channel: 'canvas',
-  scopeType: 'thread',
-  scopeId: 'ensure-frozen-project',
-  threadId: 'ensure-frozen-pane'
-} as const
-const teamPage = () => (
-  <MemoryRouter>
-    <ThemeProvider theme={theme}>
-      <ChatPage compact storageScope={scope} active route={teamRoute} />
-    </ThemeProvider>
-  </MemoryRouter>
-)
-const lead: ChatSession = {
-  id: 'fixture-lead',
-  title: 'Lead',
-  profileId: 'base-model',
-  messages: [{ role: 'user', content: 'original' }],
-  createdAt: 300,
-  teamGeneration: 1,
-  teamSettings: { maxMembers: 6, defaultModel: null, autoCleanup: false },
-  teamTasks: [
-    {
-      id: 'fixture-task',
-      title: 'fixture task',
-      ownerId: 'fixture-member',
-      status: 'pending',
-      dependsOn: []
-    }
-  ]
-}
-const member: ChatSession = {
-  id: 'fixture-member',
-  title: 'designer',
-  profileId: 'base-model',
-  messages: [],
-  createdAt: 301,
-  teamLeadId: lead.id,
-  teamMemberName: 'designer',
-  teamRole: '设计师',
-  teamMemberGeneration: 1
-}
-const storedLead = () => h.sessions.find((stored) => stored.id === lead.id)
-
 beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
@@ -236,8 +141,6 @@ beforeEach(() => {
   h.save.mockReset().mockImplementation(() => new Promise(() => {}))
   h.notify = vi.fn()
   h.fetch.mockReset().mockRejectedValue(new Error('Network forbidden in fixture'))
-  h.claim.mockReset().mockRejectedValue(new Error('Claim not expected in this test'))
-  h.request.mockReset().mockRejectedValue(new Error('Request not expected in this test'))
   vi.stubGlobal('fetch', h.fetch)
   localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), session.id)
 })
@@ -287,92 +190,6 @@ describe('ChatPage baseline call sites, synthetic storage and no network', () =>
       expect(h.fetch).not.toHaveBeenCalled()
     } finally {
       release?.(structuredClone(h.sessions))
-      view.unmount()
-    }
-  })
-
-  it('freezes the lead baseline and invokes persistLatest after a guarded task claim and member completion', async () => {
-    // The assertion is deliberately a real page route, never a direct baseline helper invocation.
-    const freeze = vi.spyOn(ChatSessionSaveBaseline.prototype, 'freeze')
-    const persistLatest = vi.spyOn(ChatSessionSaveBaseline.prototype, 'persistLatest')
-    h.sessions = [structuredClone(lead), structuredClone(member)]
-    localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, scope), lead.id)
-    // Saves acknowledge in this test: the completion write must commit for the page to report it.
-    h.save.mockReset().mockImplementation(async (saved: ChatSession) => {
-      h.sessions = h.sessions.map((stored) =>
-        stored.id === saved.id ? structuredClone(saved) : stored
-      )
-    })
-    h.claim.mockImplementation(
-      async ({ expectedLead, taskId }: { expectedLead: ChatSession; taskId: string }) => {
-        const claimed: ChatSession = {
-          ...structuredClone(expectedLead),
-          teamTasks: setTeamTaskStatus(expectedLead.teamTasks ?? [], taskId, 'running')
-        }
-        h.sessions = h.sessions.map((stored) =>
-          stored.id === claimed.id ? structuredClone(claimed) : stored
-        )
-        return claimed
-      }
-    )
-    let finish!: (value: { content: string }) => void
-    h.request.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve
-        })
-    )
-    const view = render(teamPage())
-    try {
-      await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('original'))
-      // Team management opens from the conversation header (the composer has no "+" menu).
-      fireEvent.click(await screen.findByTestId('agent-header-team'))
-      await screen.findByRole('dialog', { name: '团队管理' })
-      expect(screen.getByRole('button', { name: '执行 fixture task' })).toBeEnabled()
-      fireEvent.click(screen.getByRole('button', { name: '执行 fixture task' }))
-      await waitFor(() => expect(h.request).toHaveBeenCalledTimes(1))
-      expect(h.claim).toHaveBeenCalledTimes(1)
-      expect(storedLead()?.teamTasks?.[0].status).toBe('running')
-      const request = h.request.mock.calls[0][0] as {
-        teamMember?: unknown
-        messages: Array<{ content: string }>
-      }
-      expect(request.teamMember).toEqual({
-        scope,
-        thread: teamRoute.threadId,
-        lead: lead.id,
-        member: member.id
-      })
-      expect(request.messages.at(-1)?.content).toContain('fixture task')
-      // Only the completion path may satisfy the baseline assertions below, never a load-time freeze.
-      freeze.mockClear()
-      persistLatest.mockClear()
-      await act(async () => finish({ content: 'fixture result' }))
-      await waitFor(() => expect(storedLead()?.teamTasks?.[0].status).toBe('done'))
-      expect(freeze).toHaveBeenCalledWith(
-        scope,
-        'fixture-lead',
-        expect.objectContaining({ id: 'fixture-lead' })
-      )
-      expect(persistLatest).toHaveBeenCalledWith(
-        scope,
-        'fixture-lead',
-        expect.any(Function),
-        expect.any(Function),
-        expect.any(Function),
-        true,
-        expect.any(Function)
-      )
-      // The completion write is checked against the claimed lead, the baseline frozen for it.
-      const completionSave = h.save.mock.calls.findLast(
-        ([saved]) => (saved as ChatSession).id === lead.id
-      ) as [ChatSession, string, { expectedSession?: ChatSession | null }] | undefined
-      expect(completionSave?.[0].teamTasks?.[0].status).toBe('done')
-      expect(completionSave?.[2].expectedSession?.teamTasks?.[0].status).toBe('running')
-      expect(h.request).toHaveBeenCalledTimes(1)
-      expect(h.fetch).not.toHaveBeenCalled()
-    } finally {
-      finish?.({ content: 'cleanup' })
       view.unmount()
     }
   })

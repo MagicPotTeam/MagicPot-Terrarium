@@ -29,10 +29,6 @@ const channel = (id: number): QueuedSendState => ({
   queueKey: `team-message:${id}`,
   overrides: { onTeamRequestStarted: () => undefined }
 })
-const task = (id: number): QueuedSendState => ({
-  id,
-  overrides: { onTaskCompleted: () => undefined }
-})
 const autoSend = (id: number): QueuedSendState => ({
   id,
   queueKey: `request-${id}`,
@@ -47,7 +43,9 @@ describe('queued send rules', () => {
       isUserQueuedSend({ id: 3, queueKey: 'lead-summary', overrides: { composerSubmission: true } })
     ).toBe(true)
     expect(isUserQueuedSend(channel(4))).toBe(false)
-    expect(isUserQueuedSend(task(5))).toBe(false)
+    expect(isUserQueuedSend({ id: 5, overrides: { onTeamRequestStarted: () => undefined } })).toBe(
+      false
+    )
     expect(isUserQueuedSend(autoSend(6))).toBe(false)
     expect(isUserQueuedSend({ id: 7 })).toBe(false)
   })
@@ -56,9 +54,8 @@ describe('queued send rules', () => {
     expect(isEditableQueuedSend(composer(1))).toBe(true)
     expect(isEditableQueuedSend(edit(2))).toBe(true)
     expect(isEditableQueuedSend(composer(3, { paused: true, heldByStop: 1 }))).toBe(true)
-    // Team-internal work keeps its sender's authority: a member channel message, a task dispatch.
+    // A member channel message keeps its sender's authority.
     expect(isEditableQueuedSend(channel(4))).toBe(false)
-    expect(isEditableQueuedSend(task(5))).toBe(false)
     expect(isEditableQueuedSend(autoSend(6))).toBe(false)
     expect(isEditableQueuedSend(composer(7, { inFlight: true }))).toBe(false)
     // A composer item that resolves its attachments lazily is not edited in place either.
@@ -95,7 +92,7 @@ describe('queued send rules', () => {
   })
 
   it('member stop keeps every user item paused and drops team work', () => {
-    const queue = [composer(1, { inFlight: true, leaseId: 3 }), channel(2), edit(3), task(4)]
+    const queue = [composer(1, { inFlight: true, leaseId: 3 }), channel(2), edit(3), autoSend(4)]
     const { kept, dropped } = settleQueueOnStop(queue, 'member', 1)
     expect(dropped.map((item) => item.id)).toEqual([2, 4])
     expect(
@@ -157,7 +154,7 @@ describe('queued send rules', () => {
     ).toBe(true)
     expect(queueSendsWithoutUserAction([composer(1)])).toBe(true)
     expect(queueSendsWithoutUserAction([channel(1)])).toBe(true)
-    expect(queueSendsWithoutUserAction([composer(1, { heldByStop: 1 }), task(2)])).toBe(true)
+    expect(queueSendsWithoutUserAction([composer(1, { heldByStop: 1 }), channel(2)])).toBe(true)
   })
 
   it('a stale lease never becomes current again, even when the same item is leased again', () => {

@@ -60,7 +60,6 @@ export function defaultValueFirstTranslator(language: string): LocaleTranslate {
 // that echoes the key would show the key where the page shows text.
 const LOCALE_ONLY_PREFIXES = [
   'chat.team_notice.',
-  'chat.team_menu.',
   'chat.queue_item.',
   'chat.team_member_status.'
 ] as const
@@ -72,7 +71,6 @@ const LOCALE_ONLY_KEYS = new Set([
   'agent_workspace.member_form.limit_reached',
   'agent_workspace.member_form.name',
   'agent_workspace.member_form.role',
-  'agent_workspace.team_overlay.close_aria',
   'chat.context_budget_preview_ratio',
   'chat.context_compression_preview_idle',
   'chat.context_compression_preview_planned',
@@ -88,8 +86,6 @@ const LOCALE_ONLY_KEYS = new Set([
   'chat.new_conversation_keep_original',
   'chat.queue_edit_busy',
   'chat.skill_none',
-  'chat.task_dependency_invalid',
-  'chat.team_ended',
   'chat.team_lead_row',
   'chat.team_live_unknown_tool',
   'chat.team_member_default_name'

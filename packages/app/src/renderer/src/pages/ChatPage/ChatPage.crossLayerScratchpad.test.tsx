@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -14,7 +14,7 @@ import { cliFromProfile } from '@shared/llm'
 import ChatPage from './ChatPage'
 import MagicAgentApprovalCenter from '../../components/MagicAgentApprovalCenter'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
-import type { ChatSession } from './chatStorage'
+import { endTeamInDB, type ChatSession } from './chatStorage'
 
 const h = vi.hoisted(() => ({
   fromId: vi.fn(),
@@ -307,7 +307,6 @@ it.each(['approve', 'end', 'deny'] as const)(
       platform = new MagicAgentPlatformSvcImpl()
     let writerOutcome: Promise<'fulfilled' | 'rejected'> | undefined
     const bridge = {
-      endTeam: (req: any) => llm.endTeam(req),
       chat: (req: any) => {
         const pending = llm.chat(req, invoke('svcLLMProxy', 'chat'))
         if (req.conversationId === 'writer')
@@ -440,10 +439,20 @@ it.each(['approve', 'end', 'deny'] as const)(
         return
       }
       if (endWhilePending) {
-        // Team management opens from the conversation header (the composer has no team menu).
-        fireEvent.click(await screen.findByTestId('agent-header-team'))
-        const management = await screen.findByRole('dialog', { name: '团队管理' })
-        fireEvent.click(within(management).getByRole('button', { name: '结束团队' }))
+        // The lifecycle owner cuts the turn in MAIN and commits its records. The page receives
+        // the same notification as when a team is ended in another window.
+        await act(async () => {
+          await llm.endTeam({ scope: 'isolated-fixture', thread: route.threadId, lead: 'lead' })
+          await endTeamInDB({
+            scope: 'isolated-fixture',
+            expectedLead: h.sessions.value.find((s) => s.id === 'lead')
+          })
+          window.dispatchEvent(
+            new CustomEvent('chat:team-lifecycle-ended', {
+              detail: { scope: 'isolated-fixture', leadId: 'lead' }
+            })
+          )
+        })
         await waitFor(() =>
           expect(h.sessions.value.find((s) => s.id === 'lead')?.teamEnded).toBe(true)
         )

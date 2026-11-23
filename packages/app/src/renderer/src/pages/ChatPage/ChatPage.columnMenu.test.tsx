@@ -10,8 +10,7 @@ import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import ChatPage from './ChatPage'
 import { scopedStorageKey, STORAGE_KEY_CURRENT_SESSION_ID } from './chatPageShared'
 
-// Wiring only: where the real ChatPage offers the functions that left the Agent column chrome
-// (the column header's team buttons and slash commands; the composer has no "+" menu).
+// Wiring in the Agent column: slash commands and model selection, with no team-management chrome.
 const h = vi.hoisted(() => ({
   config: { value: null as any },
   sessions: { value: [] as any[] },
@@ -280,7 +279,7 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(screen.queryByRole('dialog', { name: '创建成员' })).toBeNull()
   })
 
-  it('offers only "team" in the header when the thread has a team and opens team management', async () => {
+  it('has no team-management button or dialog even when a team exists', async () => {
     h.sessions.value = [
       { id: 'lead', title: 'Lead', profileId: 'fixture-profile', messages: [] },
       {
@@ -295,22 +294,11 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     ]
     renderPage()
     await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
-    const team = await screen.findByTestId('agent-header-team')
-    const actions = screen.getByTestId('agent-header-team-actions')
-    expect([...actions.children].map((entry) => entry.getAttribute('data-testid'))).toEqual([
-      'agent-header-team'
-    ])
-    expect(team).toHaveAccessibleName('团队…')
-    expect(en.chat.team_menu_manage).toBe('Team…')
+    expect(screen.queryByTestId('agent-header-team')).toBeNull()
+    expect(screen.queryByTestId('agent-header-team-actions')).toBeNull()
+    expect(screen.queryByTestId('agent-team-overlay')).toBeNull()
+    expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
     expect(menuEntryIds()).toEqual([])
-    expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
-
-    fireEvent.click(team)
-    const dialog = await screen.findByRole('dialog', { name: '团队管理' })
-    const closeTeam = screen.getByRole('button', { name: '关闭团队管理' })
-    await waitFor(() => expect(closeTeam).toHaveFocus())
-    fireEvent.keyDown(dialog, { key: 'Escape' })
-    expect(screen.queryByRole('dialog', { name: '团队管理' })).toBeNull()
   })
 
   it('offers no team buttons with the remote model service', async () => {
