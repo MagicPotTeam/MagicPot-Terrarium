@@ -348,7 +348,13 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
         expect(index).toBeGreaterThanOrEqual(0)
         if (alias && step === 1)
           expect(params.tools!.at(index)!.inputSchema).toMatchObject({
-            properties: { timeout_s: { type: 'number', exclusiveMinimum: 0, maximum: AGENT_THREAD_INTERACTION_LIMITS.maxFeedbackTimeoutSeconds } }
+            properties: {
+              timeout_s: {
+                type: 'number',
+                exclusiveMinimum: 0,
+                maximum: AGENT_THREAD_INTERACTION_LIMITS.maxFeedbackTimeoutSeconds
+              }
+            }
           })
         if (withBody && step === 1)
           expect(params.tools!.at(index)!.inputSchema).toMatchObject({
@@ -716,7 +722,7 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
           const index = input.tools!.findIndex((tool) => tool.name === 'show_card')
           expect(index).toBeGreaterThanOrEqual(0)
           if (withBody) {
-            expect(input.tools!.at(index)!.description).toContain('formatting-only Markdown body')
+            expect(input.tools!.at(index)!.description).toMatch(/formatting-only Markdown body/i)
             expect(input.tools!.at(index)!.inputSchema).toMatchObject({
               properties: { body: { type: 'string', maxLength: 4000 } }
             })
