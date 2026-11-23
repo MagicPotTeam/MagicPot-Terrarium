@@ -87,12 +87,29 @@ describe('standalone Codex JSON Images contract (not public multipart or hosted 
 
   it.each([
     ['parse', () => new Response('broken private body', { status: 200 }), 'decode', 200],
-    ['empty', () => Response.json({data:[]}), 'decode', 200],
-    ['broken stream', () => new Response(new ReadableStream({start(c){c.error(new Error('fixture truncation'))}})), 'receive', 200],
-    ['gateway error', () => new Response('', {status:502}), 'request', 502]
+    ['empty', () => Response.json({ data: [] }), 'decode', 200],
+    [
+      'broken stream',
+      () =>
+        new Response(
+          new ReadableStream({
+            start(c) {
+              c.error(new Error('fixture truncation'))
+            }
+          })
+        ),
+      'receive',
+      200
+    ],
+    ['gateway error', () => new Response('', { status: 502 }), 'request', 502]
   ] as const)('reports %s without redispatch', async (_name, reply, phase, http) => {
     h.fetch.mockImplementationOnce(async () => reply())
-    await expect(custom().generate('fixture')).rejects.toMatchObject({retryBlocked:true, imageHttpStatus:http, imageFailureStage:phase, imageClientRequestId:expect.stringMatching(/^[a-f0-9-]{36}$/i)})
+    await expect(custom().generate('fixture')).rejects.toMatchObject({
+      retryBlocked: true,
+      imageHttpStatus: http,
+      imageFailureStage: phase,
+      imageClientRequestId: expect.stringMatching(/^[a-f0-9-]{36}$/i)
+    })
     expect(h.fetch).toHaveBeenCalledOnce()
   })
 
@@ -187,7 +204,7 @@ describe('standalone Codex JSON Images contract (not public multipart or hosted 
     expect(h.refresh).not.toHaveBeenCalled()
   })
 
-  it('offers GIF only with a trusted opt-in and uses flat body fields', async () => {
+  it('sends flat GIF controls only when the factory supplies the trusted backend capability', async () => {
     await expect(oauth().generate('loop', { gif: {} })).rejects.toThrow('GIF output is not enabled')
     expect(h.fetch).not.toHaveBeenCalled()
     expect(h.ensure).not.toHaveBeenCalled()
