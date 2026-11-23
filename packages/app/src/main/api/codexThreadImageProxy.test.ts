@@ -96,6 +96,14 @@ const invocation = (method: string) => ({
 const prompt = 'A real one-pixel fixture, no live provider'
 const encoded =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg2JLyHwAD6AIYhAHF9gAAAABJRU5ErkJggg=='
+// A valid two-frame GIF: the late-response test must reject the changed backend, not malformed bytes.
+const animatedBytes = Buffer.concat([
+  Buffer.from('47494638396101000100800000000000ffffff', 'hex'),
+  ...Array.from({ length: 2 }, () =>
+    Buffer.from('21f904000a0000002c0000000001000100000202440100', 'hex')
+  ),
+  Buffer.from([0x3b])
+])
 const sse = (output: unknown[]) =>
   new Response(
     `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output } })}\n\n`,
@@ -198,8 +206,8 @@ it.each(
         'config-link',
         'config-target',
         'late-link',
-        'gif-revoked',
-        'late-gif-revoked'
+        'gif-backend-switch',
+        'late-gif-backend-switch'
       ] as const
     ).map((boundary) => [method, boundary] as const)
   )
@@ -216,9 +224,10 @@ it.each(
       base_url: 'https://independent-text.fixture/v1',
       api_key: 'never-image-key',
       attachment_transports: ['request-data-url'],
-      codex_image_profile_id: 'selected-oauth',
-      codex_image_gif_enabled: true
+      codex_image_profile_id: 'selected-oauth'
     }
+    const gifRequest = boundary === 'gif-backend-switch' || boundary === 'late-gif-backend-switch'
+    if (gifRequest) getConfig().llm_config.api_profiles[0].base_url = 'https://provider.fixture/v1'
     getConfig().llm_config.api_profiles.push(text)
     let imageCalls = 0,
       textCalls = 0
@@ -235,7 +244,10 @@ it.each(
         expect(init.headers.Authorization).toBe('Bearer fixture-oauth')
         expect(JSON.stringify(init)).not.toContain('never-image-key')
         await imageReply
-        return Response.json({ data: [{ b64_json: encoded }], output_format: 'png' })
+        return Response.json({
+          data: [{ b64_json: gifRequest ? animatedBytes.toString('base64') : encoded }],
+          output_format: gifRequest ? 'gif' : 'png'
+        })
       }
       expect(endpoint).toBe('https://independent-text.fixture/v1/responses')
       expect(init.headers.Authorization).toBe('Bearer never-image-key')
@@ -253,7 +265,7 @@ it.each(
           arguments: JSON.stringify({
             prompt,
             num_last_images_to_include: 1,
-            ...(['gif-revoked', 'late-gif-revoked'].includes(boundary) ? { gif: {} } : {})
+            ...(gifRequest ? { gif: {} } : {})
           })
         }
       ])
@@ -276,7 +288,10 @@ it.each(
         }
       ]
     }
-    req.messages.push({ role: 'user', content: 'Edit the earlier reference.' } as typeof req.messages[number])
+    req.messages.push({
+      role: 'user',
+      content: 'Edit the earlier reference.'
+    } as (typeof req.messages)[number])
     let settled = false,
       failure: unknown
     const pending = (
@@ -306,7 +321,8 @@ it.each(
     const approval = policy.listPendingTerminalApprovals()[0]
     expect(approval.request.request.input).toMatchObject({
       profileId: 'selected-oauth',
-      uploadsInputImages: true
+      uploadsInputImages: true,
+      ...(gifRequest ? { gif: {}, output_format: 'gif', backend: 'codex-json-oauth' } : {})
     })
     expect(JSON.stringify(approval)).not.toContain('base64,')
     expect(JSON.stringify(approval)).not.toContain('never-image-key')
@@ -323,7 +339,7 @@ it.each(
         invocation('cancelConversation')
       )
     if (boundary === 'navigation') sender.emit('did-start-navigation')
-    if (boundary === 'config-link') {
+    if (boundary === 'config-link' || boundary === 'gif-backend-switch') {
       text.codex_image_profile_id = 'selected'
       resolve(true)
     }
@@ -332,18 +348,13 @@ it.each(
       h.configChanged?.()
       if (policy.listPendingTerminalApprovals().length) resolve(true)
     }
-    if (boundary === 'gif-revoked') {
-      text.codex_image_gif_enabled = false
-      resolve(true)
-    }
-    if (boundary === 'late-link' || boundary === 'late-gif-revoked') {
+    if (boundary === 'late-link' || boundary === 'late-gif-backend-switch') {
       resolve(true)
       await vi.waitFor(() => {
         if (failure) throw failure
         expect(imageCalls).toBe(1)
       })
-      if (boundary === 'late-link') text.codex_image_profile_id = 'selected'
-      else text.codex_image_gif_enabled = false
+      text.codex_image_profile_id = 'selected'
       release!()
     }
     release!()
@@ -365,7 +376,13 @@ it.each(
       expect(
         outputEvents.filter((event) => event.type === 'done' || event.type === 'error')
       ).toEqual([])
-    const afterDispatch = boundary === 'late-link' || boundary === 'late-gif-revoked'
+    const afterDispatch = boundary === 'late-link' || boundary === 'late-gif-backend-switch'
+    // Inspect the raw attempts as well as the decoded JSON counter: an incorrect /v1 multipart
+    // upload or fallback to another endpoint must not be hidden by a failing body parser.
+    expect(h.fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://independent-text.fixture/v1/responses',
+      ...(afterDispatch ? ['https://chatgpt.com/backend-api/codex/images/edits'] : [])
+    ])
     expect(imageCalls).toBe(afterDispatch ? 1 : 0)
     expect(textCalls).toBe(1)
     expect(auth.refresh).not.toHaveBeenCalled()
@@ -386,63 +403,121 @@ it.each(
   }
 )
 
-it.each(['chat', 'chatStream'] as const)('continues editing the previous result on a fresh %s turn after approving each upload', async (method) => {
-  const base = 'https://provider.fixture/v1'
-  getConfig().llm_config.api_profiles[0].base_url = base
-  const webp = 'UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoCAAEAAUAmJaQAA3AA/v02aAA='
-  let edits = 0, calls = 0
-  h.fetch.mockImplementation(async (input, init) => {
-    if (String(input) === `${base}/images/edits`) {
-      const file = (init.body as FormData).get('image') as File
-      expect(Buffer.from(await file.arrayBuffer()).toString('base64')).toBe(edits++ === 0 ? webp : encoded)
-      return edits === 1 ? Response.json({ data: [{ b64_json: encoded }], output_format: 'png' })
-        : Response.json({ data: [{ b64_json: webp }] }) // compatible gateway omits the output-format hint
+it.each(['chat', 'chatStream'] as const)(
+  'continues editing the previous result on a fresh %s turn after approving each upload',
+  async (method) => {
+    const base = 'https://provider.fixture/v1'
+    getConfig().llm_config.api_profiles[0].base_url = base
+    const webp = 'UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoCAAEAAUAmJaQAA3AA/v02aAA='
+    let edits = 0,
+      calls = 0
+    h.fetch.mockImplementation(async (input, init) => {
+      if (String(input) === `${base}/images/edits`) {
+        const file = (init.body as FormData).get('image') as File
+        expect(Buffer.from(await file.arrayBuffer()).toString('base64')).toBe(
+          edits++ === 0 ? webp : encoded
+        )
+        return edits === 1
+          ? Response.json({ data: [{ b64_json: encoded }], output_format: 'png' })
+          : Response.json({ data: [{ b64_json: webp }] }) // compatible gateway omits the output-format hint
+      }
+      expect(String(input)).toBe(`${base}/responses`)
+      const body = JSON.parse(String(init.body))
+      const step = ++calls
+      if (step % 2 === 0)
+        return sse([
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done.' }] }
+        ])
+      const tool = body.tools.find((entry: { description?: string }) =>
+        entry.description?.startsWith('image_gen:')
+      )
+      return sse([
+        {
+          type: 'function_call',
+          call_id: `edit-${step}`,
+          id: `fn-${step}`,
+          name: tool.name,
+          arguments: JSON.stringify({
+            prompt: step === 1 ? 'Preserve the style.' : 'Simplify the previous picture.',
+            num_last_images_to_include: 1
+          })
+        }
+      ])
+    })
+    const policy = getAssistantTerminalPolicyRuntime()
+    const turn = async (messages: import('@shared/llm').ChatMessage[]) => {
+      const req = { ...scope, profileId: 'selected', messages }
+      if (method === 'chat') return service.chat(req, invocation(method))
+      const onData = vi.fn<(event: LLMChatStreamResp) => void>()
+      await service.chatStream(req, { onData }, invocation(method))
+      const done = onData.mock.calls.map(([e]) => e).findLast((e) => e.type === 'done')
+      if (!done) throw Error('Missing completed image turn')
+      return done
     }
-    expect(String(input)).toBe(`${base}/responses`)
-    const body = JSON.parse(String(init.body))
-    const step = ++calls
-    if (step % 2 === 0) return sse([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done.' }] }])
-    const tool = body.tools.find((entry: { description?: string }) => entry.description?.startsWith('image_gen:'))
-    return sse([{ type: 'function_call', call_id: `edit-${step}`, id: `fn-${step}`, name: tool.name,
-      arguments: JSON.stringify({ prompt: step === 1 ? 'Preserve the style.' : 'Simplify the previous picture.', num_last_images_to_include: 1 }) }])
-  })
-  const policy = getAssistantTerminalPolicyRuntime()
-  const turn = async (messages: import('@shared/llm').ChatMessage[]) => {
-    const req = { ...scope, profileId: 'selected', messages }
-    if (method === 'chat') return service.chat(req, invocation(method))
-    const onData = vi.fn<(event: LLMChatStreamResp) => void>()
-    await service.chatStream(req, { onData }, invocation(method))
-    const done = onData.mock.calls.map(([e]) => e).findLast(e => e.type === 'done')
-    if (!done) throw Error('Missing completed image turn')
-    return done
+    // Every edit uploads an image, so each turn waits for exactly one formal approval.
+    const approveEdit = async () => {
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+        timeout: 10_000
+      })
+      const [approval] = policy.listPendingTerminalApprovals()
+      expect(approval.request.request.input).toMatchObject({
+        uploadsInputImages: true,
+        inputImages: [expect.any(Object)]
+      })
+      expect(JSON.stringify(approval)).not.toContain('base64,')
+      expect(edits).toBe(approved)
+      policy.resolvePendingTerminalApproval({
+        approvalId: approval.approvalId,
+        expectedRevision: approval.revision,
+        approved: true
+      })
+      approved++
+    }
+    let approved = 0
+    const first = {
+      role: 'user' as const,
+      content: '风格不变，设计优化下画面',
+      attachments: [
+        { type: 'image' as const, mimeType: 'image/webp', url: `data:image/webp;base64,${webp}` }
+      ]
+    }
+    const firstTurn = turn([first])
+    await approveEdit()
+    const original = await firstTurn
+    const media = original.attachments?.[0].media
+    expect(media?.kind).toBe('managed')
+    const returned = await fs.readFile(path.join(h.data, '.chat_media', media!.relativePath))
+    const history = [
+      first,
+      {
+        role: 'assistant' as const,
+        content: 'Done.',
+        attachments: [
+          {
+            type: 'image' as const,
+            mimeType: 'image/png',
+            url: `data:image/png;base64,${returned.toString('base64')}`
+          }
+        ]
+      },
+      { role: 'user' as const, content: '目前画面太斑驳、太碎，简化一些。' }
+    ]
+    const second = turn(history)
+    await approveEdit()
+    await vi.waitFor(() => {
+      expect(policy.listPendingTerminalApprovals()).toEqual([])
+      expect(edits).toBe(2)
+    })
+    const saved = (await second).attachments?.[0].media
+    expect(saved).toMatchObject({ kind: 'managed', mimeType: 'image/webp' })
+    expect(
+      (await fs.readFile(path.join(h.data, '.chat_media', saved!.relativePath))).toString('base64')
+    ).toBe(webp)
+    expect(calls).toBe(4)
+    expect(edits).toBe(2)
+    expect(policy.listPendingTerminalApprovals()).toEqual([])
   }
-  // Every edit uploads an image, so each turn waits for exactly one formal approval.
-  const approveEdit = async () => {
-    await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), { timeout: 10_000 })
-    const [approval] = policy.listPendingTerminalApprovals()
-    expect(approval.request.request.input).toMatchObject({ uploadsInputImages: true, inputImages: [expect.any(Object)] })
-    expect(JSON.stringify(approval)).not.toContain('base64,')
-    expect(edits).toBe(approved)
-    policy.resolvePendingTerminalApproval({ approvalId: approval.approvalId, expectedRevision: approval.revision, approved: true })
-    approved++
-  }
-  let approved = 0
-  const first = { role: 'user' as const, content: '风格不变，设计优化下画面', attachments: [{type:'image' as const, mimeType:'image/webp', url:`data:image/webp;base64,${webp}`}] }
-  const firstTurn = turn([first])
-  await approveEdit()
-  const original = await firstTurn
-  const media = original.attachments?.[0].media
-  expect(media?.kind).toBe('managed')
-  const returned = await fs.readFile(path.join(h.data, '.chat_media', media!.relativePath))
-  const history = [first, {role:'assistant' as const, content:'Done.', attachments:[{type:'image' as const, mimeType:'image/png',url:`data:image/png;base64,${returned.toString('base64')}`}]}, { role:'user' as const, content:'目前画面太斑驳、太碎，简化一些。' }]
-  const second = turn(history)
-  await approveEdit()
-  await vi.waitFor(() => { expect(policy.listPendingTerminalApprovals()).toEqual([]); expect(edits).toBe(2) })
-  const saved = (await second).attachments?.[0].media
-  expect(saved).toMatchObject({ kind: 'managed', mimeType: 'image/webp' })
-  expect((await fs.readFile(path.join(h.data, '.chat_media', saved!.relativePath))).toString('base64')).toBe(webp)
-  expect(calls).toBe(4); expect(edits).toBe(2); expect(policy.listPendingTerminalApprovals()).toEqual([])
-})
+)
 
 it.each(
   (['chat', 'chatStream'] as const).flatMap((method) =>
@@ -461,8 +536,11 @@ it.each(
     const gateway = mode === 'key' && !linked && !gifOutput
     if (gateway) getConfig().llm_config.api_profiles[0].base_url = 'https://provider.fixture/v1'
     const webpEdit = gateway && edits
-    const base = gateway ? 'https://provider.fixture/v1' :
-      mode === 'key' ? 'https://provider.fixture/codex' : 'https://chatgpt.com/backend-api/codex'
+    const base = gateway
+      ? 'https://provider.fixture/v1'
+      : mode === 'key'
+        ? 'https://provider.fixture/codex'
+        : 'https://chatgpt.com/backend-api/codex'
     const imageProfileId = mode === 'key' ? 'selected' : 'selected-oauth'
     const profileId = linked ? 'ordinary-text' : imageProfileId
     const textBase = linked ? 'https://text.fixture/v1' : base
@@ -485,18 +563,8 @@ it.each(
         max_input_images: 5,
         codex_image_profile_id: imageProfileId
       })
-    const sourceProfile = getConfig().llm_config.api_profiles.find((p) => p.id === profileId)!
-    sourceProfile.codex_image_gif_enabled = gifOutput
     const gifControls = { frame_count: 2, frame_duration_ms: 100 }
-    const outputBytes = gifOutput
-      ? Buffer.concat([
-          Buffer.from('47494638396101000100800000000000ffffff', 'hex'),
-          ...Array.from({ length: 2 }, () =>
-            Buffer.from('21f904000a0000002c0000000001000100000202440100', 'hex')
-          ),
-          Buffer.from([0x3b])
-        ])
-      : Buffer.from(encoded, 'base64')
+    const outputBytes = gifOutput ? animatedBytes : Buffer.from(encoded, 'base64')
     const outputEncoded = outputBytes.toString('base64')
     const authorization = mode === 'key' ? 'Bearer fixture-key' : 'Bearer fixture-oauth'
     let textCalls = 0,
@@ -504,7 +572,9 @@ it.each(
     h.fetch.mockImplementation(async (input, init) => {
       const endpoint = String(input)
       const multipart = init.body instanceof FormData ? init.body : undefined
-      const body = multipart ? Object.fromEntries(multipart.entries()) : JSON.parse(String(init.body))
+      const body = multipart
+        ? Object.fromEntries(multipart.entries())
+        : JSON.parse(String(init.body))
       if (endpoint === `${base}/images/${edits ? 'edits' : 'generations'}`) {
         expect(init.headers.Authorization).toBe(authorization)
         expect(JSON.stringify(init)).not.toContain('independent-text-key')
@@ -514,18 +584,21 @@ it.each(
           const file = multipart?.get('image') as File
           expect(file?.type).toBe('image/webp')
           expect(file.name).toMatch(/\.webp$/)
-          expect(Buffer.from(await file.arrayBuffer()).toString('base64')).toBe('UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoCAAEAAUAmJaQAA3AA/v02aAA=')
+          expect(Buffer.from(await file.arrayBuffer()).toString('base64')).toBe(
+            'UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoCAAEAAUAmJaQAA3AA/v02aAA='
+          )
           expect(body.prompt).toBe(prompt)
           expect(body.model).toBe('gpt-image-2')
-        } else expect(body).toEqual({
-          prompt,
-          background: 'transparent',
-          model: 'gpt-image-2',
-          size: 'auto',
-          quality: 'auto',
-          ...(gifOutput ? { output_format: 'gif', ...gifControls } : {}),
-          ...(edits ? { images: [{ image_url: `data:image/png;base64,${encoded}` }] } : {})
-        })
+        } else
+          expect(body).toEqual({
+            prompt,
+            background: 'transparent',
+            model: 'gpt-image-2',
+            size: 'auto',
+            quality: 'auto',
+            ...(gifOutput ? { output_format: 'gif', ...gifControls } : {}),
+            ...(edits ? { images: [{ image_url: `data:image/png;base64,${encoded}` }] } : {})
+          })
         return Response.json({
           data: [{ b64_json: outputEncoded }],
           output_format: gifOutput ? 'gif' : 'png'
@@ -541,8 +614,9 @@ it.each(
           tool.description?.startsWith('image_gen:')
         )
         expect(tool).toBeDefined()
-        if (gifOutput) expect(tool.parameters).toHaveProperty('properties.gif')
-        else expect(tool.parameters).not.toHaveProperty('properties.gif')
+        // Schema follows the backend, even when this particular call asks for a still.
+        if (gateway) expect(tool.parameters).not.toHaveProperty('properties.gif')
+        else expect(tool.parameters).toHaveProperty('properties.gif')
         expect(imageCalls).toBe(textCalls === 1 ? 0 : 1)
         return sse([
           {
@@ -583,13 +657,19 @@ it.each(
       messages: [
         {
           role: 'user' as const,
-          content: webpEdit ? '风格不变，优化下画面' : gateway ? '随便出一张图' : 'Please generate this fixture image.',
+          content: webpEdit
+            ? '风格不变，优化下画面'
+            : gateway
+              ? '随便出一张图'
+              : 'Please generate this fixture image.',
           ...(edits
             ? {
                 attachments: [
                   {
                     type: 'image' as const,
-                    url: webpEdit ? 'data:image/webp;base64,UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoCAAEAAUAmJaQAA3AA/v02aAA=' : `data:image/png;base64,${encoded}`,
+                    url: webpEdit
+                      ? 'data:image/webp;base64,UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoCAAEAAUAmJaQAA3AA/v02aAA='
+                      : `data:image/png;base64,${encoded}`,
                     mimeType: webpEdit ? 'image/webp' : 'image/png'
                   }
                 ]
@@ -616,7 +696,10 @@ it.each(
       // A plain text-to-image request: no approval is resolved by this fixture, so reaching
       // the wire proves generation didn't wait for a card or a modal. Edits upload images
       // and always wait for the approval below.
-      await vi.waitFor(() => { if (earlyError) throw earlyError; expect(imageCalls).toBe(1) })
+      await vi.waitFor(() => {
+        if (earlyError) throw earlyError
+        expect(imageCalls).toBe(1)
+      })
       expect(policy.listPendingTerminalApprovals()).toEqual([])
     } else {
       await vi.waitFor(() => {
@@ -631,7 +714,11 @@ it.each(
       expect(approval.request.request.input).toMatchObject({
         prompt,
         profileId: imageProfileId,
-        backend: gateway ? 'openai-images-api-key' : mode === 'key' ? 'codex-json-api-key' : 'codex-json-oauth',
+        backend: gateway
+          ? 'openai-images-api-key'
+          : mode === 'key'
+            ? 'codex-json-api-key'
+            : 'codex-json-oauth',
         endpoint: base,
         ...(gifOutput ? { gif: gifControls, output_format: 'gif' } : {})
       })
@@ -655,7 +742,9 @@ it.each(
             expect.objectContaining(
               webpEdit
                 ? {
-                    sourceSha256: createHash('sha256').update(Buffer.from(webpFixture, 'base64')).digest('hex'),
+                    sourceSha256: createHash('sha256')
+                      .update(Buffer.from(webpFixture, 'base64'))
+                      .digest('hex'),
                     sourceMimeType: 'image/webp',
                     sourceWidth: 2,
                     sourceHeight: 1,
@@ -663,7 +752,9 @@ it.each(
                     mimeType: 'image/webp'
                   }
                 : {
-                    sourceSha256: createHash('sha256').update(Buffer.from(encoded, 'base64')).digest('hex'),
+                    sourceSha256: createHash('sha256')
+                      .update(Buffer.from(encoded, 'base64'))
+                      .digest('hex'),
                     sourceMimeType: 'image/png',
                     sourceWidth: 1,
                     sourceHeight: 1,

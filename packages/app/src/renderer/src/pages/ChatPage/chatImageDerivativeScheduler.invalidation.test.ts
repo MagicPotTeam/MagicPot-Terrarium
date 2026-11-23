@@ -104,20 +104,26 @@ describe('chat image derivative cache invalidation', () => {
     expect(ensureDerivative).toHaveBeenCalledTimes(2)
   })
 
-  it('does not evict an original-image fallback even when its URL matches the failure', async () => {
-    const result: EnsureManagedMediaDerivativeResp = {
-      status: 'fallbackOriginal',
-      reason: 'animated-gif',
-      localMediaUrl: 'local-media:///assets/original.gif'
-    }
-    const ensureDerivative = vi.fn().mockResolvedValue(result)
-    const service = { ensureDerivative } as never
-    await ensureCachedChatImageDerivative(service, reference, 512)
+  it.each(['animated-gif', 'derivative-unavailable'] as const)(
+    'does not evict an original-image fallback (%s) even when its URL matches the failure',
+    async (reason) => {
+      const result: EnsureManagedMediaDerivativeResp = {
+        status: 'fallbackOriginal',
+        reason,
+        localMediaUrl:
+          reason === 'animated-gif'
+            ? 'local-media:///assets/original.gif'
+            : 'local-media:///assets/original.png'
+      }
+      const ensureDerivative = vi.fn().mockResolvedValue(result)
+      const service = { ensureDerivative } as never
+      await ensureCachedChatImageDerivative(service, reference, 512)
 
-    expect(invalidateCachedChatImageDerivative(key, result.localMediaUrl)).toBe(false)
-    await expect(ensureCachedChatImageDerivative(service, reference, 512)).resolves.toBe(result)
-    expect(ensureDerivative).toHaveBeenCalledOnce()
-  })
+      expect(invalidateCachedChatImageDerivative(key, result.localMediaUrl)).toBe(false)
+      await expect(ensureCachedChatImageDerivative(service, reference, 512)).resolves.toBe(result)
+      expect(ensureDerivative).toHaveBeenCalledOnce()
+    }
+  )
 
   it('does not evict another size or accept a mismatched failed URL', async () => {
     const ensureDerivative = vi.fn().mockResolvedValue(ready(recoveredUrl))

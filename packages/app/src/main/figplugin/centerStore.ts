@@ -47,6 +47,7 @@ import {
   MAX_FILES
 } from '@shared/figplugin/package'
 import type { VerifiedFigPluginPackage } from './packageVerifier'
+import { renameWithTransientRetry } from './transientRename'
 
 export type FigPluginRuntimeDescriptor = {
   pluginId: string
@@ -947,7 +948,7 @@ export class FigPluginCenterStore {
       await this.ensureRoot(root)
       await this.safeDirectory(parent)
       checkDeadline(deadlineAt)
-      await fs.rename(staging, directory)
+      await renameWithTransientRetry(staging, directory, { deadlineAt })
       renamed = true
     } finally {
       if (!renamed)
@@ -1257,7 +1258,7 @@ export class FigPluginCenterStore {
       // Rename is the commit point. Report its actual outcome even after deadline expiry.
       // No delete-and-retry fallback: failed replacement must preserve the previous record.
       if (Date.now() >= deadlineAt) return false
-      await fs.rename(temp, filename)
+      await renameWithTransientRetry(temp, filename, { deadlineAt })
       return true
     } finally {
       await handle?.close().catch(() => undefined)

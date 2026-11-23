@@ -599,4 +599,70 @@ describe('ManagedMediaSvcImpl', () => {
     })
     await expectSanitizedFailure(create(derive).ensureDerivative({ reference, maxEdge: 512 }))
   })
+
+  describe('when the preview cannot be made', () => {
+    const resolvedOriginal = {
+      reference,
+      absolutePath: '/canonical/media/ab/file.png',
+      localMediaUrl: 'local-media:///canonical/media/ab/file.png',
+      metadataPath: '/canonical/media/ab/file.png.json',
+      metadata: { mimeType: 'image/png' },
+      storeRoot: '/canonical/media',
+      integrityVerified: true,
+      verifiedAt: new Date(0).toISOString()
+    } as unknown as ResolvedManagedMedia
+    const workerMissing = () =>
+      vi.fn(async () => {
+        throw new Error('image worker binary-not-found at /secret/fixture-data/bin')
+      })
+
+    it('shows the stored original, resolved under the media root, instead of failing', async () => {
+      const resolveReference = vi.fn<
+        NonNullable<ManagedMediaSvcImplDependencies['resolveReference']>
+      >(async () => resolvedOriginal)
+      await expect(
+        create(workerMissing(), { resolveReference }).ensureDerivative({ reference, maxEdge: 512 })
+      ).resolves.toEqual({
+        status: 'fallbackOriginal',
+        reason: 'derivative-unavailable',
+        localMediaUrl: 'local-media:///canonical/media/ab/file.png'
+      })
+      expect(resolveReference).toHaveBeenCalledWith('/configured/media', reference, {
+        authorizedRoot: '/canonical/media'
+      })
+    })
+
+    it('still fails, without leaking paths, when the original cannot be resolved either', async () => {
+      for (const code of ['MANAGED_MEDIA_MISSING', 'MANAGED_MEDIA_CORRUPT'] as const) {
+        const resolveReference = vi.fn(async () => {
+          throw new ManagedMediaResolutionError(code, 'secret /fixture-data/path')
+        })
+        const failure = create(workerMissing(), { resolveReference }).ensureDerivative({
+          reference,
+          maxEdge: 512
+        })
+        await expectSanitizedFailure(failure)
+        await failure.catch((error: ServiceError) =>
+          expect(error.message).not.toContain('/fixture-data/path')
+        )
+      }
+    })
+
+    it('does not fall back for a missing or corrupt original, or a result that breaks the contract', async () => {
+      const resolveReference = vi.fn<
+        NonNullable<ManagedMediaSvcImplDependencies['resolveReference']>
+      >(async () => resolvedOriginal)
+      const missing = vi.fn(async () => {
+        throw new ManagedMediaResolutionError('MANAGED_MEDIA_MISSING', 'gone')
+      })
+      await expect(
+        create(missing, { resolveReference }).ensureDerivative({ reference, maxEdge: 512 })
+      ).rejects.toMatchObject({ code: 'MANAGED_MEDIA_MISSING' })
+      const inconsistent = vi.fn(async () => ({ ...descriptor, maxEdge: 256 }) as never)
+      await expectSanitizedFailure(
+        create(inconsistent, { resolveReference }).ensureDerivative({ reference, maxEdge: 512 })
+      )
+      expect(resolveReference).not.toHaveBeenCalled()
+    })
+  })
 })

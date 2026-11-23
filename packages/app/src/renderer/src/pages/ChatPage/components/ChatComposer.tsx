@@ -183,7 +183,7 @@ const ComposerImageThumbnail: React.FC<{
   src: string
   media?: ChatAttachment['media']
   alt: string
-  onPreview: () => void
+  onPreview: (resolvedOriginal?: string) => void
 }> = ({ src, media, alt, onPreview }) => {
   const { t } = useTranslation()
   const managed = useMemo(() => {
@@ -218,7 +218,7 @@ const ComposerImageThumbnail: React.FC<{
         setDisplay(
           result.status === 'ready'
             ? { sourceSrc: src, src: result.descriptor.localMediaUrl, cacheKey, derivative: true }
-            : { sourceSrc: src, src, cacheKey }
+            : { sourceSrc: src, src: result.localMediaUrl, cacheKey }
         )
       },
       () => {
@@ -274,7 +274,7 @@ const ComposerImageThumbnail: React.FC<{
         type="button"
         aria-label={alt}
         aria-busy="true"
-        onClick={onPreview}
+        onClick={() => onPreview()}
         sx={{
           width: '100%',
           height: '100%',
@@ -301,14 +301,17 @@ const ComposerImageThumbnail: React.FC<{
       decoding="async"
       style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
       onError={() => {
-        if (current?.derivative && current.cacheKey) {
-          invalidateCachedChatImageDerivative(current.cacheKey, current.src)
+        if (current && current.src !== src) {
+          if (current.derivative && current.cacheKey)
+            invalidateCachedChatImageDerivative(current.cacheKey, current.src)
           setDisplay({ sourceSrc: src, src, cacheKey })
           return
         }
         setFailed(true)
       }}
-      onClick={onPreview}
+      onClick={() =>
+        onPreview(current && !current.derivative && current.src !== src ? current.src : undefined)
+      }
     />
   )
 }
@@ -1147,7 +1150,7 @@ const ChatComposer: React.FC<ChatComposerProps> = ({
             src={normalizeLocalMediaUrl(attachment.url)}
             media={attachment.media}
             alt={t('chat.preview_alt_index', { index: idx + 1 })}
-            onPreview={() => onPreviewImage(attachment.url)}
+            onPreview={(resolvedOriginal) => onPreviewImage(resolvedOriginal ?? attachment.url)}
           />
         ) : attachment.type === 'video' ? (
           <Box

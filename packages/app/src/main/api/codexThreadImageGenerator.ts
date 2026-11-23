@@ -60,7 +60,9 @@ export function createCodexThreadImageGenerator(
       throw new Error('Selected image backend changed; start a new Agent thread request.')
   }
   const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis)
-  const gifEnabled = backend !== 'openai-images-api-key' && source.codex_image_gif_enabled === true
+  // GIF output follows the backend: the Codex JSON image routes take output_format gif, the
+  // OpenAI images API has no GIF output. Every GIF request still waits for formal approval.
+  const gifEnabled = backend !== 'openai-images-api-key'
   const client = new CodexImageClient({
     auth,
     enableGif: gifEnabled,

@@ -43,8 +43,5 @@
   "image_backend_own": "使用当前文本配置自己的 Codex 后端",
   "image_backend_none": "未配置（不提供 image_gen）",
   "image_backend_unavailable": "后端不可用",
-  "image_backend_hint": "仅在此文本配置的 Agent 线程中使用显式选定的图片后端；不复制密钥、不自动选择登录或逐级跳转。只凭文字生成静态图会直接执行（可能消耗额度）；上传图片做编辑或输出 GIF 时，每次都须正式审批；修改任一配置或关联会使当前请求失效。",
-  "image_gif_label": "允许 image_gen 输出 GIF（后端须支持）",
-  "image_gif_unsupported": "所选图片后端（OpenAI 图片接口）不支持 GIF 输出。",
-  "image_gif_hint": "默认关闭，仅允许此文本配置的线程请求 GIF 输出，不从图片后端配置继承；仍须逐次审批。GIF 编辑输入仍不支持，开关不验证后端是否可用。"
+  "image_backend_hint": "仅在此文本配置的 Agent 线程中使用显式选定的图片后端；不复制密钥、不自动选择登录或逐级跳转。只凭文字生成静态图会直接执行（可能消耗额度）；上传图片做编辑或输出 GIF 时，每次都须正式审批；修改任一配置或关联会使当前请求失效。"
 }

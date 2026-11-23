@@ -604,6 +604,43 @@ describe('FIGPLUGIN managed packages in the existing metadata store', () => {
     })
   })
 
+  it('retries a transient Windows EPERM on the staging rename and then installs', async () => {
+    const verified = fixture()
+    const rename = fs.rename.bind(fs)
+    let stagingAttempts = 0
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (to === directory(verified) && ++stagingAttempts <= 2)
+        throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+      await rename(from, to)
+    })
+    expect(await store.installVerifiedPackage(verified, 0, 'install')).toMatchObject({
+      generation: 1
+    })
+    expect(stagingAttempts).toBe(3)
+    expect(await fs.readFile(path.join(directory(verified), verified.files[0].path))).toEqual(
+      verified.files[0].data
+    )
+  })
+
+  it('gives up on a persistent staging EPERM with IO_ERROR and removes the staging copy', async () => {
+    const verified = fixture()
+    let stagingAttempts = 0
+    const rename = fs.rename.bind(fs)
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (to !== directory(verified)) return rename(from, to)
+      stagingAttempts += 1
+      throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+    })
+    await expect(store.installVerifiedPackage(verified, 0, 'install')).rejects.toMatchObject(
+      rejection('IO_ERROR')
+    )
+    expect(stagingAttempts).toBe(6)
+    await expect(fs.lstat(directory(verified))).rejects.toMatchObject({ code: 'ENOENT' })
+    const siblings = await fs.readdir(path.dirname(directory(verified))).catch(() => [])
+    expect(siblings.filter((name) => name.startsWith('.staging-'))).toEqual([])
+    expect(await store.getManagedGeneration(pluginId)).toBe(0)
+  })
+
   it('does not delete an orphan from another failed candidate to evade quota', async () => {
     const verified = fixture()
     const rename = fs.rename.bind(fs)

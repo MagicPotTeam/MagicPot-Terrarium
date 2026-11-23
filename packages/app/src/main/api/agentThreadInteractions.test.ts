@@ -1639,8 +1639,10 @@ describe('local Agent thread interactions', () => {
       const generator = {
         gifEnabled,
         approval: {
-          backend: 'codex-json-oauth' as const,
-          endpoint: 'https://images.example.test/backend',
+          backend: gifEnabled ? ('codex-json-oauth' as const) : ('openai-images-api-key' as const),
+          endpoint: gifEnabled
+            ? 'https://images.example.test/backend'
+            : 'https://images.example.test/v1',
           profileId: 'selected'
         },
         assertCurrent: vi.fn(),
@@ -1656,7 +1658,13 @@ describe('local Agent thread interactions', () => {
         const tool = first.toolProvider!.listTools().find((tool) => tool.name === 'image_gen')!
         if (gifEnabled) {
           expect(tool.inputSchema).toHaveProperty('properties.gif')
-          expect(first.request.systemPrompt).toContain('explicitly enabled GIF OUTPUT')
+          expect(first.request.systemPrompt).toContain(
+            'The selected image backend supports GIF OUTPUT'
+          )
+          expect(tool.description).toContain('GIF OUTPUT is available on this image backend')
+          expect(first.request.systemPrompt).toContain(
+            "animated output, first waits for the user's formal approval"
+          )
         } else {
           expect(tool.inputSchema).not.toHaveProperty('properties.gif')
           expect(first.request.systemPrompt).toContain('GIF output is disabled')

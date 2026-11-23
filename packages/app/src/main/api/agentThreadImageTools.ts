@@ -84,7 +84,7 @@ const gifDefinition = {
       'GIF/animation or non-default EXIF orientation',
       'GIF/animation inputs or non-default EXIF orientation'
     ) +
-    ' GIF OUTPUT only is available with the user opt-in: optional gif:{} uses backend defaults; gif.frame_count (2–16), gif.frame_duration_ms (20–2000). GIF edit INPUTS remain unsupported. Returned animation must pass bounded structural/frame/pixel inspection, not a pixel decoder.',
+    ' GIF OUTPUT is available on this image backend: optional gif:{} uses backend defaults; gif.frame_count (2–16), gif.frame_duration_ms (20–2000). GIF edit INPUTS remain unsupported. Returned animation must pass bounded structural/frame/pixel inspection, not a pixel decoder.',
   inputSchema: {
     ...stillDefinition.inputSchema,
     properties: { ...stillDefinition.inputSchema.properties, gif: gifSchema }
@@ -325,7 +325,7 @@ export function createAgentThreadImageTools(options: {
       const input = structuredClone(args)
       if (!validate(input) || typeof input.prompt !== 'string' || !input.prompt.trim())
         throw new Error(
-          'Invalid image_gen arguments; use bounded prompt, transparent_background, num_last_images_to_include (1–5), and gif controls only when explicitly enabled.'
+          'Invalid image_gen arguments; use bounded prompt, transparent_background, num_last_images_to_include (1–5), and gif controls only when the image backend supports GIF.'
         )
       if (running || ++attempts > 2)
         throw new Error(

@@ -33,7 +33,17 @@ export type EnsureManagedMediaDerivativeReq = {
 
 export type EnsureManagedMediaDerivativeResp =
   | { status: 'ready'; descriptor: ManagedMediaDerivativeDescriptor }
-  | { status: 'fallbackOriginal'; reason: 'animated-gif'; localMediaUrl: string }
+  | {
+      status: 'fallbackOriginal'
+      /**
+       * animated-gif: a still preview would drop the animation. derivative-unavailable: the
+       * preview could not be made (no image worker, or it failed); the original is shown.
+       */
+      reason: ManagedMediaFallbackOriginalReason
+      localMediaUrl: string
+    }
+
+export type ManagedMediaFallbackOriginalReason = 'animated-gif' | 'derivative-unavailable'
 
 export type MaterializeManagedMediaForRequestReq =
   | { reference: MediaReference; transport: 'request-data-url'; maxBytes?: number }
@@ -507,7 +517,7 @@ export const validateEnsureManagedMediaDerivativeResp = (
   if (value.status === 'fallbackOriginal') {
     if (
       !hasExactKeys(value, ['status', 'reason', 'localMediaUrl']) ||
-      value.reason !== 'animated-gif' ||
+      (value.reason !== 'animated-gif' && value.reason !== 'derivative-unavailable') ||
       decodedLocalMediaPath(value.localMediaUrl) === undefined
     ) {
       throw new ServiceValidationError('svcManagedMedia.ensureDerivative response')

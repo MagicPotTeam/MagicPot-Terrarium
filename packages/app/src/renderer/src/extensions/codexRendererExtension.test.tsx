@@ -25,13 +25,14 @@ const textProfile: LLMAPIProfile = {
 const cardExtra = (
   profile: LLMAPIProfile,
   profiles: LLMAPIProfile[],
-  onUpdate: (id: string, profile: LLMAPIProfile) => void = vi.fn()
+  onUpdate: (id: string, profile: LLMAPIProfile) => void = vi.fn(),
+  isChineseUi = false
 ) =>
   codexRendererExtension.settings!.renderAgentApiProfileCardExtra!({
     profile,
     profiles,
     onUpdate,
-    isChineseUi: false,
+    isChineseUi,
     callTypeOptions: [],
     onChangeCallType: vi.fn(),
     onClone: vi.fn(),
@@ -40,58 +41,37 @@ const cardExtra = (
   })
 
 describe('explicit image backend selection on the existing Agent profile card', () => {
-  it('GIF is default-off, saved only on the text profile and explicitly cleared through the existing card', () => {
-    const onUpdate = vi.fn()
-    // A Codex JSON proxy (not a /v1 OpenAI images API base), which can output GIF.
-    const target = { ...proxyProfile, base_url: 'https://proxy.example.test/codex', codex_image_gif_enabled: true }
-    const Harness = () => {
-      const [profile, setProfile] = React.useState({
-        ...textProfile,
-        codex_image_profile_id: target.id
-      })
-      return (
-        <>
-          {cardExtra(profile, [profile, target], (id, next) => {
-            onUpdate(id, next)
-            setProfile(next as typeof profile)
-          })}
-        </>
+  it.each([
+    ['en-US', '/codex'],
+    ['en-US', '/v1'],
+    ['zh-CN', '/codex'],
+    ['zh-CN', '/v1']
+  ] as const)(
+    'shows no GIF setting or dedicated caption on a %s card linked to %s',
+    (locale, path) => {
+      const isChineseUi = locale === 'zh-CN'
+      const onUpdate = vi.fn()
+      const target = { ...proxyProfile, base_url: `https://proxy.example.test${path}` }
+      const profile = { ...textProfile, codex_image_profile_id: target.id }
+      const { container } = render(
+        <>{cardExtra(profile, [profile, target], onUpdate, isChineseUi)}</>
       )
+      expect(screen.getByRole('combobox')).toHaveValue(target.id)
+      expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+      expect(container).not.toHaveTextContent(
+        /Allow GIF output for image_gen|允许 image_gen 输出 GIF/i
+      )
+      expect(container).not.toHaveTextContent(
+        /Default off for this text profile|默认关闭，仅允许此文本配置/
+      )
+      expect(container).not.toHaveTextContent(/has no GIF output|不支持 GIF 输出/)
+      // General approval guidance is still true and is deliberately not a GIF preference.
+      expect(container).toHaveTextContent(
+        isChineseUi ? /每次都须正式审批/ : /needs a fresh formal approval/
+      )
+      expect(onUpdate).not.toHaveBeenCalled()
     }
-    render(<Harness />)
-    const checkbox = screen.getByRole('checkbox', {
-      name: 'Allow GIF output for image_gen (backend must support it)'
-    })
-    expect(checkbox).not.toBeChecked()
-    expect(onUpdate).not.toHaveBeenCalled()
-    fireEvent.click(checkbox)
-    expect(onUpdate).toHaveBeenLastCalledWith(textProfile.id, {
-      ...textProfile,
-      codex_image_profile_id: target.id,
-      codex_image_gif_enabled: true
-    })
-    expect(checkbox).toBeChecked()
-    fireEvent.click(checkbox)
-    expect(onUpdate).toHaveBeenLastCalledWith(textProfile.id, {
-      ...textProfile,
-      codex_image_profile_id: target.id,
-      codex_image_gif_enabled: undefined
-    })
-    expect(checkbox).not.toBeChecked()
-    expect(target.codex_image_gif_enabled).toBe(true)
-  })
-  it('shows GIF output as unavailable for an OpenAI images API backend', () => {
-    const onUpdate = vi.fn()
-    const profile = { ...textProfile, codex_image_profile_id: proxyProfile.id, codex_image_gif_enabled: true }
-    render(<>{cardExtra(profile, [profile, proxyProfile], onUpdate)}</>)
-    const checkbox = screen.getByRole('checkbox', {
-      name: 'Allow GIF output for image_gen (backend must support it)'
-    })
-    expect(checkbox).toBeDisabled()
-    expect(checkbox).not.toBeChecked()
-    expect(screen.getByText('The selected image backend (OpenAI images API) has no GIF output.')).toBeTruthy()
-    expect(onUpdate).not.toHaveBeenCalled()
-  })
+  )
 
   it('does not select or save another login merely by showing the card', () => {
     const onUpdate = vi.fn()
@@ -99,7 +79,9 @@ describe('explicit image backend selection on the existing Agent profile card', 
     expect(screen.getByRole('combobox', { name: 'image_gen backend' })).toHaveValue('')
     expect(onUpdate).not.toHaveBeenCalled()
     expect(screen.getByText(/A plain text-to-image request runs directly/)).toBeTruthy()
-    expect(screen.getByText(/uploads images or outputs a GIF needs a fresh formal approval/)).toBeTruthy()
+    expect(
+      screen.getByText(/uploads images or outputs a GIF needs a fresh formal approval/)
+    ).toBeTruthy()
     expect(document.body.textContent).not.toContain('test-key')
     expect(document.body.textContent).not.toContain('text-key-not-for-image')
   })
@@ -129,6 +111,9 @@ describe('explicit image backend selection on the existing Agent profile card', 
       ...textProfile,
       codex_image_profile_id: undefined
     })
+    expect(onUpdate).toHaveBeenCalledTimes(2)
+    for (const [, updated] of onUpdate.mock.calls)
+      expect(updated).not.toHaveProperty('codex_image_gif_enabled')
   })
 
   it('lists only unique eligible Codex backends, not public Images, stale mixed auth or duplicate ids', () => {
@@ -208,36 +193,13 @@ describe('explicit image backend selection on the existing Agent profile card', 
         }
       })
       expect(selects[0]).toHaveValue('')
-      const gifs = screen.getAllByRole('checkbox', {
-        name: 'Allow GIF output for image_gen (backend must support it)'
-      })
-      expect(gifs).toHaveLength(2)
-      expect(gifs[0]).not.toBeChecked()
-      fireEvent.click(gifs[0])
-      expect(save).toHaveBeenLastCalledWith({
-        llm_config: {
-          api_profiles: [
-            { ...textProfile, codex_image_profile_id: undefined, codex_image_gif_enabled: true },
-            proxyProfile
-          ]
+      expect(save).toHaveBeenCalledTimes(2)
+      for (const [patch] of save.mock.calls) {
+        for (const savedProfile of patch.llm_config.api_profiles) {
+          expect(savedProfile).not.toHaveProperty('codex_image_gif_enabled')
         }
-      })
-      expect(gifs[0]).toBeChecked()
-      expect(gifs[1]).not.toBeChecked()
-      fireEvent.click(gifs[0])
-      expect(save).toHaveBeenLastCalledWith({
-        llm_config: {
-          api_profiles: [
-            {
-              ...textProfile,
-              codex_image_profile_id: undefined,
-              codex_image_gif_enabled: undefined
-            },
-            proxyProfile
-          ]
-        }
-      })
-      expect(gifs[0]).not.toBeChecked()
+      }
+      expect(screen.queryByRole('checkbox', { name: /GIF/i })).not.toBeInTheDocument()
     } finally {
       rendererHostExtensionApiV1.settings = previous
     }
@@ -248,11 +210,7 @@ describe('explicit image backend selection on the existing Agent profile card', 
     (model_use) => {
       render(<>{cardExtra({ ...textProfile, model_use }, [textProfile, proxyProfile])}</>)
       expect(screen.queryByRole('combobox', { name: 'image_gen backend' })).toBeNull()
-      expect(
-        screen.queryByRole('checkbox', {
-          name: 'Allow GIF output for image_gen (backend must support it)'
-        })
-      ).toBeNull()
+      expect(screen.queryByRole('checkbox', { name: /GIF/i })).not.toBeInTheDocument()
     }
   )
 })
@@ -364,7 +322,7 @@ describe('pending Codex authentication preserves current image settings', () => 
       (['select', 'clear'] as const).map((change) => [mode, change] as const)
     )
   )(
-    'pending %s preserves %s image link/GIF and unrelated source/sibling fields through real settings save',
+    'pending %s preserves the %s image link and unrelated source/sibling fields through real settings save',
     async (mode, change) => {
       const auth = installAuth(mode !== 'browser')
       const source = {
@@ -372,9 +330,7 @@ describe('pending Codex authentication preserves current image settings', () => 
         ...(mode === 'logout'
           ? { auth_mode: 'codex_oauth', auth_account_email: 'old@fixture.test' }
           : {}),
-        ...(change === 'clear'
-          ? { codex_image_profile_id: proxyProfile.id, codex_image_gif_enabled: true }
-          : {})
+        ...(change === 'clear' ? { codex_image_profile_id: proxyProfile.id } : {})
       }
       const sibling = { ...textProfile, id: 'sibling' }
       let saved: LLMAPIProfile[] = [source, proxyProfile, sibling]
@@ -440,19 +396,14 @@ describe('pending Codex authentication preserves current image settings', () => 
           })
         const select = screen.getAllByRole('combobox', { name: 'image_gen backend' })[0]
         fireEvent.change(select, { target: { value: change === 'clear' ? '' : proxyProfile.id } })
-        const gif = screen.getAllByRole('checkbox', {
-          name: 'Allow GIF output for image_gen (backend must support it)'
-        })[0]
-        fireEvent.click(gif)
         fireEvent.click(screen.getByRole('button', { name: 'Edit other current fields' }))
         await act(async () => {
           auth.finish()
           await Promise.resolve()
         })
-        await waitFor(() => expect(save).toHaveBeenCalledTimes(3))
+        await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
         expect(saved[0]).toMatchObject({
           codex_image_profile_id: change === 'clear' ? undefined : proxyProfile.id,
-          codex_image_gif_enabled: change === 'clear' ? undefined : true,
           model_name: 'new-source-name'
         })
         expect(saved.find((p) => p.id === sibling.id)?.model_name).toBe('new-sibling-name')
@@ -464,9 +415,7 @@ describe('pending Codex authentication preserves current image settings', () => 
             auth_connected_at: 1000
           })
         expect(select).toHaveValue(change === 'clear' ? '' : proxyProfile.id)
-        // The stored GIF choice survives the pending login (saved[0] above), but this /v1 proxy is
-        // an images-API backend, which cannot output GIF, so the checkbox shows it off.
-        expect(gif).toHaveProperty('checked', false)
+        expect(saved[0]).not.toHaveProperty('codex_image_gif_enabled')
       } finally {
         rendererHostExtensionApiV1.settings = previous
       }
@@ -577,26 +526,73 @@ describe('codexRendererExtension scoped assistant image AutoSave', () => {
   })
 })
 
-
 describe('readonly thread image capability hint', () => {
   const hint = codexRendererExtension.chat!.hasThreadImageTool!
   it('recognizes a selected local Codex image backend without exposing credentials or doing work', () => {
-    const config = { ...DEFAULT_CONFIG, use_remote_llm: false, llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [textProfile, proxyProfile] } }
+    const config = {
+      ...DEFAULT_CONFIG,
+      use_remote_llm: false,
+      llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [textProfile, proxyProfile] }
+    }
     const linked = { ...textProfile, codex_image_profile_id: proxyProfile.id }
     config.llm_config.api_profiles = [linked, proxyProfile]
     expect(hint(config, linked.id)).toBe(true)
     expect(hint({ ...config, use_remote_llm: true }, linked.id)).toBe(false)
   })
-  it.each(['missing', '', ' ', 'bad\nlink'])( 'declines invalid explicit links (%s)', (selection) => {
-    const source = { ...textProfile, codex_image_profile_id: selection }
-    const config = { ...DEFAULT_CONFIG, use_remote_llm: false, llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [source, proxyProfile] } }
-    expect(hint(config, source.id)).toBe(false)
-  })
+  it.each(['missing', '', ' ', 'bad\nlink'])(
+    'declines invalid explicit links (%s)',
+    (selection) => {
+      const source = { ...textProfile, codex_image_profile_id: selection }
+      const config = {
+        ...DEFAULT_CONFIG,
+        use_remote_llm: false,
+        llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [source, proxyProfile] }
+      }
+      expect(hint(config, source.id)).toBe(false)
+    }
+  )
   it('requires unique source and linked target and rejects unsupported source use', () => {
     const source = { ...textProfile, codex_image_profile_id: proxyProfile.id }
-    const config = { ...DEFAULT_CONFIG, use_remote_llm: false, llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [source, proxyProfile] } }
-    expect(hint({ ...config, llm_config: { ...config.llm_config, api_profiles: [source, proxyProfile, { ...proxyProfile, id: source.id }] } }, source.id)).toBe(false)
-    expect(hint({ ...config, llm_config: { ...config.llm_config, api_profiles: [{ ...source, model_use: 'image' }, proxyProfile] } }, source.id)).toBe(false)
-    expect(hint({ ...config, llm_config: { ...config.llm_config, api_profiles: [source, proxyProfile, { ...proxyProfile }] } }, source.id)).toBe(false)
+    const config = {
+      ...DEFAULT_CONFIG,
+      use_remote_llm: false,
+      llm_config: { ...DEFAULT_CONFIG.llm_config, api_profiles: [source, proxyProfile] }
+    }
+    expect(
+      hint(
+        {
+          ...config,
+          llm_config: {
+            ...config.llm_config,
+            api_profiles: [source, proxyProfile, { ...proxyProfile, id: source.id }]
+          }
+        },
+        source.id
+      )
+    ).toBe(false)
+    expect(
+      hint(
+        {
+          ...config,
+          llm_config: {
+            ...config.llm_config,
+            api_profiles: [{ ...source, model_use: 'image' }, proxyProfile]
+          }
+        },
+        source.id
+      )
+    ).toBe(false)
+    expect(
+      hint(
+        {
+          ...config,
+          llm_config: {
+            ...config.llm_config,
+            api_profiles: [source, proxyProfile, { ...proxyProfile }]
+          }
+        },
+        source.id
+      )
+    ).toBe(false)
   })
 })

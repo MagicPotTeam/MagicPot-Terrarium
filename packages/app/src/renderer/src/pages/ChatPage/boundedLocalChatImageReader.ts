@@ -51,12 +51,16 @@ const uint8ArrayChunkLength = (chunk: unknown): number => {
   }
 }
 
+// Deterministic format/size failures are distinct from reader.read() rejecting with a transport error.
+export class InvalidChatImageSourceError extends Error {}
+
 export async function readBoundedLocalChatImageBlob(
   response: Response,
   options: { maxBytes: number; signal?: AbortSignal }
 ): Promise<Blob> {
   const { maxBytes, signal } = options
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new RangeError('Invalid image source limit.')
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)
+    throw new RangeError('Invalid image source limit.')
   const maxChunks = Math.max(MIN_SOURCE_CHUNKS, Math.ceil(maxBytes / MIN_AVERAGE_CHUNK_BYTES))
 
   const cancellation = (): Error => {
@@ -66,10 +70,12 @@ export async function readBoundedLocalChatImageBlob(
     error.name = 'AbortError'
     return error
   }
-  const check = (): void => { if (signal?.aborted) throw cancellation() }
+  const check = (): void => {
+    if (signal?.aborted) throw cancellation()
+  }
   check()
   if (!response.body || typeof response.body.getReader !== 'function') {
-    throw new Error('Image source did not provide a readable body.')
+    throw new InvalidChatImageSourceError('Image source did not provide a readable body.')
   }
 
   const reader = response.body.getReader()
@@ -78,7 +84,11 @@ export async function readBoundedLocalChatImageBlob(
   const cancel = (): void => {
     if (cancelled || completed) return
     cancelled = true
-    try { void reader.cancel().catch(() => undefined) } catch { /* best effort */ }
+    try {
+      void reader.cancel().catch(() => undefined)
+    } catch {
+      /* best effort */
+    }
   }
   const onAbort = (): void => cancel()
   signal?.addEventListener('abort', onAbort, { once: true })
@@ -99,11 +109,14 @@ export async function readBoundedLocalChatImageBlob(
       }
       const abortRead = (): void => finish(() => reject(cancellation()))
       signal.addEventListener('abort', abortRead, { once: true })
-      if (signal.aborted) { abortRead(); return }
+      if (signal.aborted) {
+        abortRead()
+        return
+      }
       try {
         reader.read().then(
-          result => finish(() => resolve(result)),
-          error => finish(() => reject(error))
+          (result) => finish(() => resolve(result)),
+          (error) => finish(() => reject(error))
         )
       } catch (error) {
         finish(() => reject(error))
@@ -126,12 +139,18 @@ export async function readBoundedLocalChatImageBlob(
     while (true) {
       const result = await read()
       check()
-      if (result.done) { completed = true; break }
-      if (++chunkCount > maxChunks) throw new Error('Image source exceeds the chunk limit.')
+      if (result.done) {
+        completed = true
+        break
+      }
+      if (++chunkCount > maxChunks)
+        throw new InvalidChatImageSourceError('Image source exceeds the chunk limit.')
       const chunk = result.value
       const length = uint8ArrayChunkLength(chunk)
-      if (length < 0) throw new Error('Image source returned an invalid chunk.')
-      if (length > maxBytes - size) throw new Error('Image source exceeds the per-image byte limit.')
+      if (length < 0)
+        throw new InvalidChatImageSourceError('Image source returned an invalid chunk.')
+      if (length > maxBytes - size)
+        throw new InvalidChatImageSourceError('Image source exceeds the per-image byte limit.')
       if (!length) continue
       // Every accepted byte is copied into a buffer the reader owns.
       if (length >= SEGMENT_BYTES) {
@@ -155,6 +174,10 @@ export async function readBoundedLocalChatImageBlob(
   } finally {
     cancel()
     signal?.removeEventListener('abort', onAbort)
-    try { reader.releaseLock() } catch { /* an uncooperative reader may remain pending */ }
+    try {
+      reader.releaseLock()
+    } catch {
+      /* an uncooperative reader may remain pending */
+    }
   }
 }
