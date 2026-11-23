@@ -5,6 +5,10 @@ import type { Config, LLMAPIProfile } from '@shared/config/config'
 import type { ApiExtensionServices } from '@shared/api/extensionServices'
 import type { LLMCli } from '@shared/llm'
 import type { FetchImpl } from '@shared/llm/clients'
+import {
+  codexMainLlmProxyExtension,
+  createCodexApiExtensionServices
+} from './codexMainExtension'
 import { tripoMainLlmProxyExtension } from './tripoMainExtension'
 
 export type MainApiExtensionContextV1 = {
@@ -56,8 +60,10 @@ export type MainHostExtensionApiV1 = Readonly<{
 }>
 
 export const mainHostExtensionApiV1: MainHostExtensionApiV1 = {
-  apiServices: [],
-  llmProxy: [tripoMainLlmProxyExtension]
+  apiServices: [
+    (context) => createCodexApiExtensionServices(context) as Partial<ApiExtensionServices>
+  ],
+  llmProxy: [codexMainLlmProxyExtension, tripoMainLlmProxyExtension]
 }
 
 export const createApiExtensionServices = (

@@ -24,6 +24,9 @@ const trashRoot = path.join(workspaceRoot, '.magicpot-trash')
 const testRoots = []
 const privateExtensionDirectory = 'private' + 'Extensions'
 const chatWebRule = 'chat' + 'gpt' + '-web'
+// Retired ChatGPT Web service token: the generic private-content sentinel for scanner tests.
+const privateWebServiceToken = 'svc' + 'Chat' + 'GPT' + 'Web'
+const privateWebFunctionalRule = `${chatWebRule}-functional-reference`
 
 const makeCandidate = () => {
   fs.mkdirSync(trashRoot, { recursive: true })
@@ -107,12 +110,8 @@ describe('create-open-candidate policy', () => {
 
   it('rejects declared private source paths without broad private keyword matching', () => {
     const neutralPrivateSegment = privateExtensionDirectory
-    const codexClientPathName = 'codex' + 'Chat' + 'Client.ts'
     expect(
       getOpenCandidateExclusionReason(`packages/app/src/main/${neutralPrivateSegment}/neutral.ts`)
-    ).toBe('declared private source implementation')
-    expect(
-      getOpenCandidateExclusionReason(`packages/app/src/main/api/${codexClientPathName}`)
     ).toBe('declared private source implementation')
     expect(
       getOpenCandidateExclusionReason('packages/app/src/shared/llm/modelCatalog.ts')
@@ -121,14 +120,45 @@ describe('create-open-candidate policy', () => {
     expect(getOpenCandidateExclusionReason('tests/private-fixture.ts')).toBeNull()
   })
 
+  it.each([
+    'packages/app/src/main/api/' + 'codex' + 'Chat' + 'Client.ts',
+    'packages/app/src/main/api/' + 'codex' + 'OAuth.ts',
+    'packages/app/src/main/api/svc' + 'CodexAuthImpl.ts',
+    'packages/app/src/main/llmProxy/' + 'codex' + 'AttachmentArtifacts.ts',
+    'packages/app/src/main/extensions/' + 'codex' + 'MainExtension.ts',
+    'packages/app/src/renderer/src/extensions/' + 'codex' + 'RendererExtension.tsx',
+    'packages/app/src/shared/extensions/' + 'codex' + 'SharedExtension.ts',
+    'packages/app/src/shared/api/svc' + 'CodexAuth.ts',
+    'packages/app/src/shared/locales/en-US/' + 'codex' + '.json',
+    'packages/app/src/shared/locales/zh-CN/' + 'codex' + '.json'
+  ])('treats public Codex source as ordinary open source: %s', (relativeFile) => {
+    expect(getOpenCandidateExclusionReason(relativeFile)).toBeNull()
+  })
+
+  it('allows public Codex OAuth and backend references', () => {
+    const candidate = makeCandidate()
+    const backend = 'https://' + 'chat' + 'gpt' + '.com/backend-api/' + 'codex' + '/responses'
+    const auth = 'https://' + 'auth' + '.openai' + '.com/oauth/token'
+    writeFile(
+      candidate,
+      'packages/app/src/main/api/' + 'codex' + 'OAuth.ts',
+      [
+        `export const ${'codex' + 'OAuth'}Endpoint = '${auth}'`,
+        `export const backend = '${backend}'`,
+        `export const service = '${'svc' + 'CodexAuth'}'`
+      ].join('\n')
+    )
+    expect(auditOpenCandidate(candidate)).toEqual([])
+  })
+
   it('audits Python runtime sources with the same private-code and secret rules', () => {
     const candidate = makeCandidate()
-    const serviceName = 'svc' + 'CodexAuth'
+    const serviceName = privateWebServiceToken
     const apiToken = 'sk-' + 'abcdefghijklmnopqrstuvwxyz123456'
     const relative = 'packages/runtime-assets/resources/comfy/nodes/extension.py'
     writeFile(candidate, relative, `SERVICE = "${serviceName}"\nTOKEN = "${apiToken}"\n`)
     expect(auditOpenCandidate(candidate)).toEqual([
-      { file: relative, line: 1, rule: 'codex-functional-reference', message: serviceName },
+      { file: relative, line: 1, rule: privateWebFunctionalRule, message: serviceName },
       { file: relative, line: 2, rule: 'high-confidence-secret', message: apiToken }
     ])
     writeFile(candidate, relative, 'def remove_background(image):\n    return image\n')
@@ -178,14 +208,14 @@ describe('create-open-candidate policy', () => {
 
   it('reports candidate blockers with file, line, and rule', () => {
     const candidate = makeCandidate()
-    const codexServiceName = 'svc' + 'CodexAuth'
+    const privateServiceName = privateWebServiceToken
     const privatePath = 'private' + '/internal'
     const apiToken = 'sk-' + 'abcdefghijklmnopqrstuvwxyz123456'
 
     writeFile(
       candidate,
       'packages/app/src/main/api/server.ts',
-      `const svc = "${codexServiceName}"\n`
+      `const svc = "${privateServiceName}"\n`
     )
     writeFile(candidate, 'docs/path.md', `Do not point users at ${privatePath} paths.\n`)
     writeFile(candidate, 'config/token.txt', `OPENAI_API_KEY=${apiToken}\n`)
@@ -206,8 +236,8 @@ describe('create-open-candidate policy', () => {
       {
         file: 'packages/app/src/main/api/server.ts',
         line: 1,
-        rule: 'codex-functional-reference',
-        message: codexServiceName
+        rule: privateWebFunctionalRule,
+        message: privateServiceName
       }
     ])
   })
@@ -293,11 +323,7 @@ describe('create-open-candidate policy', () => {
   })
 
   it('matches literal domain dots rather than arbitrary hostname characters', () => {
-    const exactHosts = [
-      'chat' + 'gpt' + '.com',
-      'chat' + '.openai' + '.com',
-      'auth' + '.openai' + '.com'
-    ]
+    const exactHosts = ['chat' + '.openai' + '.com']
     for (const host of exactHosts) {
       const candidate = makeCandidate()
       writeFile(
@@ -311,7 +337,7 @@ describe('create-open-candidate policy', () => {
         )
       ).toBe(true)
     }
-    for (const host of ['chatXgptXcom', 'chatXopenaiXcom', 'authXopenaiXcom', 'auth.openaiXcom']) {
+    for (const host of ['chatXopenaiXcom', 'chat.openaiXcom']) {
       const candidate = makeCandidate()
       writeFile(
         candidate,
@@ -331,7 +357,7 @@ describe('create-open-candidate policy', () => {
     const webToken = 'Chat' + 'GPT' + 'Web'
     const hyphenToken = 'chat' + 'gpt' + '-web'
     const serviceToken = 'svc' + webToken
-    const origin = 'https://' + 'chat' + 'gpt' + '.com/c/example'
+    const origin = 'https://' + 'chat' + '.openai' + '.com/c/example'
     const partitionMarker = 'SESSION_' + 'PARTITION'
     const domMarker = '__magicpot' + webToken + 'Request'
     writeFile(
@@ -399,7 +425,7 @@ describe('create-open-candidate policy', () => {
     'tests/provider-fixture.test.ts'
   ])('never trusts a provider filename or test directory: %s', (relativeFile) => {
     const candidate = makeCandidate()
-    const token = 'svc' + 'CodexAuth'
+    const token = privateWebServiceToken
     writeFile(candidate, relativeFile, `export const service = '${token}'\n`)
     const declaredPrivate =
       getOpenCandidateExclusionReason(relativeFile) === 'declared private source implementation'
@@ -408,7 +434,7 @@ describe('create-open-candidate policy', () => {
           expect.objectContaining({ file: relativeFile, rule: 'forbidden-candidate-file' })
         ])
       : expect.arrayContaining([
-          expect.objectContaining({ file: relativeFile, rule: 'codex-functional-reference' })
+          expect.objectContaining({ file: relativeFile, rule: privateWebFunctionalRule })
         ])
     const expectedCandidate = declaredPrivate
       ? expect.arrayContaining([expect.objectContaining({ rule: 'forbidden-candidate-file' })])
@@ -503,16 +529,23 @@ describe('create-open-candidate policy', () => {
     'packages/app/src/main/neutral.test.ts'
   ])('does not exempt private provider references in %s', (relativeFile) => {
     const candidate = makeCandidate()
-    const serviceName = 'svc' + 'CodexAuth'
     const webToken = 'Chat' + 'GPT' + 'Web'
     writeFile(
       candidate,
       relativeFile,
-      `export const services = ['${serviceName}', '${webToken}']\n`
+      `export const services = ['${privateWebServiceToken}', '${webToken}']\n`
     )
     const expected = expect.arrayContaining([
-      expect.objectContaining({ file: relativeFile, rule: 'codex-functional-reference' }),
-      expect.objectContaining({ file: relativeFile, rule: `${chatWebRule}-functional-reference` })
+      expect.objectContaining({
+        file: relativeFile,
+        rule: privateWebFunctionalRule,
+        message: privateWebServiceToken
+      }),
+      expect.objectContaining({
+        file: relativeFile,
+        rule: privateWebFunctionalRule,
+        message: webToken
+      })
     ])
     expect(auditOpenCandidate(candidate)).toEqual(expected)
     expect(auditOpenWorktree(candidate, { exec: () => `${relativeFile}\0` })).toEqual(expected)
@@ -604,12 +637,12 @@ describe('create-open-candidate policy', () => {
     'does not exempt scanner implementation or tests: %s',
     (relativeFile) => {
       const candidate = makeCandidate()
-      const token = 'svc' + 'CodexAuth'
+      const token = privateWebServiceToken
       const fixturePath = '/' + 'private' + '/leak.txt'
       const apiToken = 'sk-' + 'abcdefghijklmnopqrstuvwxyz123456'
       writeFile(candidate, relativeFile, [token, fixturePath, apiToken].join('\n'))
       const expected = expect.arrayContaining([
-        expect.objectContaining({ file: relativeFile, rule: 'codex-functional-reference' }),
+        expect.objectContaining({ file: relativeFile, rule: privateWebFunctionalRule }),
         expect.objectContaining({ file: relativeFile, rule: 'private-path-reference' }),
         expect.objectContaining({ file: relativeFile, rule: 'high-confidence-secret' })
       ])
@@ -622,9 +655,9 @@ describe('create-open-candidate policy', () => {
     'scans extensionless and nonstandard text: %s',
     (relativeFile) => {
       const candidate = makeCandidate()
-      writeFile(candidate, relativeFile, 'svc' + 'CodexAuth')
+      writeFile(candidate, relativeFile, privateWebServiceToken)
       const expected = expect.arrayContaining([
-        expect.objectContaining({ file: relativeFile, rule: 'codex-functional-reference' })
+        expect.objectContaining({ file: relativeFile, rule: privateWebFunctionalRule })
       ])
       expect(auditOpenCandidate(candidate)).toEqual(expected)
       expect(auditOpenWorktree(candidate, { exec: () => `${relativeFile}\0` })).toEqual(expected)
@@ -683,7 +716,8 @@ describe('create-open-candidate policy', () => {
       'config/tsconfig.tsbuildinfo',
       '.magicpot-trash-open-audit-worker.txt'
     ]
-    for (const relativeFile of generatedFiles) writeFile(source, relativeFile, 'svc' + 'CodexAuth')
+    for (const relativeFile of generatedFiles)
+      writeFile(source, relativeFile, privateWebServiceToken)
 
     const issues = auditOpenWorktree(source, {
       exec: (_command, args) => (args.includes('--ignored') ? generatedFiles.join('\0') + '\0' : '')
@@ -705,7 +739,7 @@ describe('create-open-candidate policy', () => {
     const output = makeCandidate()
     const ignoredFile = 'ignored/neutral.custom'
     writeFile(source, '.gitignore', 'ignored/\n')
-    writeFile(source, ignoredFile, 'svc' + 'CodexAuth')
+    writeFile(source, ignoredFile, privateWebServiceToken)
     const calls = []
     const issues = auditOpenWorktree(source, {
       exec: (_command, args) => {
@@ -715,7 +749,7 @@ describe('create-open-candidate policy', () => {
       }
     })
     expect(issues).toEqual([
-      expect.objectContaining({ file: ignoredFile, rule: 'codex-functional-reference' })
+      expect.objectContaining({ file: ignoredFile, rule: privateWebFunctionalRule })
     ])
     expect(calls.some((args) => args.includes('--ignored'))).toBe(true)
     withFakeGitLsFiles([], () => createOpenCandidate(output, source))
@@ -750,7 +784,7 @@ describe('create-open-candidate policy', () => {
   it('rejects linked candidate and worktree entries rather than following them', () => {
     const candidate = makeCandidate()
     const outside = makeCandidate()
-    writeFile(outside, 'leak.ts', 'svc' + 'CodexAuth')
+    writeFile(outside, 'leak.ts', privateWebServiceToken)
     fs.symlinkSync(outside, path.join(candidate, 'linked'), 'junction')
     expect(auditOpenCandidate(candidate)).toEqual(
       expect.arrayContaining([
@@ -767,7 +801,7 @@ describe('create-open-candidate policy', () => {
     const output = makeCandidate()
     writeFile(output, 'sentinel', 'unchanged')
     const relativeFile = 'src/untracked.test.ts'
-    writeFile(source, relativeFile, 'svc' + 'CodexAuth')
+    writeFile(source, relativeFile, privateWebServiceToken)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     withFakeGitLsFiles([{ path: relativeFile }], () => {
       const realMock = vi.mocked(execFileSync).getMockImplementation()

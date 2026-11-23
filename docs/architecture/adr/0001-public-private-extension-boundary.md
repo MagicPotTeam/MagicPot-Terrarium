@@ -6,11 +6,11 @@ Accepted
 
 ## Context
 
-MagicPot is maintained as the public open application in `open/MagicPot-Terrarium` and a private wrapper at the repository root. Private Codex and Tripo integrations add provider behavior, optional IPC services, and renderer UI contributions.
+MagicPot is maintained as the public open application in `open/MagicPot-Terrarium` and a private wrapper at the repository root. Codex and Tripo integrations add provider behavior, optional IPC services, and renderer UI contributions. Both started as private integrations and are now public; see Migration notes.
 
 Historically, private overlays could patch high-churn open files such as chat pages, settings panels, IPC assembly, LLM proxy implementation, and shared LLM/config files. That is workable for short-lived experiments but creates long-term merge risk and can accidentally leak private assumptions into public candidates.
 
-The open application already has generated registry seams in shared, main, and renderer source trees. These registries are empty in the public build and can be populated by downstream/private packaging.
+The open application already has generated registry seams in shared, main, and renderer source trees. These registries were originally empty in the public build and can be populated or replaced by downstream/private packaging.
 
 ## Decision
 
@@ -41,6 +41,12 @@ Negative or trade-offs:
 - Some private migration work requires adding new public extension points before private behavior can move.
 - Extension contracts require versioning discipline; V1 additions should remain additive.
 - Generated registries must be tested in both empty-open and populated-private forms.
+
+## Migration notes
+
+- Tripo moved from the private wrapper into `main/extensions/` and is registered in the main registry by default.
+- 2026-11: Codex (ChatGPT sign-in OAuth, model discovery, image generation) moved from the private overlay into `shared/extensions/`, `main/extensions/`, `renderer/src/extensions/`, and `main/api/`. The public registries now register Codex by default (Codex before Tripo in `llmProxy`). It lives in `extensions/` rather than a private extension directory so that public code still never imports private modules.
+- The private wrapper must drop its Codex overlay entries once this lands, otherwise private packaging would carry a second Codex copy and regenerate the registries to point at it.
 
 ## Follow-up
 

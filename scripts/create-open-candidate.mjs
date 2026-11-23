@@ -197,7 +197,6 @@ const isEnvFile = (name) => name === '.env' || name.startsWith('.env.') || name.
 const isAllowedEnvExample = (name) => name === '.env.example' || name === '.env.sample'
 const privatePathSegment = 'private'
 const privateExtSegment = privatePathSegment + 'Extensions'
-const codexSegment = 'codex'
 const chatWebMixedSegment = 'chat' + 'gpt' + 'Web'
 const chatWebLowerSegment = chatWebMixedSegment.toLowerCase()
 const scannerPrivateFixtureDirectoryToken = privatePathSegment
@@ -210,20 +209,11 @@ const privateSourcePathPrefixes = [
 ].map((segments) => segments.join('/').toLowerCase())
 const privateSourcePathExact = new Set(
   [
-    ['packages', 'app', 'src', 'main', 'api', codexSegment + 'ChatClient.ts'],
-    ['packages', 'app', 'src', 'main', 'api', codexSegment + 'RequestGovernor.ts'],
-    ['packages', 'app', 'src', 'main', 'llmProxy', codexSegment + 'AttachmentArtifacts.ts'],
-    ['packages', 'app', 'src', 'main', 'api', codexSegment + 'ModelDiscovery.ts'],
-    ['packages', 'app', 'src', 'main', 'api', codexSegment + 'OAuth.ts'],
-    ['packages', 'app', 'src', 'main', 'api', 'svc' + 'CodexAuthImpl.ts'],
-    ['packages', 'app', 'src', 'main', 'api', 'svc' + 'CodexModelsImpl.ts'],
     ['packages', 'app', 'src', 'main', 'api', 'svc' + chatWebMixedSegment + 'Impl.ts'],
     ['packages', 'app', 'src', 'main', 'llmProxy', chatWebLowerSegment + 'Client.ts'],
     ['packages', 'app', 'src', 'main', 'llmProxy', chatWebLowerSegment + 'Dom.ts'],
     ['packages', 'app', 'src', 'main', 'llmProxy', chatWebLowerSegment + 'LlmProxyExtension.ts'],
     ['packages', 'app', 'src', 'main', 'llmProxy', chatWebLowerSegment + 'SessionManager.ts'],
-    ['packages', 'app', 'src', 'shared', 'api', 'svc' + 'CodexAuth.ts'],
-    ['packages', 'app', 'src', 'shared', 'api', 'svc' + 'CodexModels.ts'],
     ['packages', 'app', 'src', 'shared', 'api', 'svc' + chatWebMixedSegment + '.ts'],
     ['packages', 'app', 'src', 'shared', 'llm', 'profileHelpers.ts'],
     ['packages', 'app', 'src', 'shared', 'llm', 'profileHelpers.test.ts'],
@@ -248,9 +238,7 @@ const privateSourcePathExact = new Set(
       chatWebMixedSegment + 'Translations.ts'
     ],
     ['packages', 'app', 'src', 'shared', 'locales', 'en-US', chatWebLowerSegment + '.json'],
-    ['packages', 'app', 'src', 'shared', 'locales', 'zh-CN', chatWebLowerSegment + '.json'],
-    ['packages', 'app', 'src', 'shared', 'locales', 'en-US', codexSegment + '.json'],
-    ['packages', 'app', 'src', 'shared', 'locales', 'zh-CN', codexSegment + '.json']
+    ['packages', 'app', 'src', 'shared', 'locales', 'zh-CN', chatWebLowerSegment + '.json']
   ].map((segments) => segments.join('/').toLowerCase())
 )
 const isDeclaredPrivateSourcePath = (file) => {
@@ -361,16 +349,6 @@ const readTextContent = (file) => {
 }
 
 const addContentIssues = ({ relativeFile, text, issues }) => {
-  const codexFunctionalPattern = new RegExp(
-    [
-      'codex' + 'OAuth',
-      'codex' + 'ChatClient',
-      'svc' + 'Codex[A-Za-z0-9_]*',
-      'Codex' + 'ChatGPTCli',
-      'backend-api/' + 'codex'
-    ].join('|'),
-    'gi'
-  )
   const privateWebFunctionalPattern = new RegExp(
     [chatWebToken, chatWebHyphenToken, chatWebSnakeToken, serviceChatWebToken].join('|'),
     'gi'
@@ -389,11 +367,9 @@ const addContentIssues = ({ relativeFile, text, issues }) => {
     'ChatGPT' + 'Web' + 'Session',
     'validate' + 'ChatGPT' + 'Session'
   ]
-  const chatWebHosts = [
-    'chat' + 'gpt' + '[.]com',
-    'chat' + '[.]openai' + '[.]com',
-    'auth' + '[.]openai' + '[.]com'
-  ]
+  // Codex OAuth is public and legitimately uses the ChatGPT backend and OpenAI auth hosts;
+  // only the retired ChatGPT Web page host remains a tombstone.
+  const chatWebHosts = ['chat' + '[.]openai' + '[.]com']
   const privateWebOriginPattern = new RegExp(
     `(?<![A-Za-z0-9])(?:https?:\\/\\/)?(?:www\\.)?(?:${chatWebHosts.join('|')})(?=[/:?#\\s"'\\x60)]|$)|\\b(?:${privateWebOriginIdentifiers.join('|')})\\b`,
     'gi'
@@ -429,7 +405,6 @@ const addContentIssues = ({ relativeFile, text, issues }) => {
   const highConfidenceSecretPattern =
     /(?:sk-[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9_]{36,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN ((?:RSA |OPENSSH |EC |DSA )?)PRIVATE KEY-----[A-Za-z0-9+/=\r\n]{32,8192}-----END \1PRIVATE KEY-----)/g
   const rules = [
-    { rule: 'codex-functional-reference', pattern: codexFunctionalPattern },
     { rule: privateExtensionRuleName, pattern: privateExtensionReferencePattern },
     { rule: `${chatWebRulePrefix}-functional-reference`, pattern: privateWebFunctionalPattern },
     { rule: `${chatWebRulePrefix}-origin-reference`, pattern: privateWebOriginPattern },

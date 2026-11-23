@@ -261,14 +261,22 @@ describe('credential-free remote profile routing', () => {
   )
 
   it.each(['codex_oauth', 'extension_oauth'])(
-    'only publishes the non-secret auth discriminator for %s',
+    'only publishes the non-secret auth discriminator for %s without an installed extension',
     (auth_mode) => {
+      sharedHostExtensionApiV1.llmProfiles.splice(0)
       expect(resolveRemoteProfileRouting({ ...base, auth_mode })).toEqual({
         call_type: 'api',
         auth_mode
       })
     }
   )
+
+  it('routes codex_oauth through the default Codex extension without publishing secrets', () => {
+    expect(resolveRemoteProfileRouting({ ...base, auth_mode: 'codex_oauth' })).toEqual({
+      call_type: 'codex',
+      auth_mode: 'codex_oauth'
+    })
+  })
 
   it('honors pure extension route hooks without constructing a client or fetching', () => {
     const createCli = vi.fn()
