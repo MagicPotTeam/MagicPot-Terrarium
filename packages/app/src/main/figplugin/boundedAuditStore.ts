@@ -10,6 +10,7 @@ import {
   FIGPLUGIN_AUDIT_MAX_BYTES,
   FIGPLUGIN_AUDIT_MAX_LINE_BYTES
 } from '@shared/figplugin/executionAudit'
+import { renameWithTransientRetry } from './transientRename'
 
 type Queue = { tail: Promise<void>; writeFailed: boolean }
 // All controllers/windows in this main process share ordering for the same audit file.
@@ -265,7 +266,7 @@ export class BoundedAuditStore<T extends { at: number }> {
       const tempInfo = await fs.lstat(temporary, { bigint: true })
       if (!sameIdentity(identity, tempInfo) || !tempInfo.isFile() || tempInfo.nlink !== 1n)
         throw unavailable()
-      await fs.rename(temporary, this.#file)
+      await renameWithTransientRetry(temporary, this.#file)
       renamed = true
     } finally {
       await handle.close().catch(() => undefined)
