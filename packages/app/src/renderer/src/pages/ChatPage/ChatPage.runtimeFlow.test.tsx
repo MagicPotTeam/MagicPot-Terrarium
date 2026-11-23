@@ -4774,7 +4774,7 @@ describe('ChatPage runtime workflow integration', () => {
       })
       fireEvent.click(screen.getByTestId('chat-composer-send-mock'))
       expect(hoisted.notifyWarningMock).toHaveBeenLastCalledWith(
-        'Use /status, /jobs or /compact without arguments.'
+        'Use /status, /jobs, /triggers or /compact without arguments.'
       )
     } finally {
       view.unmount()

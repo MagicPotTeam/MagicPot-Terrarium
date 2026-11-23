@@ -503,6 +503,13 @@ export class ThreadInboxStore {
    * The producer withdraws the waiting event with this idempotency key in the session (its result
    * was already consumed). Only a queued event: a claimed one is already on its way to a turn.
    */
+  /** An event with this idempotency key still waits in the session (queued or claimed). */
+  pending(session: ThreadEventSession, idempotencyKey: string): boolean {
+    this.assertAvailable()
+    if (!isThreadEventSession(session)) return false
+    return this.keys.has(keyOf(session, idempotencyKey))
+  }
+
   withdraw(session: ThreadEventSession, idempotencyKey: string, reason: string): boolean {
     this.assertAvailable()
     if (!isThreadEventSession(session)) throw new Error('Invalid thread event session.')

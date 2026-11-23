@@ -372,6 +372,7 @@ import ChatTranscriptEmptyState from './components/ChatTranscriptEmptyState'
 import { getAgentColumnTokens } from '../../components/agentColumnTokens'
 import AgentThreadHtmlPanel from './components/AgentThreadHtmlPanel'
 import { isAgentBasicCommand, parseAgentBasicCommand } from './agentBasicCommand'
+import { formatAgentTriggers } from './agentTriggersList'
 import { listComposerCommands } from './composerCommandCatalog'
 import { isAgentGoalCommand } from './agentGoalCommand'
 import {
@@ -11768,6 +11769,40 @@ const ChatPage: React.FC<ChatPageProps> = ({
         } else if (command === 'video_gen') {
           if (compact) appendTailCard(inspectionScope, configurationTailCard('video_gen'))
           else setConfigurationView({ scope: inspectionScope, kind: 'video_gen' })
+        } else if (command === 'triggers') {
+          // KohakuTerrarium's /triggers: a read-only list, answered here without a model turn. Only
+          // the user's own composer reaches this; model and event text never run a command.
+          if (
+            route?.channel !== 'canvas' ||
+            route.scopeType !== 'thread' ||
+            config.use_remote_llm
+          ) {
+            notifyWarning(
+              t('chat.triggers_local_only', {
+                defaultValue: 'Triggers are available only in a local canvas thread.'
+              })
+            )
+            return
+          }
+          const scope = inspectionScope
+          const show = (
+            text: string,
+            tone: { muted?: boolean; error?: boolean; mono?: boolean }
+          ) => {
+            if (compact)
+              appendTailCard(scope, { kind: 'text', command: '/triggers', text, ...tone })
+            else setInspectionView({ scope, title: '/triggers', text })
+          }
+          void Promise.resolve()
+            .then(() => api().svcLLMProxy.listAgentTriggers({ route: route!, conversationId: id }))
+            .then(({ triggers }) => {
+              const text = formatAgentTriggers(triggers)
+              show(
+                text ?? t('chat.command_card.no_triggers'),
+                text ? { mono: true } : { muted: true }
+              )
+            })
+            .catch(() => show(t('chat.command_card.triggers_failed'), { error: true }))
         } else {
           if (
             command === 'jobs' &&
@@ -11908,7 +11943,7 @@ const ChatPage: React.FC<ChatPageProps> = ({
       } catch {
         notifyWarning(
           t('chat.use_basic_command', {
-            defaultValue: 'Use /status, /jobs or /compact without arguments.'
+            defaultValue: 'Use /status, /jobs, /triggers or /compact without arguments.'
           })
         )
       }

@@ -207,6 +207,7 @@ describe('ChatPage composer suggestions', () => {
       'goal',
       'status',
       'jobs',
+      'triggers',
       'compact',
       'btw',
       'skill',

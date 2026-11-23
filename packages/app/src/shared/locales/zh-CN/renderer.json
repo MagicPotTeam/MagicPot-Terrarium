@@ -933,8 +933,9 @@
     "use_replay_commands": "使用 /branch、/regen 或 /edit <消息编号> <文本>。工具或附件重放需要使用现有编辑器并进行检查。",
     "command_unavailable_current": "当前对话无法使用该命令。",
     "jobs_local_only": "只有本地画布线程可以查看任务。",
+    "triggers_local_only": "只有本地画布线程可以查看触发器。",
     "compaction_unavailable_busy": "压缩不可用，或对话当前正忙。",
-    "use_basic_command": "不带参数使用 /status、/jobs 或 /compact。",
+    "use_basic_command": "不带参数使用 /status、/jobs、/triggers 或 /compact。",
     "image_repair_unavailable_current": "当前对话无法修复图片。",
     "use_repair_images": "不带参数使用 /repair-images。",
     "image_existence_check_unavailable": "无法检查图片是否存在，未修改任何上下文。",
@@ -970,6 +971,7 @@
       "command_goal": "设置、查看或清除当前目标",
       "command_status": "查看当前对话状态",
       "command_jobs": "查看本线程的辅助任务",
+      "command_triggers": "查看本对话的定时器和日程",
       "command_compact": "压缩对话上下文",
       "command_btw": "私下提问，不打断主对话",
       "command_skill": "查看或开关本线程的技能",
@@ -1455,6 +1457,7 @@
     "queue_show_more": "再显示 {{count}} 条",
     "command_card": {
       "jobs_failed": "无法读取任务。",
+      "triggers_failed": "无法读取触发器。",
       "plugin_hint": "插件在插件中心配置。",
       "module_hint": "工具环境和 MCP 客户端在设置中配置。",
       "video_gen_hint": "视频在视频生成工作区生成。",
@@ -1470,6 +1473,7 @@
       "edit_prompt": "新建一个对话，保留第 {{number}} 条消息之前的内容，并把修改后的文字放入输入框。原对话保留。",
       "repair_prompt": "在之后的请求中用占位说明代替 {{count}} 张缺失的本地图片？原始记录不变。",
       "no_jobs": "没有后台任务或进程。",
+      "no_triggers": "没有运行中的触发器。",
       "no_output": "没有输出。"
     },
     "delegated": {

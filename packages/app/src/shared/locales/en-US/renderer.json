@@ -1106,8 +1106,9 @@
     "use_replay_commands": "Use /branch, /regen or /edit <message number> <text>. Tool/attachment replay requires the existing editor and review.",
     "command_unavailable_current": "Command unavailable for the current conversation.",
     "jobs_local_only": "Jobs are available only in a local canvas thread.",
+    "triggers_local_only": "Triggers are available only in a local canvas thread.",
     "compaction_unavailable_busy": "Compaction unavailable or conversation is busy.",
-    "use_basic_command": "Use /status, /jobs or /compact without arguments.",
+    "use_basic_command": "Use /status, /jobs, /triggers or /compact without arguments.",
     "image_repair_unavailable_current": "Image repair unavailable for the current conversation.",
     "use_repair_images": "Use /repair-images without arguments.",
     "image_existence_check_unavailable": "Image existence check unavailable. No context was changed.",
@@ -1143,6 +1144,7 @@
       "command_goal": "Set, show or clear the current goal",
       "command_status": "Show conversation status",
       "command_jobs": "List thread helper jobs",
+      "command_triggers": "List this conversation's timers and schedules",
       "command_compact": "Compress the context",
       "command_btw": "Ask a private side question",
       "command_skill": "View or toggle thread skills",
@@ -1628,6 +1630,7 @@
     "queue_show_more": "Show {{count}} more",
     "command_card": {
       "jobs_failed": "Could not read the jobs.",
+      "triggers_failed": "Could not read the triggers.",
       "plugin_hint": "Plugins are configured in the plugin center.",
       "module_hint": "The tool environment and MCP clients are configured in Settings.",
       "video_gen_hint": "Videos are generated in the video generation workspace.",
@@ -1643,6 +1646,7 @@
       "edit_prompt": "Create a new conversation that keeps everything before message {{number}} and puts the edited text in the input. The original stays.",
       "repair_prompt": "Replace {{count}} missing local image(s) with a placeholder note in later requests? The original history stays unchanged.",
       "no_jobs": "No background jobs or processes.",
+      "no_triggers": "No active triggers.",
       "no_output": "No output."
     },
     "delegated": {
