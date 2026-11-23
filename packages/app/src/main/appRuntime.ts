@@ -11,6 +11,7 @@ import {
 } from './localMediaAccess'
 import { getLocalMediaAllowedRoots } from './localMediaAllowedRoots'
 import { checkRendererLocalPath } from './rendererLocalPathAccess'
+import { createLocalFileResponse, needsNodeFileResponse } from './localMediaFileResponse'
 import {
   flushReportBundleRegistry,
   initializeReportBundleRegistry
@@ -201,6 +202,10 @@ async function handleLocalMediaRequest(request: Request): Promise<Response> {
         : withLocalMediaCorsHeaders(new Response('Forbidden', { status: 403 }), request)
     }
 
+    // Chromium cannot open a Windows path near MAX_PATH (deep chat media); read those here.
+    if (needsNodeFileResponse(localPath)) {
+      return withLocalMediaCorsHeaders(await createLocalFileResponse(localPath, request), request)
+    }
     const fileUrl = toFileUrl(localPath)
     return withLocalMediaCorsHeaders(await net.fetch(fileUrl), request)
   } catch (error) {

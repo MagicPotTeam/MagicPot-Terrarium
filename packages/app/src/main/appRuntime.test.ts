@@ -330,6 +330,55 @@ describe('appRuntime local-media protocol helpers', () => {
     }
   })
 
+  it('reads a Windows path near MAX_PATH itself, since Chromium answers ERR_FILE_NOT_FOUND for it', async () => {
+    // node:fs is the in-memory filesystem of the node test setup.
+    const base = path.join(process.cwd(), '.magicpot-trash', 'app-runtime-long-path')
+    const longFile = path.join(
+      base,
+      'Data',
+      '.chat_media',
+      'user-output',
+      'a'.repeat(64),
+      'originals',
+      'c6',
+      `${'c'.repeat(64)}.png`
+    )
+    fs.mkdirSync(path.dirname(longFile), { recursive: true })
+    fs.writeFileSync(longFile, 'synthetic-png-bytes')
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+    try {
+      resolveAuthorizedLocalMediaPathMock.mockImplementation(() => longFile)
+      vi.mocked(net.fetch).mockImplementation(async () => new Response('short-path-bytes'))
+      await setupReadyAppRuntime()
+      const handler = vi.mocked(protocol.handle).mock.calls.at(-1)?.[1] as (
+        request: Request
+      ) => Promise<Response>
+
+      const response = await handler(
+        new Request('local-media:///C:/deep/original.png', { headers: { Origin: 'file://' } })
+      )
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Content-Type')).toBe('image/png')
+      expect(response.headers.get('Access-Control-Allow-Origin')).toBe('file://')
+      expect(await response.text()).toBe('synthetic-png-bytes')
+      expect(net.fetch).not.toHaveBeenCalled()
+
+      // A missing deep file is a plain 404, not the 500 a failed net.fetch turned into.
+      fs.rmSync(longFile)
+      expect((await handler(new Request('local-media:///C:/deep/original.png'))).status).toBe(404)
+
+      // A short path still goes through Chromium.
+      resolveAuthorizedLocalMediaPathMock.mockImplementation((filePath: string) => filePath)
+      const short = await handler(new Request('local-media:///C:/images/a.png'))
+      expect(await short.text()).toBe('short-path-bytes')
+      expect(net.fetch).toHaveBeenCalledWith('file:///C:/images/a.png')
+    } finally {
+      Object.defineProperty(process, 'platform', platform)
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
   it('adds CORS headers while preserving the proxied local file response metadata', async () => {
     const request = new Request('local-media:///C:/images/a.webp', {
       headers: { Origin: 'file://' }
