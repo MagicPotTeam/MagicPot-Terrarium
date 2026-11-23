@@ -421,27 +421,38 @@ const ToolCallRow: React.FC<{
 
   if (columnStyle) {
     const hairline = `1px solid ${tokens.toolTint.hairline}`
-    const section = (title: string, value: { text: string; truncated: boolean }) => (
-      <Box sx={{ px: '12px', pt: '8px', minWidth: 0 }}>
-        <Typography
-          component="h4"
-          sx={{
-            m: 0,
-            fontSize: tokens.fontSize.micro,
-            lineHeight: '14px',
-            fontWeight: 600,
-            letterSpacing: '0.04em',
-            textTransform: 'uppercase',
-            color: tokens.muted
-          }}
-        >
-          {title}
-        </Typography>
+    // Arguments and result show their content without a heading; the label stays for
+    // assistive technology.
+    const section = (
+      title: string,
+      value: { text: string; truncated: boolean },
+      showTitle = true
+    ) => (
+      <Box
+        sx={{ px: '12px', pt: '8px', minWidth: 0 }}
+        {...(showTitle ? {} : { role: 'group', 'aria-label': title })}
+      >
+        {showTitle && (
+          <Typography
+            component="h4"
+            sx={{
+              m: 0,
+              fontSize: tokens.fontSize.micro,
+              lineHeight: '14px',
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+              color: tokens.muted
+            }}
+          >
+            {title}
+          </Typography>
+        )}
         <Box
           component="pre"
           sx={{
             m: 0,
-            mt: '2px',
+            mt: showTitle ? '2px' : 0,
             maxHeight: COLUMN_SECTION_MAX_HEIGHT,
             overflowY: 'auto',
             overflowX: 'hidden',
@@ -607,8 +618,8 @@ const ToolCallRow: React.FC<{
         )}
         {open && details && (
           <Box sx={{ borderTop: hairline, bgcolor: tokens.toolTint.body, pb: '8px', minWidth: 0 }}>
-            {section(t('chat.tool_call.arguments'), details.args)}
-            {details.output && section(t('chat.tool_call.result'), details.output)}
+            {section(t('chat.tool_call.arguments'), details.args, false)}
+            {details.output && section(t('chat.tool_call.result'), details.output, false)}
             {details.error && section(t('chat.tool_call.error'), details.error)}
             {!details.output &&
               !details.error &&
@@ -625,11 +636,19 @@ const ToolCallRow: React.FC<{
     )
   }
 
-  const section = (title: string, value: { text: string; truncated: boolean }) => (
-    <Box>
-      <Typography variant="caption" component="h4" sx={{ px: 1, pt: 1, fontWeight: 600 }}>
-        {title}
-      </Typography>
+  // Arguments and result show their content without a heading; the label stays for
+  // assistive technology.
+  const section = (
+    title: string,
+    value: { text: string; truncated: boolean },
+    showTitle = true
+  ) => (
+    <Box {...(showTitle ? {} : { role: 'group', 'aria-label': title })}>
+      {showTitle && (
+        <Typography variant="caption" component="h4" sx={{ px: 1, pt: 1, fontWeight: 600 }}>
+          {title}
+        </Typography>
+      )}
       <Box component="pre" sx={codeStyle}>
         {value.text}
       </Box>
@@ -766,8 +785,8 @@ const ToolCallRow: React.FC<{
       )}
       {open && details && (
         <Box sx={{ borderTop: '1px solid', borderColor: 'divider', pb: 1 }}>
-          {section(t('chat.tool_call.arguments'), details.args)}
-          {details.output && section(t('chat.tool_call.result'), details.output)}
+          {section(t('chat.tool_call.arguments'), details.args, false)}
+          {details.output && section(t('chat.tool_call.result'), details.output, false)}
           {details.error && section(t('chat.tool_call.error'), details.error)}
           {!details.output && !details.error && (
             <Typography

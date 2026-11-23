@@ -129,7 +129,7 @@ describe('tool lines in the Agent column', () => {
     })
     expect(lines(container)[0]).toHaveStyle({ borderRadius: '8px', overflow: 'hidden' })
     fireEvent.click(header)
-    expect(screen.getByText('chat.tool_call.result').parentElement?.parentElement).toHaveStyle({
+    expect(screen.getByRole('group', { name: 'chat.tool_call.result' }).parentElement).toHaveStyle({
       backgroundColor: alpha('#0F52BA', 0.06)
     })
   })
@@ -154,10 +154,12 @@ describe('tool lines in the Agent column', () => {
     await user.keyboard('{Enter}')
     expect(header).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText('RESULT_a')).toHaveStyle({ maxHeight: '16rem', overflowY: 'auto' })
-    expect(screen.getAllByRole('heading').map((heading) => heading.textContent)).toEqual([
-      'chat.tool_call.arguments',
-      'chat.tool_call.result'
-    ])
+    // Arguments and result carry no heading; their label stays for assistive technology.
+    expect(screen.queryAllByRole('heading')).toHaveLength(0)
+    expect(screen.getByRole('group', { name: 'chat.tool_call.arguments' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'chat.tool_call.result' })).toBeInTheDocument()
+    expect(screen.queryByText('chat.tool_call.arguments')).not.toBeInTheDocument()
+    expect(screen.queryByText('chat.tool_call.result')).not.toBeInTheDocument()
     await user.keyboard(' ')
     expect(header).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(header)
@@ -460,7 +462,9 @@ describe('helper calls as delegated-agent lines in the Agent column', () => {
     expect(box.querySelector('strong')?.textContent).toBe('Three')
     expect(box).toHaveTextContent('Three call sites for a.')
     // No arguments section, no stats strip, no nested conversation.
-    expect(screen.queryByText('chat.tool_call.arguments')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('group', { name: 'chat.tool_call.arguments' })
+    ).not.toBeInTheDocument()
   })
 
   it('shows a background job receipt as raw text', () => {
