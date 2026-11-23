@@ -50,6 +50,7 @@ import {
 } from '../magicAgentRuntime/trustedRouteBinding'
 import { THREAD_EVENT_BUSY, type AgentThreadInbox } from './agentThreadInbox'
 import { agentThreadInteractions } from './agentThreadInteractions'
+import { timerSpec, type AgentThreadTriggers } from './agentThreadTriggers'
 import { LLMProxySvcImpl } from './svcLLMProxyImpl'
 
 const route = {
@@ -109,8 +110,10 @@ afterEach(() => {
   vi.restoreAllMocks()
   clearMagicAgentTrustedRouteBindingsForTest()
   h.senders.clear()
-  for (const svc of services.splice(0))
-    (svc as unknown as { threadInbox: AgentThreadInbox }).threadInbox.dispose()
+  for (const svc of services.splice(0)) {
+    ;(svc as unknown as { threadInbox: AgentThreadInbox }).threadInbox.dispose()
+    ;(svc as unknown as { threadTriggers: AgentThreadTriggers }).threadTriggers.dispose()
+  }
   rmSync(h.data, { recursive: true, force: true })
 })
 
@@ -209,5 +212,60 @@ describe('MAIN admits a thread event turn', () => {
     expect(pending()[0]).toMatchObject({ prompt: { title: 'Approve the synthetic deletion?' } })
     channel.dispose()
     await expect(answer).rejects.toThrow()
+  })
+})
+
+describe('MAIN wires the S4 triggers', () => {
+  const triggersOf = (svc: LLMProxySvcImpl) =>
+    (svc as unknown as { threadTriggers: AgentThreadTriggers }).threadTriggers
+  const install = (svc: LLMProxySvcImpl, conversationId: string, name: string) =>
+    triggersOf(svc).install({
+      tool: 'add_timer',
+      route,
+      conversationId,
+      name,
+      spec: timerSpec({ interval: 60 }),
+      prompt: 'synthetic check'
+    })
+  const listed = async (svc: LLMProxySvcImpl, conversationId: string) =>
+    (
+      await svc.listAgentTriggers({ route, conversationId }, invoke(1, 'listAgentTriggers'))
+    ).triggers.map((trigger) => trigger.id)
+
+  it('lists for /triggers only through its own authorized method', async () => {
+    const { svc } = service()
+    install(svc, 'session-a', 'tick')
+    expect(await listed(svc, 'session-a')).toEqual(['tick'])
+    await expect(
+      svc.listAgentTriggers({ route, conversationId: 'session-a' }, invoke(1, 'chat'))
+    ).rejects.toThrow('unauthorized')
+    await expect(svc.listAgentTriggers({ route, conversationId: 'session-a' })).rejects.toThrow(
+      'unauthorized'
+    )
+  })
+
+  it("deletes a removed session's triggers; stopping (hold) keeps them", async () => {
+    const { svc } = service()
+    install(svc, 'session-a', 'tick')
+    install(svc, 'session-b', 'other')
+    await svc.setAgentThreadEventHold(
+      { ...scope, conversationId: 'session-a', held: true },
+      invoke(1, 'setAgentThreadEventHold')
+    )
+    expect(await listed(svc, 'session-a')).toEqual(['tick'])
+    // An unauthorized removal changes nothing.
+    await expect(
+      svc.expireAgentThreadEvents(
+        { ...scope, conversationId: 'session-a', reason: 'session-removed' },
+        invoke(1, 'chat')
+      )
+    ).rejects.toThrow()
+    expect(await listed(svc, 'session-a')).toEqual(['tick'])
+    await svc.expireAgentThreadEvents(
+      { ...scope, conversationId: 'session-a', reason: 'session-removed' },
+      invoke(1, 'expireAgentThreadEvents')
+    )
+    expect(await listed(svc, 'session-a')).toEqual([])
+    expect(await listed(svc, 'session-b')).toEqual(['other'])
   })
 })

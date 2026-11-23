@@ -49,6 +49,12 @@ export const COMPOSER_COMMANDS: readonly ComposerCommand[] = [
   { name: 'status', descriptionKey: key('command_status'), available: always },
   { name: 'jobs', descriptionKey: key('command_jobs'), available: localThread },
   {
+    name: 'triggers',
+    aliases: ['trigger'],
+    descriptionKey: key('command_triggers'),
+    available: localThread
+  },
+  {
     name: 'compact',
     descriptionKey: key('command_compact'),
     available: (context) => !context.teamMember

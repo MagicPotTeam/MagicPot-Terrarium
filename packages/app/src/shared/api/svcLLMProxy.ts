@@ -1,3 +1,4 @@
+import type { AgentThreadTriggerListScope, AgentThreadTriggerView } from './agentThreadTrigger'
 import type {
   AgentTeamMessageClaim,
   AgentTeamMessageIntent,
@@ -563,6 +564,13 @@ export type LLMProxySvc = {
   expireAgentThreadEvents(req: AgentThreadEventExpire): Promise<{ expired: number }>
   /** Stopped by the user (held) or resumed by the user's own send: durable, survives a restart. */
   setAgentThreadEventHold(req: AgentThreadEventHold): Promise<{ held: boolean }>
+  /**
+   * The user's /triggers command (trusted local desktop only): the conversation's installed
+   * triggers, read-only. It never fires, edits or removes one.
+   */
+  listAgentTriggers(
+    req: AgentThreadTriggerListScope
+  ): Promise<{ triggers: AgentThreadTriggerView[] }>
   /** Conversation feedback, never operation approval. */
   getAgentNotes(req: AgentThreadInteractionScope): Promise<AgentThreadNotes>
   listAgentArchiveQueries(
@@ -691,6 +699,7 @@ export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
   releaseAgentThreadEvent: { type: 'unary' },
   expireAgentThreadEvents: { type: 'unary' },
   setAgentThreadEventHold: { type: 'unary' },
+  listAgentTriggers: { type: 'unary' },
   getAgentNotes: { type: 'unary' },
   listAgentArchiveQueries: { type: 'unary' },
   resolveAgentArchiveQuery: { type: 'unary' },

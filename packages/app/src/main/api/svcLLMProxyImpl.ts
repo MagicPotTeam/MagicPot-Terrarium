@@ -1,5 +1,12 @@
 import { AgentTeamMessageQueue } from './agentTeamMessageQueue'
 import { createJobReportSink } from './agentThreadJobReportSink'
+import { AgentThreadTriggers, lazyThreadTriggerStoreOpener } from './agentThreadTriggers'
+import { getBuildEnv } from '../config/buildEnv'
+import { join } from 'node:path'
+import type {
+  AgentThreadTriggerListScope,
+  AgentThreadTriggerView
+} from '@shared/api/agentThreadTrigger'
 import { AgentThreadInbox } from './agentThreadInbox'
 import type {
   AgentThreadEventClaim,
@@ -2254,6 +2261,20 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   ) => ({ intent: this.teamMessageQueue.claim(req, invocation) })
   /** MAIN-owned thread events (only MAIN enqueues); the renderer lists, claims, releases, expires. */
   private readonly threadInbox = new AgentThreadInbox()
+  /**
+   * S4 triggers: fire into the inbox only while the session's pane is open (its pump lists). The
+   * scheduler starts with the first pane that lists, so nothing runs while no project is open.
+   */
+  private readonly threadTriggers = new AgentThreadTriggers({
+    store: lazyThreadTriggerStoreOpener(() =>
+      join(getBuildEnv().pathMap.data, 'thread-triggers', 'triggers.sqlite')
+    ),
+    inbox: {
+      enqueue: (input) => this.threadInbox.enqueue(input),
+      isPending: (session, key) => this.threadInbox.isPending(session, key),
+      isOpen: (storageScope, routeKey) => this.threadInbox.isOpen(storageScope, routeKey)
+    }
+  })
   /** A conversation whose request still owns its abort controller (a running turn). */
   private readonly isConversationBusy = (conversationId: string): boolean => {
     const owner = this.conversationAbortControllers.get(conversationId.trim())
@@ -2274,7 +2295,24 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   expireAgentThreadEvents = async (
     req: AgentThreadEventExpire,
     invocation?: ServiceInvocationContext
-  ) => this.threadInbox.expire(req, invocation)
+  ) => {
+    // Authorized by the inbox first; then a removed (or unavailable) session loses its triggers too.
+    const result = this.threadInbox.expire(req, invocation)
+    try {
+      this.threadTriggers.removeSession(req.route, req.conversationId)
+    } catch {
+      /* Unreadable trigger file: nothing fires from it either. */
+    }
+    return result
+  }
+  /** The user's /triggers command: the conversation's triggers, read-only. */
+  listAgentTriggers = async (
+    req: AgentThreadTriggerListScope,
+    invocation?: ServiceInvocationContext
+  ): Promise<{ triggers: AgentThreadTriggerView[] }> => {
+    authorizeAgentThreadScope(req, invocation, 'listAgentTriggers')
+    return { triggers: this.threadTriggers.list(req.route!, req.conversationId!) }
+  }
   setAgentThreadEventHold = async (
     req: AgentThreadEventHold,
     invocation?: ServiceInvocationContext
@@ -2396,6 +2434,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   constructor(executionPolicy: { retryModelCapacity?: false } = {}) {
     this.retryModelCapacity = executionPolicy.retryModelCapacity !== false
     // S3: finished background work wakes the session that started it (one job_done per job).
+    this.threadInbox.onOpen = () => this.threadTriggers.start()
     const reports = createJobReportSink(this.threadInbox)
     agentThreadJobs.reportTo(reports)
     agentThreadProcesses.reportTo(reports)
@@ -3100,6 +3139,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         threadImageReview,
         threadImageHistory,
         createImageGenerator: () => this.createThreadImageGenerator(req),
+        triggers: this.threadTriggers,
         goalProgress,
         teamMessages:
           invocation && requestRoute
@@ -5422,6 +5462,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         threadImageReview,
         threadImageHistory,
         createImageGenerator: () => this.createThreadImageGenerator(req),
+        triggers: this.threadTriggers,
         goalProgress: localGoalProgress,
         teamMessages:
           invocation && requestRoute

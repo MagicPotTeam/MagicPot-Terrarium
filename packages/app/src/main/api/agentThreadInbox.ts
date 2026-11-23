@@ -29,6 +29,8 @@ import { authorizeAgentThreadScope } from './agentThreadScope'
 /** This MAIN process. A claim of another boot never started a turn (see ThreadInboxStore). */
 const BOOT = randomUUID()
 const RETRY_MS = 30_000
+/** A pane counts as open while its pump listed this recently (it polls every 0.5-3 s). */
+export const THREAD_PANE_OPEN_WINDOW_MS = 15_000
 const BOOT_STARTED_AT = Date.now()
 export const THREAD_EVENT_UNAVAILABLE = 'Thread event is no longer available.'
 export const THREAD_EVENT_BUSY = 'Thread event waits: its session has a running turn.'
@@ -186,8 +188,34 @@ export class AgentThreadInbox {
   >()
   private readonly opener: ThreadInboxStoreOpener
 
-  constructor(options: { store?: ThreadInboxStoreOpener } = {}) {
+  /** [storageScope, routeKey] -> when its pane's pump last listed (monotonic ms). */
+  private readonly seen = new Map<string, number>()
+  /** MAIN wiring: a pane's pump started listing again (its project opened). */
+  onOpen?: () => void
+
+  constructor(options: { store?: ThreadInboxStoreOpener; clock?: () => number } = {}) {
     this.opener = options.store ?? productionOpener()
+    this.clock = options.clock ?? (() => performance.now())
+  }
+  private readonly clock: () => number
+
+  /**
+   * MAIN-only: the pane (storage scope + route) is open, meaning its thread pump listed events within
+   * the window. Only an authorized list counts; nothing a model or event text says does.
+   */
+  isOpen(storageScope: string, routeKey: string, windowMs = THREAD_PANE_OPEN_WINDOW_MS): boolean {
+    const at = this.seen.get(JSON.stringify([storageScope, routeKey]))
+    return at !== undefined && this.clock() - at <= windowMs
+  }
+
+  /** MAIN-only: an event with this idempotency key still waits (queued or claimed) in the session. */
+  isPending(
+    input: Pick<AgentThreadEventInput, 'route' | 'storageScope' | 'conversationId'>,
+    idempotencyKey: string
+  ): boolean {
+    const session = this.session(input, input.conversationId)
+    const store = this.opener.open(false)
+    return store?.pending(session, idempotencyKey) ?? false
   }
 
   private owner(senderId: number, invocation: ServiceInvocationContext): Owner {
@@ -340,6 +368,20 @@ export class AgentThreadInbox {
       invocation,
       'listAgentThreadEvents'
     )
+    const pane = JSON.stringify([scope.storageScope, getAgentSessionKey(route)])
+    const now = this.clock()
+    const last = this.seen.get(pane)
+    if (this.seen.size >= 512)
+      for (const [key, at] of this.seen)
+        if (now - at > THREAD_PANE_OPEN_WINDOW_MS) this.seen.delete(key)
+    this.seen.set(pane, now)
+    if (last === undefined || now - last > THREAD_PANE_OPEN_WINDOW_MS) {
+      try {
+        this.onOpen?.()
+      } catch {
+        /* Producers look again on their own schedule. */
+      }
+    }
     let store: ThreadInboxStore | undefined
     try {
       store = this.opener.open(false)

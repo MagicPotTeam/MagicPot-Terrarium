@@ -373,6 +373,60 @@ describe('slash-command results in the Agent column', () => {
     expectCardsInTheTranscriptOnly()
   })
 
+  it('lists the triggers of /triggers and /trigger read-only, locally, without a model turn', async () => {
+    const createdAt = new Date(2026, 4, 4, 9, 0, 0).getTime()
+    let answer: () => Promise<unknown> = async () => ({
+      triggers: [
+        {
+          id: 'tick',
+          type: 'TimerTrigger',
+          running: true,
+          createdAt,
+          nextFireAt: createdAt + 300_000,
+          prompt: 'synthetic check'
+        }
+      ]
+    })
+    const listAgentTriggers = vi.fn((_scope: unknown) => answer())
+    const chat = vi.fn(async () => anyResult)
+    useServices({
+      'svcLLMProxy.listAgentTriggers': listAgentTriggers,
+      'svcLLMProxy.chat': chat,
+      'svcLLMProxy.chatStream': chat
+    })
+    await renderPage()
+
+    run('/triggers')
+    await waitFor(() => expect(commands()).toEqual(['/triggers']))
+    expect(listAgentTriggers).toHaveBeenCalledWith({ route, conversationId: 'lead' })
+    expect(cards()[0]).toHaveTextContent('Active triggers (1):')
+    expect(cards()[0]).toHaveTextContent('tick')
+    expect(cards()[0]).toHaveTextContent('TimerTrigger')
+    expect(cards()[0]).toHaveTextContent('2026-05-04T09:00:00')
+    // Read-only: no stop/delete control in the card.
+    expect(within(cards()[0]).queryAllByRole('button')).toEqual([])
+
+    answer = async () => ({ triggers: [] })
+    run('/trigger')
+    await waitFor(() => expect(commands()).toEqual(['/triggers', '/triggers']))
+    expect(cards()[1]).toHaveTextContent(zh.chat.command_card.no_triggers)
+    expect(en.chat.command_card.no_triggers).toBe('No active triggers.')
+
+    answer = async () => {
+      throw new Error('offline')
+    }
+    run('/triggers')
+    await waitFor(() => expect(commands()).toHaveLength(3))
+    expect(cards()[2]).toHaveAttribute('data-error', 'true')
+
+    // An argument (KT has no delete subcommand) runs nothing.
+    run('/triggers delete tick')
+    await waitFor(() => expect(h.notify).toHaveBeenCalled())
+    expect(listAgentTriggers).toHaveBeenCalledTimes(3)
+    expect(chat).not.toHaveBeenCalled()
+    expectCardsInTheTranscriptOnly()
+  })
+
   it('shows the notes of /scratchpad and /pad with the revision as the title and one muted line', async () => {
     const getAgentNotes = vi
       .fn()

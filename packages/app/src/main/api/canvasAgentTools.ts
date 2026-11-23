@@ -39,6 +39,8 @@ import { createAgentThreadMcpConnectionTools } from './agentThreadMcpConnections
 import { createAgentThreadMcpTools } from './agentThreadMcpTools'
 import type { Config } from '@shared/config/config'
 import { createAgentThreadProcessTools } from './agentThreadProcessTools'
+import { createAgentThreadTriggerTools, mayInstallTriggers } from './agentThreadTriggerTools'
+import type { AgentThreadTriggers } from './agentThreadTriggers'
 import { createAgentThreadShellTools } from './agentThreadShellTools'
 import { createAgentThreadScriptTools } from './agentThreadScriptTools'
 import type { AssistantRunToolProvider } from '../assistantRuntime/types'
@@ -165,6 +167,8 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
     assertTeamActive?: () => void
     /** The same check for background sub-agent jobs (defaults to assertTeamActive). */
     assertBackgroundTeamActive?: () => void
+    /** S4 trigger registry (MAIN). Install tools are listed only for a turn of the user's own send. */
+    triggers?: Pick<AgentThreadTriggers, 'install' | 'remove'>
   }
 ): {
   request: T
@@ -585,6 +589,16 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
     const mcpNames = new Set(mcpTools?.listTools().map((tool) => tool.name) || [])
     const scriptNames = new Set(scriptTools?.listTools().map((tool) => tool.name) || [])
     const jobNames = new Set(jobs?.listTools().map((tool) => tool.name) || [])
+    const triggerTools =
+      interactions && options.triggers
+        ? createAgentThreadTriggerTools({
+            request,
+            triggers: options.triggers,
+            assertInvocation,
+            installAllowed: mayInstallTriggers(request, { goalProgress: options.goalProgress })
+          })
+        : undefined
+    const triggerNames = new Set(triggerTools?.listTools().map((tool) => tool.name) || [])
     const subagentNames = new Set(subagents?.listTools().map((tool) => tool.name) || [])
     const helperNames = new Set(helpers.listTools().map((tool) => tool.name))
     const toolProvider: AssistantRunToolProvider = {
@@ -598,6 +612,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
         ...(interactions ? helpers.listTools() : []),
         ...(subagents?.listTools() || []),
         ...(jobs?.listTools() || []),
+        ...(triggerTools?.listTools() || []),
         ...(scriptTools?.listTools() || []),
         ...(mcpTools?.listTools() || []),
         ...(mcpConnectionTools?.listTools() || []),
@@ -628,11 +643,13 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
                               ? scriptTools!
                               : jobNames.has(name)
                                 ? jobs!
-                                : subagentNames.has(name)
-                                  ? subagents!
-                                  : interactions && helperNames.has(name)
-                                    ? helpers
-                                    : creative
+                                : triggerNames.has(name)
+                                  ? triggerTools!
+                                  : subagentNames.has(name)
+                                    ? subagents!
+                                    : interactions && helperNames.has(name)
+                                      ? helpers
+                                      : creative
         ).callTool(name, args, context)
       }
     }

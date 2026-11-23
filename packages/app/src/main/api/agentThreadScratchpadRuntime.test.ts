@@ -37,6 +37,18 @@ const actionType = (value: unknown) => value && typeof value === 'object' && 'ty
 const options = { runId: 'notes-owned-run', toolCallId: 'notes-owned-call' }
 const call = (args: Record<string, unknown>) => prepared.admission!.run('scratchpad', undefined, () => runtime.callTool(route, 'scratchpad', args, { ...options, allowedToolNames: prepared.request.skillRuntime!.bindings![0].toolNames, toolProvider: prepared.toolProvider }))
 describe('real Canvas + runtime + durable adapter + scratchpad (memfs/Electron stubs)', () => {
+  it('still waits for the user\'s formal approval in a trigger_fire event turn, and writes nothing on refusal', async () => {
+    prepared.dispose?.()
+    prepared = prepareCanvasAgentTools({ ...scope, threadEventOrigin: 'trigger_fire', messages: [] }, { ...invocation, methodName: 'svcLLMProxy.chatStream' }, { local: true, terminalEnabled: false })
+    const notes = await getAgentThreadNotesStore(), mutate = vi.spyOn(notes, 'mutate')
+    const pending = call({ action: 'set', key: 'from-timer', value: 'SYNTHETIC_TRIGGER_VALUE', expectedRevision: 0 }), policy = getAssistantTerminalPolicyRuntime()
+    await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+    expect(mutate).not.toHaveBeenCalled()
+    const item = policy.listPendingTerminalApprovals()[0]
+    policy.resolvePendingTerminalApproval({ approvalId: item.approvalId, expectedRevision: item.revision, approved: false })
+    await expect(pending).rejects.toThrow()
+    expect(mutate).not.toHaveBeenCalled(); expect(notes.get(scope)).toEqual({ revision: 0, notes: [] })
+  })
   it('keeps approved writes behind policy, journals success once and replays without approval/redispatch/MCP sync', async () => {
     const notes = await getAgentThreadNotesStore(), mutate = vi.spyOn(notes, 'mutate')
     const args = { action: 'set', key: 'retained', value: 'REAL_ADAPTER_APPROVED_VALUE', expectedRevision: 0 }
