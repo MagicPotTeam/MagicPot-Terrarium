@@ -14,10 +14,16 @@ import type {
   LLMCli,
   ModelCatalogOption
 } from '@shared/llm'
+import {
+  codexApiExtensionDef,
+  codexLlmProfileExtension,
+  type CodexApiExtensionServices
+} from './codexSharedExtension'
 
-export type ApiExtensionServices = {}
+export type ApiExtensionServices = CodexApiExtensionServices
 
-export const apiExtensionDef: ApiDefSheet<ApiExtensionServices> = {}
+export const apiExtensionDef: ApiDefSheet<ApiExtensionServices> =
+  codexApiExtensionDef as ApiDefSheet<ApiExtensionServices>
 
 export type LlmProfileLikeV1 = Omit<Partial<LLMAPIProfile>, 'provider'> & {
   provider?: LLMProvider | (string & {})
@@ -82,8 +88,6 @@ export type SharedHostExtensionApiV1 = {
   llmProfiles: SharedLlmProfileExtensionV1[]
 }
 
-// The public checkout owns this registry. Private workspace materialization
-// generates provider entries from overlay-owned sources at run time.
 export const sharedHostExtensionApiV1: SharedHostExtensionApiV1 = {
-  llmProfiles: []
+  llmProfiles: [codexLlmProfileExtension]
 }

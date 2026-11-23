@@ -1,6 +1,7 @@
 import type React from 'react'
 import type { Config, LLMAPIProfile } from '@shared/config/config'
 import type { ChatCapabilityProfile } from '@shared/llm'
+import { codexRendererExtension } from './codexRendererExtension'
 
 export type QuickAppApiProfileLists = {
   pluginProfileCards: LLMAPIProfile[]
@@ -101,4 +102,11 @@ export type RendererHostExtensionApiV1 = {
   }
 }
 
-export const rendererHostExtensionApiV1: RendererHostExtensionApiV1 = {}
+export const rendererHostExtensionApiV1: RendererHostExtensionApiV1 = {
+  chat: {
+    ...codexRendererExtension.chat
+  },
+  settings: {
+    ...codexRendererExtension.settings
+  }
+}

@@ -2,19 +2,19 @@
 
 ## Purpose
 
-Extension API v1 provides typed seams where optional product-specific behavior can be added without making the open repository depend on private code. The open build ships with empty extension registries. A maintainer or downstream wrapper may populate those registries during its own build process, but the public application must continue to compile and run when they are empty.
+Extension API v1 provides typed seams where optional product-specific behavior can be added without making the open repository depend on private code. The open build registers the public Codex (ChatGPT sign-in) and Tripo extensions by default. A maintainer or downstream wrapper may replace those registries during its own build process, and the public application must continue to compile and run when they are empty.
 
 This API is a compile-time/package-time extension seam, not a general-purpose untrusted plugin loader.
 
 ## Public extension modules
 
-| Layer    | Public module                                                    | Open-build default                                      | Responsibility                                                       |
-| -------- | ---------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------- |
-| Shared   | `packages/app/src/shared/extensions/generatedRegistry.ts`        | Empty service definitions and empty shared host arrays. | Shared extension contracts and shared LLM profile hooks.             |
-| Main     | `packages/app/src/main/extensions/generatedRegistry.ts`          | Empty LLM proxy hooks and empty API extension services. | Main-process provider/proxy hooks and optional IPC service creation. |
-| Renderer | `packages/app/src/renderer/src/extensions/generatedRegistry.tsx` | Empty renderer host API object.                         | UI hooks for chat/settings behavior.                                 |
+| Layer    | Public module                                                    | Open-build default                                    | Responsibility                                                       |
+| -------- | ---------------------------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------- |
+| Shared   | `packages/app/src/shared/extensions/generatedRegistry.ts`        | Codex service definitions and Codex LLM profile hook. | Shared extension contracts and shared LLM profile hooks.             |
+| Main     | `packages/app/src/main/extensions/generatedRegistry.ts`          | Codex then Tripo LLM proxy hooks; Codex API services. | Main-process provider/proxy hooks and optional IPC service creation. |
+| Renderer | `packages/app/src/renderer/src/extensions/generatedRegistry.tsx` | Codex chat and settings hooks.                        | UI hooks for chat/settings behavior.                                 |
 
-The `generatedRegistry` name reflects that downstream packaging may generate or replace registry contents. Open-source implementation files should consume the exported contracts and tolerate the empty default.
+The `generatedRegistry` name reflects that downstream packaging may generate or replace registry contents. Open-source implementation files should consume the exported contracts and must still tolerate empty registries. LLM proxy hooks are matched in array order, so Codex is listed before Tripo.
 
 ## Shared host API
 
@@ -70,7 +70,7 @@ Settings hooks can customize Quick App profile presentation and legacy-profile m
 - V1 additions should be additive: new optional hooks, new optional fields, or new extension arrays.
 - Existing hook names and parameter meanings should not change without introducing a V2 contract.
 - Hooks should include stable `id` values for diagnostics and conflict handling.
-- Open build defaults must remain empty and safe.
+- Open build defaults must remain safe and limited to public extensions (currently Codex and Tripo).
 
 ## Extension implementation rules
 

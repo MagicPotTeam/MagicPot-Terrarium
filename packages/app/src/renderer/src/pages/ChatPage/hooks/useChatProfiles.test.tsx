@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { rendererHostExtensionApiV1 } from '@renderer/extensions/generatedRegistry'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
@@ -26,9 +26,15 @@ const buildConfig = (profiles: LLMAPIProfile[], useRemoteLlm = false): Config =>
   }
 })
 
+const initialChat = rendererHostExtensionApiV1.chat
+
 describe('useChatProfiles', () => {
-  afterEach(() => {
+  beforeEach(() => {
     delete rendererHostExtensionApiV1.chat
+  })
+
+  afterEach(() => {
+    rendererHostExtensionApiV1.chat = initialChat
     vi.unstubAllGlobals()
   })
 

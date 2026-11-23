@@ -42,16 +42,23 @@ const createConfigWithQAppProfiles = (apiProfiles: LLMAPIProfile[]): Config => {
   }
 }
 
+const initialApiServices = [...mainHostExtensionApiV1.apiServices]
+const initialLlmProxy = [...mainHostExtensionApiV1.llmProxy]
+
 describe('main extension registry', () => {
   it('registers the Tripo LLM proxy extension by default', () => {
     expect(mainHostExtensionApiV1.llmProxy).toContain(tripoMainLlmProxyExtension)
   })
   afterEach(() => {
-    mainHostExtensionApiV1.apiServices.splice(0)
+    mainHostExtensionApiV1.apiServices.splice(
+      0,
+      mainHostExtensionApiV1.apiServices.length,
+      ...initialApiServices
+    )
     mainHostExtensionApiV1.llmProxy.splice(
       0,
       mainHostExtensionApiV1.llmProxy.length,
-      tripoMainLlmProxyExtension
+      ...initialLlmProxy
     )
   })
 
@@ -66,6 +73,7 @@ describe('main extension registry', () => {
       () => ({ svcSecondExtension: { marker: 'second' } }) as Partial<ApiExtensionServices>
     )
 
+    mainHostExtensionApiV1.apiServices.splice(0)
     mainHostExtensionApiV1.apiServices.push(firstFactory, secondFactory, thirdFactory)
 
     expect(createApiExtensionServices({ baseApi })).toEqual({

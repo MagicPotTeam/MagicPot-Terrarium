@@ -46,13 +46,20 @@ function mount(route = '/agent-management', state: unknown = { tab: 'environment
   render(<React.StrictMode><Provider store={store}><HashRouter><Layout /></HashRouter></Provider></React.StrictMode>)
   return store
 }
+// Codex is registered by default; this suite pins the empty-extension fallback explicitly.
+const initialRendererChat = rendererHostExtensionApiV1.chat
+const initialRendererSettings = rendererHostExtensionApiV1.settings
 beforeEach(() => {
+  delete rendererHostExtensionApiV1.chat; delete rendererHostExtensionApiV1.settings
   vi.clearAllMocks(); localStorage.clear(); h.config = structuredClone(DEFAULT_CONFIG)
   h.config.use_remote_llm = false
   h.config.llm_config.api_profiles = [{ id: 'synthetic-model-profile', model_name: 'fixture-model', api_key: '', base_url: 'https://fixture.invalid/v1', provider: 'openai', call_type: 'api' }]
   expect(rendererHostExtensionApiV1.settings).toBeUndefined()
 })
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => {
+  cleanup(); vi.restoreAllMocks()
+  rendererHostExtensionApiV1.chat = initialRendererChat; rendererHostExtensionApiV1.settings = initialRendererSettings
+})
 // The routes load AgentManagementPage and SettingsPage lazily. Their first import (module transform) took longer
 // than findBy's 1 s under load, so the first visit was not found in time (19 of 20 runs with four in parallel).
 // Load both once here; the lazy routes then resolve from the module cache.

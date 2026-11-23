@@ -70,7 +70,8 @@ describe('actual side service/reader/storage wiring', () => {
     await expect(service.startAgentSide(req, invoke('startAgentSide'))).rejects.toThrow('local desktop')
     vi.mocked(getConfig)().use_remote_llm = false
     vi.mocked(getConfig)().llm_config.api_profiles[0].auth_mode = 'codex_oauth'
-    await expect(service.startAgentSide(req, invoke('startAgentSide'))).rejects.toThrow('does not support')
+    // The default Codex extension treats codex_oauth on a non-OpenAI base URL as unrunnable.
+    await expect(service.startAgentSide(req, invoke('startAgentSide'))).rejects.toThrow('Private side profile is unavailable')
     expect(cliFromProfile).not.toHaveBeenCalled()
   })
 })

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Config, LLMAPIProfile } from '@shared/config/config'
 import { rendererHostExtensionApiV1 } from './generatedRegistry'
 import {
@@ -31,9 +31,17 @@ const createProfile = (id: string, modelName = id): LLMAPIProfile =>
 
 const config = { download_dir: 'C:/MagicPot/Projects' } as Config
 
-afterEach(() => {
+const initialChat = rendererHostExtensionApiV1.chat
+const initialSettings = rendererHostExtensionApiV1.settings
+
+beforeEach(() => {
   delete rendererHostExtensionApiV1.chat
   delete rendererHostExtensionApiV1.settings
+})
+
+afterEach(() => {
+  rendererHostExtensionApiV1.chat = initialChat
+  rendererHostExtensionApiV1.settings = initialSettings
 })
 
 describe('renderer HostExtensionApi helper fallbacks', () => {
