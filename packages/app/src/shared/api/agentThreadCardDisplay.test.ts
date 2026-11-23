@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AGENT_THREAD_CARD_DISPLAY_CONTRACT, parseAgentThreadCardDisplay, parseAgentThreadChoiceCard } from './agentThreadCardDisplay'
+import { AGENT_THREAD_CARD_DISPLAY_CONTRACT, isAgentThreadCardLinkUrl, parseAgentThreadCardDisplay, parseAgentThreadChoiceCard } from './agentThreadCardDisplay'
 
 const receipt = () => ({ contract: AGENT_THREAD_CARD_DISPLAY_CONTRACT, status: 'provided', mode: 'display-only', card: { title: 'A read-only status', body: 'Raw model data, not authorization.' }, untrustedData: true, grantsPermission: false })
 const parse = (value: unknown) => parseAgentThreadCardDisplay(JSON.stringify(value))
@@ -24,7 +24,8 @@ describe('bounded passive display-card result parser', () => {
       expect(parse({ ...receipt(), card: { ...card, ...patch } })).toBeUndefined(); expect(parseChoice({ ...prompt, ...patch })).toBeUndefined()
     }
     expect(parse({ ...receipt(), icon: '✓' })).toBeUndefined()
-    expect(parse({ ...receipt(), card: { ...card, actions: prompt.actions } })).toBeUndefined()
+    // A display-only card keeps its supplied actions (KohakuTerrarium show_card payload).
+    expect(parse({ ...receipt(), card: { ...card, actions: prompt.actions } })?.card.actions).toEqual(prompt.actions)
     expect(parseChoice({ ...prompt, actions: [{ ...prompt.actions[0], icon: '✓' }] })).toBeUndefined()
   })
   it.each(['provided', 'choice'] as const)('includes escaped decorative icon and every context in exact serialized unit AND UTF8 caps mode=%s', mode => {
@@ -82,7 +83,18 @@ describe('bounded passive display-card result parser', () => {
       Reflect.set(parsed.actions[0], 'style', 'changed-copy'); expect(source.actions[0].style).toBe(style)
       expect(parse(source)).toBeUndefined()
     }
-    expect(parse({ ...receipt(), card: { title: 'No actions in provided receipt', actions: [{ id: 'a', label: 'A', style }] } })).toBeUndefined()
+    expect(parse({ ...receipt(), card: { title: 'Inert actions in provided receipt', actions: [{ id: 'a', label: 'A', style }] } })?.card.actions).toEqual([{ id: 'a', label: 'A', style }])
+  })
+  it('accepts upstream link actions with an http(s) url and never a link-only waiting prompt', () => {
+    const link = { id: 'docs', label: 'Docs', style: 'link', url: 'https://example.invalid/docs' }
+    expect(parseChoice({ ...choice(), actions: [link, { id: 'b', label: 'B' }] })?.actions).toEqual([link, { id: 'b', label: 'B' }])
+    expect(parseChoice({ ...choice(), actions: [link] })).toBeUndefined()
+    expect(parse({ ...receipt(), card: { title: 'Links', actions: [link] } })?.card.actions).toEqual([link])
+    for (const url of ['http://example.invalid', 'https://example.invalid/a?b=c']) expect(isAgentThreadCardLinkUrl(url)).toBe(true)
+    for (const url of ['', ' https://example.invalid', 'javascript:alert(1)', 'mailto:a@example.invalid', 'file:///x', 'https://u:p@example.invalid', 'relative/path', 'https://example.invalid/' + 'p'.repeat(2048), 1, null])
+      expect(isAgentThreadCardLinkUrl(url)).toBe(false)
+    expect(parse({ ...receipt(), card: { title: 'Bad', actions: [{ ...link, url: 'javascript:alert(1)' }] } })).toBeUndefined()
+    expect(parse({ ...receipt(), card: { title: 'Bad', actions: [{ id: 'a', label: 'A', url: 'https://example.invalid' }] } })).toBeUndefined()
   })
   it.each([null, 1, false, [], {}, ['primary'], '', 'link', 'error', 'Primary', 'primary ', '#f00', 'url(https://external.invalid)', 'constructor', '__proto__'])('rejects invalid serialized action styles and URL authority %#', style => {
     expect(parseChoice({ ...choice(), actions: [{ id: 'a', label: 'A', style }] })).toBeUndefined()
@@ -370,7 +382,7 @@ describe('bounded serialized choice-card prompt parser', () => {
     { actions: [] }, { actions: [{ id: '', label: 'Malformed single choice' }] }, { actions: null }, { actions: 'a' },
     { actions: [{ id: 'a', label: 'A' }, { id: 'a', label: 'Duplicate' }] },
     { actions: Array.from({ length: 5 }, (_, i) => ({ id: `a${i}`, label: 'Too many' })) },
-    ...[{}, null, [], { id: '', label: 'A' }, { id: 'x'.repeat(65), label: 'A' }, { id: 'unsafe id', label: 'A' }, { id: 'a', label: ' ' }, { id: 'a', label: 'x'.repeat(201) }, { id: 'a', label: '😀'.repeat(101) }, { id: 'a', label: 1 }, { id: 'a', label: 'A', style: 'link', url: 'https://external.invalid' }, { id: 'a', label: 'A', approved: true }].map(action => ({ actions: [action, { id: 'b', label: 'B' }] }))
+    ...[{}, null, [], { id: '', label: 'A' }, { id: 'x'.repeat(65), label: 'A' }, { id: 'unsafe id', label: 'A' }, { id: 'a', label: ' ' }, { id: 'a', label: 'x'.repeat(201) }, { id: 'a', label: '😀'.repeat(101) }, { id: 'a', label: 1 }, { id: 'a', label: 'A', style: 'link', url: 'javascript:alert(1)' }, { id: 'a', label: 'A', style: 'link' }, { id: 'a', label: 'A', approved: true }].map(action => ({ actions: [action, { id: 'b', label: 'B' }] }))
   ])('rejects malformed or authority-bearing choice prompt %#', patch => {
     expect(parseChoice({ ...choice(), ...patch })).toBeUndefined()
   })

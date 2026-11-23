@@ -10,8 +10,11 @@ const DEFAULT_TIMEOUT_MS = 15_000
 const MAX_TIMEOUT_MS = 30_000
 const MAX_SEARCH_RESPONSE_BYTES = 2 * 1024 * 1024
 const MAX_FETCH_RESPONSE_BYTES = Math.min(MAX_REMOTE_FETCH_RESPONSE_BYTES, 4 * 1024 * 1024)
-const MAX_FETCH_TEXT_CHARS = 24_000
-const MAX_SEARCH_RESULTS = 8
+// KohakuTerrarium web_fetch: max_length 1-100000, default 100000 (builtins/tools/web/fetch.py:24,90).
+export const WEB_FETCH_MAX_TEXT_CHARS = 100_000
+// KohakuTerrarium web_search: max_results default 10 (builtins/tools/web/search.py:50).
+export const WEB_SEARCH_DEFAULT_RESULTS = 10
+const MAX_SEARCH_RESULTS = 50
 const MAX_REDIRECTS = 3
 const MAX_URL_LENGTH = 8_192
 const MAX_REQUEST_ATTEMPTS = 2
@@ -565,7 +568,10 @@ export const webSearch = async (
   const normalizedQuery = String(query || '').trim()
   if (!normalizedQuery) throw new Error('web_search requires a non-empty query.')
   if (normalizedQuery.length > 512) throw new Error('web_search query is too long.')
-  const maxResults = Math.max(1, Math.min(MAX_SEARCH_RESULTS, Math.trunc(options.maxResults || 5)))
+  const maxResults = Math.max(
+    1,
+    Math.min(MAX_SEARCH_RESULTS, Math.trunc(options.maxResults || WEB_SEARCH_DEFAULT_RESULTS))
+  )
   const encoded = encodeURIComponent(normalizedQuery)
   const apiUrl = validatePublicUrl(
     `https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`
@@ -622,8 +628,8 @@ export const webFetch = async (
   const titleMatch = isHtml ? raw.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i) : null
   const text = isHtml ? stripHtml(raw) : raw.replace(/\s+/g, ' ').trim()
   const maxChars = Math.max(
-    1_000,
-    Math.min(MAX_FETCH_TEXT_CHARS, Math.trunc(options.maxChars || 12_000))
+    1,
+    Math.min(WEB_FETCH_MAX_TEXT_CHARS, Math.trunc(options.maxChars || WEB_FETCH_MAX_TEXT_CHARS))
   )
   return {
     url: url.toString(),

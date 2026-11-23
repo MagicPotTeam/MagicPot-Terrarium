@@ -93,25 +93,43 @@ export async function executeAgentThreadScript(call: ThreadScriptInvocation, dep
     check(); return result
   }
   if (name === 'notebook.inspect') {
-    const includeOutputs = input.includeOutputs ?? 'none'
-    if (includeOutputs !== 'none' && includeOutputs !== 'summary') throw new Error('Invalid notebook output mode.')
+    // Parameters and defaults follow KohakuTerrarium notebook_read (builtins/tools/notebook/read.py):
+    // include_outputs summary by default, limit 0 = every remaining cell, cell_id real id or cell-N.
+    // The host still pages at 100 cells and bounded text; a cut page returns nextOffset.
+    const includeOutputs = input.include_outputs ?? 'summary'
+    if (includeOutputs !== 'none' && includeOutputs !== 'summary' && includeOutputs !== 'all') throw new Error('Invalid notebook output mode.')
+    const includeMetadata = input.include_metadata === true
     const result = await read(); check()
-    const offset = Number(input.offset ?? 0), end = Math.min(result.notebook.cells.length, offset + Number(input.limit ?? 20))
-    const selected = input.cellId === undefined ? result.notebook.cells.slice(offset, end) : result.notebook.cells.filter(cell => cell.id === input.cellId)
-    if (input.cellId !== undefined && selected.length !== 1) throw new Error('Notebook cell ID not found.')
-    let remaining = 65536, outputRemaining = 16384
-    const cells = selected.map((cell) => {
-      const source = cell.source.join(''), content = source.slice(0, Math.min(remaining, 8192))
+    const all = result.notebook.cells
+    let start = Math.min(all.length, Number(input.offset ?? 0)), end = Math.min(all.length, start + (Number(input.limit ?? 0) || 100), start + 100)
+    if (input.cell_id !== undefined) {
+      // A real stored id wins; otherwise a synthetic positional cell-N (utils.py resolve_cell).
+      start = all.findIndex(cell => cell.id === input.cell_id)
+      const synthetic = start < 0 ? /^cell-(\d+)$/.exec(String(input.cell_id)) : null
+      if (synthetic) {
+        start = Number(synthetic[1])
+        if (start >= all.length) throw new Error(`Notebook cell index ${start} does not exist.`)
+      }
+      if (start < 0) throw new Error('Notebook cell ID not found.')
+      end = start + 1
+    }
+    let remaining = 65536, outputRemaining = 16384, metadataRemaining = 16384
+    const cells = all.slice(start, end).map((cell, offset) => {
+      const source = cell.source.join(''), content = source.slice(0, Math.min(remaining, 8000))
       remaining -= content.length
-      const outputs = includeOutputs === 'summary' ? (cell.outputs ?? []).slice(0, 3).map(value => {
-        const output = summarizeNotebookOutput(value, Math.min(2048, outputRemaining))
+      const stored = cell.outputs ?? []
+      const outputs = includeOutputs === 'none' ? undefined : (includeOutputs === 'all' ? stored : stored.slice(0, 3)).map(value => {
+        const output = summarizeNotebookOutput(value, Math.min(4000, outputRemaining))
         outputRemaining -= output.text.length
         return output
-      }) : undefined
-      const omittedOutputCount = (cell.outputs?.length ?? 0) - (outputs?.length ?? 0)
-      return { id: cell.id, cellType: cell.cell_type, source: content, sourceTruncated: content.length < source.length, outputCount: cell.outputs?.length ?? 0, ...(cell.cell_type === 'code' ? { executionCount: cell.execution_count ?? null } : {}), ...(outputs ? { outputs, omittedOutputCount, outputsOmitted: omittedOutputCount > 0 || outputs.some(output => output.truncated || output.richDataOmitted) } : {}) }
+      })
+      const omittedOutputCount = stored.length - (outputs?.length ?? 0)
+      const metadataText = includeMetadata && Object.keys(cell.metadata ?? {}).length ? JSON.stringify(cell.metadata) : undefined
+      const metadata = metadataText?.slice(0, Math.min(4000, metadataRemaining))
+      if (metadata !== undefined) metadataRemaining -= metadata.length
+      return { index: start + offset, id: cell.id, cellType: cell.cell_type, source: content, sourceTruncated: content.length < source.length, outputCount: stored.length, ...(cell.cell_type === 'code' ? { executionCount: cell.execution_count ?? null } : {}), ...(outputs ? { outputs, omittedOutputCount, outputsOmitted: omittedOutputCount > 0 || outputs.some(output => output.truncated || output.richDataOmitted) } : {}), ...(metadataText !== undefined ? { metadata, metadataTruncated: metadata!.length < metadataText.length } : {}) }
     })
-    return { path: result.path, sha256: result.sha256, bytes: result.bytes, cellCount: result.notebook.cells.length, generation: generation(root, call.namespace, requested), cells, ...(input.cellId === undefined && end < result.notebook.cells.length ? { nextOffset: end } : {}), outputsOmitted: includeOutputs === 'none' || cells.some(cell => cell.outputsOmitted), untrustedData: true, kernelPersistent: false }
+    return { path: result.path, sha256: result.sha256, bytes: result.bytes, cellCount: all.length, generation: generation(root, call.namespace, requested), cells, ...(input.cell_id === undefined && end < all.length ? { nextOffset: end } : {}), outputsOmitted: includeOutputs === 'none' || cells.some(cell => cell.outputsOmitted), untrustedData: true, kernelPersistent: false }
   }
   const filesystemKey = (value: string) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value)
   const lock = `${filesystemKey(root)}\0${call.namespace}`

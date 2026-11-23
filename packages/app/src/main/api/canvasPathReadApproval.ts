@@ -1,6 +1,7 @@
 import type { AgentThreadInteractionScope } from '@shared/api/agentThreadInteraction'
 import { authorizeAgentThreadScope } from './agentThreadScope'
 import { createHash, randomUUID } from 'node:crypto'
+import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { BrowserWindow, webContents } from 'electron'
 import type { LLMChatReq } from '@shared/api/svcLLMProxy'
@@ -18,6 +19,11 @@ import {
   selectFilesReadJson,
   boundFilesReadJson
 } from '../magicAgentPlatform2/toolHost/files'
+import {
+  GITIGNORE_MAX_BYTES,
+  GitIgnoreFilter,
+  isAlwaysSkippedDirectory
+} from '../magicAgentPlatform2/toolHost/gitignore'
 
 export type CanvasPathReadLimits = {
   maxBytes?: number
@@ -30,6 +36,13 @@ export type CanvasPathReadLimits = {
   maxFiles?: number
   maxDepth?: number
   maxEntries?: number
+  /** tree/glob filtering; absent keeps the unfiltered listing. */
+  hidden?: boolean
+  gitignore?: boolean
+  skipCommonDirectories?: boolean
+  /** glob only: drop directories and/or order by modification time, newest first. */
+  filesOnly?: boolean
+  order?: 'path' | 'mtime'
   /** Plain-text line window: 0-based first line and line count. */
   offset?: number
   limit?: number
@@ -218,6 +231,31 @@ export function createScopedCanvasPathReadHandler(
         const started = Date.now()
         let truncated = false
         let characters = filePath.length + 160
+        // Filtering only narrows the listing; .gitignore files are read for rules, never returned.
+        const ignore =
+          limits.gitignore === true
+            ? // The approved directory is the whole scope: nothing above it is probed or read,
+              // and each .gitignore is read through the same grant (regular file, no links,
+              // GITIGNORE_MAX_BYTES at most).
+              await GitIgnoreFilter.create(filePath, filePath, (file) =>
+                grants!
+                  .read(
+                    senderId,
+                    scope,
+                    {
+                      grantId: grant.id,
+                      requestId: randomUUID(),
+                      relativePath: path.relative(filePath, file).split(path.sep).join('/')
+                    },
+                    { maxBytes: GITIGNORE_MAX_BYTES }
+                  )
+                  .then(
+                    (read) => (read.truncated || read.document ? undefined : read.content),
+                    () => undefined
+                  )
+              )
+            : undefined
+        check()
         const walk = async (relativePath: string, depth: number): Promise<void> => {
           check()
           const listed = await grants!.list(
@@ -238,7 +276,15 @@ export function createScopedCanvasPathReadHandler(
               truncated = true
               break
             }
+            if (limits.hidden === false && entry.name.startsWith('.')) continue
+            if (limits.skipCommonDirectories && isAlwaysSkippedDirectory(entry.name)) continue
             const relative = relativePath ? `${relativePath}/${entry.name}` : entry.name
+            if (
+              ignore &&
+              (await ignore.isIgnored(path.join(filePath, relative), entry.kind === 'directory'))
+            )
+              continue
+            check()
             const item = { path: relative, type: entry.kind }
             const size = JSON.stringify(item).length + 1
             if (characters + size > maxChars) {
@@ -256,8 +302,22 @@ export function createScopedCanvasPathReadHandler(
         check()
         grants.assertDeliveryAuthorized(senderId, scope, grant.id)
         const results = pattern
-          ? entries.filter((entry) => matchesFilesReadGlob(pattern, entry.path))
+          ? entries.filter(
+              (entry) =>
+                (!limits.filesOnly || entry.type === 'file') &&
+                matchesFilesReadGlob(pattern, entry.path)
+            )
           : entries
+        if (glob && limits.order === 'mtime') {
+          // Most recently modified first; a vanished file sorts oldest (KohakuTerrarium glob.py:98-103).
+          const mtimes = new Map<string, number>()
+          for (const entry of results) {
+            check()
+            mtimes.set(entry.path, await regularFileMtime(filePath, entry.path))
+          }
+          check()
+          results.sort((a, b) => mtimes.get(b.path)! - mtimes.get(a.path)!)
+        }
         const returned = glob ? results.slice(0, maxFiles) : results
         const content = JSON.stringify({
           root: filePath,
@@ -265,7 +325,7 @@ export function createScopedCanvasPathReadHandler(
           entries: returned,
           entryCount: returned.length,
           truncated: truncated || returned.length < results.length,
-          nameFiltering: false,
+          nameFiltering: limits.hidden === false || !!limits.skipCommonDirectories || !!ignore,
           linksSkipped: true,
           durationMs: Date.now() - started
         })
@@ -359,4 +419,26 @@ export function createScopedCanvasPathReadHandler(
       pendingSenders.delete(senderId)
     }
   }
+}
+
+/**
+ * mtime of a listed file without following links: every component below the approved root is
+ * lstat-ed, so a file or directory swapped for a link (or anything not a regular file) after
+ * listing sorts as oldest (0) instead of being followed.
+ */
+export async function regularFileMtime(root: string, relative: string): Promise<number> {
+  let current = root
+  const parts = relative.split('/')
+  try {
+    for (let index = 0; index < parts.length; index++) {
+      current = path.join(current, parts[index])
+      const stat = await fs.lstat(current)
+      const last = index === parts.length - 1
+      if (last ? !stat.isFile() : !stat.isDirectory()) return 0
+      if (last) return stat.mtimeMs
+    }
+  } catch {
+    // A vanished file sorts oldest (KohakuTerrarium glob.py:98-103).
+  }
+  return 0
 }

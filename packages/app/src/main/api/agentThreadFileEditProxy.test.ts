@@ -43,6 +43,7 @@ vi.mock(import('@shared/llm'), async (original) => ({
 import { projectNativeToolTurns } from '@shared/llm/nativeTools'
 import type { LLMChatParams, LLMChatResult } from '@shared/llm/types'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
+import { AGENT_THREAD_INTERACTION_LIMITS } from '@shared/api/agentThreadInteraction'
 import {
   llmProxySvcDef,
   type LLMChatStreamResp,
@@ -284,7 +285,8 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
                 documentationOnly: true,
                 grantsPermission: false,
                 authority: { readingUnlocksTool: false, answersGrantPermission: false },
-                ...(alias ? { timeout: { alias: 'timeout_s', mutuallyExclusive: true } } : {})
+                // KohakuTerrarium timeout_s: the only timeout parameter, no default (waits).
+                timeout: { parameter: 'timeout_s', defaultSeconds: null }
               }
             })
           else expect(output).toEqual(answer)
@@ -309,7 +311,7 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
           }
           if (step === 1 && withActionStyle) {
             expect(output.documentation.limits).toMatchObject({
-              actionStyles: ['primary', 'secondary', 'danger']
+              actionStyles: ['primary', 'secondary', 'danger', 'link']
             })
             expect(output.documentation.behavior.choices).toContain('never approval')
           }
@@ -346,7 +348,13 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
         expect(index).toBeGreaterThanOrEqual(0)
         if (alias && step === 1)
           expect(params.tools!.at(index)!.inputSchema).toMatchObject({
-            properties: { timeout_s: { type: 'integer', minimum: 1, maximum: 600 } }
+            properties: {
+              timeout_s: {
+                type: 'number',
+                exclusiveMinimum: 0,
+                maximum: AGENT_THREAD_INTERACTION_LIMITS.maxFeedbackTimeoutSeconds
+              }
+            }
           })
         if (withBody && step === 1)
           expect(params.tools!.at(index)!.inputSchema).toMatchObject({
@@ -362,7 +370,7 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
               actions: {
                 items: {
                   properties: {
-                    style: { type: 'string', enum: ['primary', 'secondary', 'danger'] }
+                    style: { type: 'string', enum: ['primary', 'secondary', 'danger', 'link'] }
                   }
                 }
               }
@@ -714,7 +722,7 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
           const index = input.tools!.findIndex((tool) => tool.name === 'show_card')
           expect(index).toBeGreaterThanOrEqual(0)
           if (withBody) {
-            expect(input.tools!.at(index)!.description).toContain('formatting-only Markdown body')
+            expect(input.tools!.at(index)!.description).toMatch(/formatting-only Markdown body/i)
             expect(input.tools!.at(index)!.inputSchema).toMatchObject({
               properties: { body: { type: 'string', maxLength: 4000 } }
             })

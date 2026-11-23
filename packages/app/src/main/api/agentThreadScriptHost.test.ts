@@ -44,8 +44,8 @@ describe('thread script production host', () => {
     expect(readFileSync(file)).toEqual(before); expect(existsSync(path.join(t.root, '.magicpot'))).toBe(false)
     const listed = JSON.parse((await provider.callTool('notebook.browse', {}, context)).content)
     expect(listed).toMatchObject({ path: '.', root: realpathSync.native(t.root), notebooks: [{ path: 'a.ipynb', sha256: hash(before), cellCount: 1 }], count: 1 })
-    const inspected = JSON.parse((await provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId: 'code1', offset: 1000, limit: 50, includeOutputs: 'summary' }, context)).content)
-    expect(inspected).toMatchObject({ sha256: hash(before), generation: 0, cellCount: 1, untrustedData: true, kernelPersistent: false, outputsOmitted: true, cells: [{ id: 'code1', source: 'print(2)', outputCount: 1, outputs: [{ outputType: 'display_data', text: '', richDataOmitted: true }] }] })
+    const inspected = JSON.parse((await provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id: 'code1', offset: 1000, limit: 50, include_outputs: 'summary' }, context)).content)
+    expect(inspected).toMatchObject({ sha256: hash(before), generation: 0, cellCount: 1, untrustedData: true, kernelPersistent: false, outputsOmitted: true, cells: [{ index: 0, id: 'code1', source: 'print(2)', outputCount: 1, outputs: [{ outputType: 'display_data', text: '', richDataOmitted: true }] }] })
     expect(inspected).not.toHaveProperty('root'); expect(inspected).not.toHaveProperty('nextOffset')
     expect(JSON.stringify(inspected)).not.toContain('SECRET_OUTPUT')
     await expect(provider.callTool('notebook.inspect', { path: '../a.ipynb' }, context)).rejects.toThrow(/traversal|outside/)
@@ -90,14 +90,14 @@ describe('thread script production host', () => {
     ]
     writeFileSync(file, JSON.stringify({ ...notebook(), cells: [{ ...notebook().cells[0], outputs }] }))
     const before = readFileSync(file), approval = vi.spyOn(t.runtime, 'requestTerminalApproval')
-    const result = await t.invoke('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'summary' })
+    const result = await t.invoke('notebook.inspect', { path: 'a.ipynb' })
     expect(result).toMatchObject({ sha256: hash(before), generation: 0, kernelPersistent: false, untrustedData: true, outputsOmitted: true, cells: [{ executionCount: 1, outputCount: 4, omittedOutputCount: 1, outputsOmitted: true, outputs: [
       { outputType: 'stream', name: 'stderr', text: 'stored warning\n', truncated: false, richDataOmitted: false },
       { outputType: 'error', text: 'ValueError: bad input\ntrace-one\ntrace-two', truncated: false, richDataOmitted: false },
       { outputType: 'display_data', text: 'saved table', truncated: false, richDataOmitted: true }
     ] }] })
     for (const hidden of ['HIDDEN_HTML', 'HIDDEN_PNG', 'HIDDEN_JS', 'HIDDEN_METADATA', 'FOURTH_OUTPUT']) expect(JSON.stringify(result)).not.toContain(hidden)
-    const noOutputs = await t.invoke('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'none' })
+    const noOutputs = await t.invoke('notebook.inspect', { path: 'a.ipynb', include_outputs: 'none' })
     expect(noOutputs).toMatchObject({ outputsOmitted: true, cells: [{ outputCount: 4 }] })
     expect(JSON.stringify(noOutputs)).not.toContain('stored warning')
     expect(approval).not.toHaveBeenCalled(); expect(readFileSync(file)).toEqual(before)
@@ -105,16 +105,16 @@ describe('thread script production host', () => {
   })
   it('bounds saved output text per item and per page while preserving existing source pagination', async () => {
     const t = setup(), file = path.join(t.root, 'a.ipynb')
-    writeFileSync(file, JSON.stringify({ ...notebook(), cells: Array.from({ length: 6 }, (_, index) => ({ ...notebook().cells[0], id: `code${index}`, outputs: Array.from({ length: 4 }, () => ({ output_type: 'execute_result', execution_count: 1, data: { 'text/plain': ['x'.repeat(1500), 'y'.repeat(1500)] }, metadata: {} })) })) }))
-    const result = await t.invoke('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'summary', limit: 5 }) as { nextOffset: number; outputsOmitted: boolean; cells: { outputCount: number; omittedOutputCount: number; outputs: { text: string; truncated: boolean }[] }[] }
+    writeFileSync(file, JSON.stringify({ ...notebook(), cells: Array.from({ length: 6 }, (_, index) => ({ ...notebook().cells[0], id: `code${index}`, outputs: Array.from({ length: 4 }, () => ({ output_type: 'execute_result', execution_count: 1, data: { 'text/plain': ['x'.repeat(2500), 'y'.repeat(2500)] }, metadata: {} })) })) }))
+    const result = await t.invoke('notebook.inspect', { path: 'a.ipynb', include_outputs: 'summary', limit: 5 }) as { nextOffset: number; outputsOmitted: boolean; cells: { outputCount: number; omittedOutputCount: number; outputs: { text: string; truncated: boolean }[] }[] }
     expect(result.nextOffset).toBe(5); expect(result.outputsOmitted).toBe(true)
     expect(result.cells).toHaveLength(5)
     expect(result.cells.flatMap(cell => cell.outputs).reduce((sum, output) => sum + output.text.length, 0)).toBe(16384)
     for (const cell of result.cells) {
       expect(cell.outputCount).toBe(4); expect(cell.omittedOutputCount).toBe(1); expect(cell.outputs).toHaveLength(3)
-      for (const output of cell.outputs) { expect(output.text.length).toBeLessThanOrEqual(2048); expect(output.truncated).toBe(true) }
+      for (const output of cell.outputs) { expect(output.text.length).toBeLessThanOrEqual(4000); expect(output.truncated).toBe(true) }
     }
-    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', offset: 5, includeOutputs: 'summary' })).toMatchObject({ cells: [{ id: 'code5', outputs: expect.arrayContaining([{ outputType: 'execute_result', text: expect.stringContaining('x'), truncated: true, richDataOmitted: false }]) }] })
+    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', offset: 5 })).toMatchObject({ cells: [{ id: 'code5', outputs: expect.arrayContaining([{ outputType: 'execute_result', text: expect.stringContaining('x'), truncated: true, richDataOmitted: false }]) }] })
   })
   it('handles unsupported or malformed saved outputs passively and reports complete small summaries honestly', async () => {
     const t = setup(), file = path.join(t.root, 'a.ipynb')
@@ -124,41 +124,125 @@ describe('thread script production host', () => {
       { id: 'markdown', cell_type: 'markdown', source: ['passive source'], metadata: {} }
     ]
     writeFileSync(file, JSON.stringify({ ...notebook(), cells }))
-    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'summary', limit: 1 })).toMatchObject({ outputsOmitted: false, cells: [{ executionCount: 1, omittedOutputCount: 0, outputsOmitted: false, outputs: [{ outputType: 'execute_result', text: '42', truncated: false, richDataOmitted: false }] }] })
-    const result = await t.invoke('notebook.inspect', { path: 'a.ipynb', offset: 1, includeOutputs: 'summary' })
+    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', include_outputs: 'summary', limit: 1 })).toMatchObject({ outputsOmitted: false, cells: [{ executionCount: 1, omittedOutputCount: 0, outputsOmitted: false, outputs: [{ outputType: 'execute_result', text: '42', truncated: false, richDataOmitted: false }] }] })
+    const result = await t.invoke('notebook.inspect', { path: 'a.ipynb', offset: 1, include_outputs: 'summary' })
     expect(result).toMatchObject({ outputsOmitted: true, cells: [{ id: 'unknown', outputsOmitted: true, outputs: [{ outputType: 'unknown', text: '', richDataOmitted: true }, { outputType: 'unknown', text: '', richDataOmitted: true }, { outputType: 'display_data', text: '', richDataOmitted: true }] }, { id: 'markdown', outputs: [], outputsOmitted: false }] })
     for (const hidden of ['UNSUPPORTED_RAW', 'MALFORMED_RAW', 'RICH_RAW']) expect(JSON.stringify(result)).not.toContain(hidden)
-    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'all' })).rejects.toThrow('output mode')
+    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', include_outputs: 'ALL' })).rejects.toThrow('output mode')
     t.controller.abort(Error('document navigated'))
-    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'summary' })).rejects.toThrow('document navigated')
+    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', include_outputs: 'summary' })).rejects.toThrow('document navigated')
   })
   it('selects one exact stored cell ID beyond the default page and keeps source/output bounds', async () => {
     const t = setup(), file = path.join(t.root, 'a.ipynb')
     t.settings.project_trace_config.enable_agent_python_notebook = false
-    const cells = Array.from({ length: 27 }, (_, index) => ({ ...notebook().cells[0], id: `code${index}`, source: [index === 25 ? 's'.repeat(9000) : 'UNSELECTED_SOURCE'], outputs: index === 25 ? Array.from({ length: 4 }, () => ({ output_type: 'stream', name: 'stdout', text: ['t'.repeat(3000)] })) : [{ output_type: 'stream', name: 'stdout', text: ['UNSELECTED_OUTPUT'] }] }))
+    const cells = Array.from({ length: 27 }, (_, index) => ({ ...notebook().cells[0], id: `code${index}`, source: [index === 25 ? 's'.repeat(9000) : 'UNSELECTED_SOURCE'], outputs: index === 25 ? Array.from({ length: 4 }, () => ({ output_type: 'stream', name: 'stdout', text: ['t'.repeat(5000)] })) : [{ output_type: 'stream', name: 'stdout', text: ['UNSELECTED_OUTPUT'] }] }))
     writeFileSync(file, JSON.stringify({ ...notebook(), cells }))
     const before = readFileSync(file), approval = vi.spyOn(t.runtime, 'requestTerminalApproval')
-    const result = await t.invoke('notebook.inspect', { path: 'a.ipynb', cellId: 'code25', offset: 1000, limit: 50, includeOutputs: 'summary' })
-    expect(result).toMatchObject({ cellCount: 27, sha256: hash(before), generation: 0, kernelPersistent: false, untrustedData: true, outputsOmitted: true, cells: [{ id: 'code25', source: 's'.repeat(8192), sourceTruncated: true, outputCount: 4, omittedOutputCount: 1, outputs: Array.from({ length: 3 }, () => ({ text: 't'.repeat(2048), truncated: true })) }] })
+    const result = await t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id: 'code25', offset: 1000, limit: 50, include_outputs: 'summary' })
+    expect(result).toMatchObject({ cellCount: 27, sha256: hash(before), generation: 0, kernelPersistent: false, untrustedData: true, outputsOmitted: true, cells: [{ index: 25, id: 'code25', source: 's'.repeat(8000), sourceTruncated: true, outputCount: 4, omittedOutputCount: 1, outputs: Array.from({ length: 3 }, () => ({ text: 't'.repeat(4000), truncated: true })) }] })
     expect(result).not.toHaveProperty('nextOffset')
     for (const hidden of ['UNSELECTED_SOURCE', 'UNSELECTED_OUTPUT']) expect(JSON.stringify(result)).not.toContain(hidden)
-    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', cellId: 'code25' })).toMatchObject({ outputsOmitted: true, cells: [{ id: 'code25', outputCount: 4 }] })
+    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id: 'code25', include_outputs: 'none' })).toMatchObject({ outputsOmitted: true, cells: [{ id: 'code25', outputCount: 4 }] })
     expect(approval).not.toHaveBeenCalled(); expect(t.runtime.listPendingTerminalApprovals()).toEqual([])
     expect(readFileSync(file)).toEqual(before); expect(existsSync(path.join(t.root, '.magicpot'))).toBe(false)
   })
-  it('never falls back to a page, case folding or synthetic cell-N when the exact cell ID is absent', async () => {
+  it('resolves a real cell id first, then a synthetic positional cell-N, without page or case fallback', async () => {
     const t = setup(), file = path.join(t.root, 'a.ipynb'), before = readFileSync(file)
-    for (const cellId of ['missing', 'CODE1', 'cell-0', '', null, 1]) await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', cellId, includeOutputs: 'summary', offset: 0, limit: 1 })).rejects.toThrow('cell ID not found')
+    for (const cell_id of ['missing', 'CODE1', '', null, 1]) await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id, offset: 0, limit: 1 })).rejects.toThrow('cell ID not found')
+    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id: 'cell-0', offset: 5 })).toMatchObject({ cells: [{ index: 0, id: 'code1' }] })
+    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id: 'cell-1' })).rejects.toThrow('index 1 does not exist')
     expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', offset: 0, limit: 1 })).toMatchObject({ cells: [{ id: 'code1' }] })
+    writeFileSync(file, JSON.stringify({ ...notebook(), cells: [{ ...notebook().cells[0], id: 'first' }, { ...notebook().cells[0], id: 'cell-0' }] }))
+    // A stored id spelled cell-0 is a real id and wins over the positional reading.
+    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id: 'cell-0' })).toMatchObject({ cells: [{ index: 1, id: 'cell-0' }] })
+    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id: 'cell-1' })).toMatchObject({ cells: [{ index: 1, id: 'cell-0' }] })
+    writeFileSync(file, before)
     t.controller.abort(Error('document navigated'))
-    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', cellId: 'code1' })).rejects.toThrow('document navigated')
+    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id: 'code1' })).rejects.toThrow('document navigated')
     expect(readFileSync(file)).toEqual(before); expect(t.runtime.listPendingTerminalApprovals()).toEqual([])
+  })
+  it('reads every output with include_outputs all and bounded per-cell metadata only on request', async () => {
+    const t = setup(), file = path.join(t.root, 'a.ipynb')
+    const outputs = Array.from({ length: 5 }, (_, index) => ({ output_type: 'stream', name: 'stdout', text: `out-${index}` }))
+    writeFileSync(file, JSON.stringify({ ...notebook(), cells: [{ ...notebook().cells[0], metadata: { tags: ['keep'], long: 'm'.repeat(5000) }, outputs }, { id: 'plain', cell_type: 'markdown', source: ['md'], metadata: {} }] }))
+    const before = readFileSync(file)
+    const all = await t.invoke('notebook.inspect', { path: 'a.ipynb', include_outputs: 'all' }) as { cells: { outputs: { text: string }[]; omittedOutputCount: number }[] }
+    expect(all.cells[0].outputs.map(output => output.text)).toEqual(['out-0', 'out-1', 'out-2', 'out-3', 'out-4'])
+    expect(all.cells[0].omittedOutputCount).toBe(0)
+    expect(all.cells[0]).not.toHaveProperty('metadata')
+    const summary = await t.invoke('notebook.inspect', { path: 'a.ipynb' }) as { cells: { outputs: unknown[]; omittedOutputCount: number }[] }
+    expect(summary.cells[0].outputs).toHaveLength(3); expect(summary.cells[0].omittedOutputCount).toBe(2)
+    const meta = await t.invoke('notebook.inspect', { path: 'a.ipynb', include_metadata: true, include_outputs: 'none' }) as { cells: { metadata?: string; metadataTruncated?: boolean; outputs?: unknown }[] }
+    expect(meta.cells[0].metadata).toHaveLength(4000); expect(meta.cells[0].metadata!.startsWith('{"tags":["keep"]')).toBe(true); expect(meta.cells[0].metadataTruncated).toBe(true)
+    expect(meta.cells[0]).not.toHaveProperty('outputs')
+    // Empty metadata adds nothing.
+    expect(meta.cells[1]).not.toHaveProperty('metadata')
+    expect(readFileSync(file)).toEqual(before)
+  })
+  it('keeps the 8000 source, 4000 per-output, 16384 output-page and 4000 metadata bounds under include_outputs all', async () => {
+    const t = setup(),
+      file = path.join(t.root, 'a.ipynb')
+    const outputs = Array.from({ length: 5 }, (_, index) => ({
+      output_type: 'stream',
+      name: 'stdout',
+      text: [String(index).repeat(5000)]
+    }))
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...notebook(),
+        cells: [
+          {
+            ...notebook().cells[0],
+            source: ['s'.repeat(9000)],
+            metadata: { long: 'm'.repeat(5000) },
+            outputs
+          }
+        ]
+      })
+    )
+    const result = (await t.invoke('notebook.inspect', {
+      path: 'a.ipynb',
+      include_outputs: 'all',
+      include_metadata: true
+    })) as {
+      outputsOmitted: boolean
+      cells: {
+        source: string
+        sourceTruncated: boolean
+        omittedOutputCount: number
+        metadata: string
+        metadataTruncated: boolean
+        outputs: { text: string; truncated: boolean }[]
+      }[]
+    }
+    const [cell] = result.cells
+    expect(cell.source).toBe('s'.repeat(8000))
+    expect(cell.sourceTruncated).toBe(true)
+    // Every output is returned, each cut at 4000, and the page total stays at 16384.
+    expect(cell.omittedOutputCount).toBe(0)
+    expect(cell.outputs).toHaveLength(5)
+    expect(cell.outputs.map((output) => output.text.length)).toEqual([4000, 4000, 4000, 4000, 384])
+    expect(cell.outputs.map((output) => output.text[0])).toEqual(['0', '1', '2', '3', '4'])
+    expect(cell.outputs.every((output) => output.truncated)).toBe(true)
+    expect(cell.metadata).toHaveLength(4000)
+    expect(cell.metadataTruncated).toBe(true)
+    expect(result.outputsOmitted).toBe(true)
+  })
+  it('reads every remaining cell by default and pages at the 100-cell host bound', async () => {
+    const t = setup(), file = path.join(t.root, 'a.ipynb')
+    writeFileSync(file, JSON.stringify({ ...notebook(), cells: Array.from({ length: 130 }, (_, index) => ({ id: `c${index}`, cell_type: 'markdown', source: [`m${index}`], metadata: {} })) }))
+    const first = await t.invoke('notebook.inspect', { path: 'a.ipynb' }) as { cells: { index: number }[]; nextOffset?: number }
+    expect(first.cells).toHaveLength(100); expect(first.nextOffset).toBe(100)
+    const rest = await t.invoke('notebook.inspect', { path: 'a.ipynb', offset: 100, limit: 0 }) as { cells: { index: number; id: string }[]; nextOffset?: number }
+    expect(rest.cells).toHaveLength(30); expect(rest.cells[0]).toMatchObject({ index: 100, id: 'c100' }); expect(rest).not.toHaveProperty('nextOffset')
+    expect(await t.invoke('notebook.inspect', { path: 'a.ipynb', offset: 120, limit: 5 })).toMatchObject({ nextOffset: 125 })
   })
   it('does not bypass complete-file ID validation by selecting only a valid cell', async () => {
     const t = setup(), file = path.join(t.root, 'a.ipynb')
     writeFileSync(file, JSON.stringify({ ...notebook(), cells: [{ cell_type: 'markdown', source: ['INVALID_ID_HIDDEN_SOURCE'], metadata: {} }, ...notebook().cells] }))
     const before = readFileSync(file), approval = vi.spyOn(t.runtime, 'requestTerminalApproval')
-    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', cellId: 'code1' })).rejects.toThrow('unique stable id')
+    await expect(t.invoke('notebook.inspect', { path: 'a.ipynb', cell_id: 'code1' })).rejects.toThrow('unique stable id')
     expect(readFileSync(file)).toEqual(before); expect(approval).not.toHaveBeenCalled(); expect(t.runtime.listPendingTerminalApprovals()).toEqual([])
   })
   it.each([

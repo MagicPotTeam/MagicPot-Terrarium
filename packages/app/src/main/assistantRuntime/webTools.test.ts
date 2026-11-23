@@ -82,6 +82,30 @@ describe('assistant web tools', () => {
     expect(request).toHaveBeenCalledTimes(1)
   })
 
+  it('returns ten search results by default and honours an explicit count (KohakuTerrarium web_search)', async () => {
+    const topics = Array.from({ length: 20 }, (_, i) => ({
+      Text: `Topic ${i}`,
+      FirstURL: `https://example.org/topic-${i}`
+    }))
+    mockWebDocument(
+      JSON.stringify({ Heading: 'Fixture', RelatedTopics: topics }),
+      'application/json'
+    )
+    expect((await webSearch('fixture query')).results).toHaveLength(10)
+    expect((await webSearch('fixture query', { maxResults: 15 })).results).toHaveLength(15)
+  })
+
+  it('returns up to 100000 characters by default and allows a small max_length (KohakuTerrarium web_fetch)', async () => {
+    const body = 'x'.repeat(30_000)
+    mockWebDocument(body, 'text/plain')
+    const full = await webFetch('https://1.1.1.1/')
+    expect(full.text).toHaveLength(30_000)
+    expect(full.truncated).toBe(false)
+    const short = await webFetch('https://1.1.1.1/', { maxChars: 5 })
+    expect(short.text).toBe('xxxxx')
+    expect(short.truncated).toBe(true)
+  })
+
   it('rejects empty search queries before network access', async () => {
     await expect(webSearch('   ')).rejects.toThrow('non-empty query')
   })

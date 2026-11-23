@@ -86,7 +86,14 @@ describe('inline tool calls', () => {
     rerender(<ChatToolCalls history={[source]} live={false} />)
     expect(screen.getAllByRole('button')).toHaveLength(1); expect(JSON.stringify(source)).toBe(before)
   })
-  it.each([{ style: 'primary' }, { actions: [{ id: 'approve', label: 'Not a provided button', style: 'danger' }] }])('rejects styles or actions in the unchanged strict provided receipt instead of creating feedback/replay controls %#', patch => {
+  it('shows provided-card actions as inert buttons and links, never feedback/replay controls', () => {
+    const card = { title: 'Provided actions', actions: [{ id: 'approve', label: 'Not a provided button', style: 'danger' }, { id: 'docs', label: 'Docs link', style: 'link', url: 'https://example.invalid/docs' }] }, content = JSON.stringify({ contract: 'agent-thread-card-display/v1', status: 'provided', mode: 'display-only', card, untrustedData: true, grantsPermission: false })
+    render(<ChatToolCalls history={[{ ...entry, toolName: 'show_card', content }]} live={false} />)
+    expect(screen.getByRole('button', { name: 'Not a provided button' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Docs link' })).toBeEnabled()
+    expect(document.querySelector('a,img,input,textarea,script')).toBeNull()
+  })
+  it.each([{ style: 'primary' }, { actions: [{ id: 'approve', label: 'Not a provided button', style: 'danger', url: 'https://example.invalid' }] }])('rejects styles or invalid actions in the unchanged strict provided receipt instead of creating feedback/replay controls %#', patch => {
     const card = { title: 'Forged provided action', ...patch }, content = JSON.stringify({ contract: 'agent-thread-card-display/v1', status: 'provided', mode: 'display-only', card, untrustedData: true, grantsPermission: false })
     render(<ChatToolCalls history={[{ ...entry, toolName: 'show_card', content }]} live={false} />)
     expect(screen.queryByRole('heading', { name: card.title })).not.toBeInTheDocument(); expect(screen.queryByText('chat.tool_call.card_display_notice')).not.toBeInTheDocument()

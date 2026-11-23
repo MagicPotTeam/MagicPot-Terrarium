@@ -455,13 +455,26 @@ describe('AssistantToolRegistry', () => {
   })
 
   it('session cleanup clear removes legacy context but preserves opaque persistent memory and review locks', async () => {
-    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'memory-tool-clear' }, workspace = getAssistantWorkspaceState(route), namespace = path.join(workspace.memoryDir, '.agent-memory-v1')
+    const route = { channel: 'generic', scopeType: 'dm' as const, scopeId: 'memory-tool-clear' },
+      workspace = getAssistantWorkspaceState(route),
+      namespace = path.join(workspace.memoryDir, '.agent-memory-v1')
     await store.attachWorkspace(route, workspace)
-    await fs.mkdir(namespace, { recursive: true }); await fs.writeFile(path.join(namespace, 'facts.md'), 'TOOL_CLEAR_PERSISTENT_MEMORY'); await fs.writeFile(path.join(namespace, '.writer-lock'), 'TOOL_CLEAR_UNKNOWN_REVIEW'); await fs.writeFile(workspace.memoryFile, 'legacy daily')
-    const result = await new AssistantToolRegistry().callTool('session.cleanup', { mode: 'clear' }, createToolContext(route, createTaskState(route)))
+    await fs.mkdir(namespace, { recursive: true })
+    await fs.writeFile(path.join(namespace, 'facts.md'), 'TOOL_CLEAR_PERSISTENT_MEMORY')
+    await fs.writeFile(path.join(namespace, '.writer-lock'), 'TOOL_CLEAR_UNKNOWN_REVIEW')
+    await fs.writeFile(workspace.memoryFile, 'legacy daily')
+    const result = await new AssistantToolRegistry().callTool(
+      'session.cleanup',
+      { mode: 'clear' },
+      createToolContext(route, createTaskState(route))
+    )
     expect(JSON.parse(result.content)).toMatchObject({ mode: 'clear', cleared: true })
-    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe('TOOL_CLEAR_PERSISTENT_MEMORY')
-    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('TOOL_CLEAR_UNKNOWN_REVIEW')
+    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe(
+      'TOOL_CLEAR_PERSISTENT_MEMORY'
+    )
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe(
+      'TOOL_CLEAR_UNKNOWN_REVIEW'
+    )
     await expect(fs.access(workspace.memoryFile)).rejects.toMatchObject({ code: 'ENOENT' })
   })
   it('prunes exact persisted workspace roots and keeps a shared root until its last session', async () => {
@@ -496,7 +509,9 @@ describe('AssistantToolRegistry', () => {
     await fs.mkdir(oldWorkspace.memoryDir, { recursive: true })
     await fs.writeFile(oldWorkspace.taskContextFile, 'shared task context')
     const namespace = path.join(oldWorkspace.memoryDir, '.agent-memory-v1')
-    await fs.mkdir(namespace); await fs.writeFile(path.join(namespace, 'facts.md'), 'SHARED_PERSISTENT_MEMORY'); await fs.writeFile(path.join(namespace, '.writer-lock'), 'SHARED_UNKNOWN_REVIEW')
+    await fs.mkdir(namespace)
+    await fs.writeFile(path.join(namespace, 'facts.md'), 'SHARED_PERSISTENT_MEMORY')
+    await fs.writeFile(path.join(namespace, '.writer-lock'), 'SHARED_UNKNOWN_REVIEW')
     const oldSession = await store.getSession(oldRoute)
     const retainedSession = await store.getSession(retainedRoute)
     if (!oldSession || !retainedSession) throw new Error('missing prune fixture sessions')
@@ -508,8 +523,12 @@ describe('AssistantToolRegistry', () => {
       createToolContext(oldRoute, createTaskState(oldRoute))
     )
     expect(JSON.parse(first.content)).toMatchObject({ mode: 'prune', removedCount: 1 })
-    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe('SHARED_PERSISTENT_MEMORY')
-    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('SHARED_UNKNOWN_REVIEW')
+    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe(
+      'SHARED_PERSISTENT_MEMORY'
+    )
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe(
+      'SHARED_UNKNOWN_REVIEW'
+    )
     await expect(fs.readFile(oldWorkspace.taskContextFile, 'utf8')).resolves.toBe(
       'shared task context'
     )
@@ -521,8 +540,12 @@ describe('AssistantToolRegistry', () => {
       createToolContext(retainedRoute, createTaskState(retainedRoute))
     )
     expect(JSON.parse(second.content)).toMatchObject({ mode: 'prune', removedCount: 1 })
-    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe('SHARED_PERSISTENT_MEMORY')
-    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe('SHARED_UNKNOWN_REVIEW')
+    expect(await fs.readFile(path.join(namespace, 'facts.md'), 'utf8')).toBe(
+      'SHARED_PERSISTENT_MEMORY'
+    )
+    expect(await fs.readFile(path.join(namespace, '.writer-lock'), 'utf8')).toBe(
+      'SHARED_UNKNOWN_REVIEW'
+    )
     await expect(fs.access(oldWorkspace.taskContextFile)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -718,10 +741,25 @@ describe('AssistantToolRegistry', () => {
 
     expect(
       registry.listTools().find((tool) => tool.name === 'web_search')?.inputSchema
-    ).toMatchObject({ required: ['query'] })
+    ).toMatchObject({
+      required: ['query'],
+      properties: { max_results: { type: 'integer', minimum: 1 }, limit: { type: 'integer' } }
+    })
     expect(
       registry.listTools().find((tool) => tool.name === 'web_fetch')?.inputSchema
-    ).toMatchObject({ required: ['url'] })
+    ).toMatchObject({
+      required: ['url'],
+      properties: { max_length: { type: 'integer', minimum: 1, maximum: 100_000 } }
+    })
+    for (const [name, args] of [
+      ['web_search', { query: 'x', maxResults: 3 }],
+      ['web_search', { query: 'x', timeoutMs: 1000 }],
+      ['web_fetch', { url: 'https://example.com', maxChars: 1000 }],
+      ['web_fetch', { url: 'https://example.com', max_length: 100_001 }]
+    ] as const)
+      await expect(
+        registry.callTool(name, args, createToolContext(route, taskState))
+      ).rejects.toThrow(`Invalid input for tool "${name}"`)
 
     await expect(
       registry.callTool('task.group.cancel', {}, createToolContext(route, taskState))
@@ -1385,6 +1423,78 @@ describe('AssistantToolRegistry', () => {
       exitCode: 0,
       stdout: expect.stringContaining(process.version)
     })
+  })
+
+  it('accepts KohakuTerrarium tree/glob/grep parameters with upstream defaults and drops the old names', async () => {
+    const registry = new AssistantToolRegistry()
+    const route = {
+      channel: 'canvas',
+      scopeType: 'thread',
+      scopeId: 'kt-files',
+      threadId: 'a'
+    } as const
+    const context = createToolContext(route, createTaskState(route), { workspaceRootDir: tempDir })
+    await fs.mkdir(path.join(tempDir, 'a', 'b', 'c', 'd'), { recursive: true })
+    await fs.mkdir(path.join(tempDir, 'node_modules'), { recursive: true })
+    await fs.writeFile(path.join(tempDir, '.gitignore'), 'ignored.txt\n')
+    await fs.writeFile(path.join(tempDir, 'ignored.txt'), 'Needle\n')
+    await fs.writeFile(path.join(tempDir, 'node_modules', 'dep.txt'), 'needle\n')
+    await fs.writeFile(path.join(tempDir, 'a', 'b', 'c', 'd', 'deep.txt'), 'needle\n')
+    for (let i = 0; i < 60; i++)
+      await fs.writeFile(path.join(tempDir, `f${String(i).padStart(3, '0')}.txt`), `NEEDLE ${i}\n`)
+    const run = async (name: string, args: Record<string, unknown>) =>
+      JSON.parse((await registry.callTool(name, args, context)).content)
+
+    // tree: depth 3 levels by default, hidden/.gitignore/noise filtered, limit 100.
+    const tree = await run('files.tree', {})
+    const treePaths = tree.entries.map((entry: { path: string }) => entry.path)
+    expect(treePaths).toContain('a/b/c')
+    expect(treePaths).not.toContain('a/b/c/d')
+    for (const hidden of ['.gitignore', 'ignored.txt', 'node_modules'])
+      expect(treePaths).not.toContain(hidden)
+    expect((await run('files.tree', { depth: 1, limit: 5 })).entries).toHaveLength(5)
+    expect(
+      (await run('files.tree', { depth: 1, hidden: true, gitignore: false })).entries.map(
+        (entry: { path: string }) => entry.path
+      )
+    ).toEqual(expect.arrayContaining(['.gitignore', 'ignored.txt']))
+
+    // glob: files only, default limit 100, gitignore by default.
+    const glob = await run('files.glob', { pattern: '**/*.txt' })
+    expect(glob.entries).toHaveLength(61)
+    expect(glob.entries.map((entry: { path: string }) => entry.path)).not.toContain('ignored.txt')
+    expect((await run('files.glob', { pattern: '*.txt', limit: 3 })).entries).toHaveLength(3)
+    expect(
+      (await run('files.glob', { pattern: '*.txt', gitignore: false })).entries.map(
+        (entry: { path: string }) => entry.path
+      )
+    ).toContain('ignored.txt')
+
+    // grep: regex pattern, default limit 50, case-sensitive unless ignore_case.
+    const grep = await run('files.grep', { pattern: 'NEEDLE \\d+' })
+    expect(grep.matches).toHaveLength(50)
+    expect(grep.truncated).toBe(true)
+    expect((await run('files.grep', { pattern: 'needle', limit: 100 })).matchCount).toBe(1)
+    expect(
+      (await run('files.grep', { pattern: 'needle', ignore_case: true, limit: 100 })).matchCount
+    ).toBe(61)
+    expect(
+      (await run('files.grep', { pattern: 'needle', glob: 'a/**', ignore_case: true })).matches.map(
+        (match: { path: string }) => match.path
+      )
+    ).toEqual(['a/b/c/d/deep.txt'])
+    expect((await run('files.grep', { pattern: 'Needle', path: 'ignored.txt' })).matchCount).toBe(1)
+
+    for (const [name, args] of [
+      ['files.tree', { maxDepth: 2 }],
+      ['files.tree', { maxEntries: 2 }],
+      ['files.glob', { pattern: '*', maxFiles: 2 }],
+      ['files.grep', { query: 'needle' }],
+      ['files.grep', { pattern: 'needle', caseSensitive: false }],
+      ['files.grep', { pattern: 'needle', fileGlob: '*.txt' }],
+      ['files.grep', { pattern: 'needle', mode: 'literal' }]
+    ] as const)
+      await expect(registry.callTool(name, args, context)).rejects.toThrow('Invalid input')
   })
 
   it('detaches a route from a shared workspace and archives the prior workspace identity', async () => {

@@ -48,7 +48,7 @@ vi.mock('electron', () => ({
   dialog: { showMessageBox: h.prompt, showOpenDialog: h.prompt }
 }))
 
-import { createCanvasPathReadHandler } from './canvasPathReadApproval'
+import { createCanvasPathReadHandler, regularFileMtime } from './canvasPathReadApproval'
 import { watchSenderDocument } from '@shared/api/createServer/senderDocumentWatch'
 import { LocalFileReadGrants } from '../agentLocalFiles/readGrants'
 import {
@@ -338,6 +338,65 @@ describe('default bounded directory browsing', () => {
     expect(value.entries[0].path.endsWith('.ts')).toBe(true)
     expect(value.truncated).toBe(true)
     expect(result.content).not.toContain('NOT_READ')
+  })
+  it('reads .gitignore only through the grant and only inside the approved directory', async () => {
+    // A repository above the approved directory: neither its .git nor its rules apply.
+    await fs.mkdir(path.join(root, '.git'))
+    await fixture('.gitignore', '*.tmp\n')
+    const approved = path.join(root, 'approved')
+    await fixture('approved/.gitignore', '*.log\n')
+    await fixture('approved/a.tmp', 'NOT_READ')
+    await fixture('approved/a.log', 'NOT_READ')
+    await fixture('approved/a.ts', 'NOT_READ')
+    // Over the size cap: ignored as a whole rather than read.
+    await fixture('approved/big/.gitignore', `*.ts\n${'#'.repeat(256 * 1024)}`)
+    await fixture('approved/big/b.ts', 'NOT_READ')
+    const read = vi.spyOn(LocalFileReadGrants.prototype, 'read')
+    const lstat = vi.spyOn(fs, 'lstat')
+    const result = await handler()(approved, undefined, {
+      operation: 'glob',
+      pattern: '**',
+      gitignore: true,
+      filesOnly: true
+    })
+    expect(JSON.parse(result.content).entries.map((entry: { path: string }) => entry.path)).toEqual(
+      ['.gitignore', 'a.tmp', 'a.ts', 'big/.gitignore', 'big/b.ts']
+    )
+    expect(result.content).not.toContain('NOT_READ')
+    const readPaths = read.mock.calls.map((call) => call[2].relativePath)
+    expect(readPaths).toEqual(expect.arrayContaining(['.gitignore', 'big/.gitignore']))
+    expect(readPaths.every((relative) => relative?.endsWith('.gitignore') === true)).toBe(true)
+    for (const call of read.mock.calls) expect(call[3]).toEqual({ maxBytes: 256 * 1024 })
+    // No .git probe above the approved directory (grant chain checks may lstat ancestors).
+    expect(lstat.mock.calls.map(([target]) => path.resolve(String(target)))).not.toContain(
+      path.join(root, '.git')
+    )
+  })
+  it('orders glob results by mtime without following links; a swapped entry sorts oldest', async () => {
+    await fixture('dir/new.ts')
+    await fixture('dir/old.ts')
+    await fs.utimes(path.join(root, 'dir/new.ts'), 3000, 3000)
+    await fs.utimes(path.join(root, 'dir/old.ts'), 1000, 1000)
+    expect(await regularFileMtime(root, 'dir/new.ts')).toBe(3_000_000)
+    expect(await regularFileMtime(root, 'dir')).toBe(0)
+    expect(await regularFileMtime(root, 'dir/missing.ts')).toBe(0)
+    const result = await handler()(root, undefined, {
+      operation: 'glob',
+      pattern: '**/*.ts',
+      order: 'mtime'
+    })
+    expect(JSON.parse(result.content).entries.map((entry: { path: string }) => entry.path)).toEqual(
+      ['dir/new.ts', 'dir/old.ts']
+    )
+    // A directory replaced by a junction/link after listing is not followed.
+    await fixture('elsewhere/new.ts')
+    await fs.utimes(path.join(root, 'elsewhere/new.ts'), 9000, 9000)
+    await fs.rm(path.join(root, 'dir'), { recursive: true })
+    await fs.symlink(path.join(root, 'elsewhere'), path.join(root, 'dir'), 'junction')
+    expect(await regularFileMtime(root, 'dir/new.ts')).toBe(0)
+    expect(await fs.stat(path.join(root, 'dir/new.ts')).then((stat) => stat.mtimeMs)).toBe(
+      9_000_000
+    )
   })
   it('rejects traversal patterns before opening the directory', async () => {
     const authorize = vi.spyOn(LocalFileReadGrants.prototype, 'authorize')

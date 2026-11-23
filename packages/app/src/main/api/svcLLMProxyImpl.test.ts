@@ -2395,7 +2395,7 @@ describe('LLMProxySvcImpl', () => {
             expect(JSON.stringify(native ? input.toolTurns : input.messages)).toContain('SAVED_TABLE')
             return 'Read the saved output only; no code was run.'
           }
-          const name = 'notebook.inspect', args = { path: 'saved.ipynb', includeOutputs: 'summary', ...(exactCell ? { cellId: 'saved', offset: 1000, limit: 50 } : { offset: 25, limit: 1 }) }
+          const name = 'notebook.inspect', args = { path: 'saved.ipynb', include_outputs: 'summary', ...(exactCell ? { cell_id: 'saved', offset: 1000, limit: 50 } : { offset: 25, limit: 1 }) }
           expect(JSON.stringify(input)).not.toContain('SAVED_TABLE')
           if (!native) return JSON.stringify({ toolName: name, args })
           const index = input.tools.findIndex((tool: { name: string }) => tool.name === name)

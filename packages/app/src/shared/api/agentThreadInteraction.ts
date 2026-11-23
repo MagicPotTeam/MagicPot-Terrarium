@@ -15,9 +15,15 @@ export type AgentThreadInteractionPrompt =
 
 export type AgentThreadInteraction = {
   id: string
-  expiresAt: number
+  /** Epoch ms; null when the prompt is open-ended (ask_user/show_card without timeout_s). */
+  expiresAt: number | null
   prompt: AgentThreadInteractionPrompt
 }
+
+export const isAgentThreadInteractionExpired = (
+  interaction: Pick<AgentThreadInteraction, 'expiresAt'>,
+  now = Date.now()
+): boolean => interaction.expiresAt !== null && now >= interaction.expiresAt
 
 export type AgentThreadInteractionAnswer =
   | { status: 'answered'; text: string }
@@ -37,6 +43,9 @@ export const AGENT_THREAD_INTERACTION_LIMITS = {
   body: 4000,
   answer: 4000,
   actionLabel: 200,
+  /** show_app only; ask_user/show_card wait open-ended unless timeout_s is given. */
   defaultTimeoutSeconds: 300,
-  maxTimeoutSeconds: 600
+  maxTimeoutSeconds: 600,
+  /** Largest timeout_s a timer can honour (setTimeout ceiling, 2^31-1 ms). */
+  maxFeedbackTimeoutSeconds: 2_147_483
 } as const
