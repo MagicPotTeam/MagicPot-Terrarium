@@ -2,6 +2,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createBinaryChunkTransport } from '@shared/binaryChunkProtocol'
 import { DEFAULT_BUILD_ENV } from '@shared/config/buildEnv'
 import { DEFAULT_CONFIG, type Config, type LLMAPIProfile } from '@shared/config/config'
 import type { ChatAttachment, ChatMessage } from '@shared/llm'
@@ -397,7 +398,13 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
   })
 
   it('auto-saves a generated image once, also after its stored form replaced the inline copy', async () => {
-    const generated = inlinePng('auto-saved')
+    // One real RGB pixel with a valid 55 KiB tEXt chunk so the storage guard actually adopts it.
+    const pixel = atob(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNQ6nABAAG+AO+BmP0iAAAAAElFTkSuQmCC'
+    )
+    const comment =
+      '\x00\x00\xdc\x00tEXtComment\x00' + 'a'.repeat(55 * 1024 - 8) + '\x0f\xab\x67\xe3'
+    const generated = `data:image/png;base64,${btoa(pixel.slice(0, 33) + comment + pixel.slice(33))}`
     const hex = (bytes: ArrayBuffer): string =>
       Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
     const bytesOf = (dataUrl: string): Uint8Array<ArrayBuffer> =>
@@ -420,18 +427,34 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
         return { reference, localMediaUrl: `local-media:///managed/originals/${id}.png` }
       }
     )
-    const realFetch = globalThis.fetch
-    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
-      const managed = /([0-9a-f]{64})\.png$/u.exec(url)
-      if (url.startsWith('local-media:') && managed) {
-        return realFetch(mediaStore.get(managed[1]) ?? 'data:,')
-      }
-      return realFetch(input, init)
+    fixture.materializeForRequest.mockImplementation(async ({ reference, transport }) => {
+      const dataUrl = mediaStore.get(reference.sha256)!
+      if (transport === 'chunked-binary-v1')
+        return {
+          transport,
+          ...(await createBinaryChunkTransport(bytesOf(dataUrl), { mimeType: 'image/png' }))
+        }
+      return { transport, dataUrl, mimeType: 'image/png', sizeBytes: reference.sizeBytes }
     })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input) !== generated)
+          throw new Error('Unexpected URL; no network in this fixture')
+        return new Response(bytesOf(generated), { headers: { 'content-type': 'image/png' } })
+      })
+    )
     const saveImageToDir = (
       window as unknown as { api: { svcHyper: { saveImageToDir: ReturnType<typeof vi.fn> } } }
     ).api.svcHyper.saveImageToDir
+    const savedPath = 'C:/Synthetic/Agent/export.png'
+    let finishWrite!: (result: { savedPath: string }) => void
+    saveImageToDir.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishWrite = resolve
+        })
+    )
     await seed({ id: 'auto', title: 'Auto', profileId: 'inline-vision-fixture', messages: [] })
     localStorage.setItem(scopedStorageKey(STORAGE_KEY_CURRENT_SESSION_ID, SCOPE), 'auto')
     fixture.ipcChat
@@ -445,6 +468,14 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
       const shown = storedAttachments(readSessionFromUi() ?? undefined)
       expect(shown[0]?.url).toMatch(/^local-media:\/\//)
     })
+    const before = storedAttachments(readSessionFromUi() ?? undefined)[0]
+    await waitFor(() => expect(saveImageToDir).toHaveBeenCalledTimes(1))
+    await act(async () => finishWrite({ savedPath }))
+    await waitFor(() =>
+      expect(storedAttachments(readSessionFromUi() ?? undefined)[0]?.url).toBe(
+        `file://${savedPath}`
+      )
+    )
     // The page scans its last message again after each change.
     await sendComposer('thanks')
     await waitFor(() => expect(fixture.ipcChat).toHaveBeenCalledTimes(2))
@@ -452,6 +483,17 @@ describe('ChatPage save guard (FIX-PLAN item 4, part 1)', () => {
       await new Promise((resolve) => setTimeout(resolve, 200))
     })
     expect(saveImageToDir).toHaveBeenCalledTimes(1)
+    expect(saveImageToDir).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: bytesOf(generated),
+        fileName: expect.stringMatching(/\.png$/)
+      })
+    )
+    const saved = await waitForStored((s) => storedAttachments(s)[0]?.url === `file://${savedPath}`)
+    expect(storedAttachments(saved)[0].media).toEqual(before.media)
+    expect(before.media?.sha256).toBe(
+      hex(await crypto.subtle.digest('SHA-256', bytesOf(generated)))
+    )
   })
 
   it('keeps the image inline, and saves, when the managed import fails', async () => {
