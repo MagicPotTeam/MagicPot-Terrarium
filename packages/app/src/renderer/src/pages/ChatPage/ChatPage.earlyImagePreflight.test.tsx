@@ -21,7 +21,6 @@ import {
   STORAGE_KEY_CURRENT_SESSION_ID
 } from './chatPageShared'
 
-
 // Saved chat images are read as a bounded stream and must sniff as an image, so the
 // fixture serves a real Response whose bytes start with the PNG signature.
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
@@ -1345,9 +1344,9 @@ describe('manual blob attachment persistence at the send boundary', () => {
 
     await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
     expect(fixture.fetch.mock.calls.map(([url]) => url)).toEqual(selectedUrls)
-    expect(
-      fixture.saveImageToDir.mock.calls.map(([value]) => pngMarker(value.data))
-    ).toEqual(selectedUrls.map((url) => `bytes:${url}`))
+    expect(fixture.saveImageToDir.mock.calls.map(([value]) => pngMarker(value.data))).toEqual(
+      selectedUrls.map((url) => `bytes:${url}`)
+    )
     const sent = fixture.request.mock.calls[0][0].messages.find(
       (entry: { role: string }) => entry.role === 'user'
     )
