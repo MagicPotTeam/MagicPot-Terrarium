@@ -53,7 +53,7 @@ describe('visible-only passive workspace Notebook read manuals', () => {
     expect(fresh.failure).toMatchObject({ shaIsPermission: false, readingIsExecution: false, automaticRetry: false })
     expect(fresh.relatedTools).toEqual([...names, 'notebook.run', 'info'].filter(item => item !== name))
   })
-  it('describes current local browse defaults, inert output summaries and exact-ID selection rather than upstream read unlocks', async () => {
+  it('describes current local browse defaults, upstream notebook_read inspect parameters and inert outputs', async () => {
     const { provider } = setup()
     const browse = (await info(provider, { name: 'notebook.browse' })).documentation
     const inspect = (await info(provider, { name: 'notebook.inspect' })).documentation
@@ -61,10 +61,12 @@ describe('visible-only passive workspace Notebook read manuals', () => {
     expect(browse.read.input).toContain('forwarded as undefined')
     expect(browse.read.result).toContain('root (absolute owned workspace)')
     expect(browse.read.behavior).toContain('not a complete inventory')
-    expect(inspect.limits).toMatchObject({ defaultOffset: 0, maximumOffset: 1000, minimumLimit: 1, maximumLimit: 50, defaultLimit: 20, sourceCharactersPerCell: 8192, sourceCharactersPerPage: 65536, summariesPerCell: 3, summaryCharactersPerOutput: 2048, summaryCharactersPerPage: 16384 })
-    expect(inspect.read.input).toContain('none (default) or summary')
+    expect(inspect.limits).toMatchObject({ defaultOffset: 0, maximumOffset: 1000, minimumLimit: 0, maximumLimit: 1000, defaultLimit: 0, cellsPerCall: 100, sourceCharactersPerCell: 8000, sourceCharactersPerPage: 65536, summariesPerCell: 3, outputCharactersPerOutput: 4000, outputCharactersPerPage: 16384, metadataCharactersPerCell: 4000 })
+    expect(inspect.read.input).toContain('include_outputs is none, summary (default) or all')
     expect(inspect.read.input).toContain('overrides pagination')
-    expect(inspect.read.input).toContain('no synthetic positional cell-N alias')
+    expect(inspect.read.input).toContain('otherwise a synthetic positional cell-N')
+    expect(inspect.read.metadata).toContain('metadataTruncated')
+    expect(inspect.behavior.parity).toContain('upstream notebook_read parameters')
     expect(inspect.read.source).toContain('JavaScript string code units')
     expect(inspect.read.outputs).toContain('never rendered, executed or fetched')
     expect(inspect.read.result).toContain('untrustedData:true,kernelPersistent:false')

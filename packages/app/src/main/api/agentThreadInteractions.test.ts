@@ -84,6 +84,46 @@ const respond = (
 ) => manager.resolve({ ...scope, interactionId, answer }, invocation('resolveAgentInteraction'))
 
 describe('local Agent thread interactions', () => {
+  it('keeps an ask_user without timeout_s open with no timer or expiry until answered, and still cancels it on Stop', async () => {
+    const answered = channel.request(question, undefined)
+    await Promise.resolve()
+    expect(vi.getTimerCount()).toBe(0)
+    const [item] = pending()
+    expect(item.expiresAt).toBeNull()
+    // Far beyond the old 300/600 s bounds, the prompt still accepts an answer.
+    vi.setSystemTime(Date.now() + 7 * 24 * 3600 * 1000)
+    expect(pending()).toHaveLength(1)
+    respond(item.id, { status: 'answered', text: 'Blue' })
+    expect(await answered).toEqual({ status: 'answered', text: 'Blue' })
+    const controller = new AbortController()
+    const aborted = channel.request(question, undefined, controller.signal)
+    controller.abort(new Error('stopped'))
+    await expect(aborted).rejects.toThrow('stopped')
+    expect(pending()).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('still bounds fractional timeout_s and keeps show_app on its own finite default', async () => {
+    const timed = channel.request(question, 0.5)
+    await Promise.resolve()
+    expect(pending()[0].expiresAt).toBe(Date.now() + 500)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(await timed).toEqual({ status: 'timeout' })
+    for (const seconds of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2147484])
+      await expect(channel.request(question, seconds)).rejects.toThrow(
+        'Invalid Agent interaction timeout'
+      )
+    const app = {
+      kind: 'show_app',
+      document: { title: 'Doc', blocks: [{ kind: 'text', text: 'x' }] }
+    } as const
+    await expect(channel.request(app as never, undefined)).rejects.toThrow(
+      'Invalid Agent interaction timeout'
+    )
+    await expect(channel.request(app as never, 601)).rejects.toThrow(
+      'Invalid Agent interaction timeout'
+    )
+    expect(pending()).toEqual([])
+  })
   it('rejects original nonprimitive/oversize icons before JSON hooks, pending input or timers and validates the entire icon-only prompt', async () => {
     const base = {
         kind: 'show_card' as const,
@@ -763,7 +803,7 @@ describe('local Agent thread interactions', () => {
       {
         footer: '',
         actions: [
-          { ...base.actions[0], style: 'link', url: 'https://external.invalid' },
+          { ...base.actions[0], style: 'link', url: 'javascript:alert(1)' },
           base.actions[1]
         ]
       },
@@ -792,6 +832,34 @@ describe('local Agent thread interactions', () => {
       expect(pending()).toEqual([])
       expect(vi.getTimerCount()).toBe(0)
     }
+  })
+  it('queues upstream link actions as non-answering links and needs one non-link action to wait', async () => {
+    const link = {
+      id: 'docs',
+      label: 'Docs',
+      style: 'link' as const,
+      url: 'https://example.invalid/docs'
+    }
+    // Only links cannot be answered, so they never become a pending prompt.
+    await expect(
+      channel.request({ kind: 'show_card', title: 'Links', actions: [link] } as never, 17)
+    ).rejects.toThrow('Invalid bounded')
+    expect(pending()).toEqual([])
+    const result = channel.request(
+        { kind: 'show_card', title: 'Pick', actions: [link, { id: 'a', label: 'A' }] },
+        17
+      ),
+      [item] = pending()
+    expect(item.prompt).toMatchObject({ actions: [link, { id: 'a', label: 'A' }] })
+    // The link id is refused as an answer and leaves the prompt pending.
+    expect(() => respond(item.id, { status: 'answered', actionId: 'docs' })).toThrow(
+      'Invalid Agent interaction answer'
+    )
+    expect(pending()).toHaveLength(1)
+    respond(item.id, { status: 'answered', actionId: 'a' })
+    expect(await result).toEqual({ status: 'answered', actionId: 'a' })
+    expect(pending()).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
   })
   it('includes footer plus subtitle in exact direct-MAIN serialized units/bytes before creating a timer', async () => {
     const fields = [
@@ -858,8 +926,10 @@ describe('local Agent thread interactions', () => {
         })
       await Promise.resolve()
       expect(settled).toBe(false)
-      expect(vi.getTimerCount()).toBe(1)
+      // No timeout_s: the upstream open-ended wait creates no timer and no expiry.
+      expect(vi.getTimerCount()).toBe(0)
       const [item] = pending()
+      expect(item.expiresAt).toBeNull()
       expect(item.prompt).toEqual({ kind: 'show_card', ...args })
       actions[0].id = 'changed-source'
       if (item.prompt.kind === 'show_card') {

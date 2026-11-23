@@ -1,10 +1,24 @@
+/**
+ * Optional KohakuTerrarium-style walk filtering. Absent fields keep the original
+ * unfiltered walk: hidden entries listed, no .gitignore rules, no skipped directories.
+ */
+export type FilesWalkFilter = Readonly<{
+  /** List dot-prefixed entries. Default true. */
+  hidden?: boolean
+  /** Follow directory-scoped .gitignore rules. Default false. */
+  gitignore?: boolean
+  /** Skip .git, node_modules, __pycache__, venv and similar directories. Default false. */
+  skipCommonDirectories?: boolean
+}>
+
 export type FilesTreeInput = Readonly<{
   path?: string
   maxDepth?: number
   maxEntries?: number
   maxStringLength?: number
   timeoutMs?: number
-}>
+}> &
+  FilesWalkFilter
 
 export type FilesReadInput = Readonly<{
   path: string
@@ -24,7 +38,12 @@ export type FilesGlobInput = Readonly<{
   maxFiles?: number
   maxStringLength?: number
   timeoutMs?: number
-}>
+  /** Return files only, without directories. Default false. */
+  filesOnly?: boolean
+  /** Result order: by path (default) or most recently modified first. */
+  order?: 'path' | 'mtime'
+}> &
+  FilesWalkFilter
 
 export type FilesGrepInput = Readonly<{
   query: string
@@ -38,7 +57,10 @@ export type FilesGrepInput = Readonly<{
   maxReadBytes?: number
   maxSnippetLength?: number
   timeoutMs?: number
-}>
+  /** One match per matching line (its first column) instead of one per occurrence. */
+  perLine?: boolean
+}> &
+  FilesWalkFilter
 
 export type FilesJsonReadInput = Readonly<{
   path: string

@@ -5,10 +5,11 @@ import { ThemeProvider, alpha, createTheme } from '@mui/material/styles'
 import type { AgentThreadInteraction } from '@shared/api/agentThreadInteraction'
 import AgentThreadInteractionPanel from './AgentThreadInteractionPanel'
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), resolve: vi.fn() }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), resolve: vi.fn(), openExternal: vi.fn() }))
 vi.mock('../../../utils/windowUtils', () => ({
   api: () => ({
-    svcLLMProxy: { listAgentInteractions: mocks.list, resolveAgentInteraction: mocks.resolve }
+    svcLLMProxy: { listAgentInteractions: mocks.list, resolveAgentInteraction: mocks.resolve },
+    svcShell: { openExternal: mocks.openExternal }
   })
 }))
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
@@ -52,6 +53,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   mocks.list.mockReset()
   mocks.resolve.mockReset()
+  mocks.openExternal.mockReset()
   mocks.resolve.mockResolvedValue(undefined)
 })
 afterEach(() => {
@@ -60,6 +62,23 @@ afterEach(() => {
 })
 
 describe('Agent thread interaction UI', () => {
+  it('keeps an open-ended prompt (expiresAt null) answerable however long it waits', async () => {
+    await mount({ ...question('open-ended'), expiresAt: null })
+    // Jump the clock far past the old bounded waits, then let one poll observe it.
+    vi.setSystemTime(Date.now() + 7 * 24 * 3600 * 1000)
+    await poll()
+    expect(screen.queryByText('chat.agent_interaction.state_expired')).toBeNull()
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Later' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'chat.agent_interaction.submit' }))
+    })
+    expect(mocks.resolve).toHaveBeenCalledWith({
+      route,
+      conversationId: 'a',
+      interactionId: 'open-ended',
+      answer: { status: 'answered', text: 'Later' }
+    })
+  })
   it('formats only body Markdown while keeping every context and an approve-named choice inert until its exact click', async () => {
     const body =
         '**Body strong** and *Body emphasis* and ~~Body removed~~\n\n> Body quote\n\n- Body list\n\n```mermaid\nflowchart TD\nA-->B\n```\n\n| Key | Value |\n| --- | --- |\n| Body table | Data |',
@@ -426,7 +445,6 @@ describe('Agent thread interaction UI', () => {
     Object('primary'),
     { toJSON: () => 'primary' },
     { toString: () => 'primary' },
-    'link',
     'error',
     'Primary',
     'primary ',
@@ -467,6 +485,42 @@ describe('Agent thread interaction UI', () => {
       expect(prompt.actions[0].style).toBe(style)
     }
   )
+  it('renders an upstream link action as an external link that opens its url and never answers', async () => {
+    const prompt = {
+      kind: 'show_card' as const,
+      title: 'Pick or read',
+      actions: [
+        {
+          id: 'docs',
+          label: 'Read docs',
+          style: 'link' as const,
+          url: 'https://example.invalid/docs'
+        },
+        { id: 'a', label: 'Choose A' }
+      ]
+    }
+    mocks.list.mockResolvedValue({ interactions: [{ id: 'with-link', expiresAt: null, prompt }] })
+    render(<AgentThreadInteractionPanel route={route} conversationId="a" active />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const link = screen.getByRole('button', { name: 'Read docs' })
+    expect(link).not.toHaveAttribute('href')
+    await act(async () => {
+      fireEvent.click(link)
+    })
+    expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith('https://example.invalid/docs')
+    expect(mocks.resolve).not.toHaveBeenCalled()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Choose A' }))
+    })
+    expect(mocks.resolve).toHaveBeenCalledExactlyOnceWith({
+      route,
+      conversationId: 'a',
+      interactionId: 'with-link',
+      answer: { status: 'answered', actionId: 'a' }
+    })
+  })
   it('ignores inherited button style and keeps mixed omitted choices independent, with no dismiss button', async () => {
     const actions = [
       { id: 'a', label: 'Primary feedback', style: 'primary' as const },

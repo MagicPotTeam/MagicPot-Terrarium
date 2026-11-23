@@ -6,9 +6,23 @@ export const AGENT_THREAD_CARD_FOOTER_LIMIT = 200
 export const AGENT_THREAD_CARD_ICON_LIMIT = 64
 export const AGENT_THREAD_CARD_ACCENTS = ['primary', 'info', 'success', 'warning', 'danger', 'neutral'] as const
 export type AgentThreadCardAccent = typeof AGENT_THREAD_CARD_ACCENTS[number]
-export const AGENT_THREAD_CARD_ACTION_STYLES = ['primary', 'secondary', 'danger'] as const
+// KohakuTerrarium show_card action styles (builtins/tools/show_card.py:25): a link action carries a url,
+// opens it on click and never answers the card.
+export const AGENT_THREAD_CARD_ACTION_STYLES = ['primary', 'secondary', 'danger', 'link'] as const
 export type AgentThreadCardActionStyle = typeof AGENT_THREAD_CARD_ACTION_STYLES[number]
-export type AgentThreadCardAction = { id: string; label: string; style?: AgentThreadCardActionStyle }
+export type AgentThreadCardAction = { id: string; label: string; style?: AgentThreadCardActionStyle; url?: string }
+export const AGENT_THREAD_CARD_URL_LIMIT = 2048
+/** An absolute http(s) URL only; anything else is never offered as a link. */
+export const isAgentThreadCardLinkUrl = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !value || value.length > AGENT_THREAD_CARD_URL_LIMIT || value.trim() !== value) return false
+  try {
+    const url = new URL(value)
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+export const isAgentThreadCardLinkAction = (action: Pick<AgentThreadCardAction, 'style'>): boolean => action.style === 'link'
 export const AGENT_THREAD_CARD_FIELD_LIMITS = { maximum: 8, label: 200, value: 1000, totalText: 4096 } as const
 export const AGENT_THREAD_CARD_FIELDS_SCHEMA = {
   type: 'array', maxItems: AGENT_THREAD_CARD_FIELD_LIMITS.maximum,
@@ -37,7 +51,8 @@ export type AgentThreadCardDisplay = {
   contract: typeof AGENT_THREAD_CARD_DISPLAY_CONTRACT
   status: 'provided'
   mode: 'display-only'
-  card: { title: string; icon?: string; subtitle?: string; body?: string; footer?: string; accent?: AgentThreadCardAccent; fields?: AgentThreadCardField[] }
+  /** actions: buttons of a card that does not wait (links open their url, others are inert). */
+  card: { title: string; icon?: string; subtitle?: string; body?: string; footer?: string; accent?: AgentThreadCardAccent; fields?: AgentThreadCardField[]; actions?: AgentThreadCardAction[] }
   untrustedData: true
   grantsPermission: false
 }
@@ -73,14 +88,28 @@ const boundedJson = (content: unknown): unknown => {
   try { return JSON.parse(content) } catch { return undefined }
 }
 
+/** 1-4 actions with unique ids; a link action needs an http(s) url and only a link may carry one. */
+const validActions = (value: unknown): value is AgentThreadCardAction[] => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 4) return false
+  const ids = new Set<string>()
+  for (const action of value) {
+    if (!exactKeys(action, ['id', 'label'], ['style', 'url']) || typeof action.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(action.id) ||
+      typeof action.label !== 'string' || !action.label.trim() || action.label.length > LIMITS.actionLabel || ids.has(action.id) ||
+      Object.hasOwn(action, 'style') && (typeof action.style !== 'string' || !AGENT_THREAD_CARD_ACTION_STYLES.some(style => style === action.style)) ||
+      (action.style === 'link' ? !isAgentThreadCardLinkUrl(action.url) : Object.hasOwn(action, 'url'))) return false
+    ids.add(action.id)
+  }
+  return true
+}
+
 /** Parse only bounded serialized result data. This marker never supplies permissions or a renderer acknowledgement. */
 export function parseAgentThreadCardDisplay(content: unknown): AgentThreadCardDisplay | undefined {
   const value = boundedJson(content)
   if (!exactKeys(value, ['contract', 'status', 'mode', 'card', 'untrustedData', 'grantsPermission']) ||
     value.contract !== AGENT_THREAD_CARD_DISPLAY_CONTRACT || value.status !== 'provided' || value.mode !== 'display-only' ||
     value.untrustedData !== true || value.grantsPermission !== false ||
-    !exactKeys(value.card, ['title'], ['icon', 'subtitle', 'body', 'fields', 'footer', 'accent'])) return undefined
-  if (!validCardText(value.card)) return undefined
+    !exactKeys(value.card, ['title'], ['icon', 'subtitle', 'body', 'fields', 'footer', 'accent', 'actions'])) return undefined
+  if (!validCardText(value.card) || Object.hasOwn(value.card, 'actions') && !validActions(value.card.actions)) return undefined
   return value as AgentThreadCardDisplay
 }
 
@@ -88,13 +117,8 @@ export function parseAgentThreadCardDisplay(content: unknown): AgentThreadCardDi
 export function parseAgentThreadChoiceCard(content: unknown): AgentThreadChoiceCardPrompt | undefined {
   const value = boundedJson(content)
   if (!exactKeys(value, ['kind', 'title', 'actions'], ['icon', 'subtitle', 'body', 'fields', 'footer', 'accent']) || value.kind !== 'show_card' || !validCardText(value) ||
-    !Array.isArray(value.actions) || value.actions.length < 1 || value.actions.length > 4) return undefined
-  const ids = new Set<string>()
-  for (const action of value.actions) {
-    if (!exactKeys(action, ['id', 'label'], ['style']) || typeof action.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(action.id) ||
-      typeof action.label !== 'string' || !action.label.trim() || action.label.length > LIMITS.actionLabel || ids.has(action.id) ||
-      Object.hasOwn(action, 'style') && (typeof action.style !== 'string' || !AGENT_THREAD_CARD_ACTION_STYLES.some(style => style === action.style))) return undefined
-    ids.add(action.id)
-  }
+    !validActions(value.actions)) return undefined
+  // Only a non-link action can answer, so a waiting card needs at least one.
+  if (value.actions.every(action => isAgentThreadCardLinkAction(action))) return undefined
   return value as AgentThreadChoiceCardPrompt
 }

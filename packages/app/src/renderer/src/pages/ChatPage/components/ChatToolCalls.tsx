@@ -2,6 +2,7 @@ import React from 'react'
 import { Box, CircularProgress, Typography, useTheme } from '@mui/material'
 import { alpha, keyframes, type Theme } from '@mui/material/styles'
 import AgentThreadCardBody from './AgentThreadCardBody'
+import AgentThreadCardActions from './AgentThreadCardActions'
 import {
   Check,
   Close,
@@ -603,6 +604,7 @@ const ToolCallRow: React.FC<{
                 {formatToolCallValue(card.footer).text}
               </Typography>
             )}
+            {card.actions && <AgentThreadCardActions actions={card.actions} />}
           </Box>
         )}
         {open && details && (
@@ -762,6 +764,7 @@ const ToolCallRow: React.FC<{
               {formatToolCallValue(card.footer).text}
             </Typography>
           )}
+          {card.actions && <AgentThreadCardActions actions={card.actions} />}
         </Box>
       )}
       {open && details && (

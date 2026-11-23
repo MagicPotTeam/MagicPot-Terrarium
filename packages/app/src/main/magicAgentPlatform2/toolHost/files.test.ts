@@ -8,6 +8,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -71,12 +72,12 @@ function createFilesHost(
 }
 
 function call<TInput extends Record<string, unknown>>(
-  tool: 'files.read' | 'files.glob' | 'files.grep' | 'files.json.read',
+  tool: 'files.read' | 'files.tree' | 'files.glob' | 'files.grep' | 'files.json.read',
   input: TInput,
   authorization: MagicAgentPolicyAuthorizationService
 ) {
   const action =
-    tool === 'files.glob'
+    tool === 'files.glob' || tool === 'files.tree'
       ? 'filesystem.list'
       : tool === 'files.grep'
         ? 'filesystem.search'
@@ -2477,6 +2478,139 @@ describe('FilesToolHost focused file discovery tools', () => {
     await expect(
       host.grep(call('files.grep', { query: '(a+)+', mode: 'regex' }, authorization))
     ).rejects.toThrow('Unsafe')
+  })
+
+  describe('KohakuTerrarium-style walk filtering', () => {
+    const fixture = () => {
+      const base = setup()
+      for (const dir of ['src/gen', 'node_modules/pkg', '.hidden', 'pkg.egg-info', 'docs', 'build'])
+        mkdirSync(path.join(base.root, dir), { recursive: true })
+      writeFileSync(
+        path.join(base.root, '.gitignore'),
+        '# comment\n*.log\nbuild/\n!build/keep.ts\n/docs/*.md\n!docs/keep.md\n'
+      )
+      writeFileSync(path.join(base.root, 'src', '.gitignore'), 'gen/\n!important.log\n')
+      for (const file of [
+        'src/a.ts',
+        'src/debug.log',
+        'src/important.log',
+        'src/gen/x.ts',
+        'node_modules/pkg/i.ts',
+        '.hidden/h.ts',
+        '.env',
+        'pkg.egg-info/PKG',
+        'docs/a.md',
+        'docs/keep.md',
+        'build/out.ts',
+        'build/keep.ts',
+        'root.log'
+      ])
+        writeFileSync(path.join(base.root, file), `needle in ${file}\n`)
+      return base
+    }
+    const kt = { hidden: false, gitignore: true, skipCommonDirectories: true }
+
+    it('glob skips hidden and noise entries and applies scoped .gitignore with negation', async () => {
+      const { root, authorization } = fixture()
+      const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
+      const filtered = await host.glob(
+        call('files.glob', { pattern: '**', ...kt, filesOnly: true }, authorization)
+      )
+      // A deeper .gitignore re-includes important.log; build/ stays excluded despite !build/keep.ts.
+      expect(filtered.entries.map((entry) => entry.path)).toEqual([
+        'docs/keep.md',
+        'src/a.ts',
+        'src/important.log'
+      ])
+      const unfiltered = await host.glob(call('files.glob', { pattern: '**' }, authorization))
+      const all = unfiltered.entries.map((entry) => entry.path)
+      for (const kept of ['.env', 'node_modules/pkg/i.ts', 'build/out.ts', 'src', '.gitignore'])
+        expect(all).toContain(kept)
+    })
+
+    it('glob orders files by modification time, newest first, before truncating', async () => {
+      const { root, authorization } = setup()
+      const times = { 'old.ts': 1_000, 'new.ts': 3_000, 'mid.ts': 2_000 }
+      for (const [file, seconds] of Object.entries(times)) {
+        writeFileSync(path.join(root, file), file)
+        utimesSync(path.join(root, file), seconds, seconds)
+      }
+      const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
+      const all = await host.glob(
+        call('files.glob', { pattern: '*.ts', order: 'mtime', filesOnly: true }, authorization)
+      )
+      expect(all.entries.map((entry) => entry.path)).toEqual(['new.ts', 'mid.ts', 'old.ts'])
+      const two = await host.glob(
+        call('files.glob', { pattern: '*.ts', order: 'mtime', maxFiles: 2 }, authorization)
+      )
+      expect(two.entries.map((entry) => entry.path)).toEqual(['new.ts', 'mid.ts'])
+      expect(two.truncated).toBe(true)
+    })
+
+    it('tree lists one level at maxDepth 0 with the same filtering', async () => {
+      const { root, authorization } = fixture()
+      const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
+      const tree = await host.tree(call('files.tree', { ...kt, maxDepth: 0 }, authorization))
+      expect(tree.entries.map((entry) => entry.path)).toEqual(['docs', 'src'])
+      const hidden = await host.tree(
+        call('files.tree', { ...kt, hidden: true, maxDepth: 0 }, authorization)
+      )
+      expect(hidden.entries.map((entry) => entry.path)).toEqual([
+        '.env',
+        '.gitignore',
+        '.hidden',
+        'docs',
+        'src'
+      ])
+    })
+
+    it('grep filters directories, but an explicitly addressed file bypasses filtering', async () => {
+      const { root, authorization } = fixture()
+      const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
+      const filtered = await host.grep(
+        call('files.grep', { query: 'needle', ...kt, perLine: true }, authorization)
+      )
+      expect(filtered.matches.map((match) => match.path)).toEqual([
+        'docs/keep.md',
+        'src/a.ts',
+        'src/important.log'
+      ])
+      const ignoredFile = await host.grep(
+        call('files.grep', { path: 'build/out.ts', query: 'needle', ...kt }, authorization)
+      )
+      expect(ignoredFile.matches.map((match) => [match.path, match.line])).toEqual([
+        ['build/out.ts', 1]
+      ])
+    })
+
+    it('grep reports one match per line, honours case folding and allows plain alternation', async () => {
+      const { root, authorization } = setup()
+      writeFileSync(path.join(root, 'a.txt'), 'FOO foo foo\nbar\nnone\n')
+      const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
+      const perLine = await host.grep(
+        call(
+          'files.grep',
+          { path: 'a.txt', query: 'foo|bar', mode: 'regex', caseSensitive: false, perLine: true },
+          authorization
+        )
+      )
+      expect(perLine.matches.map(({ line, column }) => [line, column])).toEqual([
+        [1, 1],
+        [2, 1]
+      ])
+      const sensitive = await host.grep(
+        call(
+          'files.grep',
+          { path: 'a.txt', query: 'FOO', mode: 'regex', perLine: true },
+          authorization
+        )
+      )
+      expect(sensitive.matchCount).toBe(1)
+      for (const unsafe of ['(foo|fo)+', '(a|aa)*', '(?:x|y)?'])
+        await expect(
+          host.grep(call('files.grep', { query: unsafe, mode: 'regex' }, authorization))
+        ).rejects.toThrow('Unsafe')
+    })
   })
 
   it('reads BOM UTF-8 JSON, selects paths, bounds output, rejects prototype keys, and redacts secrets', async () => {

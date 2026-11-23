@@ -156,12 +156,12 @@ describe('thread script tools', () => {
     }
     expect(t.execute).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled()
     for (const [name, args] of [
-      ['notebook.browse', { maxEntries: 0 }], ['notebook.browse', { maxEntries: 101 }], ['notebook.browse', { path: '' }], ['notebook.inspect', {}], ['notebook.inspect', { path: 'a.ipynb', limit: 0 }], ['notebook.inspect', { path: 'a.ipynb', limit: 51 }], ['notebook.inspect', { path: 'a.ipynb', includeOutputs: 'all' }], ['notebook.inspect', { path: 'a.ipynb', approved: true }], ['notebook.inspect', { path: 'a.ipynb', offset: 1001 }]
+      ['notebook.browse', { maxEntries: 0 }], ['notebook.browse', { maxEntries: 101 }], ['notebook.browse', { path: '' }], ['notebook.inspect', {}], ['notebook.inspect', { path: 'a.ipynb', limit: -1 }], ['notebook.inspect', { path: 'a.ipynb', limit: 1001 }], ['notebook.inspect', { path: 'a.ipynb', include_outputs: 'ALL' }], ['notebook.inspect', { path: 'a.ipynb', includeOutputs: 'summary' }], ['notebook.inspect', { path: 'a.ipynb', cellId: 'code1' }], ['notebook.inspect', { path: 'a.ipynb', approved: true }], ['notebook.inspect', { path: 'a.ipynb', offset: 1001 }]
     ] as Array<[string, Record<string, unknown>]>) await expect(t.provider.callTool(name, args, t.context)).rejects.toThrow('Invalid bounded')
     expect(t.execute).not.toHaveBeenCalled()
     for (let i = 0; i < 12; i++) {
       const name = i % 2 ? 'notebook.inspect' : 'notebook.browse'
-      await t.provider.callTool(name, name === 'notebook.inspect' ? { path: 'a.ipynb', cellId: 'stable', offset: 1000, limit: 50, includeOutputs: 'summary' } : { maxEntries: 100 }, t.context)
+      await t.provider.callTool(name, name === 'notebook.inspect' ? { path: 'a.ipynb', cell_id: 'stable', offset: 1000, limit: 1000, include_outputs: 'all', include_metadata: true } : { maxEntries: 100 }, t.context)
     }
     expect(t.execute).toHaveBeenCalledTimes(12)
     await expect(t.provider.callTool('notebook.browse', {}, t.context)).rejects.toThrow('budget')
@@ -232,40 +232,41 @@ describe('thread script tools', () => {
   it.each([
     ['python.execute', { code: 'pass', file: 'other.py' }], ['python.execute', { code: 'pass', run_in_background: true }], ['python.execute', { code: 'pass', timeoutMs: 120001 }],
     ['notebook.run', { path: 'x.ipynb', expectedSha256: 'a'.repeat(64) }], ['notebook.cell.delete', { path: 'x.ipynb', expectedSha256: 'a'.repeat(64), cellIds: [] }],
-    ['notebook.inspect', { path: 'a.ipynb', limit: 51 }], ['python.execute', { code: 'pass', env: { SECRET: 'value' } }]
+    ['notebook.inspect', { path: 'a.ipynb', limit: 1001 }], ['notebook.inspect', { path: 'a.ipynb', include_metadata: 'yes' }], ['python.execute', { code: 'pass', env: { SECRET: 'value' } }]
   ])('strict schema rejects %s privileged/oversize args', async (name, args) => {
     const t = setup()
     await expect(t.provider.callTool(name, args, t.context)).rejects.toThrow(/Invalid bounded/)
     expect(t.execute).not.toHaveBeenCalled()
   })
-  it('accepts only an explicit passive output-summary mode on the existing read tool', async () => {
+  it('accepts only the upstream none/summary/all output modes on the existing read tool', async () => {
     const t = setup(false)
-    await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'summary' }, t.context)
-    await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'none' }, t.context)
-    expect(t.execute).toHaveBeenCalledTimes(2)
-    expect(t.execute.mock.calls[0][0]).toMatchObject({ name: 'notebook.inspect', input: { includeOutputs: 'summary' } })
-    for (const includeOutputs of ['all', true, {}, 'SUMMARY']) await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', includeOutputs }, t.context)).rejects.toThrow('Invalid bounded')
-    expect(t.execute).toHaveBeenCalledTimes(2)
-    await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', includeOutputs: 'summary' }, { ...t.context, route: { ...route, threadId: 'other' } })).rejects.toThrow('outside')
+    await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', include_outputs: 'summary' }, t.context)
+    await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', include_outputs: 'none' }, t.context)
+    await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', include_outputs: 'all' }, t.context)
+    expect(t.execute).toHaveBeenCalledTimes(3)
+    expect(t.execute.mock.calls[0][0]).toMatchObject({ name: 'notebook.inspect', input: { include_outputs: 'summary' } })
+    for (const include_outputs of [true, {}, 'SUMMARY', 'rich']) await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', include_outputs }, t.context)).rejects.toThrow('Invalid bounded')
+    expect(t.execute).toHaveBeenCalledTimes(3)
+    await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', include_outputs: 'summary' }, { ...t.context, route: { ...route, threadId: 'other' } })).rejects.toThrow('outside')
   })
   it('validates exact stable cell selectors without expanding scope or resetting the shared read budget', async () => {
     const t = setup(false)
-    for (const cellId of ['', 'a'.repeat(65), '../code1', ['code1'], null, 1]) await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId }, t.context)).rejects.toThrow('Invalid bounded')
+    for (const cell_id of ['', 'a'.repeat(65), '../code1', ['code1'], null, 1]) await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id }, t.context)).rejects.toThrow('Invalid bounded')
     expect(t.execute).not.toHaveBeenCalled()
-    await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId: 'a'.repeat(64), offset: 1000, limit: 50, includeOutputs: 'summary' }, t.context)
-    expect(t.execute.mock.calls[0][0]).toMatchObject({ name: 'notebook.inspect', input: { cellId: 'a'.repeat(64) } })
-    await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId: 'code1' }, { ...t.context, route: { ...route, threadId: 'other' } })).rejects.toThrow('outside')
+    await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id: 'a'.repeat(64), offset: 1000, limit: 50, include_outputs: 'summary' }, t.context)
+    expect(t.execute.mock.calls[0][0]).toMatchObject({ name: 'notebook.inspect', input: { cell_id: 'a'.repeat(64) } })
+    await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id: 'code1' }, { ...t.context, route: { ...route, threadId: 'other' } })).rejects.toThrow('outside')
     t.execute.mockRejectedValueOnce(Error('Notebook cell ID not found.'))
-    await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId: 'missing' }, t.context)).rejects.toThrow('cell ID not found')
-    for (let index = 0; index < 10; index++) await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId: 'code1' }, t.context)
-    await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId: 'code1' }, t.context)).rejects.toThrow('budget')
+    await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id: 'missing' }, t.context)).rejects.toThrow('cell ID not found')
+    for (let index = 0; index < 10; index++) await t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id: 'code1' }, t.context)
+    await expect(t.provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id: 'code1' }, t.context)).rejects.toThrow('budget')
     expect(t.execute).toHaveBeenCalledTimes(12)
     const cancelled = setup(false); cancelled.parent.abort(Error('document navigated'))
-    await expect(cancelled.provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId: 'code1' }, cancelled.context)).rejects.toThrow('document navigated')
+    await expect(cancelled.provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id: 'code1' }, cancelled.context)).rejects.toThrow('document navigated')
     expect(cancelled.execute).not.toHaveBeenCalled()
     const revoked = setup(false)
     revoked.execute.mockImplementationOnce(async () => { revoked.parent.abort(Error('document navigated after read')); return { state: 'completed', stdout: 'DISCARD_RESULT' } })
-    await expect(revoked.provider.callTool('notebook.inspect', { path: 'a.ipynb', cellId: 'code1' }, revoked.context)).rejects.toThrow('document navigated after read')
+    await expect(revoked.provider.callTool('notebook.inspect', { path: 'a.ipynb', cell_id: 'code1' }, revoked.context)).rejects.toThrow('document navigated after read')
     expect(revoked.execute).toHaveBeenCalledOnce()
   })
   it('deep snapshots args and binds main workspace/conversation instead of caller metadata', async () => {

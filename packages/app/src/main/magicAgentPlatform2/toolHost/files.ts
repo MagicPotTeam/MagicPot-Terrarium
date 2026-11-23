@@ -15,6 +15,7 @@ import type {
   FilesTreeEntry,
   FilesTreeInput,
   FilesTreeOutput,
+  FilesWalkFilter,
   FilesWriteInput,
   FilesWriteOutput,
   FilesEditInput,
@@ -39,6 +40,7 @@ import type {
   PolicyRequest
 } from '../../../shared/magicAgentPlatform2'
 import type { MagicAgentPolicyAuthorizationService } from '../policy'
+import { GitIgnoreFilter, isAlwaysSkippedDirectory } from './gitignore'
 
 const LIMITS = Object.freeze({
   depth: 12,
@@ -189,6 +191,9 @@ export class FilesToolHost {
       const maxChars = bounded(call.input.maxStringLength, LIMITS.chars, 1, LIMITS.chars)
       const deadline =
         started + bounded(call.input.timeoutMs, LIMITS.runtimeMs, 1, LIMITS.runtimeMs)
+      const stat = await fs.lstat(target)
+      if (!stat.isDirectory())
+        throw new FilesToolValidationError('files.tree path must be a directory.')
       const { entries, truncated } = await walkEntries(
         root,
         target,
@@ -196,11 +201,9 @@ export class FilesToolHost {
         maxEntries,
         maxChars,
         call.signal,
-        deadline
+        deadline,
+        await walkFilter(call.input, target)
       )
-      const stat = await fs.lstat(target)
-      if (!stat.isDirectory())
-        throw new FilesToolValidationError('files.tree path must be a directory.')
       const output = {
         root,
         path: relativePath(root, target),
@@ -224,6 +227,7 @@ export class FilesToolHost {
       const stat = await fs.lstat(target)
       if (!stat.isDirectory())
         throw new FilesToolValidationError('files.glob path must be a directory.')
+      const mtimes = call.input.order === 'mtime' ? new Map<string, number>() : undefined
       const all = await walkEntries(
         root,
         target,
@@ -231,20 +235,20 @@ export class FilesToolHost {
         LIMITS.entries,
         maxChars,
         call.signal,
-        deadline
+        deadline,
+        await walkFilter(call.input, target),
+        mtimes
       )
       const base = relativePath(root, target)
-      const entries = all.entries
-        .filter((entry) =>
+      const matched = all.entries.filter(
+        (entry) =>
+          (!call.input.filesOnly || entry.type === 'file') &&
           globMatches(pattern, base === '.' ? entry.path : path.posix.relative(base, entry.path))
-        )
-        .slice(0, maxFiles)
-      const truncated =
-        all.truncated ||
-        entries.length <
-          all.entries.filter((entry) =>
-            globMatches(pattern, base === '.' ? entry.path : path.posix.relative(base, entry.path))
-          ).length
+      )
+      // Most recently modified first, as KohakuTerrarium glob (builtins/tools/files/glob.py:101-103).
+      if (mtimes) matched.sort((a, b) => (mtimes.get(b.path) ?? 0) - (mtimes.get(a.path) ?? 0))
+      const entries = matched.slice(0, maxFiles)
+      const truncated = all.truncated || entries.length < matched.length
       const output = {
         root,
         pattern,
@@ -273,22 +277,34 @@ export class FilesToolHost {
       const maxSnippet = bounded(call.input.maxSnippetLength, 500, 1, 2_000)
       const maxDepth = bounded(call.input.maxDepth, LIMITS.depth, 0, LIMITS.depth)
       const stat = await fs.lstat(target)
-      if (!stat.isDirectory())
-        throw new FilesToolValidationError('files.grep path must be a directory.')
-      const all = await walkEntries(
-        root,
-        target,
-        maxDepth,
-        LIMITS.entries,
-        LIMITS.chars,
-        call.signal,
-        deadline
-      )
-      const matchingFiles = all.entries.filter(
-        (entry) =>
-          entry.type === 'file' &&
-          globMatches(fileGlob, relativePath(target, path.join(root, entry.path)))
-      )
+      const singleFile = stat.isFile()
+      if (!stat.isDirectory() && !singleFile)
+        throw new FilesToolValidationError('files.grep path must be a directory or a file.')
+      // An explicitly addressed single file bypasses directory filtering (KohakuTerrarium grep).
+      const all = singleFile
+        ? {
+            entries: [
+              { path: relativePath(root, target), type: 'file' as const, bytes: stat.size }
+            ],
+            truncated: false
+          }
+        : await walkEntries(
+            root,
+            target,
+            maxDepth,
+            LIMITS.entries,
+            LIMITS.chars,
+            call.signal,
+            deadline,
+            await walkFilter(call.input, target)
+          )
+      const matchingFiles = singleFile
+        ? all.entries
+        : all.entries.filter(
+            (entry) =>
+              entry.type === 'file' &&
+              globMatches(fileGlob, relativePath(target, path.join(root, entry.path)))
+          )
       const files = matchingFiles.slice(0, maxFiles)
       const matches: FilesGrepOutput['matches'][number][] = []
       let binaryFilesSkipped = 0
@@ -312,7 +328,7 @@ export class FilesToolHost {
         for (let index = 0; index < lines.length; index++) {
           check(call.signal, deadline)
           const found = findMatches(lines[index], query)
-          for (const column of found) {
+          for (const column of call.input.perLine ? found.slice(0, 1) : found) {
             matches.push({
               path: file.path,
               line: index + 1,
@@ -1315,6 +1331,19 @@ function segmentMatches(pattern: string, value: string): boolean {
   while (pattern[pi] === '*') pi++
   return pi === pattern.length
 }
+type WalkFilter = Readonly<{
+  hidden: boolean
+  skipCommonDirectories: boolean
+  ignore?: GitIgnoreFilter
+}>
+const UNFILTERED_WALK: WalkFilter = { hidden: true, skipCommonDirectories: false }
+async function walkFilter(input: FilesWalkFilter, target: string): Promise<WalkFilter> {
+  return {
+    hidden: input.hidden !== false,
+    skipCommonDirectories: input.skipCommonDirectories === true,
+    ...(input.gitignore === true ? { ignore: await GitIgnoreFilter.create(target) } : {})
+  }
+}
 async function walkEntries(
   root: string,
   directory: string,
@@ -1322,10 +1351,15 @@ async function walkEntries(
   maxEntries: number,
   maxChars: number,
   signal: AbortSignal | undefined,
-  deadline: number
+  deadline: number,
+  filter: WalkFilter = UNFILTERED_WALK,
+  mtimes?: Map<string, number>
 ): Promise<{ entries: FilesTreeEntry[]; truncated: boolean }> {
   const entries: FilesTreeEntry[] = []
   let truncated = false
+  // A search rooted inside an ignored directory finds nothing, as in KohakuTerrarium.
+  if (filter.ignore && (await filter.ignore.isIgnored(directory, true)))
+    return { entries, truncated }
   const walk = async (current: string, depth: number): Promise<void> => {
     check(signal, deadline)
     const children = (await fs.readdir(current, { withFileTypes: true })).sort((a, b) =>
@@ -1338,8 +1372,11 @@ async function walkEntries(
         return
       }
       if (child.isSymbolicLink()) continue
+      if (!filter.hidden && child.name.startsWith('.')) continue
+      if (filter.skipCommonDirectories && isAlwaysSkippedDirectory(child.name)) continue
       const absolute = path.join(current, child.name)
       const stat = await fs.lstat(absolute)
+      if (filter.ignore && (await filter.ignore.isIgnored(absolute, stat.isDirectory()))) continue
       const relative = relativePath(root, absolute)
       if (relative.length > maxChars) {
         truncated = true
@@ -1349,7 +1386,10 @@ async function walkEntries(
         entries.push({ path: relative, type: 'directory' })
         if (depth < maxDepth) await walk(absolute, depth + 1)
         else truncated = true
-      } else if (stat.isFile()) entries.push({ path: relative, type: 'file', bytes: stat.size })
+      } else if (stat.isFile()) {
+        entries.push({ path: relative, type: 'file', bytes: stat.size })
+        mtimes?.set(relative, stat.mtimeMs)
+      }
       if (truncated && entries.length >= maxEntries) return
     }
   }
@@ -1366,7 +1406,11 @@ function validateQuery(
     throw new FilesToolValidationError('Search query is invalid or too long.')
   if (mode === 'literal')
     return { literal: caseSensitive ? value : value.toLocaleLowerCase('en'), caseSensitive }
-  if (/\\[1-9]|\(\?[=!<:]|[{}|]|(?:\*|\+|\?){2}|\[[^\]]*$|\([^)]*[+*][^)]*\)[+*?]/.test(value))
+  if (/\\[1-9]|\(\?[=!<:]|[{}]|(?:\*|\+|\?){2}|\[[^\]]*$|\([^)]*[+*][^)]*\)[+*?]/.test(value))
+    throw new FilesToolValidationError('Unsafe or unsupported regular expression.')
+  // Alternation (foo|bar) is allowed, but never together with a quantified group,
+  // where overlapping branches could backtrack catastrophically on the main process.
+  if (/(?<!\\)\|/.test(value) && /\)[+*?]/.test(value))
     throw new FilesToolValidationError('Unsafe or unsupported regular expression.')
   try {
     return { regex: new RegExp(value, caseSensitive ? 'g' : 'gi'), caseSensitive }
