@@ -3,7 +3,12 @@ import {
   getBaseProfileId,
   scopedStorageKey
 } from '../ChatPage/chatPageShared'
-import { buildAgentRoute, getAgentSessionKey, type AgentRouteLike } from '@shared/agent'
+import {
+  buildAgentRoute,
+  buildCanvasThreadStorageScope,
+  getAgentSessionKey,
+  type AgentRouteLike
+} from '@shared/agent'
 import {
   PROJECT_CANVAS_MAX_STAGE_SCALE,
   PROJECT_CANVAS_MIN_STAGE_SCALE
@@ -31,7 +36,7 @@ function readCanvasLocalStorageValue(key: string): string | null {
 }
 
 export function buildAgentPaneScope(projectId: string, paneId: string): string {
-  return `${projectId}.${paneId}`
+  return buildCanvasThreadStorageScope(projectId, paneId)
 }
 
 export function resolveActiveAgentPaneId(projectId: string): string {

@@ -1,4 +1,5 @@
 import { AgentTeamMessageQueue } from './agentTeamMessageQueue'
+import { createJobReportSink } from './agentThreadJobReportSink'
 import { AgentThreadInbox } from './agentThreadInbox'
 import type {
   AgentThreadEventClaim,
@@ -2394,6 +2395,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   /** Main-only instance policy; never accepted from renderer requests or Provider JSON. */
   constructor(executionPolicy: { retryModelCapacity?: false } = {}) {
     this.retryModelCapacity = executionPolicy.retryModelCapacity !== false
+    // S3: finished background work wakes the session that started it (one job_done per job).
+    const reports = createJobReportSink(this.threadInbox)
+    agentThreadJobs.reportTo(reports)
+    agentThreadProcesses.reportTo(reports)
   }
 
   private getFetchImpl(): FetchImpl {

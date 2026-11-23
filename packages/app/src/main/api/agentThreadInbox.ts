@@ -32,6 +32,10 @@ const RETRY_MS = 30_000
 const BOOT_STARTED_AT = Date.now()
 export const THREAD_EVENT_UNAVAILABLE = 'Thread event is no longer available.'
 export const THREAD_EVENT_BUSY = 'Thread event waits: its session has a running turn.'
+/** Event types whose queued events of one session join a single turn (KT stacked completions). */
+const STACKABLE: ReadonlySet<AgentThreadEventType> = new Set(['job_done'])
+const STACK_SEPARATOR = '\n\n'
+const STACKED_SOURCE = 'background jobs'
 const PRODUCER_TYPES: ReadonlySet<AgentThreadEventType> = new Set([
   'trigger_fire',
   'drive_ready',
@@ -172,8 +176,14 @@ function threadRoute(route: AgentRouteLike): AgentRouteLike {
  */
 export class AgentThreadInbox {
   private readonly owners = new Map<number, Owner>()
-  /** id -> the lease of the claim (memory only). */
-  private readonly leases = new Map<string, { token: string; senderId: number }>()
+  /**
+   * Claimed (first) id -> the lease of the claim (memory only). group: every event the claim holds,
+   * the claimed one first (job_done reports stack into one turn, like KohakuTerrarium).
+   */
+  private readonly leases = new Map<
+    string,
+    { token: string; senderId: number; group: readonly string[] }
+  >()
   private readonly opener: ThreadInboxStoreOpener
 
   constructor(options: { store?: ThreadInboxStoreOpener } = {}) {
@@ -197,9 +207,11 @@ export class AgentThreadInbox {
     // The claiming document is gone: its claims never started a turn and are queued again.
     const end = () => {
       for (const id of owner.leases) {
+        const group = this.leases.get(id)?.group ?? [id]
         this.leases.delete(id)
         try {
-          this.opener.open(false)?.release(id)
+          const store = this.opener.open(false)
+          for (const member of group) store?.release(member)
         } catch {
           console.warn('[ThreadInbox] A claim stays open until the next start of the app.')
         }
@@ -233,14 +245,20 @@ export class AgentThreadInbox {
     return owner
   }
 
-  private view(entry: ThreadEventEntry, lease?: string): AgentThreadEventView {
+  private view(
+    entry: ThreadEventEntry,
+    lease?: string,
+    stacked: readonly ThreadEventEntry[] = []
+  ): AgentThreadEventView {
     const { event } = entry
+    const all = [entry, ...stacked]
+    const sources = new Set(all.map((item) => item.event.source))
     return {
       id: event.id,
       conversationId: event.conversationId,
       type: event.type,
-      source: event.source,
-      text: event.text,
+      source: sources.size === 1 ? event.source : STACKED_SOURCE,
+      text: all.map((item) => item.event.text).join(STACK_SEPARATOR),
       createdAt: event.createdAt,
       expiresAt: event.expiresAt,
       ...(event.createdAt < BOOT_STARTED_AT ? { carriedOver: true as const } : {}),
@@ -369,10 +387,78 @@ export class AgentThreadInbox {
     const owner = this.owner(senderId, invocation)
     const claimed = store.claim(req.id)
     if (!claimed) return undefined
+    const stacked: ThreadEventEntry[] = []
+    try {
+      if (STACKABLE.has(claimed.event.type)) this.stack(store, claimed, stacked)
+    } catch (error) {
+      // No lease exists yet: give every claim back now, or it would wait for a restart.
+      for (const id of [req.id, ...stacked.map((item) => item.event.id)]) {
+        try {
+          store.release(id)
+        } catch {
+          /* A restart queues an unstarted claim again. */
+        }
+      }
+      throw error
+    }
     const token = randomUUID()
-    this.leases.set(req.id, { token, senderId })
+    this.leases.set(req.id, {
+      token,
+      senderId,
+      group: [req.id, ...stacked.map((item) => item.event.id)]
+    })
     owner.leases.add(req.id)
-    return this.view(claimed, token)
+    return this.view(claimed, token, stacked)
+  }
+
+  /**
+   * Like KohakuTerrarium's stacked completions: the session's other queued events of the same
+   * stackable type, oldest first, join the claim while the combined text fits the inbox's text
+   * limit. The first that does not fit, and everything after it, stays queued for a later turn.
+   */
+  private stack(
+    store: ThreadInboxStore,
+    first: ThreadEventEntry,
+    stacked: ThreadEventEntry[]
+  ): void {
+    let length = first.event.text.length
+    for (const candidate of store.queued()) {
+      const event = candidate.event
+      if (
+        event.id === first.event.id ||
+        event.type !== first.event.type ||
+        event.storageScope !== first.event.storageScope ||
+        event.routeKey !== first.event.routeKey ||
+        event.conversationId !== first.event.conversationId
+      )
+        continue
+      const next = length + STACK_SEPARATOR.length + event.text.length
+      if (next > LIMITS.textCharacters) break
+      const claimed = store.claim(event.id)
+      if (!claimed) continue
+      stacked.push(claimed)
+      length = next
+    }
+  }
+
+  /**
+   * MAIN-only producer call: the waiting event with this idempotency key in the session is no
+   * longer needed (S3: its job result was consumed). A claimed or started event is left alone.
+   */
+  withdraw(
+    input: Pick<AgentThreadEventInput, 'route' | 'storageScope' | 'conversationId'>,
+    idempotencyKey: string,
+    reason = 'consumed'
+  ): boolean {
+    const session = this.session(input, input.conversationId)
+    if (!valid(idempotencyKey)) return false
+    let store: ThreadInboxStore | undefined
+    try {
+      store = this.opener.open(false)
+    } catch {
+      return false
+    }
+    return store?.withdraw(session, idempotencyKey, reason) ?? false
   }
 
   /** The turn did not start: the claim ends and the event is queued again. Lease holder only. */
@@ -392,7 +478,9 @@ export class AgentThreadInbox {
     this.leases.delete(req.id)
     this.owners.get(senderId)?.leases.delete(req.id)
     const store = this.opener.open(false)
-    return { released: store?.release(req.id) === 'queued' }
+    let released = false
+    for (const id of lease.group) if (store?.release(id) === 'queued') released = true
+    return { released }
   }
 
   /**
@@ -503,13 +591,26 @@ export class AgentThreadInbox {
       if (req.conversationId !== entry.event.conversationId) throw Error()
       // Claimed just before the user stopped the session: not started; the release queues it again.
       if (store.isHeld(entry.event)) throw Error()
+      // Every stacked event is still claimed for this same session.
+      for (const id of lease.group) {
+        const member = store.peek(id)
+        if (
+          !member ||
+          member.state.status !== 'claimed' ||
+          member.event.storageScope !== entry.event.storageScope ||
+          member.event.routeKey !== entry.event.routeKey ||
+          member.event.conversationId !== entry.event.conversationId
+        )
+          throw Error()
+      }
       // The session's turn (and anything it waits for, such as an approval) is still running: the
       // event is not started and its claim stays, so the renderer releases it for a later turn.
       if (isConversationBusy(req.conversationId)) {
         busy = true
         throw Error()
       }
-      store.start(delivery.id)
+      // One turn delivers the whole stack: all done in one transaction, or none.
+      store.startMany(lease.group)
       type = entry.event.type
       this.dropLease(delivery.id)
     } catch {

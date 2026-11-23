@@ -430,17 +430,53 @@ export class ThreadInboxStore {
 
   /** MAIN admitted the turn's request: claimed (by this boot) -> done. Final; never runs again. */
   start(id: string): ThreadEventEntry {
+    return this.startMany([id])[0]
+  }
+
+  /**
+   * One turn delivers every event of a stacked claim: all of them claimed (by this boot) -> done in
+   * one transaction, or none (a lost CAS or a missing claim throws and changes nothing).
+   */
+  startMany(ids: readonly string[]): ThreadEventEntry[] {
     this.assertAvailable()
-    const entry = this.index.get(id)
-    if (!entry || entry.state.status !== 'claimed' || entry.state.claim?.boot !== this.boot)
+    const entries = ids.map((id) => this.index.get(id))
+    if (
+      !entries.length ||
+      new Set(ids).size !== ids.length ||
+      entries.some(
+        (entry) =>
+          !entry || entry.state.status !== 'claimed' || entry.state.claim?.boot !== this.boot
+      )
+    )
       throw new Error('Thread event is not claimed.')
-    const done = this.write(entry, {
+    const at = this.now()
+    const next = (entry: Indexed): ThreadEventState => ({
       ...withoutClaim(entry.state),
       status: 'done',
-      startedAt: this.now()
+      startedAt: at
     })
-    if (!done) throw new Error('Thread event is not claimed.')
-    return done
+    try {
+      this.store.mutateResourcesBatch(
+        (entries as Indexed[]).map((entry) =>
+          this.mutation(
+            'update',
+            THREAD_EVENT_STATE_KIND,
+            entry.event.id,
+            next(entry),
+            Math.max(at, entry.updatedAt),
+            entry.revision
+          )
+        )
+      )
+    } catch (error) {
+      if (!(error instanceof ResourceRevisionConflictError)) throw error
+      for (const entry of entries as Indexed[]) this.refresh(entry.event.id)
+      throw new Error('Thread event is not claimed.')
+    }
+    return (entries as Indexed[]).map((entry) => {
+      this.forget(entry.event)
+      return freeze({ event: entry.event, state: next(entry) })
+    })
   }
 
   /** The turn did not start (busy, refused before dispatch, document gone): claimed -> queued. */
@@ -461,6 +497,21 @@ export class ThreadInboxStore {
     // Removed for good: nothing is left to hold.
     this.resume(session)
     return expired
+  }
+
+  /**
+   * The producer withdraws the waiting event with this idempotency key in the session (its result
+   * was already consumed). Only a queued event: a claimed one is already on its way to a turn.
+   */
+  withdraw(session: ThreadEventSession, idempotencyKey: string, reason: string): boolean {
+    this.assertAvailable()
+    if (!isThreadEventSession(session)) throw new Error('Invalid thread event session.')
+    const id = this.keys.get(keyOf(session, idempotencyKey))
+    const entry = id === undefined ? undefined : this.index.get(id)
+    if (!entry || entry.state.status !== 'queued') return false
+    return (
+      this.write(entry, { ...entry.state, status: 'expired', expiredReason: reason }) !== undefined
+    )
   }
 
   /** Every queued event past its TTL -> expired. A claimed one expires when claimed or stopped. */

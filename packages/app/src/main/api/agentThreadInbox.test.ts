@@ -34,7 +34,7 @@ import {
   threadInboxStoreOpener,
   type AgentThreadEventInput
 } from './agentThreadInbox'
-import { THREAD_EVENT_STATE_KIND } from './agentThreadInboxStore'
+import { THREAD_EVENT_STATE_KIND, ThreadInboxStore } from './agentThreadInboxStore'
 
 const route = {
   channel: 'canvas',
@@ -388,5 +388,109 @@ describe('thread event inbox', () => {
     q.dispose()
     const { q: next } = inbox(file, 'boot-b')
     expect(list(next).map((event) => event.id)).toEqual([claimed])
+  })
+
+  it('stacks a session’s queued job reports into one turn and starts them together', () => {
+    sender(1)
+    const { q, file } = inbox()
+    const report = (n: number, over: Partial<AgentThreadEventInput> = {}) =>
+      q.enqueue(
+        input({
+          type: 'job_done',
+          source: n === 2 ? 'background process' : 'background explore',
+          text: `[Tool job-${n} completed]`,
+          idempotencyKey: `job_done:job-${n}`,
+          ...over
+        })
+      ).id
+    const ids = [report(1), report(2), report(3)]
+    // Neither another session's report nor a trigger joins the stack.
+    const other = report(4, { conversationId: 'session-b' })
+    const trigger = q.enqueue(input()).id
+    const view = claim(q, ids[0])!
+    expect(view.text).toBe(
+      '[Tool job-1 completed]\n\n[Tool job-2 completed]\n\n[Tool job-3 completed]'
+    )
+    expect(view.source).toBe('background jobs')
+    expect(list(q).map((event) => event.id)).toEqual([other, trigger])
+    const admitted = q.admitEvent(
+      request({ id: ids[0], lease: view.lease! }),
+      invoke(1, 'chatStream')
+    )
+    expect(admitted.threadEventOrigin).toBe('job_done')
+    for (const id of ids) {
+      sender(1)
+      expect(stored(file, id)).toMatchObject({ status: 'done', startedAt: expect.any(Number) })
+    }
+  })
+
+  it('leaves the reports that do not fit the text limit queued, and releases a stack as a whole', () => {
+    sender(1)
+    const { q, file } = inbox()
+    const text = (n: number) => `[Tool job-${n} completed]\n${'r'.repeat(1500)}`
+    const ids = [1, 2, 3].map(
+      (n) =>
+        q.enqueue(
+          input({
+            type: 'job_done',
+            source: 'background explore',
+            text: text(n),
+            idempotencyKey: `job_done:job-${n}`
+          })
+        ).id
+    )
+    const view = claim(q, ids[0])!
+    expect(view.text).toBe(`${text(1)}\n\n${text(2)}`)
+    expect(view.text.length).toBeLessThanOrEqual(AGENT_THREAD_INBOX_LIMITS.textCharacters)
+    expect(list(q).map((event) => event.id)).toEqual([ids[2]])
+    // A busy session: nothing starts, and the release queues the whole stack again.
+    expect(() =>
+      q.admitEvent(request({ id: ids[0], lease: view.lease! }), invoke(1, 'chatStream'), () => true)
+    ).toThrow(THREAD_EVENT_BUSY)
+    expect(
+      q.release(
+        { ...scope, conversationId: 'session-a', id: ids[0], lease: view.lease! },
+        invoke(1, 'releaseAgentThreadEvent')
+      )
+    ).toEqual({ released: true })
+    expect(list(q).map((event) => event.id)).toEqual(ids)
+    expect(stored(file, ids[1])).toMatchObject({ status: 'queued' })
+  })
+
+  it('gives every claim back when stacking fails before the lease exists', () => {
+    sender(1)
+    const { q } = inbox()
+    const ids = [1, 2, 3].map(
+      (n) =>
+        q.enqueue(input({ type: 'job_done', text: `r${n}`, idempotencyKey: `job_done:${n}` })).id
+    )
+    const original = ThreadInboxStore.prototype.claim
+    let calls = 0
+    vi.spyOn(ThreadInboxStore.prototype, 'claim').mockImplementation(function (
+      this: ThreadInboxStore,
+      id: string
+    ) {
+      if (++calls === 3) throw Error('synthetic write failure')
+      return original.call(this, id)
+    })
+    expect(() => claim(q, ids[0])).toThrow('synthetic write failure')
+    vi.restoreAllMocks()
+    expect(list(q).map((event) => event.id)).toEqual(ids)
+  })
+
+  it('withdraws only a waiting report by its key; a claimed one is left to its turn', () => {
+    sender(1)
+    const { q } = inbox()
+    const session = { ...scope, conversationId: 'session-a' }
+    const a = q.enqueue(input({ type: 'job_done', idempotencyKey: 'job_done:a' })).id
+    const b = q.enqueue(
+      input({ type: 'job_done', idempotencyKey: 'job_done:b', conversationId: 'session-b' })
+    ).id
+    expect(q.withdraw({ ...session, conversationId: 'session-b' }, 'job_done:a')).toBe(false)
+    expect(q.withdraw(session, 'job_done:a')).toBe(true)
+    expect(list(q).map((event) => event.id)).toEqual([b])
+    expect(claim(q, b, 1, 'session-b')).toBeDefined()
+    expect(q.withdraw({ ...session, conversationId: 'session-b' }, 'job_done:b')).toBe(false)
+    expect(a).toBeTruthy()
   })
 })

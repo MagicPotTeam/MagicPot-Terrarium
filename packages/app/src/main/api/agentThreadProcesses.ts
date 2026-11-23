@@ -8,6 +8,7 @@ import { agentThreadInteractions, type AgentThreadInteractionChannel } from './a
 import { authorizeAgentThreadScope } from './agentThreadScope'
 import type { ThreadProcessControl } from './agentThreadProcessHost'
 import { isApprovalContinuationRefusal } from '../magicAgentPlatform2/approvalContinuationGate'
+import { formatProcessJobReport, JOB_REPORT_LOG_BYTES, type AgentThreadJobReportSink, type JobCancelCause, type ProcessLogHead } from './agentThreadJobReports'
 
 const ownerKey = (scope: AgentThreadInteractionScope, sender: number) => JSON.stringify([sender, getAgentSessionKey(scope.route), scope.conversationId])
 type Entry = {
@@ -15,10 +16,40 @@ type Entry = {
   createdAt: number; expiresAt: number; finishedAt?: number; control?: ThreadProcessControl
   controller: AbortController; lease: AgentThreadInteractionChannel; revoked: boolean; settled: boolean; failed: boolean; started: boolean
   done: Promise<void>; detachParent(): void; expiry: ReturnType<typeof setTimeout>
+  /** A team member's process reports nothing (its turns belong to the team queue). */
+  reportable: boolean; reported: boolean; consumed: boolean; cancelCause?: JobCancelCause
 }
-/** Main-owned leases/handles, not a process registry reconstructed from workspace JSON. */
+/** The agent's own process tools run inside its chat request; the user's controls are IPC calls. */
+const agentMethod = (method: string) => method === 'chat' || method === 'chatStream'
+/**
+ * Main-owned leases/handles, not a process registry reconstructed from workspace JSON. A started
+ * process that ends on its own (or is stopped by anything other than the agent's own stop or the
+ * user's stop) is reported once to the report sink (S3 job_done thread event).
+ */
 export class AgentThreadProcesses {
   private readonly entries = new Map<string, Entry>()
+  private sink?: AgentThreadJobReportSink
+
+  /** MAIN wiring only (svcLLMProxyImpl): where finished processes are reported. */
+  reportTo(sink: AgentThreadJobReportSink | undefined): void { this.sink = sink }
+
+  private cause(entry: Entry, cause: JobCancelCause): void { if (!entry.settled) entry.cancelCause ??= cause }
+
+  private report(entry: Entry): void {
+    // A start that never happened already failed the start call itself.
+    if (entry.reported || !entry.reportable || entry.consumed || !entry.started || !entry.settled) return
+    entry.reported = true
+    if (!this.sink) return
+    try {
+      const job = this.view(entry)
+      const head = (stream: 'stdout' | 'stderr'): ProcessLogHead | undefined => {
+        try { return entry.control ? entry.control.read(stream, 0, JOB_REPORT_LOG_BYTES[stream]) : undefined } catch { return undefined }
+      }
+      // A stop with no recorded cause (the process was ended from outside) counts as the host's.
+      const text = formatProcessJobReport(job, { stdout: head('stdout'), stderr: head('stderr') }, entry.cancelCause ?? 'host')
+      if (text) this.sink.report({ route: entry.scope.route, conversationId: entry.scope.conversationId, jobId: entry.id, source: `background ${entry.kind}`, text })
+    } catch { /* The report is advisory; the process stays readable. */ }
+  }
   async start(options: {
     request: LLMChatReq; invocation: ServiceInvocationContext; kind: AgentProcessKind; parentSignal?: AbortSignal
     execute(signal: AbortSignal, assertLive: () => void, onStarted: (control: ThreadProcessControl) => void, onOwned: (control: ThreadProcessControl) => void): Promise<unknown>
@@ -41,12 +72,14 @@ export class AgentThreadProcesses {
     const controller = new AbortController(), signal = AbortSignal.any([controller.signal, lease.signal])
     let finish!: () => void, started!: (job: AgentProcessJob) => void, notStarted!: (error: Error) => void
     const startedPromise = new Promise<AgentProcessJob>((resolve, reject) => { started = resolve; notStarted = reject })
-    const parentAbort = () => controller.abort(new Error('Parent process request cancelled.'))
+    // The parent turn was stopped: the user's stop (the session is held anyway).
+    const parentAbort = () => { this.cause(entry, 'user-stop'); controller.abort(new Error('Parent process request cancelled.')) }
     const entry: Entry = {
       scope: structuredClone(scope), sender, cancellationId: options.request.cancellationId, id: randomUUID(), kind: options.kind,
       createdAt: Date.now(), expiresAt: Date.now() + LIMITS.retentionMs, controller, lease, revoked: false, settled: false, failed: false, started: false,
       done: new Promise<void>((resolve) => { finish = resolve }), detachParent: () => options.parentSignal?.removeEventListener('abort', parentAbort),
-      expiry: setTimeout(() => { entry.revoked = true; controller.abort(new Error('Background process retention expired.')); if (entry.settled && this.view(entry).status !== 'unknown') this.remove(entry) }, LIMITS.retentionMs)
+      reportable: !options.request.teamMember, reported: false, consumed: false,
+      expiry: setTimeout(() => { this.cause(entry, 'host'); entry.revoked = true; controller.abort(new Error('Background process retention expired.')); if (entry.settled && this.view(entry).status !== 'unknown') this.remove(entry) }, LIMITS.retentionMs)
     }
     this.entries.set(entry.id, entry)
     const abort = () => {
@@ -55,9 +88,9 @@ export class AgentThreadProcesses {
       if (entry.control) void entry.control.stop().catch(() => undefined)
     }
     signal.addEventListener('abort', abort, { once: true })
-    lease.signal.addEventListener('abort', () => { entry.revoked = true; if (entry.settled && this.view(entry).status !== 'unknown') this.remove(entry) }, { once: true })
+    lease.signal.addEventListener('abort', () => { this.cause(entry, 'host'); entry.revoked = true; if (entry.settled && this.view(entry).status !== 'unknown') this.remove(entry) }, { once: true })
     options.parentSignal?.addEventListener('abort', parentAbort, { once: true })
-    options.registerRelease((success) => { entry.detachParent(); if (!success) controller.abort(new Error('Parent process request did not complete successfully.')) })
+    options.registerRelease((success) => { entry.detachParent(); if (!success) this.cause(entry, 'host'); if (!success) controller.abort(new Error('Parent process request did not complete successfully.')) })
     if (options.parentSignal?.aborted) parentAbort()
     void (async () => {
       try {
@@ -79,6 +112,7 @@ export class AgentThreadProcesses {
         notStarted(isApprovalContinuationRefusal(error) ? error : new Error('Background process did not start successfully; approval, configuration or execution failed.'))
       } finally {
         entry.settled = true; entry.finishedAt = Date.now(); signal.removeEventListener('abort', abort); finish()
+        this.report(entry)
         // Keep parent abort until normal release, but no process handle survives navigation.
         if (entry.revoked && this.view(entry).status !== 'unknown') this.remove(entry)
       }
@@ -132,6 +166,8 @@ export class AgentThreadProcesses {
   async stop(req: AgentProcessJobReq, invocation?: ServiceInvocationContext, method = 'stopAgentProcess'): Promise<AgentProcessJob> {
     const entry = this.find(req, invocation, method)
     if (!entry.settled) {
+      // Through the agent's own stop tool the call returns the final state: no report.
+      this.cause(entry, agentMethod(method) ? 'agent-stop' : 'user-stop')
       entry.controller.abort(new Error('Owned background process stopped.'))
       try { await entry.control?.stop() } catch { /* Report unknown, never stopped-success. */ }
       await entry.done
@@ -149,6 +185,11 @@ export class AgentThreadProcesses {
         abort = () => reject(signal?.reason ?? new Error('Process wait cancelled.')); signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort()
       })])
       signal?.throwIfAborted(); this.find(req, invocation, method)
+      if (entry.settled && agentMethod(method) && !entry.consumed) {
+        // The agent got the final state itself: a still-queued report is withdrawn.
+        entry.consumed = true
+        if (entry.reported) try { this.sink?.withdraw(entry.scope, entry.id) } catch { /* Left to run as a report. */ }
+      }
       return this.view(entry)
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
   }
@@ -156,13 +197,13 @@ export class AgentThreadProcesses {
     let cancelled = false
     for (const entry of this.entries.values()) {
       if (entry.settled || entry.scope.conversationId !== conversationId || cancellationId !== undefined && entry.cancellationId !== cancellationId) continue
-      try { if (authorizeAgentThreadScope(entry.scope, invocation, 'cancelConversation') === entry.sender) { entry.controller.abort(); cancelled = true } } catch { /* Foreign owner. */ }
+      try { if (authorizeAgentThreadScope(entry.scope, invocation, 'cancelConversation') === entry.sender) { this.cause(entry, 'user-stop'); entry.controller.abort(); cancelled = true } } catch { /* Foreign owner. */ }
     }
     return cancelled
   }
   async dispose(): Promise<void> {
     const entries = [...this.entries.values()]
-    for (const entry of entries) { entry.revoked = true; entry.controller.abort() }
+    for (const entry of entries) { this.cause(entry, 'host'); entry.revoked = true; entry.controller.abort() }
     await Promise.all(entries.map((entry) => entry.done))
     for (const entry of entries) {
       if (this.view(entry).status === 'unknown') {

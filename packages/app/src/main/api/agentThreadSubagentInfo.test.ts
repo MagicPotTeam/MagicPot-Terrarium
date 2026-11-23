@@ -58,7 +58,7 @@ describe('visible-only read-only subagent documentation', () => {
     expect(first.documentation.background).toMatchObject({ available: false, autoWake: false, restartResume: false })
     setVisible([helper('fork'), ...['jobs.list', 'jobs.status', 'jobs.read', 'jobs.wait', 'stop_task'].map(helper)])
     const second = await info(provider, { name: 'fork' })
-    expect(second.documentation.background).toMatchObject({ available: true, controls: ['jobs.list', 'jobs.status', 'jobs.read', 'jobs.wait', 'stop_task'], autoWake: false, restartResume: false })
+    expect(second.documentation.background).toMatchObject({ available: true, controls: ['jobs.list', 'jobs.status', 'jobs.read', 'jobs.wait', 'stop_task'], autoWake: true, restartResume: false })
     second.documentation.limits.toolCalls = 999
     expect((await info(provider, { name: 'fork' })).documentation.limits.toolCalls).toBe(12)
     setVisible([helper('fork'), helper('jobs.read')])

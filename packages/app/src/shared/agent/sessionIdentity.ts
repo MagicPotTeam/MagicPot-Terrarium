@@ -96,6 +96,25 @@ export const getAgentSessionKey = (route: AgentRouteLike): string => {
   return parts.join(':')
 }
 
+/**
+ * The chat storage scope of a canvas Agent thread pane (project id + pane id). The renderer mounts
+ * the pane's ChatPage with it, and MAIN derives it from the pane's route ({canvas, thread,
+ * scopeId: project, threadId: pane}) to address that pane's thread events.
+ */
+export const buildCanvasThreadStorageScope = (projectId: string, paneId: string): string =>
+  `${projectId}.${paneId}`
+
+/** The storage scope of a canvas thread route, or undefined for any other route. */
+export const canvasThreadStorageScopeOfRoute = (route: AgentRouteLike): string | undefined => {
+  const normalized = normalizeAgentRoute(route)
+  return normalized.channel === 'canvas' &&
+    normalized.scopeType === 'thread' &&
+    normalized.scopeId &&
+    normalized.threadId
+    ? buildCanvasThreadStorageScope(normalized.scopeId, normalized.threadId)
+    : undefined
+}
+
 export const buildAgentSessionIdentity = (
   route: AgentRouteLike,
   options?: BuildAgentSessionIdentityOptions
