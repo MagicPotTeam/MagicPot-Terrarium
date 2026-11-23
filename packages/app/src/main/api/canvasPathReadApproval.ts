@@ -20,6 +20,7 @@ import {
   boundFilesReadJson
 } from '../magicAgentPlatform2/toolHost/files'
 import {
+  GITIGNORE_MAX_BYTES,
   GitIgnoreFilter,
   isAlwaysSkippedDirectory
 } from '../magicAgentPlatform2/toolHost/gitignore'
@@ -232,7 +233,28 @@ export function createScopedCanvasPathReadHandler(
         let characters = filePath.length + 160
         // Filtering only narrows the listing; .gitignore files are read for rules, never returned.
         const ignore =
-          limits.gitignore === true ? await GitIgnoreFilter.create(filePath) : undefined
+          limits.gitignore === true
+            ? // The approved directory is the whole scope: nothing above it is probed or read,
+              // and each .gitignore is read through the same grant (regular file, no links,
+              // GITIGNORE_MAX_BYTES at most).
+              await GitIgnoreFilter.create(filePath, filePath, (file) =>
+                grants!
+                  .read(
+                    senderId,
+                    scope,
+                    {
+                      grantId: grant.id,
+                      requestId: randomUUID(),
+                      relativePath: path.relative(filePath, file).split(path.sep).join('/')
+                    },
+                    { maxBytes: GITIGNORE_MAX_BYTES }
+                  )
+                  .then(
+                    (read) => (read.truncated || read.document ? undefined : read.content),
+                    () => undefined
+                  )
+              )
+            : undefined
         check()
         const walk = async (relativePath: string, depth: number): Promise<void> => {
           check()
@@ -291,13 +313,7 @@ export function createScopedCanvasPathReadHandler(
           const mtimes = new Map<string, number>()
           for (const entry of results) {
             check()
-            mtimes.set(
-              entry.path,
-              await fs.stat(path.join(filePath, entry.path)).then(
-                (stat) => stat.mtimeMs,
-                () => 0
-              )
-            )
+            mtimes.set(entry.path, await regularFileMtime(filePath, entry.path))
           }
           check()
           results.sort((a, b) => mtimes.get(b.path)! - mtimes.get(a.path)!)
@@ -403,4 +419,26 @@ export function createScopedCanvasPathReadHandler(
       pendingSenders.delete(senderId)
     }
   }
+}
+
+/**
+ * mtime of a listed file without following links: every component below the approved root is
+ * lstat-ed, so a file or directory swapped for a link (or anything not a regular file) after
+ * listing sorts as oldest (0) instead of being followed.
+ */
+export async function regularFileMtime(root: string, relative: string): Promise<number> {
+  let current = root
+  const parts = relative.split('/')
+  try {
+    for (let index = 0; index < parts.length; index++) {
+      current = path.join(current, parts[index])
+      const stat = await fs.lstat(current)
+      const last = index === parts.length - 1
+      if (last ? !stat.isFile() : !stat.isDirectory()) return 0
+      if (last) return stat.mtimeMs
+    }
+  } catch {
+    // A vanished file sorts oldest (KohakuTerrarium glob.py:98-103).
+  }
+  return 0
 }

@@ -41,6 +41,7 @@ import type {
 } from '../../../shared/magicAgentPlatform2'
 import type { MagicAgentPolicyAuthorizationService } from '../policy'
 import { GitIgnoreFilter, isAlwaysSkippedDirectory } from './gitignore'
+import { compileSimplePathGlob, matchPathGlob } from './pathGlob'
 
 const LIMITS = Object.freeze({
   depth: 12,
@@ -202,7 +203,7 @@ export class FilesToolHost {
         maxChars,
         call.signal,
         deadline,
-        await walkFilter(call.input, target)
+        await walkFilter(call.input, target, root)
       )
       const output = {
         root,
@@ -236,7 +237,7 @@ export class FilesToolHost {
         maxChars,
         call.signal,
         deadline,
-        await walkFilter(call.input, target),
+        await walkFilter(call.input, target, root),
         mtimes
       )
       const base = relativePath(root, target)
@@ -296,7 +297,7 @@ export class FilesToolHost {
             LIMITS.chars,
             call.signal,
             deadline,
-            await walkFilter(call.input, target)
+            await walkFilter(call.input, target, root)
           )
       const matchingFiles = singleFile
         ? all.entries
@@ -1300,36 +1301,9 @@ function validateGlob(value: string): string {
       throw new FilesToolValidationError('** must be a complete path segment.')
   return normalized
 }
+/** Without backtracking: ** runs collapse and the path is matched by a table (pathGlob.ts). */
 function globMatches(pattern: string, candidate: string): boolean {
-  const ps = pattern.split('/'),
-    cs = candidate.split('/')
-  const match = (pi: number, ci: number): boolean =>
-    pi === ps.length
-      ? ci === cs.length
-      : ps[pi] === '**'
-        ? match(pi + 1, ci) || (ci < cs.length && match(pi, ci + 1))
-        : ci < cs.length && segmentMatches(ps[pi], cs[ci]) && match(pi + 1, ci + 1)
-  return match(0, 0)
-}
-function segmentMatches(pattern: string, value: string): boolean {
-  let pi = 0,
-    vi = 0,
-    star = -1,
-    mark = 0
-  while (vi < value.length) {
-    if (pi < pattern.length && (pattern[pi] === '?' || pattern[pi] === value[vi])) {
-      pi++
-      vi++
-    } else if (pi < pattern.length && pattern[pi] === '*') {
-      star = pi++
-      mark = vi
-    } else if (star >= 0) {
-      pi = star + 1
-      vi = ++mark
-    } else return false
-  }
-  while (pattern[pi] === '*') pi++
-  return pi === pattern.length
+  return matchPathGlob(compileSimplePathGlob(pattern), candidate.split('/'))
 }
 type WalkFilter = Readonly<{
   hidden: boolean
@@ -1337,11 +1311,16 @@ type WalkFilter = Readonly<{
   ignore?: GitIgnoreFilter
 }>
 const UNFILTERED_WALK: WalkFilter = { hidden: true, skipCommonDirectories: false }
-async function walkFilter(input: FilesWalkFilter, target: string): Promise<WalkFilter> {
+async function walkFilter(
+  input: FilesWalkFilter,
+  target: string,
+  root: string
+): Promise<WalkFilter> {
   return {
     hidden: input.hidden !== false,
     skipCommonDirectories: input.skipCommonDirectories === true,
-    ...(input.gitignore === true ? { ignore: await GitIgnoreFilter.create(target) } : {})
+    // The .git search stops at the authorized workspace root.
+    ...(input.gitignore === true ? { ignore: await GitIgnoreFilter.create(target, root) } : {})
   }
 }
 async function walkEntries(
@@ -1375,6 +1354,8 @@ async function walkEntries(
       if (!filter.hidden && child.name.startsWith('.')) continue
       if (filter.skipCommonDirectories && isAlwaysSkippedDirectory(child.name)) continue
       const absolute = path.join(current, child.name)
+      // Workspace metadata (.magicpot) is reserved for listings too, as for direct reads.
+      if (reserved(relativePath(root, absolute))) continue
       const stat = await fs.lstat(absolute)
       if (filter.ignore && (await filter.ignore.isIgnored(absolute, stat.isDirectory()))) continue
       const relative = relativePath(root, absolute)

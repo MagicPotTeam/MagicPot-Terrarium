@@ -179,6 +179,56 @@ describe('thread script production host', () => {
     expect(meta.cells[1]).not.toHaveProperty('metadata')
     expect(readFileSync(file)).toEqual(before)
   })
+  it('keeps the 8000 source, 4000 per-output, 16384 output-page and 4000 metadata bounds under include_outputs all', async () => {
+    const t = setup(),
+      file = path.join(t.root, 'a.ipynb')
+    const outputs = Array.from({ length: 5 }, (_, index) => ({
+      output_type: 'stream',
+      name: 'stdout',
+      text: [String(index).repeat(5000)]
+    }))
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...notebook(),
+        cells: [
+          {
+            ...notebook().cells[0],
+            source: ['s'.repeat(9000)],
+            metadata: { long: 'm'.repeat(5000) },
+            outputs
+          }
+        ]
+      })
+    )
+    const result = (await t.invoke('notebook.inspect', {
+      path: 'a.ipynb',
+      include_outputs: 'all',
+      include_metadata: true
+    })) as {
+      outputsOmitted: boolean
+      cells: {
+        source: string
+        sourceTruncated: boolean
+        omittedOutputCount: number
+        metadata: string
+        metadataTruncated: boolean
+        outputs: { text: string; truncated: boolean }[]
+      }[]
+    }
+    const [cell] = result.cells
+    expect(cell.source).toBe('s'.repeat(8000))
+    expect(cell.sourceTruncated).toBe(true)
+    // Every output is returned, each cut at 4000, and the page total stays at 16384.
+    expect(cell.omittedOutputCount).toBe(0)
+    expect(cell.outputs).toHaveLength(5)
+    expect(cell.outputs.map((output) => output.text.length)).toEqual([4000, 4000, 4000, 4000, 384])
+    expect(cell.outputs.map((output) => output.text[0])).toEqual(['0', '1', '2', '3', '4'])
+    expect(cell.outputs.every((output) => output.truncated)).toBe(true)
+    expect(cell.metadata).toHaveLength(4000)
+    expect(cell.metadataTruncated).toBe(true)
+    expect(result.outputsOmitted).toBe(true)
+  })
   it('reads every remaining cell by default and pages at the 100-cell host bound', async () => {
     const t = setup(), file = path.join(t.root, 'a.ipynb')
     writeFileSync(file, JSON.stringify({ ...notebook(), cells: Array.from({ length: 130 }, (_, index) => ({ id: `c${index}`, cell_type: 'markdown', source: [`m${index}`], metadata: {} })) }))

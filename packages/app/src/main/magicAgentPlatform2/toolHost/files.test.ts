@@ -2440,6 +2440,48 @@ describe('FilesToolHost focused file discovery tools', () => {
     expect(one.truncated).toBe(true)
   })
 
+  it('never lists reserved .magicpot metadata in tree, glob or grep, as for direct reads', async () => {
+    const { root, authorization } = setup()
+    mkdirSync(path.join(root, '.magicpot', 'tool-host'), { recursive: true })
+    writeFileSync(path.join(root, '.magicpot', 'tool-host', 'state.json'), 'needle')
+    mkdirSync(path.join(root, 'src', '.magicpot'), { recursive: true })
+    writeFileSync(path.join(root, 'src', '.magicpot', 'n.txt'), 'needle')
+    writeFileSync(path.join(root, 'a.txt'), 'needle')
+    const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
+    const tree = await host.tree(call('files.tree', {}, authorization))
+    const glob = await host.glob(call('files.glob', { pattern: '**' }, authorization))
+    const grep = await host.grep(call('files.grep', { query: 'needle' }, authorization))
+    for (const listed of [tree.entries, glob.entries, grep.matches].map((items) =>
+      items.map((item) => item.path)
+    ))
+      expect(
+        listed.filter((entry) => entry === '.magicpot' || entry.startsWith('.magicpot/'))
+      ).toEqual([])
+    // Only the workspace-root .magicpot is reserved; a nested directory of that name is not.
+    expect(glob.entries.map((entry) => entry.path)).toContain('src/.magicpot/n.txt')
+    expect([...new Set(grep.matches.map((match) => match.path))]).toEqual([
+      'a.txt',
+      'src/.magicpot/n.txt'
+    ])
+    await expect(
+      host.tree(call('files.tree', { path: '.magicpot' }, authorization))
+    ).rejects.toThrow('reserved')
+  })
+
+  it('matches pathological ** globs against deep paths in bounded time', async () => {
+    const { root, authorization } = setup()
+    const deep = path.join(root, ...Array.from({ length: 30 }, (_, index) => `d${index}`))
+    mkdirSync(deep, { recursive: true })
+    writeFileSync(path.join(deep, 'file.txt'), 'x')
+    const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
+    const started = Date.now()
+    const result = await host.glob(
+      call('files.glob', { pattern: `${'**/'.repeat(12)}*a*a*a*a*a*a*zzz` }, authorization)
+    )
+    expect(result.entries).toEqual([])
+    expect(Date.now() - started).toBeLessThan(3000)
+  })
+
   it('rejects traversal and absolute paths after consuming no filesystem access', async () => {
     const { root, authorization } = setup()
     const host = await FilesToolHost.create(authorization, { allowedRoots: [root] })
