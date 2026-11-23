@@ -360,7 +360,7 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
     expect(screen.queryByRole('button', { name: '技能' })).toBeNull()
   })
 
-  describe("model selector inside the column composer (owner's request)", () => {
+  describe("model selector in the column header, as in KohakuTerrarium (owner's request)", () => {
     const renderWithHost = (props: { active?: boolean; host?: HTMLElement | null }) => (
       <MemoryRouter>
         <ThemeProvider theme={createTheme()}>
@@ -380,24 +380,26 @@ describe('ChatPage functions relocated out of the Agent column chrome', () => {
       return host
     }
 
-    it('keeps the model selector in the composer and puts only the team buttons into the header host', async () => {
+    it('puts the model selector, then the team buttons, into the header host; the composer has none', async () => {
       const host = header()
       const view = render(renderWithHost({ host }))
       await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('lead'))
 
-      const slot = screen.getByTestId('composer-model-slot')
-      expect(slot).toHaveAttribute('data-layout', 'column')
-      expect(within(slot).getByTestId('model-selector')).toHaveAttribute(
-        'data-header-pill',
-        'false'
-      )
-      expect(within(host).queryByTestId('model-selector')).toBeNull()
-      expect(within(host).getByTestId('agent-header-add-member')).toBeInTheDocument()
+      expect(
+        within(screen.getByTestId('composer-model-slot')).queryByTestId('model-selector')
+      ).toBeNull()
+      const selector = within(host).getByTestId('model-selector')
+      expect(selector).toHaveAttribute('data-header-pill', 'true')
+      const addMember = within(host).getByTestId('agent-header-add-member')
+      expect(
+        selector.compareDocumentPosition(addMember) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
 
       // An inactive pane leaves the header host to the pane that is active.
       view.rerender(renderWithHost({ host, active: false }))
       expect(host).toBeEmptyDOMElement()
       view.rerender(renderWithHost({ host, active: true }))
+      expect(within(host).getByTestId('model-selector')).toBeInTheDocument()
       expect(within(host).getByTestId('agent-header-add-member')).toBeInTheDocument()
       host.remove()
     })

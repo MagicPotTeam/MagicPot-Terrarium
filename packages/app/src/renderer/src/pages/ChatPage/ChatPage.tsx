@@ -1251,10 +1251,12 @@ const ChatPage: React.FC<ChatPageProps> = ({
   onRegisterReload
 }) => {
   const queueResumeNoticeId = React.useId()
-  // The model and reasoning selectors sit inside the composer, also in the Agent column (owner's request).
-  // Keep it off until the header pill has what the composer menu gives a member: the re-pick of a
-  // model that can no longer be used and the "继承组长" row (see ChatPrimarySelection headerPill).
-  const modelInHeader = false
+  // In the Agent column the model and reasoning select sits in the column header, as in the
+  // KohakuTerrarium extension (owner's request); the composer then has none. The header pill
+  // offers a member what the composer menu did: re-picking a model that can no longer be used
+  // and the "继承组长" row (see ChatPrimarySelection headerPill). A page without a header slot
+  // (the full chat page) keeps it in the composer.
+  const modelInHeader = compact && Boolean(modelPillHost)
   const teamVisibilityRef = useRef({ active, epoch: 0 })
   if (teamVisibilityRef.current.active !== active)
     teamVisibilityRef.current = { active, epoch: teamVisibilityRef.current.epoch + 1 }
@@ -14706,6 +14708,10 @@ const ChatPage: React.FC<ChatPageProps> = ({
         </Box>
 
         {statusErrorLine}
+        {/* The model select of the active conversation, first in the column header. */}
+        {active && modelInHeader && modelPillHost
+          ? createPortal(chatComposerControlSlot, modelPillHost)
+          : null}
         {/* The team actions (the composer has no "+" menu): in the column header, else above the composer. */}
         {active && teamEnabled && teamLead
           ? ((actions: React.ReactNode) =>

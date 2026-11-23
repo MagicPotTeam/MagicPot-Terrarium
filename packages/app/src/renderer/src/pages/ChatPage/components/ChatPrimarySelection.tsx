@@ -69,6 +69,9 @@ type ChatPrimarySelectionProps = {
   onSelectReasoningEffort?: (effort: LLMReasoningEffort | undefined) => void
 }
 
+// The model switcher row that inherits the lead's model. Profile ids never contain a space.
+const INHERIT_LEAD_ROW_ID = 'inherit lead'
+
 const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   compact,
   isAgentSkillSelected,
@@ -206,21 +209,25 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
   if (headerPill) {
     if (!memberModel && isAgentSkillSelected) return null
     const tokens = getAgentColumnTokens(theme)
-    // Dormant for members: ChatPage keeps modelInHeader off, so members use the composer menu
-    // below. This pill has neither the re-pick of a member whose model can no longer be used
-    // (memberUsable excludes 'unavailable') nor the "inherit the lead" row (inheritLead is
-    // ignored here). Port both before the pill carries a member again; the headerPill tests and
-    // the channel bed's member model cases pin this.
+    // A member offers what the composer menu below offers: its models (also when its own model
+    // can no longer be used, so it can pick again) and the "inherit the lead" row.
     const memberUsable =
       Boolean(memberModel) &&
       active &&
       memberModel?.state !== 'unavailable' &&
       !memberModel?.disabled &&
       !memberModel?.pending
+    const memberCanPickModel =
+      Boolean(memberModel?.onSelectProfile) &&
+      active &&
+      !memberModel?.disabled &&
+      !memberModel?.pending
     const memberSelectableIds = memberModel?.selectableProfileIds
+    const inheritLead = memberCanPickModel ? memberModel?.inheritLead : undefined
+    const inheriting = memberModel?.state === 'inherited'
     // The models and efforts this pill may change; the caller revalidates every choice.
     const pickableProfiles = memberModel
-      ? memberUsable && memberModel.onSelectProfile
+      ? memberCanPickModel
         ? memberSelectableIds
           ? availableProfiles.filter((profile) => memberSelectableIds.includes(profile.id))
           : availableProfiles
@@ -250,23 +257,27 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
     const pillLabel = showsEffort
       ? t('chat.model_pill.with_effort', { label: pillName, effort: displayReasoningLabel })
       : pillName
-    const pillDisabled = pickableProfiles.length === 0 && pickableEfforts.length === 0
+    const pillDisabled =
+      pickableProfiles.length === 0 && pickableEfforts.length === 0 && !inheritLead
     const switcherOpen = active && Boolean(anchorEl) && !pillDisabled
     // The model in use: a member's own or inherited model, else the conversation's.
-    const currentProfileId = memberModel
+    const effectiveProfileId = memberModel
       ? memberModel.state === 'unavailable'
         ? null
         : (memberModel.profileId ??
           availableProfiles.find((profile) => profile.model_name === memberModel.label)?.id ??
           null)
       : selectedProfileId
+    // The row in use: the inherit row while the member inherits, as in the composer menu (so
+    // picking the lead's model there stores it as the member's own choice).
+    const currentProfileId = inheritLead && inheriting ? INHERIT_LEAD_ROW_ID : effectiveProfileId
     const switcherProfiles: ChatModelSwitcherProfile[] = pickableProfiles.map((profile) => {
       const row = {
         id: profile.id,
         model_name: profile.model_name,
         detail: getModelSwitcherDetail(profile)
       }
-      if (profile.id === currentProfileId) {
+      if (profile.id === effectiveProfileId && currentProfileId === effectiveProfileId) {
         return { ...row, efforts: pickableEfforts, effort: normalizedSelectedEffort ?? null }
       }
       // Another model's efforts can only be set through the per-model preference.
@@ -276,10 +287,11 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
     // Only the efforts are pickable (a member that cannot change its model): list its model.
     if (
       pickableEfforts.length > 0 &&
-      currentProfileId &&
-      !switcherProfiles.some((profile) => profile.id === currentProfileId)
+      effectiveProfileId &&
+      currentProfileId === effectiveProfileId &&
+      !switcherProfiles.some((profile) => profile.id === effectiveProfileId)
     ) {
-      const own = availableProfiles.find((profile) => profile.id === currentProfileId)
+      const own = availableProfiles.find((profile) => profile.id === effectiveProfileId)
       if (own) {
         switcherProfiles.push({
           id: own.id,
@@ -290,10 +302,34 @@ const ChatPrimarySelection: React.FC<ChatPrimarySelectionProps> = ({
         })
       }
     }
+    // First, as in the composer menu: inherit the lead (its model, a muted second line).
+    if (inheritLead) {
+      const leadReasoning = inheriting
+        ? { efforts: pickableEfforts, effort: normalizedSelectedEffort ?? null }
+        : onSelectProfileReasoningEffort
+          ? getProfileReasoning?.(inheritLead.profileId)
+          : undefined
+      switcherProfiles.unshift({
+        id: INHERIT_LEAD_ROW_ID,
+        model_name: t('chat.member_model_inherit', { defaultValue: 'Inherit lead' }),
+        detail: inheritLead.modelName,
+        efforts: leadReasoning?.efforts ?? [],
+        effort: leadReasoning?.effort ?? null
+      })
+    }
     const handleSwitch = (profileId: string, effort: LLMReasoningEffort | undefined) => {
       const target = switcherProfiles.find((profile) => profile.id === profileId)
       if (!target) return
       const effortChanged = (effort ?? null) !== (target.effort ?? null)
+      if (profileId === INHERIT_LEAD_ROW_ID && inheritLead) {
+        if (!inheriting) {
+          inheritLead.onSelect?.()
+          if (effortChanged) onSelectProfileReasoningEffort?.(inheritLead.profileId, effort)
+        } else if (effortChanged) {
+          onSelectMemberReasoningEffort?.(effort)
+        }
+        return
+      }
       if (profileId !== currentProfileId) {
         if (memberModel) memberModel.onSelectProfile?.(profileId)
         else onSelectProfile(profileId)
