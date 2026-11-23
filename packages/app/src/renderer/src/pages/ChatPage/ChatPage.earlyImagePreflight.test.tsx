@@ -21,6 +21,17 @@ import {
   STORAGE_KEY_CURRENT_SESSION_ID
 } from './chatPageShared'
 
+
+// Saved chat images are read as a bounded stream and must sniff as an image, so the
+// fixture serves a real Response whose bytes start with the PNG signature.
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+const pngResponse = (marker: string): Response =>
+  new Response(new Uint8Array([...PNG_SIGNATURE, ...new TextEncoder().encode(marker)]), {
+    status: 200,
+    headers: { 'content-type': 'image/png' }
+  })
+const pngMarker = (data: Uint8Array): string =>
+  new TextDecoder().decode(data.subarray(PNG_SIGNATURE.length))
 const fixture = vi.hoisted(() => ({
   config: null as Config | null,
   profiles: [] as LLMAPIProfile[],
@@ -397,10 +408,7 @@ beforeEach(() => {
   configure()
   fixture.sessions = []
   fixture.backups = {}
-  fixture.fetch.mockResolvedValue({
-    ok: true,
-    blob: async () => new Blob(['fixture-image'], { type: 'image/png' })
-  })
+  fixture.fetch.mockImplementation(async () => pngResponse('fixture-image'))
   fixture.fileToDataUrl.mockImplementation(async (file: File) => `blob:serialized-${file.name}`)
   fixture.request.mockResolvedValue({ content: 'fixture assistant response' })
   fixture.stream.mockResolvedValue({
@@ -590,7 +598,7 @@ describe('ChatPage image preflight at the send boundary', () => {
           }
         }
         if (String(url).startsWith('blob:')) {
-          return { ok: true, blob: async () => new Blob(['fixture'], { type: 'image/png' }) }
+          return pngResponse('fixture')
         }
         throw new Error(`Unexpected fixture read: ${String(url)}`)
       })
@@ -1315,14 +1323,10 @@ describe('manual blob attachment persistence at the send boundary', () => {
 
     let firstSaveStarted = false
     const firstSaveRelease = Promise.withResolvers<void>()
-    fixture.fetch.mockImplementation(async (url: string) => ({
-      ok: true,
-      blob: async () => new Blob([`bytes:${url}`], { type: 'image/png' })
-    }))
+    fixture.fetch.mockImplementation(async (url: string) => pngResponse(`bytes:${url}`))
     fixture.saveImageToDir.mockImplementation(
       async ({ data, fileName }: { data: Uint8Array; fileName: string }) => {
-        const content = new TextDecoder().decode(data)
-        if (content === `bytes:${selectedUrls[0]}`) {
+        if (pngMarker(data) === `bytes:${selectedUrls[0]}`) {
           firstSaveStarted = true
           await firstSaveRelease.promise
         }
@@ -1342,7 +1346,7 @@ describe('manual blob attachment persistence at the send boundary', () => {
     await waitFor(() => expect(fixture.request).toHaveBeenCalledOnce())
     expect(fixture.fetch.mock.calls.map(([url]) => url)).toEqual(selectedUrls)
     expect(
-      fixture.saveImageToDir.mock.calls.map(([value]) => new TextDecoder().decode(value.data))
+      fixture.saveImageToDir.mock.calls.map(([value]) => pngMarker(value.data))
     ).toEqual(selectedUrls.map((url) => `bytes:${url}`))
     const sent = fixture.request.mock.calls[0][0].messages.find(
       (entry: { role: string }) => entry.role === 'user'
