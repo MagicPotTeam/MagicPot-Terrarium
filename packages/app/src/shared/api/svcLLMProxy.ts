@@ -1,5 +1,11 @@
 import type { AgentThreadTriggerListScope, AgentThreadTriggerView } from './agentThreadTrigger'
 import type {
+  AgentTeamImportReq,
+  AgentTeamImportResp,
+  AgentTeamRosterView,
+  AgentTeamScope
+} from './agentTeam'
+import type {
   AgentTeamMessageClaim,
   AgentTeamMessageIntent,
   AgentTeamMessageQueueScope
@@ -554,6 +560,10 @@ export type LLMProxySvc = {
     req: AgentTeamMessageQueueScope
   ): Promise<{ intents: AgentTeamMessageIntent[] }>
   claimAgentTeamMessage(req: AgentTeamMessageClaim): Promise<{ intent?: AgentTeamMessageIntent }>
+  /** Trusted local desktop only. MAIN's roster of a team of the sender's own canvas thread; data only. */
+  getAgentTeam(req: AgentTeamScope): Promise<{ team?: AgentTeamRosterView }>
+  /** One-time, idempotent import of the renderer's legacy team fields; the fields are not changed. */
+  importAgentTeam(req: AgentTeamImportReq): Promise<AgentTeamImportResp>
   /** Trusted local desktop only. Queued thread events of the sender's own canvas thread route. */
   listAgentThreadEvents(req: AgentThreadEventListScope): Promise<{ events: AgentThreadEventView[] }>
   /** A claim is a lease on a durable event (given out once), not a delivery. */
@@ -694,6 +704,8 @@ export const llmProxySvcDef: ServiceDefSheet<LLMProxySvc> = {
   stopAgentJob: { type: 'unary' },
   listAgentTeamMessages: { type: 'unary' },
   claimAgentTeamMessage: { type: 'unary' },
+  getAgentTeam: { type: 'unary' },
+  importAgentTeam: { type: 'unary' },
   listAgentThreadEvents: { type: 'unary' },
   claimAgentThreadEvent: { type: 'unary' },
   releaseAgentThreadEvent: { type: 'unary' },
