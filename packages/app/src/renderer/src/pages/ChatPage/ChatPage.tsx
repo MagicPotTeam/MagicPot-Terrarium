@@ -18,6 +18,7 @@ import {
   type HelperInvocationHandle
 } from './useHelperInvocationObserver'
 import { createTeamLiveActivity } from './teamLiveActivity'
+import { useAgentTeamRosterImport } from './agentTeamRoster'
 import { registerTeamApprovalSurface } from '../../components/teamApprovalSurface'
 import { AgentTeamMemberImages } from './components/AgentTeamTree'
 import { useTeamImagePlacement } from './components/useTeamImagePlacement'
@@ -10576,6 +10577,15 @@ const ChatPage: React.FC<ChatPageProps> = ({
   const teamDeliveryEnabled =
     isReady && !config.use_remote_llm && route?.channel === 'canvas' && route.scopeType === 'thread'
   const teamEnabled = active && teamDeliveryEnabled
+  // S6-1: MAIN imports this team's stored fields once into its roster (the fields stay as they are).
+  // Nothing reads the roster yet: the rows below still come from the stored team (S6-4 switches them).
+  useAgentTeamRosterImport({
+    enabled: teamDeliveryEnabled,
+    storageScope,
+    route,
+    lead: teamLead,
+    sessions
+  })
   // Members with team messages held for them (joined ids), for their delegated rows.
   const [teamHeldRecipients, setTeamHeldRecipients] = useState<{ key: string; ids: string }>({
     key: '',

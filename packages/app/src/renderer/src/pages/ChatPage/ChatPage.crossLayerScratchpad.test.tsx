@@ -213,8 +213,11 @@ afterEach(async () => {
     await import('../../../../main/magicAgentPlatform2/productionRuntime')
   const { clearMagicAgentTrustedRouteBindingsForTest } =
     await import('../../../../main/magicAgentRuntime/trustedRouteBinding')
+  const { closeAgentTeamStore } = await import('../../../../main/api/agentTeamStore')
   await closeAgentThreadNotesStore()
   closeAssistantTerminalPolicyRuntime()
+  // The team roster (S6-1) is opened in this test's data dir when the lead's team is first shown.
+  closeAgentTeamStore()
   clearMagicAgentTrustedRouteBindingsForTest()
   if (teamStoreOpened) {
     const { getTeamEndStore } = await import('../../../../main/api/teamEndStore')

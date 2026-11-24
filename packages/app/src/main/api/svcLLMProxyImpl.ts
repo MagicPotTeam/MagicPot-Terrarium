@@ -1,4 +1,5 @@
 import { AgentTeamMessageQueue } from './agentTeamMessageQueue'
+import { authorizeAgentTeamScope, getAgentTeamStore } from './agentTeamStore'
 import { createJobReportSink } from './agentThreadJobReportSink'
 import { AgentThreadTriggers, lazyThreadTriggerStoreOpener } from './agentThreadTriggers'
 import {
@@ -22,6 +23,7 @@ import type {
   AgentThreadEventListScope,
   AgentThreadEventRelease
 } from '@shared/api/agentThreadInbox'
+import type { AgentTeamImportReq, AgentTeamScope } from '@shared/api/agentTeam'
 import type {
   AgentTeamMessageClaim,
   AgentTeamMessageQueueScope
@@ -2267,6 +2269,16 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     req: AgentTeamMessageClaim,
     invocation?: ServiceInvocationContext
   ) => ({ intent: this.teamMessageQueue.claim(req, invocation) })
+  /** S6 roster: data only. Nothing reads it for routing or permissions yet (S6-2 does). */
+  getAgentTeam = async (req: AgentTeamScope, invocation?: ServiceInvocationContext) => {
+    const team = authorizeAgentTeamScope(req, invocation, 'getAgentTeam')
+    const view = getAgentTeamStore().get(team)
+    return view ? { team: view } : {}
+  }
+  importAgentTeam = async (req: AgentTeamImportReq, invocation?: ServiceInvocationContext) => {
+    const team = authorizeAgentTeamScope(req, invocation, 'importAgentTeam')
+    return getAgentTeamStore().importLegacy(team, req.snapshot)
+  }
   /** MAIN-owned thread events (only MAIN enqueues); the renderer lists, claims, releases, expires. */
   private readonly threadInbox = new AgentThreadInbox()
   /**
@@ -3119,6 +3131,13 @@ export class LLMProxySvcImpl implements LLMProxySvc {
 
   endTeam = async (req: LLMTeamIdentity): Promise<{ ended: true }> => {
     const ended = getTeamEndStore().end(req)
+    // The End marker above is what stops the team; the roster follows it (a failure here changes nothing).
+    try {
+      // end() accepted the identity; the roster gets exactly its three fields, whatever else came along.
+      getAgentTeamStore().markEnded({ scope: req.scope, thread: req.thread, lead: req.lead })
+    } catch {
+      console.warn('[TeamRoster] The roster is marked ended the next time End runs for this team.')
+    }
     // End is recorded; a queued message that this misses is settled as 'ended' when it is claimed.
     try {
       this.teamMessageQueue.endTeam(req)

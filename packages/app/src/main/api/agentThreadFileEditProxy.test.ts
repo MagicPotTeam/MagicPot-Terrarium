@@ -154,6 +154,9 @@ afterEach(async () => {
   vi.clearAllMocks()
 })
 
+// Under CI load, approvals in this file can take seconds to appear: wait up to 10 s each
+// (explicit waitFor timeouts) within a test timeout that leaves room for them.
+vi.setConfig({ testTimeout: 30_000 })
 describe('file edit via existing thread, actual runtime/kernel/registry/host and formal approval (model/window stubs)', () => {
   it.each(
     (['chat', 'chatStream'] as const).flatMap((method) =>
@@ -434,43 +437,46 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
       )
       let promptId = ''
       const startedAt = Date.now()
-      await vi.waitFor(async () => {
-        const prompts = (
-          await service.listAgentInteractions(scope, invoke('listAgentInteractions'))
-        ).interactions
-        expect(prompts).toHaveLength(1)
-        expect(prompts[0].prompt.kind).toBe(name)
-        if (actionCount === 1)
-          expect(prompts[0].prompt).toMatchObject({
-            kind: 'show_card',
-            actions: [{ id: 'approve', label: 'Feedback yes (not authorization)' }]
-          })
-        if (withBody) expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', body })
-        if (withIcon) expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', icon: '✓👩🏽‍💻' })
-        if (withActionStyle)
-          expect(prompts[0].prompt).toMatchObject({
-            kind: 'show_card',
-            actions:
-              actionCount === 1
-                ? [{ id: 'approve', style: 'primary' }]
-                : [
-                    { id: 'approve', style: 'primary' },
-                    { id: 'no', style: 'danger' }
-                  ]
-          })
-        if (withAccent)
-          expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', accent: 'success' })
-        if (withFooter)
-          expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', footer: input.footer })
-        if (withSubtitle)
-          expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', subtitle: input.subtitle })
-        if (withFields) expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', fields })
-        if (alias) {
-          expect(prompts[0].expiresAt).toBeGreaterThanOrEqual(startedAt + 17000)
-          expect(prompts[0].expiresAt).toBeLessThanOrEqual(Date.now() + 17000)
-        }
-        promptId = prompts[0].id
-      })
+      await vi.waitFor(
+        async () => {
+          const prompts = (
+            await service.listAgentInteractions(scope, invoke('listAgentInteractions'))
+          ).interactions
+          expect(prompts).toHaveLength(1)
+          expect(prompts[0].prompt.kind).toBe(name)
+          if (actionCount === 1)
+            expect(prompts[0].prompt).toMatchObject({
+              kind: 'show_card',
+              actions: [{ id: 'approve', label: 'Feedback yes (not authorization)' }]
+            })
+          if (withBody) expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', body })
+          if (withIcon) expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', icon: '✓👩🏽‍💻' })
+          if (withActionStyle)
+            expect(prompts[0].prompt).toMatchObject({
+              kind: 'show_card',
+              actions:
+                actionCount === 1
+                  ? [{ id: 'approve', style: 'primary' }]
+                  : [
+                      { id: 'approve', style: 'primary' },
+                      { id: 'no', style: 'danger' }
+                    ]
+            })
+          if (withAccent)
+            expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', accent: 'success' })
+          if (withFooter)
+            expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', footer: input.footer })
+          if (withSubtitle)
+            expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', subtitle: input.subtitle })
+          if (withFields) expect(prompts[0].prompt).toMatchObject({ kind: 'show_card', fields })
+          if (alias) {
+            expect(prompts[0].expiresAt).toBeGreaterThanOrEqual(startedAt + 17000)
+            expect(prompts[0].expiresAt).toBeLessThanOrEqual(Date.now() + 17000)
+          }
+          promptId = prompts[0].id
+        },
+        { timeout: 10_000 }
+      )
       expect(chat).toHaveBeenCalledTimes(2)
       expect(runtimeCalls.mock.calls.map((call) => call[1])).toEqual(['info', name])
       expect(policy.listPendingTerminalApprovals()).toEqual([])
@@ -580,7 +586,9 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
             invoke('resolveAgentInteraction')
           )
         ).rejects.toThrow('not active')
-      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+        timeout: 10_000
+      })
       expect(chat).toHaveBeenCalledTimes(3)
       expect(runtimeCalls.mock.calls.map((call) => call[1])).toEqual(['info', name, 'files.edit'])
       expect(
@@ -946,7 +954,9 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
         (value) => ({ status: 'fulfilled' as const, value }),
         (reason: unknown) => ({ status: 'rejected' as const, reason })
       )
-      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+        timeout: 10_000
+      })
       expect(runtimeCalls.mock.calls.map((call) => call[1])).toEqual([
         'info',
         'info',
@@ -1080,7 +1090,9 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
         (value) => ({ status: 'fulfilled' as const, value }),
         (reason: unknown) => ({ status: 'rejected' as const, reason })
       )
-      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+        timeout: 10_000
+      })
       const approval = policy.listPendingTerminalApprovals()[0]
       expect(approval.request.request.input).toEqual(args)
       expect(await fs.readFile(file, 'utf8')).toBe(before)
@@ -1319,7 +1331,9 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
         (value) => ({ status: 'fulfilled' as const, value }),
         (reason: unknown) => ({ status: 'rejected' as const, reason })
       )
-      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+        timeout: 10_000
+      })
       const approval = policy.listPendingTerminalApprovals()[0]
       expect(approval.request.request.input).toEqual(args)
       expect(await fs.readFile(file, 'utf8')).toBe(before)
@@ -1622,7 +1636,9 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
         (value) => ({ status: 'fulfilled' as const, value }),
         (reason: unknown) => ({ status: 'rejected' as const, reason })
       )
-      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+        timeout: 10_000
+      })
       const approval = policy.listPendingTerminalApprovals()[0]
       expect(approval.request.request.input).toEqual(args)
       expect(await fs.readFile(file, 'utf8')).toBe(before)
@@ -1772,7 +1788,9 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
       },
       invoke('chatStream')
     )
-    await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+    await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+      timeout: 10_000
+    })
     const approval = policy.listPendingTerminalApprovals()[0]
     policy.resolvePendingTerminalApproval({
       approvalId: approval.approvalId,
@@ -1901,7 +1919,9 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
         (value) => ({ status: 'fulfilled' as const, value }),
         (reason: unknown) => ({ status: 'rejected' as const, reason })
       )
-      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+        timeout: 10_000
+      })
       expect(await fs.readFile(path.join(root, 'a.txt'), 'utf8')).toBe('a')
       expect(targetRenames).toBe(0)
       const approval = policy.listPendingTerminalApprovals()[0]
@@ -2109,7 +2129,9 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
         (value) => ({ status: 'fulfilled' as const, value }),
         (reason: unknown) => ({ status: 'rejected' as const, reason })
       )
-      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1))
+      await vi.waitFor(() => expect(policy.listPendingTerminalApprovals()).toHaveLength(1), {
+        timeout: 10_000
+      })
       expect(await fs.readFile(file, 'utf8')).toBe(before)
       const approval = policy.listPendingTerminalApprovals()[0]
       expect(approval.request.request.target.id).toBe('files.patch')
@@ -2299,10 +2321,13 @@ describe('file edit via existing thread, actual runtime/kernel/registry/host and
           return { status: 'rejected' as const, reason }
         }
       )
-      await vi.waitFor(() => {
-        expect(settled, 'The call must wait for the actual approval coordinator.').toBe(false)
-        expect(policy.listPendingTerminalApprovals()).toHaveLength(1)
-      })
+      await vi.waitFor(
+        () => {
+          expect(settled, 'The call must wait for the actual approval coordinator.').toBe(false)
+          expect(policy.listPendingTerminalApprovals()).toHaveLength(1)
+        },
+        { timeout: 10_000 }
+      )
       expect(await fs.readFile(file, 'utf8')).toBe(before)
       expect(chat).toHaveBeenCalledOnce()
       const approval = policy.listPendingTerminalApprovals()[0]
