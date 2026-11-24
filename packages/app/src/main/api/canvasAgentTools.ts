@@ -141,6 +141,8 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
     threadImageReview?: LLMChatReq['threadImageReview']
     createImageGenerator?: () => AgentThreadImageGenerator | undefined
     goalProgress?: { provider: AssistantRunToolProvider; assertLive(): void }
+    /** S5: this event turn is a goal step (MAIN-bound): its goal tools, and its tool-call budget. */
+    goalStep?: { provider: AssistantRunToolProvider; chargeToolCall(tool: string): void }
     teamMessages?: {
       assertNotEnded(source: TeamMessageSource): void
       enqueue(
@@ -184,10 +186,19 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
   /** 'ended': the turn was cut by its team's End. It keeps what it already started or finished. */
   dispose?: (outcome?: boolean | 'ended') => void
 } {
-  if (!options.local) return { request }
+  const goalStepRefused = () =>
+    new Error("A goal step requires this request's trusted canvas admission.")
+  if (!options.local) {
+    if (options.goalStep) throw goalStepRefused()
+    return { request }
+  }
   const prepared = withCanvasFileTools(request, invocation)
   // This comparison retains all existing frame/project/media/explicit-skill checks.
-  if (prepared === request || !invocation || !request.route) return { request: prepared }
+  if (prepared === request || !invocation || !request.route) {
+    // A goal step's budgets are enforced at the canvas admission: without it, it does not run.
+    if (options.goalStep) throw goalStepRefused()
+    return { request: prepared }
+  }
   const route = Object.freeze(normalizeAgentRoute(request.route))
   const key = routeKey(route)
   const owner = {}
@@ -267,6 +278,16 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
     }
     if (options.goalProgress && (!interactions || !prepared.skillRuntime))
       throw new Error("Goal progress requires this request's trusted canvas admission.")
+    // Children (sub-agents, memory helper) call tools outside this admission: never in a goal step.
+    if (
+      options.goalStep &&
+      (!interactions ||
+        !prepared.skillRuntime ||
+        options.goalProgress ||
+        options.createSubagentClient ||
+        options.createMemoryClient)
+    )
+      throw goalStepRefused()
     if (options.goalProgress) {
       const progress = options.goalProgress,
         names = new Set(progress.provider.listTools().map((tool) => tool.name))
@@ -599,6 +620,8 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
           })
         : undefined
     const triggerNames = new Set(triggerTools?.listTools().map((tool) => tool.name) || [])
+    const goalStepTools = interactions ? options.goalStep?.provider : undefined
+    const goalStepNames = new Set(goalStepTools?.listTools().map((tool) => tool.name) || [])
     const subagentNames = new Set(subagents?.listTools().map((tool) => tool.name) || [])
     const helperNames = new Set(helpers.listTools().map((tool) => tool.name))
     const toolProvider: AssistantRunToolProvider = {
@@ -613,6 +636,7 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
         ...(subagents?.listTools() || []),
         ...(jobs?.listTools() || []),
         ...(triggerTools?.listTools() || []),
+        ...(goalStepTools?.listTools() || []),
         ...(scriptTools?.listTools() || []),
         ...(mcpTools?.listTools() || []),
         ...(mcpConnectionTools?.listTools() || []),
@@ -645,11 +669,13 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
                                 ? jobs!
                                 : triggerNames.has(name)
                                   ? triggerTools!
-                                  : subagentNames.has(name)
-                                    ? subagents!
-                                    : interactions && helperNames.has(name)
-                                      ? helpers
-                                      : creative
+                                  : goalStepNames.has(name)
+                                    ? goalStepTools!
+                                    : subagentNames.has(name)
+                                      ? subagents!
+                                      : interactions && helperNames.has(name)
+                                        ? helpers
+                                        : creative
         ).callTool(name, args, context)
       }
     }
@@ -851,6 +877,9 @@ export function prepareCanvasAgentTools<T extends LLMChatReq>(
           signal?.throwIfAborted()
           // Re-check that the renderer still exists before starting each effectful invocation.
           assertActive()
+          // A goal step: the call is charged to the goal's tool-call budget before it runs, or
+          // refused (and the turn stopped) when the budget is spent.
+          options.goalStep?.chargeToolCall(tool)
           const scope: InvocationScope | undefined = admissionTools.has(tool)
             ? { routeKey: key, tool, signal, active: true, owner }
             : undefined

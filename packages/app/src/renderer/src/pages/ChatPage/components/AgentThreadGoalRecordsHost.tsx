@@ -4,7 +4,7 @@ import type { AgentRouteLike } from '@shared/agent'
 import { AGENT_GOAL_LIMITS } from '@shared/api/agentThreadGoal'
 import type { AgentGoalView } from '@shared/api/agentThreadGoal'
 import { api } from '../../../utils/windowUtils'
-import AgentThreadGoalRecordsPanel, { type AgentThreadGoalCreateIntent, type AgentThreadGoalControlIntent, type AgentThreadGoalReportIntent, type AgentThreadGoalReportAck, type AgentThreadGoalDecisionIntent, type AgentThreadGoalDeleteIntent } from './AgentThreadGoalRecordsPanel'
+import AgentThreadGoalRecordsPanel, { type AgentThreadGoalCreateIntent, type AgentThreadGoalControlIntent, type AgentThreadGoalReportIntent, type AgentThreadGoalReportAck, type AgentThreadGoalDecisionIntent, type AgentThreadGoalDeleteIntent, type AgentThreadGoalSettingsIntent } from './AgentThreadGoalRecordsPanel'
 
 type Scope = { route: AgentRouteLike; conversationId: string }
 type Bound = Scope & { documentToken: string }
@@ -91,7 +91,7 @@ function GoalBinding({ scope, embedded }: { scope: Scope; embedded?: boolean }) 
     }
   }, [identity, scope, loadVersion])
   const acknowledge = () => { uncertainScopes.delete(scopeKey); state.current.uncertain = false; setUnknown(false); setError(null) }
-  const mutate = (intent: AgentThreadGoalCreateIntent | AgentThreadGoalControlIntent | AgentThreadGoalReportIntent | AgentThreadGoalDecisionIntent | AgentThreadGoalDeleteIntent, kind: 'create' | 'control' | 'report' | 'decision' | 'delete') => {
+  const mutate = (intent: AgentThreadGoalCreateIntent | AgentThreadGoalControlIntent | AgentThreadGoalReportIntent | AgentThreadGoalDecisionIntent | AgentThreadGoalDeleteIntent | AgentThreadGoalSettingsIntent, kind: 'create' | 'control' | 'report' | 'decision' | 'delete' | 'settings') => {
     const s = state.current, bound = s.bound, current = s.view, epoch = generation.current
     const isCurrent = () => s.live && generation.current === epoch && owner === identity
     if (!s.live || owner !== identity || s.lock || s.uncertain || !bound || !current) return
@@ -105,6 +105,8 @@ function GoalBinding({ scope, embedded }: { scope: Scope; embedded?: boolean }) 
     }
     // A delete is sent only for the exact snapshot its confirmation was opened at.
     if (kind === 'delete' && (!selected || !('revision' in intent) || current.revision !== intent.revision || selected.generation !== intent.generation || !deletable.includes(selected.status))) return
+    // A settings change is sent only for the generation its editor was opened at (the user's own edit).
+    if (kind === 'settings' && (!selected || !('generation' in intent) || !('spec' in intent) || selected.generation !== intent.generation || ['cancelled', 'completed', 'failed'].includes(selected.status))) return
     const operationId = crypto.randomUUID(), goalId = kind === 'create' ? crypto.randomUUID() : selected!.id
     const command = kind === 'create' && 'spec' in intent ? { action: 'create' as const, goalId, title: intent.title, spec: intent.spec }
       : kind === 'report' && 'summary' in intent ? { action: 'report' as const, goalId, expectedGeneration: selected!.generation, summary: intent.summary, evidence: [] as string[] }
@@ -112,6 +114,7 @@ function GoalBinding({ scope, embedded }: { scope: Scope; embedded?: boolean }) 
         ? { action: 'confirm' as const, goalId, expectedGeneration: intent.generation, outcome: intent.proposal.outcome }
         : { action: 'reject-proposal' as const, goalId, expectedGeneration: intent.generation }
       : kind === 'delete' && 'revision' in intent ? { action: 'delete' as const, goalId, expectedGeneration: intent.generation }
+      : kind === 'settings' && 'spec' in intent && 'generation' in intent ? { action: 'update' as const, goalId, expectedGeneration: intent.generation, title: intent.title, spec: intent.spec }
       : { action: 'control' as const, goalId, expectedGeneration: selected!.generation, status: (intent as AgentThreadGoalControlIntent).status, reason: 'User changed goal status' }
     s.lock = true; uncertainScopes.add(scopeKey); setPending(true); setError(null)
     let settle!: () => void
@@ -132,5 +135,5 @@ function GoalBinding({ scope, embedded }: { scope: Scope; embedded?: boolean }) 
       } finally { if (pendingMutations.get(scopeKey) === pendingMutation) pendingMutations.delete(scopeKey); settle(); if (isCurrent()) { s.lock = false; setPending(false) } }
     })()
   }
-  return <><AgentThreadGoalRecordsPanel embedded={embedded} createResetVersion={formVersion} reportAck={reportAck} view={view} pending={pending || unknown} error={error} onCreate={intent => mutate(intent, 'create')} onControl={intent => mutate(intent, 'control')} onReport={intent => mutate(intent, 'report')} onDecision={intent => mutate(intent, 'decision')} onDelete={intent => mutate(intent, 'delete')} />{!view && !pending && error ? <button type="button" onClick={() => { setPending(true); setError(unknown ? translate('chat.agent_goal.result_unknown', 'Result unknown. Review the refreshed goals before continuing.') : null); setLoadVersion(version => version + 1) }}>{translate('chat.agent_goal.retry_loading', 'Retry loading goals')}</button> : null}{unknown && !pending && view ? <button type="button" onClick={acknowledge}>{translate('chat.agent_goal.reviewed_goals', 'I reviewed the goals')}</button> : null}</>
+  return <><AgentThreadGoalRecordsPanel embedded={embedded} createResetVersion={formVersion} reportAck={reportAck} view={view} pending={pending || unknown} error={error} onCreate={intent => mutate(intent, 'create')} onControl={intent => mutate(intent, 'control')} onReport={intent => mutate(intent, 'report')} onDecision={intent => mutate(intent, 'decision')} onDelete={intent => mutate(intent, 'delete')} onSettings={intent => mutate(intent, 'settings')} />{!view && !pending && error ? <button type="button" onClick={() => { setPending(true); setError(unknown ? translate('chat.agent_goal.result_unknown', 'Result unknown. Review the refreshed goals before continuing.') : null); setLoadVersion(version => version + 1) }}>{translate('chat.agent_goal.retry_loading', 'Retry loading goals')}</button> : null}{unknown && !pending && view ? <button type="button" onClick={acknowledge}>{translate('chat.agent_goal.reviewed_goals', 'I reviewed the goals')}</button> : null}</>
 }

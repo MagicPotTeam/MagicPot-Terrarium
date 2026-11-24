@@ -7,7 +7,7 @@ import type { AgentThreadInteractionScope } from '@shared/api/agentThreadInterac
 import { AGENT_GOAL_LIMITS as LIMITS, type AgentGoalBinding, type AgentGoalCollection, type AgentGoalMutation, type AgentModelGoalMutation } from '@shared/api/agentThreadGoal'
 import type { CheckpointBinaryCodec } from '../figplugin/checkpointBinaryCodec'
 import { NodeSQLiteAdapter } from '../magicAgentPlatform2/persistence/sqliteAdapter'
-import { applyModelGoalMutation, applyUserGoalMutation, emptyAgentGoalCollection, validateAgentGoalCollection, validateAgentGoalMutation } from './agentThreadGoalPolicy'
+import { applyModelGoalMutation, applySystemGoalMutation, applyUserGoalMutation, emptyAgentGoalCollection, validateAgentGoalCollection, validateAgentGoalMutation, type AgentSystemGoalMutation } from './agentThreadGoalPolicy'
 
 export type GoalCheckpointCodec = CheckpointBinaryCodec & { available(): boolean }
 /** Persisted data only. This is not consent, a permit, or an execution capability. */
@@ -159,9 +159,14 @@ export class AgentThreadGoalStore {
     if (!binding || !['report', 'propose'].includes(request.action) || request.goalId !== binding.goalId || request.expectedGeneration !== binding.generation) throw new Error('Model goal mutation requires its current main-owned binding.')
     return this.mutate(scope, request, now, binding)
   }
-  private mutate(scope: AgentThreadInteractionScope, input: AgentGoalMutation, now: number, binding?: AgentGoalBinding): AgentGoalCollection {
+  /** MAIN goal driver only: pause or block an active goal (never reachable from a renderer or model). */
+  mutateSystem(scope: AgentThreadInteractionScope, request: AgentSystemGoalMutation, now = Date.now()): AgentGoalCollection {
+    if (request?.action !== 'control' || !['paused', 'blocked'].includes(request.status)) throw new Error('System goal mutation may only pause or block a goal.')
+    return this.mutate(scope, request, now, undefined, true)
+  }
+  private mutate(scope: AgentThreadInteractionScope, input: AgentGoalMutation, now: number, binding?: AgentGoalBinding, system = false): AgentGoalCollection {
     validateAgentGoalMutation(input); const request = structuredClone(input), key = owner(scope)
-    const role = binding ? 'model' : 'user'
+    const role = system ? 'system' : binding ? 'model' : 'user'
     const operationHash = hash([key, role, request.operationId])
     // Canonical field ordering, independent of RPC object property order.
     const payload = Object.fromEntries(Object.entries(request).filter(([name]) => name !== 'operationId').sort(([a], [b]) => a.localeCompare(b)))
@@ -175,7 +180,7 @@ export class AgentThreadGoalStore {
       if (binding && !current.goals.some(goal => goal.id === binding.goalId && goal.generation === binding.generation && ['active', 'waiting', 'blocked'].includes(goal.status))) throw new Error('Model goal binding is no longer current.')
       const replay = current.receipts.find(receipt => receipt.operationHash === operationHash)
       if (replay) { if (replay.digest !== digest) throw new Error('Goal replay conflict.'); this.db.exec('COMMIT'); return current }
-      const next = binding ? applyModelGoalMutation(current, request as AgentModelGoalMutation, binding, now) : applyUserGoalMutation(current, request, now)
+      const next = system ? applySystemGoalMutation(current, request as AgentSystemGoalMutation, now) : binding ? applyModelGoalMutation(current, request as AgentModelGoalMutation, binding, now) : applyUserGoalMutation(current, request, now)
       next.receipts = [...current.receipts, { operationHash, digest }].slice(-LIMITS.receipts)
       validateAgentGoalCollection(next)
       const total = this.db.get('SELECT count(*) AS n,coalesce(sum(length(cipher)),0) AS bytes FROM goals')!

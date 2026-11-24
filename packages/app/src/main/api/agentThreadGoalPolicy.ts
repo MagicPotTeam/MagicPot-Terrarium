@@ -12,7 +12,7 @@ const id = { type: 'string', pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89
 const hash = { type: 'string', pattern: '^[a-f0-9]{64}$' }
 const strings = { type: 'array', maxItems: LIMITS.listItems, items: text(LIMITS.listItem) }
 const budgets = object({ maxTurns: integer(1, LIMITS.maxTurns), maxToolCalls: integer(1, LIMITS.maxToolCalls), maxWalltimeSeconds: integer(1, LIMITS.maxWalltimeSeconds) })
-const specSchema = object({ objective: text(LIMITS.objective), successCriteria: strings, constraints: strings, autonomy: { const: 'manual' }, completionPolicy: { const: 'user_confirm' }, budgets })
+const specSchema = object({ objective: text(LIMITS.objective), successCriteria: strings, constraints: strings, autonomy: { enum: ['manual', 'continue_when_ready'] }, completionPolicy: { enum: ['user_confirm', 'self_propose', 'verifier'] }, budgets })
 const statuses: AgentGoalStatus[] = ['draft', 'active', 'waiting', 'blocked', 'paused', 'cancelled', 'completed', 'failed']
 const terminal = (status: AgentGoalStatus) => ['cancelled', 'completed', 'failed'].includes(status)
 const report = { summary: text(LIMITS.summary), evidence: strings }
@@ -41,6 +41,8 @@ const checkSpecText = (spec: AgentGoalSpec) => nonblank(spec.objective) && [...s
 export function normalizeAgentGoalSpec(value: unknown): AgentGoalSpec {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['objective', 'successCriteria', 'constraints', 'autonomy', 'completionPolicy', 'budgets'].includes(key))) throw new Error('Invalid manual goal specification.')
   const source = value as Partial<AgentGoalSpec>
+  // A self-advancing goal never runs on a default budget: its max_turns is the user's own number.
+  if (source.autonomy === 'continue_when_ready' && (!source.budgets || typeof source.budgets !== 'object' || !Number.isSafeInteger((source.budgets as { maxTurns?: unknown }).maxTurns))) throw new Error('A goal that continues by itself needs a max turns budget.')
   const spec = { ...source, successCriteria: source.successCriteria === undefined ? [] : source.successCriteria, constraints: source.constraints === undefined ? [] : source.constraints, autonomy: source.autonomy === undefined ? 'manual' : source.autonomy, completionPolicy: source.completionPolicy === undefined ? 'user_confirm' : source.completionPolicy, budgets: source.budgets === undefined ? { maxTurns: 5, maxToolCalls: 50, maxWalltimeSeconds: 300 } : source.budgets }
   if (!validSpec(spec) || !checkSpecText(spec as AgentGoalSpec)) throw new Error('Invalid or unsupported manual goal specification.')
   return { ...structuredClone(spec) as AgentGoalSpec, objective: spec.objective!.trim(), constraints: spec.constraints.map(item => item.trim()), successCriteria: spec.successCriteria.map(item => item.trim()) }
@@ -87,7 +89,12 @@ function reduce(document: AgentGoalCollection, req: AgentGoalMutation, now: numb
       if (terminal(goal.status)) throw new Error('Terminal goal cannot be mutated.')
       if (goal.generation >= Number.MAX_SAFE_INTEGER) throw new Error('Goal generation exhausted.')
       if (req.action === 'update') {
-        Object.assign(goal, { title: req.title.trim(), spec: normalizeAgentGoalSpec(req.spec), generation: goal.generation + 1, reason: '' }); delete goal.proposal; delete goal.progress
+        const spec = normalizeAgentGoalSpec(req.spec), title = req.title.trim()
+        // Only autonomy, completion policy or budgets changed (the user's settings): the goal's
+        // progress and proposal stay. A new objective, title or criteria starts them over.
+        const settingsOnly = title === goal.title && JSON.stringify([spec.objective, spec.successCriteria, spec.constraints]) === JSON.stringify([goal.spec.objective, goal.spec.successCriteria, goal.spec.constraints])
+        Object.assign(goal, { title, spec, generation: goal.generation + 1, reason: '' })
+        if (!settingsOnly) { delete goal.proposal; delete goal.progress }
       } else if (req.action === 'control') {
         if (!transitions[goal.status].includes(req.status)) throw new Error('Invalid goal state transition.')
         goal.status = req.status; goal.reason = req.reason.trim(); goal.generation++; delete goal.proposal
@@ -97,6 +104,13 @@ function reduce(document: AgentGoalCollection, req: AgentGoalMutation, now: numb
         else {
           if (!req.evidence.length) throw new Error('Goal proposal requires evidence, not an assertion.')
           goal.proposal = { outcome: req.outcome, summary: req.summary.trim(), evidence: req.evidence.map(item => item.trim()), proposedAt: timestamp }
+          // KohakuTerrarium verify_terminal: self_propose accepts the proposal; verifier accepts it
+          // when it carries evidence. user_confirm (the default) waits for the user's confirm.
+          const policy = goal.spec.completionPolicy
+          if (policy === 'self_propose' || policy === 'verifier' && goal.proposal.evidence.length) {
+            goal.status = req.outcome; goal.generation++
+            goal.reason = policy === 'self_propose' ? 'Accepted by the self_propose completion policy.' : 'Accepted by the verifier completion policy (evidence present).'
+          }
         }
       } else if (req.action === 'confirm') {
         if (goal.proposal?.outcome !== req.outcome) throw new Error('Goal confirmation does not match the current proposal.')
@@ -116,6 +130,16 @@ function reduce(document: AgentGoalCollection, req: AgentGoalMutation, now: numb
   return next
 }
 export const applyUserGoalMutation = (document: AgentGoalCollection, req: AgentGoalMutation, now: number): AgentGoalCollection => reduce(document, req, now)
+/** MAIN's goal driver only (never a model or renderer request): an active goal is paused (the
+ * user stopped its step, like KT's user-interrupt pause) or blocked (its steps kept failing). */
+export type AgentSystemGoalMutation = Extract<AgentGoalMutation, { action: 'control' }> & { status: 'paused' | 'blocked' }
+export function applySystemGoalMutation(document: AgentGoalCollection, req: AgentSystemGoalMutation, now: number): AgentGoalCollection {
+  validateAgentGoalMutation(req)
+  if (req.action !== 'control' || !['paused', 'blocked'].includes(req.status)) throw new Error('System goal mutation may only pause or block a goal.')
+  const goal = document.goals.find(item => item.id === req.goalId)
+  if (goal?.status !== 'active') throw new Error('System goal mutation applies only to an active goal.')
+  return reduce(document, req, now)
+}
 export function applyModelGoalMutation(document: AgentGoalCollection, req: AgentModelGoalMutation, binding: AgentGoalBinding, now: number): AgentGoalCollection {
   validateAgentGoalMutation(req)
   if (!['report', 'propose'].includes(req.action) || !binding || req.goalId !== binding.goalId || req.expectedGeneration !== binding.generation) throw new Error('Model goal mutation is outside its current main-owned binding.')

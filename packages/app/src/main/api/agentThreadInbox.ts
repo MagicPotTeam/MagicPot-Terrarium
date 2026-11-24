@@ -192,6 +192,11 @@ export class AgentThreadInbox {
   private readonly seen = new Map<string, number>()
   /** MAIN wiring: a pane's pump started listing again (its project opened). */
   onOpen?: () => void
+  /** Admitted request -> the event it started (MAIN only; never a request field). */
+  private readonly admitted = new WeakMap<
+    object,
+    { type: AgentThreadEventType; idempotencyKey?: string; storageScope: string }
+  >()
 
   constructor(options: { store?: ThreadInboxStoreOpener; clock?: () => number } = {}) {
     this.opener = options.store ?? productionOpener()
@@ -206,6 +211,25 @@ export class AgentThreadInbox {
   isOpen(storageScope: string, routeKey: string, windowMs = THREAD_PANE_OPEN_WINDOW_MS): boolean {
     const at = this.seen.get(JSON.stringify([storageScope, routeKey]))
     return at !== undefined && this.clock() - at <= windowMs
+  }
+
+  /** MAIN-only: the user stopped this session (its events wait until it runs again). */
+  isSessionHeld(
+    input: Pick<AgentThreadEventInput, 'route' | 'storageScope' | 'conversationId'>
+  ): boolean {
+    const session = this.session(input, input.conversationId)
+    const store = this.opener.open(false)
+    return store?.isHeld(session) ?? false
+  }
+
+  /**
+   * MAIN-only: the event an admitted request (the object admitEvent returned) started, with its
+   * producer's idempotency key (S5 binds a goal step by it). Undefined for any other request.
+   */
+  admittedEvent(
+    req: object
+  ): { type: AgentThreadEventType; idempotencyKey?: string; storageScope: string } | undefined {
+    return this.admitted.get(req)
   }
 
   /** MAIN-only: an event with this idempotency key still waits (queued or claimed) in the session. */
@@ -601,6 +625,7 @@ export class AgentThreadInbox {
     if (!Object.hasOwn(req, 'threadEvent')) return req
     const { threadEvent: delivery, ...rest } = req
     let type: AgentThreadEventType
+    let started: { type: AgentThreadEventType; idempotencyKey?: string; storageScope: string }
     let busy = false
     try {
       const senderId = invocation?.senderId
@@ -654,11 +679,20 @@ export class AgentThreadInbox {
       // One turn delivers the whole stack: all done in one transaction, or none.
       store.startMany(lease.group)
       type = entry.event.type
+      started = {
+        type,
+        storageScope: entry.event.storageScope,
+        ...(entry.event.idempotencyKey === undefined
+          ? {}
+          : { idempotencyKey: entry.event.idempotencyKey })
+      }
       this.dropLease(delivery.id)
     } catch {
       throw new Error(busy ? THREAD_EVENT_BUSY : THREAD_EVENT_UNAVAILABLE)
     }
-    return { ...rest, threadEventOrigin: type } as T
+    const admitted = { ...rest, threadEventOrigin: type } as T
+    this.admitted.set(admitted, started)
+    return admitted
   }
 
   /** Stops watching every sender and closes the file. Claims stay (like a process exit). */

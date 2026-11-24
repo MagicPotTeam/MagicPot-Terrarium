@@ -3,11 +3,19 @@ import { useTranslation } from 'react-i18next'
 import { Alert, Box, Button, TextField, Typography } from '@mui/material'
 import {
   AGENT_GOAL_LIMITS,
+  type AgentGoal,
   type AgentGoalProposal,
   type AgentGoalSpec,
   type AgentGoalStatus,
   type AgentGoalView
 } from '@shared/api/agentThreadGoal'
+import { AgentThreadGoalSettingsFields } from './AgentThreadGoalSettingsFields'
+import {
+  defaultGoalSettings,
+  goalSettingsBudgets,
+  goalSettingsOf,
+  type AgentThreadGoalSettings
+} from './agentThreadGoalSettings'
 
 export type AgentThreadGoalCreateIntent = { title: string; spec: AgentGoalSpec }
 export type AgentThreadGoalReportIntent = { goalId: string; summary: string }
@@ -23,6 +31,13 @@ export type AgentThreadGoalDecisionIntent = {
 }
 /** A delete applies to exactly the goal, revision and generation its confirmation was opened at. */
 export type AgentThreadGoalDeleteIntent = { goalId: string; revision: number; generation: number }
+/** The user's own settings change (autonomy, completion policy, budgets) of exactly this generation. */
+export type AgentThreadGoalSettingsIntent = {
+  goalId: string
+  generation: number
+  title: string
+  spec: AgentGoalSpec
+}
 /** The statuses MAIN deletes; an active, waiting or blocked goal is paused first. */
 const deletable: readonly AgentGoalStatus[] = [
   'draft',
@@ -48,6 +63,8 @@ export type AgentThreadGoalRecordsPanelProps = {
   onDecision?: (intent: AgentThreadGoalDecisionIntent) => void
   /** Without it the view offers no delete. */
   onDelete?: (intent: AgentThreadGoalDeleteIntent) => void
+  /** Without it the view offers no settings change. */
+  onSettings?: (intent: AgentThreadGoalSettingsIntent) => void
   createResetVersion?: number
   reportAck?: AgentThreadGoalReportAck
   /**
@@ -67,6 +84,7 @@ export default function AgentThreadGoalRecordsPanel({
   onReport,
   onDecision,
   onDelete,
+  onSettings,
   createResetVersion = 0,
   reportAck,
   embedded = false
@@ -78,6 +96,32 @@ export default function AgentThreadGoalRecordsPanel({
     return resolved.replace(/{{(\w+)}}/g, (_, name: string) => String(values[name] ?? `{{${name}}}`))
   }
   const statusLabel = (status: string) => translate(`chat.agent_goal.status_${status}`, status)
+  const [editing, setEditing] = useState<{
+    goalId: string
+    generation: number
+    settings: AgentThreadGoalSettings
+  } | null>(null)
+  const settingsLine = (goal: AgentGoal) => {
+    const autonomy = goal.spec.autonomy === 'continue_when_ready'
+      ? translate('chat.agent_goal.autonomy_continue', 'Continue when ready')
+      : translate('chat.agent_goal.autonomy_manual', 'Manual')
+    const completion = translate(`chat.agent_goal.completion_${goal.spec.completionPolicy}`, {
+      user_confirm: 'I confirm',
+      self_propose: 'Agent completes it',
+      verifier: 'Agent completes it with evidence'
+    }[goal.spec.completionPolicy])
+    return translate('chat.agent_goal.settings_line', `${autonomy} · completion: ${completion}`, { autonomy, completion })
+  }
+  const usageLine = (goal: AgentGoal) => {
+    const usage = view?.drive?.[goal.id]
+    if (!usage) return null
+    const { maxTurns, maxToolCalls, maxWalltimeSeconds } = goal.spec.budgets
+    const values = {
+      turns: usage.turnsUsed, maxTurns, calls: usage.toolCallsUsed, maxCalls: maxToolCalls,
+      minutes: Math.floor(usage.walltimeUsedSeconds / 60), maxMinutes: Math.round(maxWalltimeSeconds / 60)
+    }
+    return translate('chat.agent_goal.usage_line', `Turns ${values.turns}/${maxTurns} · tool calls ${values.calls}/${maxToolCalls} · time ${values.minutes}/${values.maxMinutes} min`, values)
+  }
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const headingId = useId()
   const consumed = React.useRef(0)
@@ -206,7 +250,7 @@ export default function AgentThreadGoalRecordsPanel({
         </Typography>
       )}
       <Typography variant="caption" display={embedded ? 'block' : undefined}>
-        {translate('chat.agent_goal.panel_notice', 'Manual records only. Activating a goal does not run a model or grant permissions.')}
+        {translate('chat.agent_goal.panel_notice', 'A manual goal is a record: activating it runs nothing. An active goal set to continue when ready runs one step at a time while this project is open, within its budgets; steps grant no permissions.')}
       </Typography>
       {error ? <Alert severity="error">{error}</Alert> : null}
       {!view && !error ? <Typography>{translate('chat.agent_goal.unavailable', 'Goals unavailable.')}</Typography> : null}
@@ -241,6 +285,28 @@ export default function AgentThreadGoalRecordsPanel({
               {goal.spec.objective}
             </Typography>
             <Typography variant="caption">{translate('chat.agent_goal.status', `Status: ${goal.status}`, { status: statusLabel(goal.status) })}</Typography>
+            <Typography variant="caption" display="block" data-testid="agent-goal-settings-line">
+              {settingsLine(goal)}
+            </Typography>
+            {usageLine(goal) ? (
+              <Typography variant="caption" display="block" data-testid="agent-goal-usage-line">
+                {usageLine(goal)}
+              </Typography>
+            ) : null}
+            {view.drive?.[goal.id]?.exhausted && goal.spec.autonomy === 'continue_when_ready' && goal.status === 'active' ? (
+              <Typography variant="caption" display="block" color="warning.main">
+                {translate(`chat.agent_goal.exhausted_${view.drive[goal.id].exhausted}`, {
+                  turns: 'The turn budget is used up: no more steps run until you raise it.',
+                  toolCalls: 'The tool-call budget is used up: no more steps run until you raise it.',
+                  walltime: 'The time budget is used up: no more steps run until you raise it.'
+                }[view.drive[goal.id].exhausted!])}
+              </Typography>
+            ) : null}
+            {goal.proposal && goal.spec.autonomy === 'continue_when_ready' && goal.status === 'active' ? (
+              <Typography variant="caption" display="block">
+                {translate('chat.agent_goal.steps_wait_for_decision', 'Steps wait until you confirm or reject the proposal.')}
+              </Typography>
+            ) : null}
             {goal.progress ? (
               <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
                 {translate('chat.agent_goal.progress', `Progress: ${goal.progress.summary}`, { summary: goal.progress.summary })}
@@ -382,6 +448,15 @@ export default function AgentThreadGoalRecordsPanel({
                       {translate('chat.agent_goal.pause_for', `Pause ${label}`, { label })}
                     </Button>
                   ) : null}
+                  {onSettings && !['cancelled', 'completed', 'failed'].includes(goal.status) && editing?.goalId !== goal.id ? (
+                    <Button
+                      size="small"
+                      disabled={pending}
+                      onClick={() => setEditing({ goalId, generation, settings: goalSettingsOf(goal.spec) })}
+                    >
+                      {translate('chat.agent_goal.settings_for', `Settings for ${label}`, { label })}
+                    </Button>
+                  ) : null}
                   {onDelete && deletable.includes(goal.status) ? (
                     <Button
                       ref={(node: HTMLButtonElement | null) => {
@@ -406,6 +481,40 @@ export default function AgentThreadGoalRecordsPanel({
                 </>
               )}
             </Box>
+            {onSettings && editing?.goalId === goal.id && editing.generation === goal.generation ? (
+              <Box
+                component="form"
+                aria-label={translate('chat.agent_goal.settings_for', `Settings for ${label}`, { label })}
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  const budgets = goalSettingsBudgets(editing.settings)
+                  if (pending || !budgets) return
+                  onSettings({
+                    goalId,
+                    generation,
+                    title: goal.title,
+                    spec: { ...goal.spec, autonomy: editing.settings.autonomy, completionPolicy: editing.settings.completionPolicy, budgets }
+                  })
+                  setEditing(null)
+                }}
+                sx={{ display: 'flex', flexDirection: 'column', gap: 1, mt: 1 }}
+              >
+                <AgentThreadGoalSettingsFields
+                  idPrefix={`goal-settings-${goalId}`}
+                  settings={editing.settings}
+                  onChange={(settings) => setEditing({ ...editing, settings })}
+                  disabled={pending}
+                />
+                <Box>
+                  <Button type="submit" size="small" disabled={pending || !goalSettingsBudgets(editing.settings)}>
+                    {translate('chat.agent_goal.save_settings_for', `Save settings for ${label}`, { label })}
+                  </Button>
+                  <Button size="small" disabled={pending} onClick={() => setEditing(null)}>
+                    {translate('chat.cancel', 'Cancel')}
+                  </Button>
+                </Box>
+              </Box>
+            ) : null}
             {onReport && ['active', 'waiting', 'blocked'].includes(goal.status) ? (
               <Box
                 component="form"
@@ -484,9 +593,12 @@ function CreateGoalForm({
   }
   const [title, setTitle] = useState('')
   const [objective, setObjective] = useState('')
+  const [settings, setSettings] = useState(defaultGoalSettings)
+  const budgets = goalSettingsBudgets(settings)
   const canCreate = Boolean(
     view &&
     !pending &&
+    budgets &&
     title.trim() &&
     objective.trim() &&
     title.length <= AGENT_GOAL_LIMITS.title &&
@@ -505,9 +617,9 @@ function CreateGoalForm({
             objective: objective.trim(),
             successCriteria: [],
             constraints: [],
-            autonomy: 'manual',
-            completionPolicy: 'user_confirm',
-            budgets: { maxTurns: 10, maxToolCalls: 50, maxWalltimeSeconds: 3600 }
+            autonomy: settings.autonomy,
+            completionPolicy: settings.completionPolicy,
+            budgets: budgets!
           }
         })
       }}
@@ -540,6 +652,12 @@ function CreateGoalForm({
         inputProps={{ maxLength: AGENT_GOAL_LIMITS.objective }}
         multiline
         size="small"
+      />
+      <AgentThreadGoalSettingsFields
+        idPrefix="goal-create"
+        settings={settings}
+        onChange={setSettings}
+        disabled={pending || !view}
       />
       {view && view.goals.length >= AGENT_GOAL_LIMITS.goals ? (
         <Typography variant="caption">

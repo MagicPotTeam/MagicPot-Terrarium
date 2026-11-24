@@ -15,9 +15,13 @@ const setup = () => {
   return { initial, draft, active, goalId, binding: { goalId, generation: 2 } }
 }
 describe('manual user-confirm goal data policy (not execution admission)', () => {
-  it('defaults only omitted fields, rejects unsupported autonomy/policies and unknown or null fields', () => {
+  it('defaults only omitted fields, rejects continue_when_ready without max_turns and unknown or null fields', () => {
     expect(spec()).toEqual({ objective: 'Review the actual outcome', successCriteria: [], constraints: [], autonomy: 'manual', completionPolicy: 'user_confirm', budgets: { maxTurns: 5, maxToolCalls: 50, maxWalltimeSeconds: 300 } })
-    for (const extra of [{ autonomy: 'continue_when_ready' }, { completionPolicy: 'self_propose' }, { completionPolicy: 'verifier' }, { autonomy: null }, { budgets: null }, { successCriteria: null }, { owner: 'other' }, { budgets: { maxTurns: true } }, { constraints: [' '] }, { objective: '\0' }]) expect(() => normalizeAgentGoalSpec({ objective: 'x', ...extra })).toThrow()
+    // S5 decision A: self_propose and verifier are opt-in policies (the user's choice).
+    for (const completionPolicy of ['self_propose', 'verifier'] as const) expect(normalizeAgentGoalSpec({ objective: 'x', completionPolicy }).completionPolicy).toBe(completionPolicy)
+    // S5 addition 1: a self-advancing goal names its max_turns; it is never defaulted.
+    expect(normalizeAgentGoalSpec({ objective: 'x', autonomy: 'continue_when_ready', budgets: { maxTurns: 3, maxToolCalls: 5, maxWalltimeSeconds: 60 } }).budgets.maxTurns).toBe(3)
+    for (const extra of [{ autonomy: 'continue_when_ready' }, { autonomy: 'continue_when_ready', budgets: { maxToolCalls: 5 } }, { autonomy: 'scheduled' }, { completionPolicy: 'auto' }, { autonomy: null }, { budgets: null }, { successCriteria: null }, { owner: 'other' }, { budgets: { maxTurns: true } }, { constraints: [' '] }, { objective: '\0' }]) expect(() => normalizeAgentGoalSpec({ objective: 'x', ...extra })).toThrow()
   })
   it('requires evidence for proposals and never treats a report/proposal as terminal confirmation', () => {
     const t = setup(), request = { action: 'propose' as const, goalId: t.goalId, expectedRevision: 2, expectedGeneration: 2, operationId: 'proposal', summary: 'Possibly done', outcome: 'completed' as const, evidence: ['historical receipt, not independently verified'] }

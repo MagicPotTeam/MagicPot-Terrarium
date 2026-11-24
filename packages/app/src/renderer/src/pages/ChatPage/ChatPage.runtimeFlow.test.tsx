@@ -6871,9 +6871,7 @@ describe('ChatPage runtime workflow integration', () => {
         documentToken: 'goal-document'
       })
       expect(
-        screen.getByText(
-          'Manual records only. Activating a goal does not run a model or grant permissions.'
-        )
+        screen.getByText(/A manual goal is a record: activating it runs nothing\./)
       ).toBeVisible()
       expect(hoisted.requestChatCompletionMock).not.toHaveBeenCalled()
       await dispatchSwitchSession(second.id)
