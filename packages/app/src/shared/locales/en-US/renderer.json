@@ -1214,7 +1214,7 @@
     },
     "agent_goal": {
       "panel_title": "Thread goals",
-      "panel_notice": "Manual records only. Activating a goal does not run a model or grant permissions.",
+      "panel_notice": "A manual goal is a record: activating it runs nothing. An active goal set to continue when ready runs one step at a time while this project is open, within its budgets; steps grant no permissions.",
       "unavailable": "Goals unavailable.",
       "no_goals": "No goals yet.",
       "status": "Status: {{status}}",
@@ -1300,7 +1300,25 @@
       "dispatch_capacity": "Retained lifetime accounting capacity is full. No record purge or automatic new execution namespace is available.",
       "dispatch_charged": "Charged delegate calls",
       "dispatch_generation": "Goal generation",
-      "create": "Create draft record (no execution)"
+      "create": "Create draft record (no execution)",
+      "autonomy_label": "Autonomy",
+      "autonomy_manual": "Manual",
+      "autonomy_continue": "Continue when ready",
+      "completion_label": "Completion",
+      "completion_user_confirm": "I confirm",
+      "completion_self_propose": "Agent completes it",
+      "completion_verifier": "Agent completes it with evidence",
+      "max_turns_label": "Max turns",
+      "max_tool_calls_label": "Max tool calls",
+      "max_walltime_label": "Max time (minutes)",
+      "settings_line": "{{autonomy}} · completion: {{completion}}",
+      "usage_line": "Turns {{turns}}/{{maxTurns}} · tool calls {{calls}}/{{maxCalls}} · time {{minutes}}/{{maxMinutes}} min",
+      "exhausted_turns": "The turn budget is used up: no more steps run until you raise it.",
+      "exhausted_toolCalls": "The tool-call budget is used up: no more steps run until you raise it.",
+      "exhausted_walltime": "The time budget is used up: no more steps run until you raise it.",
+      "steps_wait_for_decision": "Steps wait until you confirm or reject the proposal.",
+      "settings_for": "Settings for {{label}}",
+      "save_settings_for": "Save settings for {{label}}"
     },
     "agent_memory": {
       "search_notice": "The Agent can explicitly search this conversation's saved message and tool-result text. Only excerpts are returned; arguments, metadata, hidden context and attachments are excluded. Keyword matching is not semantic search. BM25 ranks only an explicitly bounded scan window, with partial/omission metadata; it is not a persistent FTS index or embeddings. Historical status is not proof of current success. Do not put secrets in tool output.",
@@ -1716,7 +1734,8 @@
       "idle": "Idle"
     },
     "team_live_unknown_tool": "Unknown tool",
-    "team_member_default_name": "Member"
+    "team_member_default_name": "Member",
+    "thread_event_goal_step": "Triggered by goal {{title}} · step {{step}} / {{maxTurns}}"
   },
   "agent_workspace": {
     "refresh_threads": "Refresh sessions",

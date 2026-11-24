@@ -57,11 +57,14 @@ describe('thread goal records pure panel', () => {
     // The card names the view in its header: the panel does not repeat it.
     expect(screen.queryByText('Thread goals')).toBeNull()
     expect(getComputedStyle(panel).borderStyle).not.toBe('solid')
-    expect(panel).toHaveTextContent('Manual records only.')
+    expect(panel).toHaveTextContent('A manual goal is a record: activating it runs nothing.')
     // Fields and the button share wrapping rows.
     const form = screen.getByRole('button', { name: 'Create draft' }).closest('form')!
     expect(form).toHaveStyle({ display: 'flex', flexWrap: 'wrap' })
-    expect(within(form).getAllByRole('textbox')).toHaveLength(2)
+    // Title, objective, and the user's own budgets (max turns pre-filled 10); autonomy and policy.
+    expect(within(form).getAllByRole('textbox')).toHaveLength(5)
+    expect(within(form).getByRole('textbox', { name: 'Max turns' })).toHaveValue('10')
+    expect(within(form).getAllByRole('combobox')).toHaveLength(2)
   })
 
   it('renders empty and unavailable/error states without calling IPC', () => {
@@ -70,7 +73,7 @@ describe('thread goal records pure panel', () => {
         <AgentThreadGoalRecordsPanel view={view()} pending={false} error={null} {...cb} />
       )
     expect(screen.getByText('No goals yet.')).toBeInTheDocument()
-    expect(screen.getByText(/does not run a model or grant permissions/)).toBeInTheDocument()
+    expect(screen.getByText(/steps grant no permissions/)).toBeInTheDocument()
     page.rerender(
       <AgentThreadGoalRecordsPanel view={null} pending={false} error="Unavailable" {...cb} />
     )

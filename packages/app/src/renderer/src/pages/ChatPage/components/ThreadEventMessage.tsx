@@ -2,6 +2,29 @@ import React from 'react'
 import { Box, Typography } from '@mui/material'
 import type { TFunction } from 'i18next'
 import { threadEventDisplayText, type AgentThreadEventOrigin } from '@shared/api/agentThreadInbox'
+import { parseAgentGoalEventSource } from '@shared/api/agentThreadGoal'
+
+/**
+ * The banner title. A goal step (drive_ready, source "n/max title" written by MAIN) reads like
+ * KohakuTerrarium's goal event: "Triggered by goal {title}" and "step n / max turns", so the user
+ * sees what runs and how much is left.
+ */
+function bannerTitle(origin: AgentThreadEventOrigin, t: TFunction<'translation'>): string {
+  const goal = origin.type === 'drive_ready' ? parseAgentGoalEventSource(origin.source) : undefined
+  if (goal)
+    return t('chat.thread_event_goal_step', {
+      title: goal.title,
+      step: goal.step,
+      maxTurns: goal.maxTurns,
+      defaultValue: 'Triggered by goal {{title}} · step {{step}} / {{maxTurns}}',
+      interpolation: { escapeValue: false }
+    })
+  return t('chat.thread_event_triggered_by', {
+    source: origin.source,
+    defaultValue: 'Triggered by {{source}}',
+    interpolation: { escapeValue: false }
+  })
+}
 
 /**
  * An injected thread event turn, shown like KohakuTerrarium's trigger transcript row (VS Code
@@ -36,11 +59,7 @@ const ThreadEventMessage: React.FC<{
         data-testid="chat-thread-event-title"
         sx={{ fontWeight: 700, wordBreak: 'break-word' }}
       >
-        {t('chat.thread_event_triggered_by', {
-          source: origin.source,
-          defaultValue: 'Triggered by {{source}}',
-          interpolation: { escapeValue: false }
-        })}
+        {bannerTitle(origin, t)}
       </Typography>
       <Typography
         variant="body2"

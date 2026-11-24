@@ -1,6 +1,13 @@
 import { AgentTeamMessageQueue } from './agentTeamMessageQueue'
 import { createJobReportSink } from './agentThreadJobReportSink'
 import { AgentThreadTriggers, lazyThreadTriggerStoreOpener } from './agentThreadTriggers'
+import {
+  AgentThreadGoalDriver,
+  GOAL_STEP_UNAVAILABLE,
+  goalStepEnd,
+  lazyGoalDriveLedgerOpener,
+  type GoalStep
+} from './agentThreadGoalDrive'
 import { getBuildEnv } from '../config/buildEnv'
 import { join } from 'node:path'
 import type {
@@ -40,10 +47,11 @@ import {
 } from '../magicAgentPlatform2/agents/managedRuntimeSnapshot'
 import { isProxy } from 'node:util/types'
 import { agentThreadGoalProgress, type AgentGoalProgressContext } from './agentThreadGoalProgress'
-import { agentThreadGoals } from './agentThreadGoals'
+import { agentThreadGoals, getAgentThreadGoalStore } from './agentThreadGoals'
 import { agentGoalScopeRevision, setAgentGoalScope } from './agentThreadGoalScope'
 import type {
   AgentGoalScope,
+  AgentGoalView,
   AgentGoalScopeReq,
   AgentGoalShareReq,
   AgentGoalMutationReq
@@ -2275,6 +2283,32 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       isOpen: (storageScope, routeKey) => this.threadInbox.isOpen(storageScope, routeKey)
     }
   })
+  /**
+   * S5 goals that advance by themselves: one drive_ready step at a time into the goal's session,
+   * only while its pane is open and the session is not held; budgets are enforced here in MAIN.
+   */
+  private readonly goalDriver = new AgentThreadGoalDriver({
+    ledger: lazyGoalDriveLedgerOpener(() =>
+      join(getBuildEnv().pathMap.data, 'thread-goal-drive', 'drive.sqlite')
+    ),
+    goals: getAgentThreadGoalStore,
+    inbox: {
+      enqueue: (input) => this.threadInbox.enqueue(input),
+      isPending: (session, key) => this.threadInbox.isPending(session, key),
+      isOpen: (storageScope, routeKey) => this.threadInbox.isOpen(storageScope, routeKey),
+      isSessionHeld: (session) => this.threadInbox.isSessionHeld(session),
+      withdraw: (session, key, reason) => this.threadInbox.withdraw(session, key, reason)
+    }
+  })
+  /** The goal step an admitted drive_ready request runs (bound in MAIN before any set-up). */
+  private async bindGoalStep(req: LLMChatReq): Promise<GoalStep | undefined> {
+    const admitted = this.threadInbox.admittedEvent(req)
+    if (admitted?.type !== 'drive_ready') return undefined
+    // Budgets are enforced at the local canvas admission: a remote model path has none, so a goal
+    // step never runs there (refused before anything is charged).
+    if (getConfig().use_remote_llm) throw new Error(GOAL_STEP_UNAVAILABLE)
+    return this.goalDriver.bindStep(req, admitted)
+  }
   /** A conversation whose request still owns its abort controller (a running turn). */
   private readonly isConversationBusy = (conversationId: string): boolean => {
     const owner = this.conversationAbortControllers.get(conversationId.trim())
@@ -2302,6 +2336,11 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       this.threadTriggers.removeSession(req.route, req.conversationId)
     } catch {
       /* Unreadable trigger file: nothing fires from it either. */
+    }
+    try {
+      this.goalDriver.removeSession(req.route, req.conversationId)
+    } catch {
+      /* Unreadable goal step file: nothing steps from it either. */
     }
     return result
   }
@@ -2347,10 +2386,26 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   ) => agentGoalScopeRevision(req, invocation)
   setAgentGoalScope = async (req: AgentGoalScopeReq, invocation?: ServiceInvocationContext) =>
     setAgentGoalScope(req, invocation)
-  listAgentGoals = (req: AgentGoalScope, invocation?: ServiceInvocationContext) =>
-    agentThreadGoals.list(req, invocation)
-  mutateAgentGoal = (req: AgentGoalMutationReq, invocation?: ServiceInvocationContext) =>
-    agentThreadGoals.mutate(req, invocation)
+  listAgentGoals = async (req: AgentGoalScope, invocation?: ServiceInvocationContext) =>
+    this.withGoalDrive(req, await agentThreadGoals.list(req, invocation))
+  mutateAgentGoal = async (req: AgentGoalMutationReq, invocation?: ServiceInvocationContext) => {
+    const result = await agentThreadGoals.mutate(req, invocation)
+    return result.status === 'applied' ? this.withGoalDrive(req, result) : result
+  }
+  /** After the user's own (authorized) list or change: index self-advancing goals, add their use. */
+  private withGoalDrive<T extends AgentGoalView>(req: AgentGoalScope, view: T): T {
+    try {
+      this.goalDriver.sync(req.route, req.conversationId, view.goals)
+      const drive = this.goalDriver.usage(req.route, req.conversationId, view.goals)
+      return drive ? { ...view, drive } : view
+    } catch (error) {
+      console.warn(
+        '[GoalDrive] Goal steps are not indexed for now.',
+        String(error instanceof Error ? error.message : error).slice(0, 200)
+      )
+      return view
+    }
+  }
   // Identity DATA endpoints only; neither a managed run nor a policy grant is started here.
   managedFirstRunPaneRevision = async (
     req: AgentThreadInteractionScope,
@@ -2434,7 +2489,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
   constructor(executionPolicy: { retryModelCapacity?: false } = {}) {
     this.retryModelCapacity = executionPolicy.retryModelCapacity !== false
     // S3: finished background work wakes the session that started it (one job_done per job).
-    this.threadInbox.onOpen = () => this.threadTriggers.start()
+    this.threadInbox.onOpen = () => {
+      this.threadTriggers.start()
+      this.goalDriver.start()
+    }
     const reports = createJobReportSink(this.threadInbox)
     agentThreadJobs.reportTo(reports)
     agentThreadProcesses.reportTo(reports)
@@ -3081,6 +3139,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       options?.methodName ? (options as ServiceInvocationContext) : undefined,
       this.isConversationBusy
     )
+    const admittedRequest = req
     assertTeamRequestActive(req)
     // The turn's End checks, built from the request as it entered; requests without teamMember get none.
     const teamChecks = createMemberTeamChecks(req)
@@ -3107,9 +3166,14 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let detachDocumentAbort: (() => void) | undefined
     let successful = false
     let goalProgress: AgentGoalProgressContext | undefined
+    let goalStep: GoalStep | undefined
+    let failure: unknown
     try {
       // Before goal progress, provider, worker or canvas tool set-up.
       req = assertBoundPrimaryReports(req)
+      // S5: a goal step is bound and its turn charged before anything else runs.
+      goalStep = await this.bindGoalStep(admittedRequest)
+      goalStep?.start((reason) => abortContext.abort(reason))
       goalProgress =
         req.goalProgressToken === undefined
           ? undefined
@@ -3131,8 +3195,12 @@ export class LLMProxySvcImpl implements LLMProxySvc {
             options?.methodName ? (options as ServiceInvocationContext) : undefined
           )
       const parentRoute = buildSkillRuntimeRoute(req)
-      const createSubagentClient = goalProgress ? undefined : this.subagentClientFactory(req)
-      const createMemoryClient = goalProgress ? undefined : this.memoryHelperClientFactory(req)
+      // Sub-agent and memory-helper children run tools outside the step's charged admission: a goal
+      // step (like goal progress) gets neither, so its tool-call budget has no way around it.
+      const createSubagentClient =
+        goalProgress || goalStep ? undefined : this.subagentClientFactory(req)
+      const createMemoryClient =
+        goalProgress || goalStep ? undefined : this.memoryHelperClientFactory(req)
       const requestRoute = req.route ? Object.freeze({ ...req.route }) : undefined
       const invocation = options?.methodName ? (options as ServiceInvocationContext) : undefined
       canvas = prepareCanvasAgentTools(req, invocation, {
@@ -3141,6 +3209,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         createImageGenerator: () => this.createThreadImageGenerator(req),
         triggers: this.threadTriggers,
         goalProgress,
+        goalStep,
         teamMessages:
           invocation && requestRoute
             ? {
@@ -3281,6 +3350,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
           : new Error(
               'LLM request failed: ' + (typeof e === 'object' ? JSON.stringify(e) : String(e))
             )
+      failure = err
       console.error('[LLMProxy] chat failed at the top level:', err.message)
       // Only this final IPC-facing exit projects the typed reported failure.
       // Direct MAIN callers and chatStream keep their original throw contract.
@@ -3291,6 +3361,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       detachDocumentAbort?.()
       canvas?.dispose?.(successful || (teamChecks?.cutByEnd() ? 'ended' : false))
       goalProgress?.dispose()
+      void goalStep?.settle(goalStepEnd(abortContext.signal, successful, failure))
       abortContext.cleanup()
     }
   }
@@ -4674,6 +4745,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     // A thread event turn: MAIN records its start (or refuses it) before any other set-up, and
     // marks it threadEventOrigin (no user authority).
     req = this.threadInbox.admitEvent(req, invocation, this.isConversationBusy)
+    const admittedRequest = req
     assertTeamRequestActive(req)
     // The turn's End checks, built from the request as it entered; requests without teamMember get none.
     const teamChecks = createMemberTeamChecks(req)
@@ -4704,6 +4776,8 @@ export class LLMProxySvcImpl implements LLMProxySvc {
     let localCanvas: ReturnType<typeof prepareCanvasAgentTools> | undefined
     let detachDocumentAbort: (() => void) | undefined
     let localGoalProgress: AgentGoalProgressContext | undefined
+    let localGoalStep: GoalStep | undefined
+    let localFailure: unknown
     let localCanvasSuccess = false
     let streamedText = ''
     let lastSessionUrl = req.sessionUrl?.trim() || undefined
@@ -5429,6 +5503,9 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       resp.abortReceiver?.onAbort(closeRenderer)
       if (resp.abortReceiver?.isAborted()) closeRenderer()
       if (streamClosed) return
+      // S5: a goal step is bound and its turn charged before anything else runs.
+      localGoalStep = await this.bindGoalStep(admittedRequest)
+      localGoalStep?.start((reason) => abortContext.abort(reason))
       localGoalProgress =
         req.goalProgressToken === undefined
           ? undefined
@@ -5455,8 +5532,10 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       // binding or its local workspace instructions.
       const readExternalFile = createCanvasPathReadHandler(req, invocation)
       const parentRoute = buildSkillRuntimeRoute(req)
-      const createSubagentClient = localGoalProgress ? undefined : this.subagentClientFactory(req)
-      const createMemoryClient = localGoalProgress ? undefined : this.memoryHelperClientFactory(req)
+      const createSubagentClient =
+        localGoalProgress || localGoalStep ? undefined : this.subagentClientFactory(req)
+      const createMemoryClient =
+        localGoalProgress || localGoalStep ? undefined : this.memoryHelperClientFactory(req)
       const requestRoute = req.route ? Object.freeze({ ...req.route }) : undefined
       const canvas = (localCanvas = prepareCanvasAgentTools(req, invocation, {
         threadImageReview,
@@ -5464,6 +5543,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         createImageGenerator: () => this.createThreadImageGenerator(req),
         triggers: this.threadTriggers,
         goalProgress: localGoalProgress,
+        goalStep: localGoalStep,
         teamMessages:
           invocation && requestRoute
             ? {
@@ -5666,6 +5746,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
         !streamClosed &&
         !['error', 'cancelled', 'length'].includes(result.finishReason || '')
     } catch (error) {
+      localFailure = error
       if (streamClosed) return
       if (isUserCancellation()) {
         emitCancelledTerminal()
@@ -5679,6 +5760,7 @@ export class LLMProxySvcImpl implements LLMProxySvc {
       detachDocumentAbort?.()
       localCanvas?.dispose?.(localCanvasSuccess || (teamChecks?.cutByEnd() ? 'ended' : false))
       localGoalProgress?.dispose()
+      void localGoalStep?.settle(goalStepEnd(abortContext.signal, localCanvasSuccess, localFailure))
       cleanupRemoteStream?.()
       cleanupRemoteStream = undefined
       terminalStarted = true

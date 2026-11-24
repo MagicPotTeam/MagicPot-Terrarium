@@ -1041,7 +1041,7 @@
     },
     "agent_goal": {
       "panel_title": "线程目标",
-      "panel_notice": "仅手动记录。激活目标不会运行模型或授予权限。",
+      "panel_notice": "手动目标只是记录：激活它不会运行任何内容。设为“就绪时继续”的活动目标会在此项目打开时按预算逐步运行；步骤不授予任何权限。",
       "unavailable": "目标暂不可用。",
       "no_goals": "暂无目标。",
       "status": "状态：{{status}}",
@@ -1127,7 +1127,25 @@
       "dispatch_capacity": "保留的生命周期计数容量已满，不提供删除记录或自动换执行命名空间的绕过方式。",
       "dispatch_charged": "已计数的底层发送调用",
       "dispatch_generation": "目标代数",
-      "create": "创建草稿记录（不执行）"
+      "create": "创建草稿记录（不执行）",
+      "autonomy_label": "自主方式",
+      "autonomy_manual": "手动",
+      "autonomy_continue": "就绪时继续",
+      "completion_label": "完成方式",
+      "completion_user_confirm": "由我确认",
+      "completion_self_propose": "由智能体完成",
+      "completion_verifier": "由智能体凭证据完成",
+      "max_turns_label": "最大轮数",
+      "max_tool_calls_label": "最大工具调用次数",
+      "max_walltime_label": "最长时间（分钟）",
+      "settings_line": "{{autonomy}} · 完成方式：{{completion}}",
+      "usage_line": "轮数 {{turns}}/{{maxTurns}} · 工具调用 {{calls}}/{{maxCalls}} · 时间 {{minutes}}/{{maxMinutes}} 分钟",
+      "exhausted_turns": "轮数预算已用完：在你提高预算前不会再运行步骤。",
+      "exhausted_toolCalls": "工具调用预算已用完：在你提高预算前不会再运行步骤。",
+      "exhausted_walltime": "时间预算已用完：在你提高预算前不会再运行步骤。",
+      "steps_wait_for_decision": "在你确认或拒绝该提议前，步骤会暂停。",
+      "settings_for": "{{label}} 的设置",
+      "save_settings_for": "保存 {{label}} 的设置"
     },
     "agent_memory": {
       "search_notice": "Agent 可显式检索当前会话已保存的消息和工具结果正文，只返回摘录；不搜索参数、metadata、隐藏上下文或附件。关键词匹配不是语义搜索；BM25只对明确有界的扫描窗口排名，报告未扫完／结果省略，不是持久FTS索引或向量嵌入。历史状态不证明当前任务成功。不要在工具输出中放置秘密。",
@@ -1543,7 +1561,8 @@
       "idle": "空闲"
     },
     "team_live_unknown_tool": "未知工具",
-    "team_member_default_name": "成员"
+    "team_member_default_name": "成员",
+    "thread_event_goal_step": "由目标 {{title}} 触发 · 第 {{step}} / {{maxTurns}} 步"
   },
   "agent_workspace": {
     "refresh_threads": "刷新会话",
